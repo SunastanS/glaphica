@@ -8,11 +8,11 @@ use std::collections::{HashMap, HashSet};
 use render_protocol::{
     BlendModePipelineStrategy, RenderStepEntry, RenderStepSnapshot, TransformMatrix4x4,
 };
-use tiles::{TileKey, VirtualImage, TILE_STRIDE};
+use tiles::{TILE_STRIDE, TileKey, VirtualImage};
 
 use crate::{
-    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
-    GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord, TileDrawInstance, ViewportMode,
+    BlendMode, DrawPassContext, GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord,
+    TileDrawInstance, ViewportMode, build_group_tile_draw_instances, tile_coord_from_draw_instance,
 };
 
 impl Renderer {

@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use render_protocol::{BlendMode, ImageHandle};
-use tiles::{GroupTileAtlasStore, TileKey, VirtualImage, TILE_SIZE};
+use tiles::{GroupTileAtlasStore, TILE_SIZE, TileKey, VirtualImage};
 
 use crate::{
     CachedLeafDraw, DirtyTileMask, RenderDataResolver, TileCoord, TileDrawInstance, TileInstanceGpu,

@@ -5,14 +5,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::planning::GroupRenderDecision;
 use crate::RenderTreeNode;
+use crate::planning::GroupRenderDecision;
 use crate::{
-    build_group_tile_draw_instances, build_leaf_tile_draw_instances,
-    build_leaf_tile_draw_instances_for_tiles, leaf_should_rebuild, CachedLeafDraw,
-    CompositeEmission, CompositeNodePlan, CompositePassContext, DirtyExecutionPlan, DirtyTileMask,
-    DrawPassContext, GroupDecisionEngine, GroupRerenderMode, Renderer, TileCompositeSpace,
-    TileCoord, ViewportMode,
+    CachedLeafDraw, CompositeEmission, CompositeNodePlan, CompositePassContext, DirtyExecutionPlan,
+    DirtyTileMask, DrawPassContext, GroupDecisionEngine, GroupRerenderMode, Renderer,
+    TileCompositeSpace, TileCoord, ViewportMode, build_group_tile_draw_instances,
+    build_leaf_tile_draw_instances, build_leaf_tile_draw_instances_for_tiles, leaf_should_rebuild,
 };
 
 impl Renderer {

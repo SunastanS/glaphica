@@ -14,17 +14,17 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
+#[cfg(test)]
+use render_protocol::RenderStepEntry;
 use render_protocol::{
     BlendMode, ImageHandle, RenderOp, RenderStepSnapshot, TransformMatrix4x4, Viewport,
 };
 #[cfg(test)]
-use render_protocol::RenderStepEntry;
+use tiles::TILE_STRIDE;
 use tiles::{
     GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_SIZE, TileAddress, TileAtlasGpuArray,
     TileGpuDrainError, TileKey, VirtualImage,
 };
-#[cfg(test)]
-use tiles::TILE_STRIDE;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
