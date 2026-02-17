@@ -1,0 +1,9 @@
+[package]
+name = "document"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+render_protocol = { path = "../render_protocol" }
+slotmap = "1.0.7"
+tiles = { path = "../tiles" }
