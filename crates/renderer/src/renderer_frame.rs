@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::{
     CompositeEmission, CompositePassContext, DirtyExecutionPlan, DirtyPropagationEngine,
     DirtyRectMask, DirtyTileMask, FrameExecutionResult, FramePlan, FrameState, PresentError,
-    RenderNodeKey, RenderTreeNode, Renderer, ViewportMode, build_render_tree_from_snapshot,
+    RenderNodeKey, RenderTreeNode, Renderer, ViewportMode,
 };
 
 fn refresh_cached_render_tree_if_dirty(frame_state: &mut FrameState) {
@@ -16,9 +16,9 @@ fn refresh_cached_render_tree_if_dirty(frame_state: &mut FrameState) {
         return;
     }
     frame_state.cached_render_tree = frame_state
-        .bound_steps
+        .bound_tree
         .as_ref()
-        .map(build_render_tree_from_snapshot);
+        .map(|snapshot| snapshot.root.as_ref().clone());
     frame_state.render_tree_dirty = false;
 }
 
@@ -152,7 +152,7 @@ impl Renderer {
 
     fn snapshot_revision(&self) -> u64 {
         self.frame_state
-            .bound_steps
+            .bound_tree
             .as_ref()
             .map_or(0, |snapshot| snapshot.revision)
     }

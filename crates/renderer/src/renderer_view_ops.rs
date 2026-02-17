@@ -4,7 +4,8 @@
 //! while coordinating side effects such as cache retention and cache invalidation.
 
 use render_protocol::{
-    RenderOp, RenderStepSnapshot, RenderStepSupportMatrix, TransformMatrix4x4, Viewport,
+    RenderNodeSnapshot, RenderOp, RenderStepSupportMatrix, RenderTreeSnapshot, TransformMatrix4x4,
+    Viewport,
 };
 
 use crate::{
@@ -16,7 +17,7 @@ struct DropStaleWorkResult {
     clear_group_target_cache: bool,
 }
 
-fn should_accept_bound_snapshot(view_state: &ViewState, snapshot: &RenderStepSnapshot) -> bool {
+fn should_accept_bound_snapshot(view_state: &ViewState, snapshot: &RenderTreeSnapshot) -> bool {
     snapshot.revision >= view_state.drop_before_revision
 }
 
@@ -53,8 +54,15 @@ fn apply_present_request(view_state: &mut ViewState) {
     view_state.present_requested = true;
 }
 
-fn apply_bound_snapshot(frame_state: &mut FrameState, snapshot: RenderStepSnapshot) {
-    frame_state.bound_steps = Some(snapshot);
+fn apply_bound_snapshot(frame_state: &mut FrameState, snapshot: RenderTreeSnapshot) {
+    assert!(
+        matches!(
+            snapshot.root.as_ref(),
+            RenderNodeSnapshot::Group { group_id: 0, .. }
+        ),
+        "render tree root must be group 0"
+    );
+    frame_state.bound_tree = Some(snapshot);
     frame_state.render_tree_dirty = true;
     frame_state
         .dirty_state_store
@@ -74,11 +82,11 @@ fn drop_stale_work_before_revision(
     }
 
     if frame_state
-        .bound_steps
+        .bound_tree
         .as_ref()
         .is_some_and(|snapshot| snapshot.revision < revision)
     {
-        frame_state.bound_steps = None;
+        frame_state.bound_tree = None;
         frame_state.cached_render_tree = None;
         frame_state.render_tree_dirty = false;
         cache_state.leaf_draw_cache.clear();
@@ -112,7 +120,7 @@ impl Renderer {
             RenderOp::SetViewport(viewport) => {
                 state_changed |= apply_viewport(&mut self.view_state, viewport);
             }
-            RenderOp::BindRenderSteps(snapshot) => {
+            RenderOp::BindRenderTree(snapshot) => {
                 if should_accept_bound_snapshot(&self.view_state, &snapshot) {
                     snapshot
                         .validate_executable(
@@ -177,8 +185,8 @@ impl Renderer {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn bound_steps(&self) -> Option<&RenderStepSnapshot> {
-        self.frame_state.bound_steps.as_ref()
+    pub(crate) fn bound_tree(&self) -> Option<&RenderTreeSnapshot> {
+        self.frame_state.bound_tree.as_ref()
     }
 
     #[allow(dead_code)]

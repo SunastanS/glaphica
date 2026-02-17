@@ -6,36 +6,45 @@
 use std::collections::{HashMap, HashSet};
 
 use render_protocol::{
-    BlendModePipelineStrategy, RenderStepEntry, RenderStepSnapshot, TransformMatrix4x4,
+    BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_STRIDE, TileKey, VirtualImage};
+use tiles::{TileKey, VirtualImage, TILE_STRIDE};
 
 use crate::{
-    BlendMode, DrawPassContext, GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord,
-    TileDrawInstance, ViewportMode, build_group_tile_draw_instances, tile_coord_from_draw_instance,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
+    GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord, TileDrawInstance, ViewportMode,
 };
 
 impl Renderer {
-    fn live_leaf_layers(snapshot: &RenderStepSnapshot) -> HashSet<u64> {
-        snapshot
-            .steps
-            .iter()
-            .filter_map(|step| match step {
-                RenderStepEntry::Leaf { layer_id, .. } => Some(*layer_id),
-                RenderStepEntry::Group { .. } => None,
-            })
-            .collect()
+    fn collect_live_node_ids(
+        node: &RenderNodeSnapshot,
+        live_leaf_layers: &mut HashSet<u64>,
+        live_group_ids: &mut HashSet<u64>,
+    ) {
+        match node {
+            RenderNodeSnapshot::Leaf { layer_id, .. } => {
+                live_leaf_layers.insert(*layer_id);
+            }
+            RenderNodeSnapshot::Group {
+                group_id, children, ..
+            } => {
+                live_group_ids.insert(*group_id);
+                for child in children.iter() {
+                    Self::collect_live_node_ids(child, live_leaf_layers, live_group_ids);
+                }
+            }
+        }
     }
 
-    fn live_group_ids(snapshot: &RenderStepSnapshot) -> HashSet<u64> {
-        snapshot
-            .steps
-            .iter()
-            .filter_map(|step| match step {
-                RenderStepEntry::Group { group_id, .. } => Some(*group_id),
-                RenderStepEntry::Leaf { .. } => None,
-            })
-            .collect()
+    fn live_ids(snapshot: &RenderTreeSnapshot) -> (HashSet<u64>, HashSet<u64>) {
+        let mut live_leaf_layers = HashSet::new();
+        let mut live_group_ids = HashSet::new();
+        Self::collect_live_node_ids(
+            snapshot.root.as_ref(),
+            &mut live_leaf_layers,
+            &mut live_group_ids,
+        );
+        (live_leaf_layers, live_group_ids)
     }
 
     pub(super) fn draw_root_group_to_surface(
@@ -90,8 +99,8 @@ impl Renderer {
         max_scale > 1.0 + 1e-4
     }
 
-    pub(super) fn retain_live_leaf_caches(&mut self, snapshot: &RenderStepSnapshot) {
-        let live_leaf_layers = Self::live_leaf_layers(snapshot);
+    pub(super) fn retain_live_leaf_caches(&mut self, snapshot: &RenderTreeSnapshot) {
+        let (live_leaf_layers, _) = Self::live_ids(snapshot);
         self.cache_state
             .leaf_draw_cache
             .retain(|layer_id, _| live_leaf_layers.contains(layer_id));
@@ -100,8 +109,8 @@ impl Renderer {
             .retain_layers(&live_leaf_layers);
     }
 
-    pub(super) fn retain_live_group_targets(&mut self, snapshot: &RenderStepSnapshot) {
-        let live_group_ids = Self::live_group_ids(snapshot);
+    pub(super) fn retain_live_group_targets(&mut self, snapshot: &RenderTreeSnapshot) {
+        let (_, live_group_ids) = Self::live_ids(snapshot);
         let mut retained_cache = HashMap::new();
         let previous_cache = std::mem::take(&mut self.cache_state.group_target_cache);
         for (group_id, entry) in previous_cache {

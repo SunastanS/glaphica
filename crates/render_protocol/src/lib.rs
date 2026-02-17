@@ -15,13 +15,13 @@ pub struct Viewport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderStepSnapshot {
+pub struct RenderTreeSnapshot {
     pub revision: u64,
-    pub steps: Arc<[RenderStepEntry]>,
+    pub root: Arc<RenderNodeSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderStepEntry {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderNodeSnapshot {
     Leaf {
         layer_id: u64,
         blend: BlendMode,
@@ -29,8 +29,8 @@ pub enum RenderStepEntry {
     },
     Group {
         group_id: u64,
-        child_count: u32,
         blend: BlendMode,
+        children: Arc<[RenderNodeSnapshot]>,
     },
 }
 
@@ -93,33 +93,37 @@ pub struct RenderStepValidationError {
     pub reason: RenderStepUnsupportedReason,
 }
 
-impl RenderStepSnapshot {
+impl RenderTreeSnapshot {
     pub fn validate_executable(
         &self,
         support: &RenderStepSupportMatrix,
     ) -> Result<(), RenderStepValidationError> {
-        for (step_index, step) in self.steps.iter().enumerate() {
-            match step {
-                RenderStepEntry::Leaf { blend, .. } => {
+        let mut stack = vec![self.root.as_ref()];
+        let mut node_index = 0usize;
+        while let Some(node) = stack.pop() {
+            match node {
+                RenderNodeSnapshot::Leaf { blend, .. } => {
                     if matches!(
                         support.blend_strategy(*blend),
                         BlendModePipelineStrategy::Unsupported
                     ) {
                         return Err(RenderStepValidationError {
-                            step_index,
+                            step_index: node_index,
                             reason: RenderStepUnsupportedReason::BlendModeUnsupported {
                                 blend_mode: *blend,
                             },
                         });
                     }
                 }
-                RenderStepEntry::Group { blend, .. } => {
+                RenderNodeSnapshot::Group {
+                    blend, children, ..
+                } => {
                     if matches!(
                         support.blend_strategy(*blend),
                         BlendModePipelineStrategy::Unsupported
                     ) {
                         return Err(RenderStepValidationError {
-                            step_index,
+                            step_index: node_index,
                             reason: RenderStepUnsupportedReason::BlendModeUnsupported {
                                 blend_mode: *blend,
                             },
@@ -127,12 +131,18 @@ impl RenderStepSnapshot {
                     }
                     if matches!(support.group_strategy(), GroupPassStrategy::Unsupported) {
                         return Err(RenderStepValidationError {
-                            step_index,
+                            step_index: node_index,
                             reason: RenderStepUnsupportedReason::GroupCompositingUnsupported,
                         });
                     }
+                    for child in children.iter().rev() {
+                        stack.push(child);
+                    }
                 }
             }
+            node_index = node_index
+                .checked_add(1)
+                .expect("render tree node index overflow");
         }
 
         Ok(())
@@ -143,7 +153,7 @@ impl RenderStepSnapshot {
 pub enum RenderOp {
     SetViewTransform { matrix: TransformMatrix4x4 },
     SetViewport(Viewport),
-    BindRenderSteps(RenderStepSnapshot),
+    BindRenderTree(RenderTreeSnapshot),
     MarkLayerDirty { layer_id: u64 },
     SetFrameBudgetMicros { budget_micros: u32 },
     DropStaleWorkBeforeRevision { revision: u64 },
@@ -154,21 +164,21 @@ pub enum RenderOp {
 mod tests {
     use super::*;
 
-    fn snapshot(steps: Vec<RenderStepEntry>) -> RenderStepSnapshot {
-        RenderStepSnapshot {
+    fn snapshot(root: RenderNodeSnapshot) -> RenderTreeSnapshot {
+        RenderTreeSnapshot {
             revision: 7,
-            steps: steps.into_boxed_slice().into(),
+            root: Arc::new(root),
         }
     }
 
     #[test]
     fn current_matrix_accepts_multiply_leaf() {
-        let steps = vec![RenderStepEntry::Leaf {
+        let root = RenderNodeSnapshot::Leaf {
             layer_id: 11,
             blend: BlendMode::Multiply,
             image_handle: ImageHandle::default(),
-        }];
-        let snapshot = snapshot(steps);
+        };
+        let snapshot = snapshot(root);
 
         snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
@@ -177,19 +187,19 @@ mod tests {
 
     #[test]
     fn current_matrix_accepts_group_boundaries() {
-        let steps = vec![
-            RenderStepEntry::Leaf {
-                layer_id: 5,
-                blend: BlendMode::Normal,
-                image_handle: ImageHandle::default(),
-            },
-            RenderStepEntry::Group {
-                group_id: 0,
-                child_count: 1,
-                blend: BlendMode::Normal,
-            },
-        ];
-        let snapshot = snapshot(steps);
+        let root = RenderNodeSnapshot::Group {
+            group_id: 0,
+            blend: BlendMode::Normal,
+            children: Arc::from(
+                vec![RenderNodeSnapshot::Leaf {
+                    layer_id: 5,
+                    blend: BlendMode::Normal,
+                    image_handle: ImageHandle::default(),
+                }]
+                .into_boxed_slice(),
+            ),
+        };
+        let snapshot = snapshot(root);
 
         snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
@@ -198,12 +208,12 @@ mod tests {
 
     #[test]
     fn group_blend_reports_unsupported_mode() {
-        let steps = vec![RenderStepEntry::Group {
+        let root = RenderNodeSnapshot::Group {
             group_id: 7,
-            child_count: 0,
             blend: BlendMode::Multiply,
-        }];
-        let snapshot = snapshot(steps);
+            children: Arc::from(Vec::<RenderNodeSnapshot>::new().into_boxed_slice()),
+        };
+        let snapshot = snapshot(root);
 
         let support = RenderStepSupportMatrix {
             normal_blend_strategy: BlendModePipelineStrategy::SurfaceAlphaBlend,

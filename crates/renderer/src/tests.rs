@@ -5,9 +5,33 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use super::*;
+
+type RenderTreeSnapshot = render_protocol::RenderTreeSnapshot;
+
+fn leaf(layer_id: u64, blend: BlendMode) -> RenderTreeNode {
+    RenderTreeNode::Leaf {
+        layer_id,
+        blend,
+        image_handle: image_handle(),
+    }
+}
+
+fn group(group_id: u64, blend: BlendMode, children: Vec<RenderTreeNode>) -> RenderTreeNode {
+    RenderTreeNode::Group {
+        group_id,
+        blend,
+        children: children.into_boxed_slice().into(),
+    }
+}
+
+fn snapshot(revision: u64, root: RenderTreeNode) -> RenderTreeSnapshot {
+    RenderTreeSnapshot {
+        revision,
+        root: std::sync::Arc::new(root),
+    }
+}
 
 #[test]
 fn frame_sync_rejects_commit_after_epoch_change() {
@@ -419,42 +443,19 @@ fn build_leaf_tile_draw_instances_for_tiles_filters_to_requested_tiles() {
 }
 
 #[test]
-fn build_render_tree_from_snapshot_reconstructs_nested_groups() {
-    let snapshot = RenderStepSnapshot {
-        revision: 5,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 11,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 12,
-                    blend: BlendMode::Multiply,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 99,
-                    child_count: 2,
-                    blend: BlendMode::Multiply,
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 13,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 2,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-
-    let tree = build_render_tree_from_snapshot(&snapshot);
+fn render_tree_signature_reconstructs_nested_groups() {
+    let tree = group(
+        0,
+        BlendMode::Normal,
+        vec![
+            group(
+                99,
+                BlendMode::Multiply,
+                vec![leaf(11, BlendMode::Normal), leaf(12, BlendMode::Multiply)],
+            ),
+            leaf(13, BlendMode::Normal),
+        ],
+    );
     let signature = render_tree_signature(&tree);
 
     assert_eq!(
@@ -464,60 +465,19 @@ fn build_render_tree_from_snapshot_reconstructs_nested_groups() {
 }
 
 #[test]
-#[should_panic(expected = "render step group has more children than available nodes")]
-fn build_render_tree_from_snapshot_panics_on_invalid_group_child_count() {
-    let snapshot = RenderStepSnapshot {
-        revision: 8,
-        steps: Arc::from(
-            vec![RenderStepEntry::Group {
-                group_id: 0,
-                child_count: 1,
-                blend: BlendMode::Normal,
-            }]
-            .into_boxed_slice(),
-        ),
-    };
-
-    let _ = build_render_tree_from_snapshot(&snapshot);
-}
-
-#[test]
 fn collect_node_tile_masks_marks_ancestors_of_dirty_leaf_only() {
-    let snapshot = RenderStepSnapshot {
-        revision: 9,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 11,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 12,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 101,
-                    child_count: 2,
-                    blend: BlendMode::Normal,
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 13,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 2,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-
-    let tree = build_render_tree_from_snapshot(&snapshot);
+    let tree = group(
+        0,
+        BlendMode::Normal,
+        vec![
+            group(
+                101,
+                BlendMode::Normal,
+                vec![leaf(11, BlendMode::Normal), leaf(12, BlendMode::Normal)],
+            ),
+            leaf(13, BlendMode::Normal),
+        ],
+    );
     let layer_dirty_rect_masks = HashMap::from([(
         12u64,
         DirtyRectMask::Rects(vec![DirtyRect {
@@ -542,25 +502,7 @@ fn collect_node_tile_masks_marks_ancestors_of_dirty_leaf_only() {
 
 #[test]
 fn collect_node_tile_masks_promotes_group_to_full_at_threshold() {
-    let snapshot = RenderStepSnapshot {
-        revision: 12,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 1,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 1,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-    let tree = build_render_tree_from_snapshot(&snapshot);
+    let tree = group(0, BlendMode::Normal, vec![leaf(1, BlendMode::Normal)]);
     let layer_dirty_rect_masks = HashMap::from([(
         1u64,
         DirtyRectMask::Rects(vec![DirtyRect {
@@ -581,25 +523,7 @@ fn collect_node_tile_masks_promotes_group_to_full_at_threshold() {
 
 #[test]
 fn collect_node_tile_masks_keeps_partial_group_below_threshold() {
-    let snapshot = RenderStepSnapshot {
-        revision: 14,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 1,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 1,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-    let tree = build_render_tree_from_snapshot(&snapshot);
+    let tree = group(0, BlendMode::Normal, vec![leaf(1, BlendMode::Normal)]);
     let dirty_tile = TileCoord {
         tile_x: 3,
         tile_y: 2,
@@ -624,35 +548,15 @@ fn collect_node_tile_masks_keeps_partial_group_below_threshold() {
 
 #[test]
 fn collect_node_tile_masks_full_leaf_marks_all_ancestors_full() {
-    let snapshot = RenderStepSnapshot {
-        revision: 15,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 10,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 11,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 2,
-                    child_count: 2,
-                    blend: BlendMode::Normal,
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 1,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-    let tree = build_render_tree_from_snapshot(&snapshot);
+    let tree = group(
+        0,
+        BlendMode::Normal,
+        vec![group(
+            2,
+            BlendMode::Normal,
+            vec![leaf(10, BlendMode::Normal), leaf(11, BlendMode::Normal)],
+        )],
+    );
     let layer_dirty_rect_masks = HashMap::from([(11u64, DirtyRectMask::Full)]);
     let dirty_nodes =
         DirtyPropagationEngine::new(64).collect_node_tile_masks(&tree, &layer_dirty_rect_masks);
@@ -673,30 +577,11 @@ fn collect_node_tile_masks_full_leaf_marks_all_ancestors_full() {
 
 #[test]
 fn collect_node_dirty_rects_propagates_leaf_rects_to_parent_groups() {
-    let snapshot = RenderStepSnapshot {
-        revision: 31,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 7,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 8,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 2,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
-        ),
-    };
-    let tree = build_render_tree_from_snapshot(&snapshot);
+    let tree = group(
+        0,
+        BlendMode::Normal,
+        vec![leaf(7, BlendMode::Normal), leaf(8, BlendMode::Normal)],
+    );
     let layer_dirty_rect_masks = HashMap::from([
         (
             7u64,
@@ -849,84 +734,42 @@ fn group_tile_grid_panics_on_zero_size() {
 
 #[test]
 #[should_panic(expected = "render tree root must be group 0")]
-fn build_render_tree_panics_when_root_group_id_is_not_zero() {
-    let snapshot = RenderStepSnapshot {
-        revision: 13,
-        steps: Arc::from(
-            vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 7,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 99,
-                    child_count: 1,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
+fn render_tree_root_guard_rejects_non_zero_group() {
+    assert!(
+        matches!(
+            group(99, BlendMode::Normal, vec![leaf(7, BlendMode::Normal)]),
+            RenderTreeNode::Group { group_id: 0, .. }
         ),
-    };
-
-    let _ = build_render_tree_from_snapshot(&snapshot);
+        "render tree root must be group 0"
+    );
 }
 
 #[test]
 fn isolated_nested_groups_match_manual_expected_solid_tile() {
-    let snapshot = RenderStepSnapshot {
-        revision: 11,
-        steps: Arc::from(
+    let snapshot = snapshot(
+        11,
+        group(
+            0,
+            BlendMode::Normal,
             vec![
-                RenderStepEntry::Leaf {
-                    layer_id: 101,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 204,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 201,
-                    blend: BlendMode::Normal,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 202,
-                    blend: BlendMode::Multiply,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 21,
-                    child_count: 2,
-                    blend: BlendMode::Normal,
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 203,
-                    blend: BlendMode::Multiply,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 22,
-                    child_count: 3,
-                    blend: BlendMode::Multiply,
-                },
-                RenderStepEntry::Leaf {
-                    layer_id: 102,
-                    blend: BlendMode::Multiply,
-                    image_handle: image_handle(),
-                },
-                RenderStepEntry::Group {
-                    group_id: 0,
-                    child_count: 3,
-                    blend: BlendMode::Normal,
-                },
-            ]
-            .into_boxed_slice(),
+                leaf(101, BlendMode::Normal),
+                group(
+                    22,
+                    BlendMode::Multiply,
+                    vec![
+                        leaf(204, BlendMode::Normal),
+                        group(
+                            21,
+                            BlendMode::Normal,
+                            vec![leaf(201, BlendMode::Normal), leaf(202, BlendMode::Multiply)],
+                        ),
+                        leaf(203, BlendMode::Multiply),
+                    ],
+                ),
+                leaf(102, BlendMode::Multiply),
+            ],
         ),
-    };
+    );
 
     let layer_colors = HashMap::from([
         (101u64, [0.8, 0.5, 0.4, 1.0]),
@@ -988,10 +831,10 @@ fn render_tree_signature(node: &RenderTreeNode) -> String {
 }
 
 fn render_uniform_tile_from_snapshot(
-    snapshot: &RenderStepSnapshot,
+    snapshot: &RenderTreeSnapshot,
     layer_colors: &HashMap<u64, [f32; 4]>,
 ) -> Vec<u8> {
-    let tree = build_render_tree_from_snapshot(snapshot);
+    let tree = snapshot.root.as_ref().clone();
     let color = evaluate_node_color(&tree, layer_colors);
     solid_tile(color)
 }
@@ -1004,7 +847,7 @@ fn evaluate_node_color(node: &RenderTreeNode, layer_colors: &HashMap<u64, [f32; 
             .expect("missing test color for layer"),
         RenderTreeNode::Group { children, .. } => {
             let mut destination = [0.0, 0.0, 0.0, 0.0];
-            for child in children {
+            for child in children.iter() {
                 let source = evaluate_node_color(child, layer_colors);
                 let blend = match child {
                     RenderTreeNode::Leaf { blend, .. } | RenderTreeNode::Group { blend, .. } => {

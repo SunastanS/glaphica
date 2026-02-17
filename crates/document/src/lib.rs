@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-use render_protocol::{BlendMode, ImageHandle, RenderStepEntry, RenderStepSnapshot};
+use render_protocol::{BlendMode, ImageHandle, RenderNodeSnapshot, RenderTreeSnapshot};
 use slotmap::SlotMap;
 use tiles::{TileKey, VirtualImage};
 
@@ -18,8 +18,8 @@ pub struct Document {
     size_x: u32,
     size_y: u32,
     next_layer_id: u64,
-    render_step_cache: RefCell<Arc<[RenderStepEntry]>>,
-    render_step_cache_dirty: Cell<bool>,
+    render_tree_cache: RefCell<Arc<RenderNodeSnapshot>>,
+    render_tree_cache_dirty: Cell<bool>,
 }
 
 pub enum LayerTreeNode {
@@ -53,8 +53,12 @@ impl Document {
             size_x,
             size_y,
             next_layer_id: 1,
-            render_step_cache: RefCell::new(Arc::from(Vec::<RenderStepEntry>::new())),
-            render_step_cache_dirty: Cell::new(true),
+            render_tree_cache: RefCell::new(Arc::new(RenderNodeSnapshot::Group {
+                group_id: LayerNodeId::ROOT.0,
+                blend: BlendMode::Normal,
+                children: Arc::from(Vec::<RenderNodeSnapshot>::new().into_boxed_slice()),
+            })),
+            render_tree_cache_dirty: Cell::new(true),
         }
     }
 
@@ -66,17 +70,15 @@ impl Document {
         self.size_y
     }
 
-    pub fn render_step_snapshot(&self, revision: u64) -> RenderStepSnapshot {
-        if self.render_step_cache_dirty.get() {
-            let mut steps = Vec::new();
-            self.layer_tree.build_render_step_entries(&mut steps);
-            self.render_step_cache
-                .replace(steps.into_boxed_slice().into());
-            self.render_step_cache_dirty.set(false);
+    pub fn render_tree_snapshot(&self, revision: u64) -> RenderTreeSnapshot {
+        if self.render_tree_cache_dirty.get() {
+            let root = self.layer_tree.build_render_node_snapshot();
+            self.render_tree_cache.replace(Arc::new(root));
+            self.render_tree_cache_dirty.set(false);
         }
-        RenderStepSnapshot {
+        RenderTreeSnapshot {
             revision,
-            steps: self.render_step_cache.borrow().clone(),
+            root: self.render_tree_cache.borrow().clone(),
         }
     }
 
@@ -101,7 +103,7 @@ impl Document {
     pub fn new_layer_root(&mut self) -> LayerNodeId {
         let (id, layer) = self.new_empty_leaf();
         self.root_mut().push(layer);
-        self.mark_render_steps_dirty();
+        self.mark_render_tree_dirty();
         id
     }
 
@@ -117,13 +119,13 @@ impl Document {
             blend,
             image_handle,
         });
-        self.mark_render_steps_dirty();
+        self.mark_render_tree_dirty();
         id
     }
 
     pub fn new_layer_above(&mut self, active_layer_id: LayerNodeId) -> LayerNodeId {
         let id = self.insert_new_empty_leaf_above(active_layer_id);
-        self.mark_render_steps_dirty();
+        self.mark_render_tree_dirty();
         id
     }
 
@@ -143,13 +145,13 @@ impl Document {
 
         let grouped = self.layer_tree.group_layers(first, second, &mut alloc)?;
         if grouped.is_some() {
-            self.mark_render_steps_dirty();
+            self.mark_render_tree_dirty();
         }
         grouped.ok_or(GroupError::NotSameLevel)
     }
 
-    fn mark_render_steps_dirty(&self) {
-        self.render_step_cache_dirty.set(true);
+    fn mark_render_tree_dirty(&self) {
+        self.render_tree_cache_dirty.set(true);
     }
 
     fn alloc_layer_id(&mut self) -> LayerNodeId {
@@ -279,47 +281,41 @@ impl LayerTreeNode {
         }
     }
 
-    fn build_render_step_entries(&self, steps: &mut Vec<RenderStepEntry>) {
+    fn build_render_node_snapshot(&self) -> RenderNodeSnapshot {
         match self {
-            LayerTreeNode::Root { children } => {
-                for child in children {
-                    child.build_render_step_entries(steps);
-                }
-                steps.push(RenderStepEntry::Group {
-                    group_id: LayerNodeId::ROOT.0,
-                    child_count: children
-                        .len()
-                        .try_into()
-                        .expect("root group child count exceeds u32"),
-                    blend: BlendMode::Normal,
-                });
-            }
+            LayerTreeNode::Root { children } => RenderNodeSnapshot::Group {
+                group_id: LayerNodeId::ROOT.0,
+                blend: BlendMode::Normal,
+                children: children
+                    .iter()
+                    .map(Self::build_render_node_snapshot)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+                    .into(),
+            },
             LayerTreeNode::Branch {
                 id,
                 blend,
                 children,
-            } => {
-                for child in children {
-                    child.build_render_step_entries(steps);
-                }
-                steps.push(RenderStepEntry::Group {
-                    group_id: id.0,
-                    child_count: children
-                        .len()
-                        .try_into()
-                        .expect("group child count exceeds u32"),
-                    blend: *blend,
-                });
-            }
+            } => RenderNodeSnapshot::Group {
+                group_id: id.0,
+                blend: *blend,
+                children: children
+                    .iter()
+                    .map(Self::build_render_node_snapshot)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+                    .into(),
+            },
             LayerTreeNode::Leaf {
                 id,
                 blend,
                 image_handle,
-            } => steps.push(RenderStepEntry::Leaf {
+            } => RenderNodeSnapshot::Leaf {
                 layer_id: id.0,
                 blend: *blend,
                 image_handle: *image_handle,
-            }),
+            },
         }
     }
 }
@@ -328,29 +324,30 @@ impl LayerTreeNode {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum StepRepr {
-        Leaf(u64, BlendMode),
-        Group(u64, u32, BlendMode),
+    fn snapshot_signature(document: &Document) -> String {
+        render_node_signature(document.render_tree_snapshot(7).root.as_ref())
     }
 
-    fn steps_repr(document: &Document) -> Vec<StepRepr> {
-        document
-            .render_step_snapshot(7)
-            .steps
-            .iter()
-            .copied()
-            .map(|step| match step {
-                RenderStepEntry::Leaf {
-                    layer_id, blend, ..
-                } => StepRepr::Leaf(layer_id, blend),
-                RenderStepEntry::Group {
-                    group_id,
-                    child_count,
-                    blend,
-                } => StepRepr::Group(group_id, child_count, blend),
-            })
-            .collect()
+    fn render_node_signature(node: &RenderNodeSnapshot) -> String {
+        match node {
+            RenderNodeSnapshot::Leaf {
+                layer_id, blend, ..
+            } => {
+                format!("L({layer_id}:{blend:?})")
+            }
+            RenderNodeSnapshot::Group {
+                group_id,
+                blend,
+                children,
+            } => {
+                let children_repr = children
+                    .iter()
+                    .map(render_node_signature)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("G({group_id}:{blend:?})[{children_repr}]")
+            }
+        }
     }
 
     fn leaf_id(node: &LayerTreeNode) -> LayerNodeId {
@@ -429,10 +426,7 @@ mod tests {
     fn new_document_has_empty_root_and_single_root_group_step() {
         let document = Document::new(64, 32);
         assert_eq!(document.root().len(), 0);
-        assert_eq!(
-            steps_repr(&document),
-            vec![StepRepr::Group(0, 0, BlendMode::Normal)]
-        );
+        assert_eq!(snapshot_signature(&document), "G(0:Normal)[]");
     }
 
     #[test]
@@ -588,28 +582,24 @@ mod tests {
     }
 
     #[test]
-    fn render_steps_are_postorder_and_include_group_ids() {
+    fn render_tree_snapshot_preserves_group_ids_and_child_order() {
         let mut document = Document::new(1, 1);
         let a = document.new_layer_root();
         let b = document.new_layer_root();
         let c = document.new_layer_root();
         let branch = document.group_layers(a, b).expect("group must succeed");
 
-        let steps = steps_repr(&document);
         assert_eq!(
-            steps,
-            vec![
-                StepRepr::Leaf(a.0, BlendMode::Normal),
-                StepRepr::Leaf(b.0, BlendMode::Normal),
-                StepRepr::Group(branch.0, 2, BlendMode::Normal),
-                StepRepr::Leaf(c.0, BlendMode::Normal),
-                StepRepr::Group(LayerNodeId::ROOT.0, 2, BlendMode::Normal),
-            ]
+            snapshot_signature(&document),
+            format!(
+                "G(0:Normal)[G({}:Normal)[L({}:Normal),L({}:Normal)],L({}:Normal)]",
+                branch.0, a.0, b.0, c.0
+            )
         );
     }
 
     #[test]
-    fn render_step_snapshot_leaf_includes_blend_mode() {
+    fn render_tree_snapshot_leaf_includes_blend_mode() {
         let mut document = Document::new(1, 1);
         let a = document.new_layer_root();
         assert!(set_leaf_blend(
@@ -618,18 +608,14 @@ mod tests {
             BlendMode::Multiply
         ));
 
-        let steps = steps_repr(&document);
         assert_eq!(
-            steps,
-            vec![
-                StepRepr::Leaf(a.0, BlendMode::Multiply),
-                StepRepr::Group(LayerNodeId::ROOT.0, 1, BlendMode::Normal),
-            ]
+            snapshot_signature(&document),
+            format!("G(0:Normal)[L({}:Multiply)]", a.0)
         );
     }
 
     #[test]
-    fn render_step_snapshot_group_includes_branch_blend_mode() {
+    fn render_tree_snapshot_group_includes_branch_blend_mode() {
         let mut document = Document::new(1, 1);
         let a = document.new_layer_root();
         let b = document.new_layer_root();
@@ -641,32 +627,28 @@ mod tests {
             BlendMode::Multiply
         ));
 
-        let steps = steps_repr(&document);
         assert_eq!(
-            steps,
-            vec![
-                StepRepr::Leaf(a.0, BlendMode::Normal),
-                StepRepr::Leaf(b.0, BlendMode::Normal),
-                StepRepr::Group(branch.0, 2, BlendMode::Multiply),
-                StepRepr::Group(LayerNodeId::ROOT.0, 1, BlendMode::Normal),
-            ]
+            snapshot_signature(&document),
+            format!(
+                "G(0:Normal)[G({}:Multiply)[L({}:Normal),L({}:Normal)]]",
+                branch.0, a.0, b.0
+            )
         );
     }
 
     #[test]
-    fn render_step_snapshot_leaf_image_handle_resolves() {
+    fn render_tree_snapshot_leaf_image_handle_resolves() {
         let mut document = Document::new(8, 4);
         let _ = document.new_layer_root();
 
-        let snapshot = document.render_step_snapshot(1);
-        let image_handle = snapshot
-            .steps
-            .iter()
-            .find_map(|entry| match entry {
-                RenderStepEntry::Leaf { image_handle, .. } => Some(*image_handle),
-                RenderStepEntry::Group { .. } => None,
-            })
-            .expect("snapshot should contain one leaf");
+        let snapshot = document.render_tree_snapshot(1);
+        let image_handle = match snapshot.root.as_ref() {
+            RenderNodeSnapshot::Group { children, .. } => match children.first() {
+                Some(RenderNodeSnapshot::Leaf { image_handle, .. }) => *image_handle,
+                _ => panic!("snapshot should contain one leaf"),
+            },
+            RenderNodeSnapshot::Leaf { .. } => panic!("snapshot root must be a group"),
+        };
 
         let image = document
             .image(image_handle)

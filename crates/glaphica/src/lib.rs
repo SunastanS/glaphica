@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use document::Document;
-use render_protocol::{BlendMode, ImageHandle, RenderOp, RenderStepSupportMatrix, Viewport};
+use render_protocol::{
+    BlendMode, ImageHandle, RenderOp, RenderStepSupportMatrix, Viewport,
+};
 use renderer::{PresentError, RenderDataResolver, Renderer, ViewOpSender};
 use tiles::{TileAddress, TileAtlasStore, TileKey};
 use view::ViewTransform;
@@ -137,7 +139,7 @@ impl GpuState {
         let atlas_store = Arc::new(atlas_store);
 
         let document = create_startup_document(&atlas_store, startup_image_path.as_deref());
-        let initial_snapshot = document.render_step_snapshot(0);
+        let initial_snapshot = document.render_tree_snapshot(0);
         initial_snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
             .unwrap_or_else(|error| {
@@ -165,7 +167,7 @@ impl GpuState {
         let view_transform = ViewTransform::default();
         push_view_state(&view_sender, &view_transform, size);
         view_sender
-            .send(RenderOp::BindRenderSteps(initial_snapshot))
+            .send(RenderOp::BindRenderTree(initial_snapshot))
             .expect("send initial render steps");
 
         Self {
@@ -424,14 +426,8 @@ mod tests {
 
         let mut document = Document::new(size_x, size_y);
         let _layer_id = document.new_layer_root_with_image(virtual_image, BlendMode::Normal);
-        let snapshot = document.render_step_snapshot(1);
-        let image_handle = snapshot
-            .steps
-            .iter()
-            .find_map(|step| match step {
-                render_protocol::RenderStepEntry::Leaf { image_handle, .. } => Some(*image_handle),
-                render_protocol::RenderStepEntry::Group { .. } => None,
-            })
+        let snapshot = document.render_tree_snapshot(1);
+        let image_handle = find_first_leaf_image_handle(snapshot.root.as_ref())
             .expect("snapshot should contain a leaf image");
         let document_image = document
             .image(image_handle)
@@ -450,5 +446,16 @@ mod tests {
             .expect("export rendered image from document tiles");
 
         assert_eq!(rendered_bytes, source_bytes);
+    }
+
+    fn find_first_leaf_image_handle(
+        node: &render_protocol::RenderNodeSnapshot,
+    ) -> Option<ImageHandle> {
+        match node {
+            render_protocol::RenderNodeSnapshot::Leaf { image_handle, .. } => Some(*image_handle),
+            render_protocol::RenderNodeSnapshot::Group { children, .. } => children
+                .iter()
+                .find_map(find_first_leaf_image_handle),
+        }
     }
 }

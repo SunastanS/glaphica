@@ -14,10 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
-#[cfg(test)]
-use render_protocol::RenderStepEntry;
 use render_protocol::{
-    BlendMode, ImageHandle, RenderOp, RenderStepSnapshot, TransformMatrix4x4, Viewport,
+    BlendMode, ImageHandle, RenderOp, RenderTreeSnapshot, TransformMatrix4x4, Viewport,
 };
 #[cfg(test)]
 use tiles::TILE_STRIDE;
@@ -58,7 +56,7 @@ use geometry::{
     document_clip_matrix_from_size, group_cache_extent_from_document_size,
     group_cache_slot_extent_from_document_size, group_tile_grid_from_document_size,
 };
-use render_tree::{RenderTreeNode, build_render_tree_from_snapshot, collect_node_dirty_rects};
+use render_tree::{RenderTreeNode, collect_node_dirty_rects};
 use renderer_draw_builders::{
     build_group_tile_draw_instances, build_leaf_tile_draw_instances,
     build_leaf_tile_draw_instances_for_tiles, leaf_should_rebuild, tile_coord_from_draw_instance,
@@ -204,7 +202,7 @@ struct ViewState {
 }
 
 struct FrameState {
-    bound_steps: Option<RenderStepSnapshot>,
+    bound_tree: Option<RenderTreeSnapshot>,
     cached_render_tree: Option<RenderTreeNode>,
     render_tree_dirty: bool,
     dirty_state_store: DirtyStateStore,

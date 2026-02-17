@@ -10,9 +10,9 @@ use render_protocol::TransformMatrix4x4;
 use tiles::{GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray};
 
 use crate::{
-    CacheState, DataState, DirtyStateStore, FrameState, FrameSync, GpuState, GroupTargetCacheEntry,
-    IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer,
-    TileInstanceGpu, ViewState, create_composite_pipeline, multiply_blend_state,
+    create_composite_pipeline, multiply_blend_state, CacheState, DataState, DirtyStateStore,
+    FrameState, FrameSync, GpuState, GroupTargetCacheEntry, InputState, RenderDataResolver,
+    Renderer, TileInstanceGpu, ViewState, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY,
 };
 
 impl Renderer {
@@ -233,7 +233,7 @@ impl Renderer {
                 leaf_draw_cache: HashMap::new(),
             },
             frame_state: FrameState {
-                bound_steps: None,
+                bound_tree: None,
                 cached_render_tree: None,
                 render_tree_dirty: false,
                 dirty_state_store: DirtyStateStore::with_document_dirty(true),

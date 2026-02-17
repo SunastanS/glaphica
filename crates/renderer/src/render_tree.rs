@@ -5,24 +5,11 @@
 
 use std::collections::HashMap;
 
-use render_protocol::{BlendMode, ImageHandle, RenderStepEntry, RenderStepSnapshot};
+use render_protocol::RenderNodeSnapshot;
 
 use super::{DirtyRectMask, RenderNodeKey};
 
-#[derive(Debug, Clone)]
-pub(super) enum RenderTreeNode {
-    Leaf {
-        #[cfg_attr(not(test), allow(dead_code))]
-        layer_id: u64,
-        blend: BlendMode,
-        image_handle: ImageHandle,
-    },
-    Group {
-        group_id: u64,
-        blend: BlendMode,
-        children: Vec<RenderTreeNode>,
-    },
-}
+pub(super) type RenderTreeNode = RenderNodeSnapshot;
 
 fn merge_rect_masks(base: &mut DirtyRectMask, incoming: DirtyRectMask) {
     match (base, incoming) {
@@ -51,7 +38,7 @@ pub(super) fn collect_node_dirty_rects(
             group_id, children, ..
         } => {
             let mut group_dirty: Option<DirtyRectMask> = None;
-            for child in children {
+            for child in children.iter() {
                 if let Some(child_dirty_rect_mask) =
                     collect_node_dirty_rects(child, layer_dirty_rect_masks, dirty_nodes)
                 {
@@ -71,50 +58,4 @@ pub(super) fn collect_node_dirty_rects(
             group_dirty
         }
     }
-}
-
-pub(super) fn build_render_tree_from_snapshot(snapshot: &RenderStepSnapshot) -> RenderTreeNode {
-    let mut stack = Vec::new();
-    for step in snapshot.steps.iter() {
-        match step {
-            RenderStepEntry::Leaf {
-                layer_id,
-                blend,
-                image_handle,
-                ..
-            } => stack.push(RenderTreeNode::Leaf {
-                layer_id: *layer_id,
-                blend: *blend,
-                image_handle: *image_handle,
-            }),
-            RenderStepEntry::Group {
-                group_id,
-                child_count,
-                blend,
-            } => {
-                let child_count = *child_count as usize;
-                if child_count > stack.len() {
-                    panic!("render step group has more children than available nodes");
-                }
-
-                let split_index = stack.len() - child_count;
-                let children = stack.split_off(split_index);
-                stack.push(RenderTreeNode::Group {
-                    group_id: *group_id,
-                    blend: *blend,
-                    children,
-                });
-            }
-        }
-    }
-
-    if stack.len() != 1 {
-        panic!("render steps must reduce to a single root group");
-    }
-    let root = stack.pop().expect("render tree stack should contain root");
-    assert!(
-        matches!(root, RenderTreeNode::Group { group_id: 0, .. }),
-        "render tree root must be group 0"
-    );
-    root
 }
