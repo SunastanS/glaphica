@@ -1,3 +1,8 @@
+//! Geometry and coordinate-space helpers.
+//!
+//! This module computes clip matrices, cache extents, and tile-grid dimensions
+//! derived from document size.
+
 use render_protocol::TransformMatrix4x4;
 use tiles::{TILE_SIZE, TILE_STRIDE};
 

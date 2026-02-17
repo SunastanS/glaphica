@@ -1,3 +1,8 @@
+//! Dirty-region tracking and propagation.
+//!
+//! This module stores layer dirty state, converts dirty rects to tile masks,
+//! and propagates dirtiness through render-tree hierarchy.
+
 use std::collections::{HashMap, HashSet};
 
 use super::{

@@ -1,3 +1,8 @@
+//! Renderer initialization and GPU resource construction.
+//!
+//! This module owns `Renderer::new` and helper routines that allocate pipelines,
+//! bind groups, and per-frame buffers.
+
 use std::collections::HashMap;
 use std::sync::mpsc;
 
@@ -5,9 +10,9 @@ use render_protocol::TransformMatrix4x4;
 use tiles::{GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray};
 
 use crate::{
-    create_composite_pipeline, multiply_blend_state, DirtyStateStore, FrameSync,
-    GroupTargetCacheEntry, RenderDataResolver, Renderer, TileInstanceGpu, IDENTITY_MATRIX,
-    INITIAL_TILE_INSTANCE_CAPACITY,
+    create_composite_pipeline, multiply_blend_state, CacheState, DataState, DirtyStateStore,
+    FrameState, FrameSync, GpuState, GroupTargetCacheEntry, InputState, RenderDataResolver,
+    Renderer, TileInstanceGpu, ViewState, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY,
 };
 
 impl Renderer {
@@ -189,41 +194,51 @@ impl Renderer {
         );
 
         let renderer = Self {
-            view_receiver,
-            device,
-            queue,
-            surface,
-            surface_config,
-            render_data_resolver,
-            view_matrix: IDENTITY_MATRIX,
-            view_matrix_dirty: false,
-            view_uniform_buffer,
-            alpha_composite_pipeline,
-            multiply_composite_pipeline,
-            alpha_composite_slot_pipeline,
-            multiply_composite_slot_pipeline,
-            per_frame_bind_group_layout,
-            per_frame_bind_group,
-            group_tile_store,
-            group_tile_atlas,
-            group_atlas_bind_group_linear,
-            group_atlas_bind_group_nearest,
-            group_target_cache: HashMap::<u64, GroupTargetCacheEntry>::new(),
-            tile_instance_buffer,
-            tile_instance_capacity: INITIAL_TILE_INSTANCE_CAPACITY,
-            tile_instance_gpu_staging: Vec::new(),
-            atlas_bind_group_linear,
-            tile_atlas,
-            viewport: None,
-            bound_steps: None,
-            cached_render_tree: None,
-            render_tree_dirty: false,
-            leaf_draw_cache: HashMap::new(),
-            dirty_state_store: DirtyStateStore::with_document_dirty(true),
-            frame_budget_micros: 16_000,
-            drop_before_revision: 0,
-            present_requested: false,
-            frame_sync: FrameSync::default(),
+            input_state: InputState { view_receiver },
+            data_state: DataState {
+                render_data_resolver,
+            },
+            gpu_state: GpuState {
+                device,
+                queue,
+                surface,
+                surface_config,
+                view_uniform_buffer,
+                alpha_composite_pipeline,
+                multiply_composite_pipeline,
+                alpha_composite_slot_pipeline,
+                multiply_composite_slot_pipeline,
+                per_frame_bind_group_layout,
+                per_frame_bind_group,
+                group_tile_store,
+                group_tile_atlas,
+                group_atlas_bind_group_linear,
+                group_atlas_bind_group_nearest,
+                tile_instance_buffer,
+                tile_instance_capacity: INITIAL_TILE_INSTANCE_CAPACITY,
+                tile_instance_gpu_staging: Vec::new(),
+                atlas_bind_group_linear,
+                tile_atlas,
+            },
+            view_state: ViewState {
+                view_matrix: IDENTITY_MATRIX,
+                view_matrix_dirty: false,
+                viewport: None,
+                frame_budget_micros: 16_000,
+                drop_before_revision: 0,
+                present_requested: false,
+            },
+            cache_state: CacheState {
+                group_target_cache: HashMap::<u64, GroupTargetCacheEntry>::new(),
+                leaf_draw_cache: HashMap::new(),
+            },
+            frame_state: FrameState {
+                bound_steps: None,
+                cached_render_tree: None,
+                render_tree_dirty: false,
+                dirty_state_store: DirtyStateStore::with_document_dirty(true),
+                frame_sync: FrameSync::default(),
+            },
         };
 
         (renderer, crate::ViewOpSender(view_sender))
@@ -292,7 +307,7 @@ impl Renderer {
     }
 
     pub(super) fn ensure_tile_instance_capacity(&mut self, required_len: usize) {
-        if required_len <= self.tile_instance_capacity {
+        if required_len <= self.gpu_state.tile_instance_capacity {
             return;
         }
 
@@ -300,14 +315,14 @@ impl Renderer {
         let expanded_capacity = required_capacity
             .checked_next_power_of_two()
             .expect("tile instance capacity overflow");
-        self.tile_instance_buffer =
-            Self::create_tile_instance_buffer(&self.device, expanded_capacity);
-        self.per_frame_bind_group = Self::create_per_frame_bind_group(
-            &self.device,
-            &self.per_frame_bind_group_layout,
-            &self.view_uniform_buffer,
-            &self.tile_instance_buffer,
+        self.gpu_state.tile_instance_buffer =
+            Self::create_tile_instance_buffer(&self.gpu_state.device, expanded_capacity);
+        self.gpu_state.per_frame_bind_group = Self::create_per_frame_bind_group(
+            &self.gpu_state.device,
+            &self.gpu_state.per_frame_bind_group_layout,
+            &self.gpu_state.view_uniform_buffer,
+            &self.gpu_state.tile_instance_buffer,
         );
-        self.tile_instance_capacity = expanded_capacity;
+        self.gpu_state.tile_instance_capacity = expanded_capacity;
     }
 }

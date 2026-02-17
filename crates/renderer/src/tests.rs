@@ -1,3 +1,8 @@
+//! Renderer unit tests.
+//!
+//! This module validates frame sync behavior, geometry helpers, dirty propagation,
+//! planning decisions, and draw-instance construction invariants.
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

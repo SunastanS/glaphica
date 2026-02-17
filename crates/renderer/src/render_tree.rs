@@ -1,3 +1,8 @@
+//! Render-tree reconstruction and traversal utilities.
+//!
+//! This module rebuilds hierarchical render nodes from step snapshots and
+//! provides traversal helpers used by dirty propagation.
+
 use std::collections::HashMap;
 
 use render_protocol::{BlendMode, ImageHandle, RenderStepEntry, RenderStepSnapshot};

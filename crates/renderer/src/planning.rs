@@ -1,3 +1,8 @@
+//! Frame and composite planning data structures.
+//!
+//! This module defines frame versions/synchronization state and planning models
+//! used between dirty analysis, composite planning, and frame execution.
+
 use std::collections::{HashMap, HashSet};
 
 use render_protocol::{BlendMode, ImageHandle, TransformMatrix4x4};
