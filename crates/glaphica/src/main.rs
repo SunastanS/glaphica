@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use glaphica::GpuState;
@@ -16,6 +17,7 @@ const PIXELS_PER_SCROLL_LINE: f32 = 120.0;
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
+    startup_image_path: Option<PathBuf>,
     is_space_pressed: bool,
     is_rotate_pressed: bool,
     is_left_mouse_pressed: bool,
@@ -46,7 +48,10 @@ impl ApplicationHandler for App {
                 .expect("create window"),
         );
 
-        let gpu = pollster::block_on(GpuState::new(window.clone()));
+        let gpu = pollster::block_on(GpuState::new(
+            window.clone(),
+            self.startup_image_path.clone(),
+        ));
         window.request_redraw();
 
         self.window = Some(window);
@@ -181,6 +186,35 @@ impl ApplicationHandler for App {
 
 fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
-    let mut app = App::default();
+    let mut app = App {
+        startup_image_path: parse_startup_image_path(),
+        ..App::default()
+    };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+fn parse_startup_image_path() -> Option<PathBuf> {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+
+    let Some(first_arg) = args.next() else {
+        return None;
+    };
+
+    if first_arg == "--image" {
+        let image_path = args.next().unwrap_or_else(|| {
+            panic!("missing image path after --image; usage: glaphica [--image <path>] | [<path>]")
+        });
+        assert!(
+            args.next().is_none(),
+            "too many arguments; usage: glaphica [--image <path>] | [<path>]"
+        );
+        return Some(PathBuf::from(image_path));
+    }
+
+    assert!(
+        args.next().is_none(),
+        "too many arguments; usage: glaphica [--image <path>] | [<path>]"
+    );
+    Some(PathBuf::from(first_arg))
 }

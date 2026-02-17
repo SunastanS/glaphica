@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 document = { path = "../document" }
+image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
 pollster = "0.4.0"
 render_protocol = { path = "../render_protocol" }
 renderer = { path = "../renderer" }
@@ -14,4 +15,3 @@ wgpu = "28.0.0"
 winit = "0.30.12"
 
 [dev-dependencies]
-image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }

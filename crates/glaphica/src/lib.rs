@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use document::Document;
@@ -7,6 +8,9 @@ use tiles::{TileAddress, TileAtlasStore, TileKey};
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
+
+const DEFAULT_DOCUMENT_WIDTH: u32 = 1280;
+const DEFAULT_DOCUMENT_HEIGHT: u32 = 720;
 
 struct DocumentRenderDataResolver {
     document: Arc<Document>,
@@ -67,7 +71,7 @@ pub struct GpuState {
 }
 
 impl GpuState {
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>, startup_image_path: Option<PathBuf>) -> Self {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -124,7 +128,7 @@ impl GpuState {
 
         let (atlas_store, tile_atlas) = TileAtlasStore::new(
             &device,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
             wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC,
@@ -132,13 +136,7 @@ impl GpuState {
         .expect("create tile atlas store");
         let atlas_store = Arc::new(atlas_store);
 
-        let (image_width, image_height, image_bytes) = demo_image_rgba8();
-        let virtual_image = atlas_store
-            .ingest_image_rgba8_strided(image_width, image_height, &image_bytes, image_width * 4)
-            .expect("ingest demo image");
-
-        let mut document = Document::new(image_width, image_height);
-        let _ = document.new_layer_root_with_image(virtual_image, BlendMode::Normal);
+        let document = create_startup_document(&atlas_store, startup_image_path.as_deref());
         let initial_snapshot = document.render_step_snapshot(0);
         initial_snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
@@ -236,6 +234,48 @@ impl GpuState {
     }
 }
 
+fn create_startup_document(
+    atlas_store: &TileAtlasStore,
+    startup_image_path: Option<&Path>,
+) -> Document {
+    let Some(startup_image_path) = startup_image_path else {
+        return Document::new(DEFAULT_DOCUMENT_WIDTH, DEFAULT_DOCUMENT_HEIGHT);
+    };
+
+    let decoded = image::ImageReader::open(startup_image_path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to open startup image at {}: {error}",
+                startup_image_path.display()
+            )
+        })
+        .decode()
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to decode startup image at {}: {error}",
+                startup_image_path.display()
+            )
+        })
+        .to_rgba8();
+
+    let size_x = decoded.width();
+    let size_y = decoded.height();
+    let image_bytes = decoded.into_raw();
+
+    let image = atlas_store
+        .ingest_image_rgba8_strided(size_x, size_y, &image_bytes, size_x * 4)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to ingest startup image into tile atlas at {}: {error:?}",
+                startup_image_path.display()
+            )
+        });
+
+    let mut document = Document::new(size_x, size_y);
+    let _layer_id = document.new_layer_root_with_image(image, BlendMode::Normal);
+    document
+}
+
 fn push_view_state(
     view_sender: &ViewOpSender,
     view_transform: &ViewTransform,
@@ -256,29 +296,6 @@ fn push_view_state(
     view_sender
         .send(RenderOp::SetViewTransform { matrix })
         .expect("send view transform");
-}
-
-fn demo_image_rgba8() -> (u32, u32, Vec<u8>) {
-    let width = 512u32;
-    let height = 512u32;
-    let mut bytes = vec![0u8; (width as usize) * (height as usize) * 4];
-
-    for y in 0..height {
-        for x in 0..width {
-            let index = ((y as usize) * (width as usize) + (x as usize)) * 4;
-            let checker = ((x / 32) + (y / 32)) % 2;
-            let r = ((x * 255) / width) as u8;
-            let g = ((y * 255) / height) as u8;
-            let b = if checker == 0 { 220 } else { 40 };
-
-            bytes[index] = r;
-            bytes[index + 1] = g;
-            bytes[index + 2] = b;
-            bytes[index + 3] = 255;
-        }
-    }
-
-    (width, height, bytes)
 }
 
 #[cfg(test)]
@@ -330,13 +347,14 @@ mod tests {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("glaphica.tests.readback"),
         });
+        let (origin_x, origin_y) = address.atlas_content_origin_pixels();
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
-                    x: address.tile_x() * tiles::TILE_SIZE,
-                    y: address.tile_y() * tiles::TILE_SIZE,
+                    x: origin_x,
+                    y: origin_y,
                     z: address.atlas_layer,
                 },
                 aspect: wgpu::TextureAspect::All,
