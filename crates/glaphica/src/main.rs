@@ -1,6 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
+use driver::{
+    DabChunkRealtimeQueue, DriverStrokeSession, PointerDeviceKind, PointerEventPhase,
+    RawPointerInput, StrokeContext, create_dab_chunk_realtime_queue,
+};
 use glaphica::GpuState;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -12,6 +17,164 @@ use winit::window::{Window, WindowAttributes, WindowId};
 const ROTATION_RADIANS_PER_PIXEL: f32 = 0.01;
 const WHEEL_ZOOM_SPEED: f32 = 0.1;
 const PIXELS_PER_SCROLL_LINE: f32 = 120.0;
+const DRIVER_QUEUE_CAPACITY: usize = 64;
+const DRIVER_RESAMPLE_SPACING_PIXELS: f32 = 2.0;
+
+struct ActiveDriverStroke {
+    session: DriverStrokeSession<driver::NoSmoothingUniformResampling>,
+}
+
+struct DriverDebugState {
+    queue: DabChunkRealtimeQueue,
+    active_stroke: Option<ActiveDriverStroke>,
+    next_stroke_session_id: u64,
+    pointer_id: u64,
+    clock_start: Instant,
+}
+
+impl DriverDebugState {
+    fn new() -> Self {
+        let queue = create_dab_chunk_realtime_queue(DRIVER_QUEUE_CAPACITY)
+            .expect("create driver realtime queue");
+        Self {
+            queue,
+            active_stroke: None,
+            next_stroke_session_id: 1,
+            pointer_id: 1,
+            clock_start: Instant::now(),
+        }
+    }
+
+    fn begin_stroke(&mut self, frame_sequence_id: u64) {
+        let stroke_context = StrokeContext {
+            stroke_session_id: self.next_stroke_session_id,
+            pointer_id: self.pointer_id,
+        };
+        self.next_stroke_session_id = self
+            .next_stroke_session_id
+            .checked_add(1)
+            .expect("stroke session id overflow");
+
+        let session = DriverStrokeSession::new(
+            frame_sequence_id,
+            stroke_context,
+            driver::NoSmoothingUniformResampling::new(),
+            driver::NoSmoothingUniformResamplingConfig {
+                spacing_pixels: DRIVER_RESAMPLE_SPACING_PIXELS,
+            },
+        )
+        .expect("begin driver stroke");
+
+        self.active_stroke = Some(ActiveDriverStroke { session });
+
+        println!(
+            "[driver] begin stroke session={} pointer={} frame={}",
+            stroke_context.stroke_session_id, stroke_context.pointer_id, frame_sequence_id
+        );
+    }
+
+    fn push_input(&mut self, phase: PointerEventPhase, x: f32, y: f32) {
+        let Some(active_stroke) = self.active_stroke.as_mut() else {
+            return;
+        };
+
+        let timestamp_micros = self
+            .clock_start
+            .elapsed()
+            .as_micros()
+            .try_into()
+            .expect("timestamp micros overflow");
+
+        let input = RawPointerInput {
+            pointer_id: active_stroke.session.stroke_context().pointer_id,
+            device_kind: PointerDeviceKind::Mouse,
+            phase,
+            timestamp_micros,
+            screen_x: x,
+            screen_y: y,
+            pressure: Some(1.0),
+            tilt_x_degrees: None,
+            tilt_y_degrees: None,
+            twist_degrees: None,
+        };
+
+        active_stroke
+            .session
+            .feed_input(input, &mut self.queue)
+            .expect("feed pointer input into driver algorithm");
+    }
+
+    fn end_stroke(&mut self, x: f32, y: f32) {
+        let Some(mut active_stroke) = self.active_stroke.take() else {
+            return;
+        };
+
+        let timestamp_micros = self
+            .clock_start
+            .elapsed()
+            .as_micros()
+            .try_into()
+            .expect("timestamp micros overflow");
+        let up_input = RawPointerInput {
+            pointer_id: active_stroke.session.stroke_context().pointer_id,
+            device_kind: PointerDeviceKind::Mouse,
+            phase: PointerEventPhase::Up,
+            timestamp_micros,
+            screen_x: x,
+            screen_y: y,
+            pressure: Some(1.0),
+            tilt_x_degrees: None,
+            tilt_y_degrees: None,
+            twist_degrees: None,
+        };
+
+        active_stroke
+            .session
+            .feed_input(up_input, &mut self.queue)
+            .expect("feed pointer up into driver algorithm");
+        active_stroke
+            .session
+            .end_stroke(&mut self.queue)
+            .expect("end driver stroke");
+
+        let stroke_context = active_stroke.session.stroke_context();
+
+        println!(
+            "[driver] end stroke session={} emitted_chunks={}",
+            stroke_context.stroke_session_id,
+            active_stroke.session.emitted_chunk_count()
+        );
+    }
+
+    fn drain_debug_output(&mut self) {
+        while let Some(chunk) = self.queue.pop_dab_chunk() {
+            let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
+            let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
+            let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
+            let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
+            println!(
+                "[driver] chunk frame={} stroke={} dabs={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
+                chunk.frame_sequence_id,
+                chunk.stroke_session_id,
+                chunk.dab_count(),
+                chunk.starts_stroke,
+                chunk.ends_stroke,
+                chunk.discontinuity_before,
+                chunk.dropped_chunk_count_before,
+                first_x,
+                first_y,
+                last_x,
+                last_y,
+            );
+        }
+    }
+}
+
+impl Default for DriverDebugState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Default)]
 struct App {
@@ -22,6 +185,8 @@ struct App {
     is_rotate_pressed: bool,
     is_left_mouse_pressed: bool,
     last_cursor_position: Option<(f64, f64)>,
+    driver_debug: DriverDebugState,
+    next_driver_frame_sequence_id: u64,
 }
 
 impl App {
@@ -87,7 +252,27 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
                     self.is_left_mouse_pressed = state == ElementState::Pressed;
-                    if !self.is_left_mouse_pressed {
+                    if self.is_left_mouse_pressed
+                        && !self.is_space_pressed
+                        && !self.is_rotate_pressed
+                    {
+                        self.driver_debug
+                            .begin_stroke(self.next_driver_frame_sequence_id);
+                        if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
+                            self.driver_debug.push_input(
+                                PointerEventPhase::Down,
+                                cursor_x as f32,
+                                cursor_y as f32,
+                            );
+                        }
+                    } else if !self.is_left_mouse_pressed
+                        && !self.is_space_pressed
+                        && !self.is_rotate_pressed
+                    {
+                        if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
+                            self.driver_debug
+                                .end_stroke(cursor_x as f32, cursor_y as f32);
+                        }
                         self.last_cursor_position = None;
                     }
                 }
@@ -103,6 +288,12 @@ impl ApplicationHandler for App {
                                 gpu.pan_canvas(delta_x, delta_y);
                             } else if self.is_rotate_pressed {
                                 gpu.rotate_canvas(delta_x * ROTATION_RADIANS_PER_PIXEL);
+                            } else {
+                                self.driver_debug.push_input(
+                                    PointerEventPhase::Move,
+                                    position.x as f32,
+                                    position.y as f32,
+                                );
                             }
                         }
                     }
@@ -150,6 +341,12 @@ impl ApplicationHandler for App {
                     return;
                 };
 
+                self.driver_debug.drain_debug_output();
+                self.next_driver_frame_sequence_id = self
+                    .next_driver_frame_sequence_id
+                    .checked_add(1)
+                    .expect("driver frame sequence id overflow");
+
                 match gpu.render() {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
@@ -188,6 +385,7 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App {
         startup_image_path: parse_startup_image_path(),
+        driver_debug: DriverDebugState::new(),
         ..App::default()
     };
     event_loop.run_app(&mut app).expect("run app");

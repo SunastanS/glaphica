@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use document::Document;
-use render_protocol::{
-    BlendMode, ImageHandle, RenderOp, RenderStepSupportMatrix, Viewport,
-};
+use render_protocol::{BlendMode, ImageHandle, RenderOp, RenderStepSupportMatrix, Viewport};
 use renderer::{PresentError, RenderDataResolver, Renderer, ViewOpSender};
 use tiles::{TileAddress, TileAtlasStore, TileKey};
 use view::ViewTransform;
@@ -453,9 +451,9 @@ mod tests {
     ) -> Option<ImageHandle> {
         match node {
             render_protocol::RenderNodeSnapshot::Leaf { image_handle, .. } => Some(*image_handle),
-            render_protocol::RenderNodeSnapshot::Group { children, .. } => children
-                .iter()
-                .find_map(find_first_leaf_image_handle),
+            render_protocol::RenderNodeSnapshot::Group { children, .. } => {
+                children.iter().find_map(find_first_leaf_image_handle)
+            }
         }
     }
 }

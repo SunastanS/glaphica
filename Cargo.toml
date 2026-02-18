@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/document",
+    "crates/driver",
     "crates/glaphica",
     "crates/render_protocol",
     "crates/renderer",

@@ -10,9 +10,9 @@ use render_protocol::TransformMatrix4x4;
 use tiles::{GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray};
 
 use crate::{
-    create_composite_pipeline, multiply_blend_state, CacheState, DataState, DirtyStateStore,
-    FrameState, FrameSync, GpuState, GroupTargetCacheEntry, InputState, RenderDataResolver,
-    Renderer, TileInstanceGpu, ViewState, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY,
+    CacheState, DataState, DirtyStateStore, FrameState, FrameSync, GpuState, GroupTargetCacheEntry,
+    IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer,
+    TileInstanceGpu, ViewState, create_composite_pipeline, multiply_blend_state,
 };
 
 impl Renderer {
