@@ -301,6 +301,24 @@ This document tracks architecture and implementation decisions for the `brush_ex
   - Keeps renderer hot path deterministic via explicit command ordering.
   - Leaves an intentional edge case: last stroke in a session may remain unmerged until a later trigger command is introduced.
 
+### 2026-02-19 - Tile Atlas Generic Payload Foundation
+
+- Status: accepted
+- Context: Brush execution requires tile-atlas-backed intermediate buffers with multiple pixel payloads (`f32`, `bool`-like masks, and existing RGBA image content), but existing tiles infrastructure was RGBA8-ingest-specific.
+- Decision:
+  - Introduce generic tile atlas primitives in `tiles`:
+    - `GenericTileAtlasConfig`
+    - `GenericTileAtlasStore`
+    - `GenericTileAtlasGpuArray`
+    - `TilePayloadKind` (`Rgba8`, `R32Float`, `R8Uint`)
+  - Keep existing RGBA-facing APIs (`TileAtlasStore`, `TileAtlasGpuArray`, group atlas types) as compatibility wrappers so renderer/glaphica main render path remains unchanged.
+  - Keep RGBA gutter behavior only on RGBA upload path; `R32Float`/`R8Uint` do not use RGBA ingest/gutter expansion.
+  - For `R32Float` payload atlases, enforce storage-oriented creation contract at atlas creation time (including `STORAGE_BINDING` usage support checks) and fail fast when unsupported.
+- Consequences:
+  - Brush buffer tiling can start from a shared allocator/op-queue base without re-implementing atlas lifecycle logic.
+  - Existing document image ingest/rendering remains stable during migration.
+  - Unsupported hardware/format combinations surface as explicit creation failures instead of silent fallback.
+
 ## Open Questions
 
 - What exact transport carries driver -> brush_execution input (lock-free queue, channel, ring buffer, shared mapped memory)?

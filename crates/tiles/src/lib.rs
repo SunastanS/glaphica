@@ -124,9 +124,12 @@ impl From<TileIngestError> for ImageIngestError {
 pub enum TileAtlasCreateError {
     MissingCopyDstUsage,
     MissingTextureBindingUsage,
+    MissingStorageBindingUsage,
     MaxLayersZero,
     MaxLayersExceedsDeviceLimit,
     AtlasSizeExceedsDeviceLimit,
+    UnsupportedPayloadFormat,
+    StorageBindingUnsupportedForFormat,
 }
 
 impl fmt::Display for TileAtlasCreateError {
@@ -138,6 +141,9 @@ impl fmt::Display for TileAtlasCreateError {
             TileAtlasCreateError::MissingTextureBindingUsage => {
                 write!(formatter, "tile atlas usage must include TEXTURE_BINDING")
             }
+            TileAtlasCreateError::MissingStorageBindingUsage => {
+                write!(formatter, "tile atlas usage must include STORAGE_BINDING")
+            }
             TileAtlasCreateError::MaxLayersZero => {
                 write!(formatter, "tile atlas max_layers must be at least 1")
             }
@@ -146,6 +152,18 @@ impl fmt::Display for TileAtlasCreateError {
             }
             TileAtlasCreateError::AtlasSizeExceedsDeviceLimit => {
                 write!(formatter, "tile atlas size exceeds device limit")
+            }
+            TileAtlasCreateError::UnsupportedPayloadFormat => {
+                write!(
+                    formatter,
+                    "tile atlas payload kind is incompatible with texture format"
+                )
+            }
+            TileAtlasCreateError::StorageBindingUnsupportedForFormat => {
+                write!(
+                    formatter,
+                    "tile atlas texture format does not support STORAGE_BINDING"
+                )
             }
         }
     }
@@ -195,6 +213,34 @@ fn rgba8_tile_slot_len() -> usize {
     (TILE_STRIDE as usize) * (TILE_STRIDE as usize) * 4
 }
 
+fn tile_slot_len_for_bytes_per_texel(bytes_per_texel: u32) -> usize {
+    (TILE_STRIDE as usize) * (TILE_STRIDE as usize) * (bytes_per_texel as usize)
+}
+
+fn payload_bytes_per_texel(payload_kind: TilePayloadKind) -> u32 {
+    match payload_kind {
+        TilePayloadKind::Rgba8 | TilePayloadKind::R32Float => 4,
+        TilePayloadKind::R8Uint => 1,
+    }
+}
+
+fn zero_tile_slot_payload(payload_kind: TilePayloadKind) -> &'static [u8] {
+    static ZERO_RGBA8: OnceLock<Vec<u8>> = OnceLock::new();
+    static ZERO_R32FLOAT: OnceLock<Vec<u8>> = OnceLock::new();
+    static ZERO_R8UINT: OnceLock<Vec<u8>> = OnceLock::new();
+    match payload_kind {
+        TilePayloadKind::Rgba8 => ZERO_RGBA8
+            .get_or_init(|| vec![0u8; tile_slot_len_for_bytes_per_texel(4)])
+            .as_slice(),
+        TilePayloadKind::R32Float => ZERO_R32FLOAT
+            .get_or_init(|| vec![0u8; tile_slot_len_for_bytes_per_texel(4)])
+            .as_slice(),
+        TilePayloadKind::R8Uint => ZERO_R8UINT
+            .get_or_init(|| vec![0u8; tile_slot_len_for_bytes_per_texel(1)])
+            .as_slice(),
+    }
+}
+
 fn validate_rgba8_copy_dst_contract(
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
@@ -229,6 +275,45 @@ pub struct TileAtlasConfig {
     pub usage: wgpu::TextureUsages,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TilePayloadKind {
+    Rgba8,
+    R32Float,
+    R8Uint,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GenericTileAtlasConfig {
+    pub max_layers: u32,
+    pub format: wgpu::TextureFormat,
+    pub usage: wgpu::TextureUsages,
+    pub payload_kind: TilePayloadKind,
+}
+
+impl Default for GenericTileAtlasConfig {
+    fn default() -> Self {
+        Self {
+            max_layers: DEFAULT_MAX_LAYERS,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            payload_kind: TilePayloadKind::Rgba8,
+        }
+    }
+}
+
+impl From<TileAtlasConfig> for GenericTileAtlasConfig {
+    fn from(value: TileAtlasConfig) -> Self {
+        Self {
+            max_layers: value.max_layers,
+            format: value.format,
+            usage: value.usage,
+            payload_kind: TilePayloadKind::Rgba8,
+        }
+    }
+}
+
 impl Default for TileAtlasConfig {
     fn default() -> Self {
         Self {
@@ -246,10 +331,15 @@ enum TileOp {
     Clear {
         address: TileAddress,
     },
-    UploadRgba8 {
+    Upload {
         address: TileAddress,
-        bytes: Arc<[u8]>,
+        payload: TilePayload,
     },
+}
+
+#[derive(Debug, Clone)]
+enum TilePayload {
+    Rgba8(Arc<[u8]>),
 }
 
 #[derive(Clone, Debug)]
@@ -511,9 +601,9 @@ impl TileAtlasCpu {
     }
 }
 
-fn validate_atlas_config(
+fn validate_generic_atlas_config(
     device: &wgpu::Device,
-    config: TileAtlasConfig,
+    config: GenericTileAtlasConfig,
 ) -> Result<(), TileAtlasCreateError> {
     if !config.usage.contains(wgpu::TextureUsages::COPY_DST) {
         return Err(TileAtlasCreateError::MissingCopyDstUsage);
@@ -536,9 +626,42 @@ fn validate_atlas_config(
     Ok(())
 }
 
+fn validate_payload_contract(
+    device: &wgpu::Device,
+    config: GenericTileAtlasConfig,
+) -> Result<(), TileAtlasCreateError> {
+    match config.payload_kind {
+        TilePayloadKind::Rgba8 => Ok(()),
+        TilePayloadKind::R32Float => {
+            if config.format != wgpu::TextureFormat::R32Float {
+                return Err(TileAtlasCreateError::UnsupportedPayloadFormat);
+            }
+            if !config.usage.contains(wgpu::TextureUsages::STORAGE_BINDING) {
+                return Err(TileAtlasCreateError::MissingStorageBindingUsage);
+            }
+            let features = config.format.guaranteed_format_features(device.features());
+            if !features
+                .allowed_usages
+                .contains(wgpu::TextureUsages::STORAGE_BINDING)
+            {
+                return Err(TileAtlasCreateError::StorageBindingUnsupportedForFormat);
+            }
+            Ok(())
+        }
+        TilePayloadKind::R8Uint => {
+            if config.format != wgpu::TextureFormat::R8Uint {
+                return Err(TileAtlasCreateError::UnsupportedPayloadFormat);
+            }
+            Ok(())
+        }
+    }
+}
+
 fn create_atlas_texture_and_array_view(
     device: &wgpu::Device,
-    config: TileAtlasConfig,
+    max_layers: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
     texture_label: &'static str,
     view_label: &'static str,
 ) -> (wgpu::Texture, wgpu::TextureView) {
@@ -547,45 +670,57 @@ fn create_atlas_texture_and_array_view(
         size: wgpu::Extent3d {
             width: ATLAS_SIZE,
             height: ATLAS_SIZE,
-            depth_or_array_layers: config.max_layers,
+            depth_or_array_layers: max_layers,
         },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: config.format,
-        usage: config.usage,
+        format,
+        usage,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
         label: Some(view_label),
-        format: Some(config.format),
+        format: Some(format),
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         usage: None,
         aspect: wgpu::TextureAspect::All,
         base_mip_level: 0,
         mip_level_count: Some(1),
         base_array_layer: 0,
-        array_layer_count: Some(config.max_layers),
+        array_layer_count: Some(max_layers),
     });
 
     (texture, view)
 }
 
 #[derive(Debug)]
-pub struct TileAtlasStore {
+pub struct GenericTileAtlasStore {
     cpu: Arc<TileAtlasCpu>,
     op_sender: TileOpSender,
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
+    payload_kind: TilePayloadKind,
 }
 
 #[derive(Debug)]
-pub struct TileAtlasGpuArray {
+pub struct GenericTileAtlasGpuArray {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     op_queue: TileOpQueue,
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
+    payload_kind: TilePayloadKind,
+}
+
+#[derive(Debug)]
+pub struct TileAtlasStore {
+    generic: GenericTileAtlasStore,
+}
+
+#[derive(Debug)]
+pub struct TileAtlasGpuArray {
+    generic: GenericTileAtlasGpuArray,
 }
 
 #[derive(Debug)]
@@ -599,6 +734,116 @@ pub struct GroupTileAtlasGpuArray {
     view: wgpu::TextureView,
     format: wgpu::TextureFormat,
     max_layers: u32,
+}
+
+impl GenericTileAtlasStore {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+        payload_kind: TilePayloadKind,
+    ) -> Result<(Self, GenericTileAtlasGpuArray), TileAtlasCreateError> {
+        Self::with_config(
+            device,
+            GenericTileAtlasConfig {
+                format,
+                usage,
+                payload_kind,
+                ..GenericTileAtlasConfig::default()
+            },
+        )
+    }
+
+    pub fn with_config(
+        device: &wgpu::Device,
+        config: GenericTileAtlasConfig,
+    ) -> Result<(Self, GenericTileAtlasGpuArray), TileAtlasCreateError> {
+        validate_generic_atlas_config(device, config)?;
+        validate_payload_contract(device, config)?;
+
+        let (op_sender, op_queue) = TileOpQueue::new();
+        let cpu = Arc::new(
+            TileAtlasCpu::new(config.max_layers)
+                .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
+        );
+
+        let (texture, view) = create_atlas_texture_and_array_view(
+            device,
+            config.max_layers,
+            config.format,
+            config.usage,
+            "tiles.atlas.array",
+            "tiles.atlas.array.view",
+        );
+
+        Ok((
+            Self {
+                cpu,
+                op_sender,
+                format: config.format,
+                usage: config.usage,
+                payload_kind: config.payload_kind,
+            },
+            GenericTileAtlasGpuArray {
+                texture,
+                view,
+                op_queue,
+                format: config.format,
+                usage: config.usage,
+                payload_kind: config.payload_kind,
+            },
+        ))
+    }
+
+    pub fn is_allocated(&self, key: TileKey) -> bool {
+        self.cpu.is_allocated(key)
+    }
+
+    pub fn resolve(&self, key: TileKey) -> Option<TileAddress> {
+        self.cpu.resolve(key)
+    }
+
+    pub fn allocate(&self) -> Result<TileKey, TileAllocError> {
+        let (key, _address) = self.cpu.allocate(&self.op_sender)?;
+        Ok(key)
+    }
+
+    pub fn release(&self, key: TileKey) -> bool {
+        self.cpu.release(key)
+    }
+
+    pub fn clear(&self, key: TileKey) -> Result<bool, TileAllocError> {
+        let Some(address) = self.cpu.resolve(key) else {
+            return Ok(false);
+        };
+        self.op_sender.send(TileOp::Clear { address })?;
+        Ok(true)
+    }
+
+    fn validate_ingest_contract(&self) -> Result<(), TileIngestError> {
+        match self.payload_kind {
+            TilePayloadKind::Rgba8 => validate_rgba8_copy_dst_contract(self.format, self.usage)
+                .map_err(map_contract_error_to_tile_ingest),
+            TilePayloadKind::R32Float | TilePayloadKind::R8Uint => {
+                Err(TileIngestError::UnsupportedFormat)
+            }
+        }
+    }
+
+    fn enqueue_packed_rgba8_tile(&self, bytes: Vec<u8>) -> Result<TileKey, TileIngestError> {
+        if bytes.len() != rgba8_tile_len() {
+            return Err(TileIngestError::BufferLengthMismatch);
+        }
+
+        let (key, address) = self.cpu.allocate(&self.op_sender)?;
+        let payload = TilePayload::Rgba8(Arc::<[u8]>::from(bytes));
+        if let Err(error) = self.op_sender.send(TileOp::Upload { address, payload }) {
+            self.cpu.rollback_allocate(key, address, true);
+            return Err(error.into());
+        }
+
+        Ok(key)
+    }
 }
 
 impl TileAtlasStore {
@@ -621,73 +866,32 @@ impl TileAtlasStore {
         device: &wgpu::Device,
         config: TileAtlasConfig,
     ) -> Result<(Self, TileAtlasGpuArray), TileAtlasCreateError> {
-        validate_atlas_config(device, config)?;
-
-        let (op_sender, op_queue) = TileOpQueue::new();
-        let cpu = Arc::new(
-            TileAtlasCpu::new(config.max_layers)
-                .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
-        );
-
-        let (texture, view) = create_atlas_texture_and_array_view(
-            device,
-            config,
-            "tiles.atlas.array",
-            "tiles.atlas.array.view",
-        );
-
+        let (generic_store, generic_gpu) =
+            GenericTileAtlasStore::with_config(device, GenericTileAtlasConfig::from(config))?;
         Ok((
             Self {
-                cpu,
-                op_sender,
-                format: config.format,
-                usage: config.usage,
+                generic: generic_store,
             },
             TileAtlasGpuArray {
-                texture,
-                view,
-                op_queue,
-                format: config.format,
-                usage: config.usage,
+                generic: generic_gpu,
             },
         ))
     }
 
     pub fn is_allocated(&self, key: TileKey) -> bool {
-        self.cpu.is_allocated(key)
+        self.generic.is_allocated(key)
     }
 
     pub fn resolve(&self, key: TileKey) -> Option<TileAddress> {
-        self.cpu.resolve(key)
+        self.generic.resolve(key)
     }
 
     pub fn allocate(&self) -> Result<TileKey, TileAllocError> {
-        let (key, _address) = self.cpu.allocate(&self.op_sender)?;
-        Ok(key)
+        self.generic.allocate()
     }
 
     pub fn release(&self, key: TileKey) -> bool {
-        self.cpu.release(key)
-    }
-
-    fn validate_ingest_contract(&self) -> Result<(), TileIngestError> {
-        validate_rgba8_copy_dst_contract(self.format, self.usage)
-            .map_err(map_contract_error_to_tile_ingest)
-    }
-
-    fn enqueue_packed_rgba8_tile(&self, bytes: Vec<u8>) -> Result<TileKey, TileIngestError> {
-        if bytes.len() != rgba8_tile_len() {
-            return Err(TileIngestError::BufferLengthMismatch);
-        }
-
-        let (key, address) = self.cpu.allocate(&self.op_sender)?;
-        let bytes = Arc::<[u8]>::from(bytes);
-        if let Err(error) = self.op_sender.send(TileOp::UploadRgba8 { address, bytes }) {
-            self.cpu.rollback_allocate(key, address, true);
-            return Err(error.into());
-        }
-
-        Ok(key)
+        self.generic.release(key)
     }
 
     pub fn ingest_tile(
@@ -702,7 +906,7 @@ impl TileAtlasStore {
         if bytes.is_empty() {
             return Ok(None);
         }
-        self.validate_ingest_contract()?;
+        self.generic.validate_ingest_contract()?;
 
         if bytes.len() != rgba8_tile_len() {
             return Err(TileIngestError::BufferLengthMismatch);
@@ -711,7 +915,9 @@ impl TileAtlasStore {
             return Ok(None);
         }
 
-        self.enqueue_packed_rgba8_tile(bytes.to_vec()).map(Some)
+        self.generic
+            .enqueue_packed_rgba8_tile(bytes.to_vec())
+            .map(Some)
     }
 
     pub fn ingest_tile_rgba8_strided(
@@ -727,7 +933,7 @@ impl TileAtlasStore {
         if bytes.is_empty() {
             return Ok(None);
         }
-        self.validate_ingest_contract()?;
+        self.generic.validate_ingest_contract()?;
 
         let bytes_per_pixel = 4u32;
         let row_bytes = width
@@ -774,7 +980,7 @@ impl TileAtlasStore {
             packed[dst_start..dst_end].copy_from_slice(source);
         }
 
-        self.enqueue_packed_rgba8_tile(packed).map(Some)
+        self.generic.enqueue_packed_rgba8_tile(packed).map(Some)
     }
 
     pub fn ingest_image_rgba8_strided(
@@ -839,7 +1045,8 @@ impl TileAtlasStore {
             source_bytes,
             source_bytes_per_row,
         )?;
-        self.validate_ingest_contract()
+        self.generic
+            .validate_ingest_contract()
             .map_err(ImageIngestError::from)?;
 
         if rect_width == 0 || rect_height == 0 {
@@ -905,7 +1112,8 @@ impl TileAtlasStore {
             packed[packed_start..packed_end].copy_from_slice(source_slice);
         }
 
-        self.enqueue_packed_rgba8_tile(packed)
+        self.generic
+            .enqueue_packed_rgba8_tile(packed)
             .map(Some)
             .map_err(ImageIngestError::from)
     }
@@ -931,7 +1139,7 @@ impl GroupTileAtlasStore {
         device: &wgpu::Device,
         config: TileAtlasConfig,
     ) -> Result<(Self, GroupTileAtlasGpuArray), TileAtlasCreateError> {
-        validate_atlas_config(device, config)?;
+        validate_generic_atlas_config(device, GenericTileAtlasConfig::from(config))?;
 
         let cpu = Arc::new(
             TileAtlasCpu::new(config.max_layers)
@@ -939,7 +1147,9 @@ impl GroupTileAtlasStore {
         );
         let (texture, view) = create_atlas_texture_and_array_view(
             device,
-            config,
+            config.max_layers,
+            config.format,
+            config.usage,
             "tiles.group_atlas.array",
             "tiles.group_atlas.array.view",
         );
@@ -973,7 +1183,7 @@ impl GroupTileAtlasStore {
     }
 }
 
-impl TileAtlasGpuArray {
+impl GenericTileAtlasGpuArray {
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
     }
@@ -983,10 +1193,19 @@ impl TileAtlasGpuArray {
     }
 
     pub fn drain_and_execute(&self, queue: &wgpu::Queue) -> Result<usize, TileGpuDrainError> {
-        validate_rgba8_copy_dst_contract(self.format, self.usage)
-            .map_err(map_contract_error_to_gpu_drain)?;
+        if !self.usage.contains(wgpu::TextureUsages::COPY_DST) {
+            return Err(TileGpuDrainError::MissingCopyDstUsage);
+        }
+        if self.payload_kind == TilePayloadKind::Rgba8 {
+            validate_rgba8_copy_dst_contract(self.format, self.usage)
+                .map_err(map_contract_error_to_gpu_drain)?;
+        }
 
         let operations = self.op_queue.drain();
+        let bytes_per_texel = payload_bytes_per_texel(self.payload_kind);
+        let slot_bytes_per_row = TILE_STRIDE
+            .checked_mul(bytes_per_texel)
+            .expect("tile slot bytes_per_row overflow");
         for operation in &operations {
             match operation {
                 TileOp::Clear { address } => {
@@ -997,10 +1216,10 @@ impl TileAtlasGpuArray {
                             origin: tile_slot_origin(*address),
                             aspect: wgpu::TextureAspect::All,
                         },
-                        zero_tile_slot_rgba8(),
+                        zero_tile_slot_payload(self.payload_kind),
                         wgpu::TexelCopyBufferLayout {
                             offset: 0,
-                            bytes_per_row: Some(TILE_STRIDE * 4),
+                            bytes_per_row: Some(slot_bytes_per_row),
                             rows_per_image: Some(TILE_STRIDE),
                         },
                         wgpu::Extent3d {
@@ -1010,35 +1229,54 @@ impl TileAtlasGpuArray {
                         },
                     );
                 }
-                TileOp::UploadRgba8 { address, bytes } => {
-                    if bytes.len() != rgba8_tile_len() {
-                        return Err(TileGpuDrainError::UploadLengthMismatch);
+                TileOp::Upload { address, payload } => match payload {
+                    TilePayload::Rgba8(bytes) => {
+                        if self.payload_kind != TilePayloadKind::Rgba8 {
+                            return Err(TileGpuDrainError::UnsupportedFormat);
+                        }
+                        if bytes.len() != rgba8_tile_len() {
+                            return Err(TileGpuDrainError::UploadLengthMismatch);
+                        }
+                        let expanded = expand_tile_rgba8_with_gutter(bytes);
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &self.texture,
+                                mip_level: 0,
+                                origin: tile_slot_origin(*address),
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            &expanded,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(TILE_STRIDE * 4),
+                                rows_per_image: Some(TILE_STRIDE),
+                            },
+                            wgpu::Extent3d {
+                                width: TILE_STRIDE,
+                                height: TILE_STRIDE,
+                                depth_or_array_layers: 1,
+                            },
+                        );
                     }
-                    let expanded = expand_tile_rgba8_with_gutter(bytes);
-                    queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &self.texture,
-                            mip_level: 0,
-                            origin: tile_slot_origin(*address),
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &expanded,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(TILE_STRIDE * 4),
-                            rows_per_image: Some(TILE_STRIDE),
-                        },
-                        wgpu::Extent3d {
-                            width: TILE_STRIDE,
-                            height: TILE_STRIDE,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                }
+                },
             }
         }
 
         Ok(operations.len())
+    }
+}
+
+impl TileAtlasGpuArray {
+    pub fn view(&self) -> &wgpu::TextureView {
+        self.generic.view()
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        self.generic.texture()
+    }
+
+    pub fn drain_and_execute(&self, queue: &wgpu::Queue) -> Result<usize, TileGpuDrainError> {
+        self.generic.drain_and_execute(queue)
     }
 }
 
@@ -1295,11 +1533,6 @@ fn rgba8_rect_all_zero_strided(
     Ok(true)
 }
 
-fn zero_tile_slot_rgba8() -> &'static [u8] {
-    static ZERO: OnceLock<Vec<u8>> = OnceLock::new();
-    ZERO.get_or_init(|| vec![0u8; rgba8_tile_slot_len()])
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct VirtualImage<K> {
     size_x: u32,
@@ -1488,6 +1721,14 @@ mod tests {
         TileAtlasStore::with_config(device, config).expect("TileAtlasStore::with_config")
     }
 
+    fn create_generic_store(
+        device: &wgpu::Device,
+        config: GenericTileAtlasConfig,
+    ) -> (GenericTileAtlasStore, GenericTileAtlasGpuArray) {
+        GenericTileAtlasStore::with_config(device, config)
+            .expect("GenericTileAtlasStore::with_config")
+    }
+
     fn read_tile_rgba8(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1605,6 +1846,125 @@ mod tests {
         texel
     }
 
+    fn read_tile_r32float(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        address: TileAddress,
+    ) -> Vec<f32> {
+        let buffer_size = (TILE_SIZE as u64) * (TILE_SIZE as u64) * 4;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tile r32float readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tile r32float readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: tile_origin(address),
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TILE_SIZE * 4),
+                    rows_per_image: Some(TILE_SIZE),
+                },
+            },
+            wgpu::Extent3d {
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).expect("map callback send");
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        receiver
+            .recv()
+            .expect("map callback recv")
+            .expect("map tile readback");
+        let mapped = slice.get_mapped_range();
+        let floats = mapped
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect::<Vec<f32>>();
+        drop(mapped);
+        buffer.unmap();
+        floats
+    }
+
+    fn read_tile_r8uint(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        address: TileAddress,
+    ) -> Vec<u8> {
+        let buffer_size = (TILE_SIZE as u64) * (TILE_SIZE as u64);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tile r8uint readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tile r8uint readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: tile_origin(address),
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TILE_SIZE),
+                    rows_per_image: Some(TILE_SIZE),
+                },
+            },
+            wgpu::Extent3d {
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).expect("map callback send");
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        receiver
+            .recv()
+            .expect("map callback recv")
+            .expect("map tile readback");
+        let tile = slice.get_mapped_range().to_vec();
+        buffer.unmap();
+        tile
+    }
+
     fn source_texel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
         let index = ((y as usize) * (TILE_SIZE as usize) + (x as usize)) * 4;
         [
@@ -1613,6 +1973,13 @@ mod tests {
             bytes[index + 2],
             bytes[index + 3],
         ]
+    }
+
+    fn supports_r32float_storage(device: &wgpu::Device) -> bool {
+        wgpu::TextureFormat::R32Float
+            .guaranteed_format_features(device.features())
+            .allowed_usages
+            .contains(wgpu::TextureUsages::STORAGE_BINDING)
     }
 
     #[test]
@@ -1830,6 +2197,246 @@ mod tests {
             store.allocate().expect("allocate within layer capacity");
         }
         assert_eq!(store.allocate(), Err(TileAllocError::AtlasFull));
+    }
+
+    #[test]
+    fn generic_allocator_keys_are_unique() {
+        let (device, _queue) = create_device_queue();
+        let (store, _gpu) = create_generic_store(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                payload_kind: TilePayloadKind::R8Uint,
+            },
+        );
+
+        let key0 = store.allocate().expect("allocate key0");
+        let key1 = store.allocate().expect("allocate key1");
+        assert_ne!(key0, key1);
+    }
+
+    #[test]
+    fn generic_allocator_release_reuses_address() {
+        let (device, _queue) = create_device_queue();
+        let (store, _gpu) = create_generic_store(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                payload_kind: TilePayloadKind::R8Uint,
+            },
+        );
+
+        let key0 = store.allocate().expect("allocate key0");
+        let address0 = store.resolve(key0).expect("resolve key0");
+        assert!(store.release(key0));
+
+        let key1 = store.allocate().expect("allocate key1");
+        let address1 = store.resolve(key1).expect("resolve key1");
+        assert_eq!(address0, address1);
+    }
+
+    #[test]
+    fn generic_allocator_capacity_is_bounded_by_layers() {
+        let (device, _queue) = create_device_queue();
+        let (store, _gpu) = create_generic_store(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                payload_kind: TilePayloadKind::R8Uint,
+            },
+        );
+
+        for _ in 0..TILES_PER_ATLAS {
+            store.allocate().expect("allocate within layer capacity");
+        }
+        assert_eq!(store.allocate(), Err(TileAllocError::AtlasFull));
+    }
+
+    #[test]
+    fn r32float_config_validation_catches_invalid_format_and_usage() {
+        let (device, _queue) = create_device_queue();
+
+        let wrong_format = GenericTileAtlasStore::with_config(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::STORAGE_BINDING,
+                payload_kind: TilePayloadKind::R32Float,
+            },
+        );
+        assert!(matches!(
+            wrong_format,
+            Err(TileAtlasCreateError::UnsupportedPayloadFormat)
+        ));
+
+        let missing_storage = GenericTileAtlasStore::with_config(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                payload_kind: TilePayloadKind::R32Float,
+            },
+        );
+        assert!(matches!(
+            missing_storage,
+            Err(TileAtlasCreateError::MissingStorageBindingUsage)
+        ));
+    }
+
+    #[test]
+    fn r32float_allocate_resolve_release_lifecycle() {
+        let (device, _queue) = create_device_queue();
+        if !supports_r32float_storage(&device) {
+            let create = GenericTileAtlasStore::with_config(
+                &device,
+                GenericTileAtlasConfig {
+                    max_layers: 1,
+                    format: wgpu::TextureFormat::R32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::STORAGE_BINDING,
+                    payload_kind: TilePayloadKind::R32Float,
+                },
+            );
+            assert!(matches!(
+                create,
+                Err(TileAtlasCreateError::StorageBindingUnsupportedForFormat)
+            ));
+            return;
+        }
+
+        let (store, _gpu) = create_generic_store(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::STORAGE_BINDING,
+                payload_kind: TilePayloadKind::R32Float,
+            },
+        );
+
+        let key = store.allocate().expect("allocate key");
+        assert!(store.is_allocated(key));
+        assert!(store.resolve(key).is_some());
+        assert!(store.release(key));
+        assert!(!store.is_allocated(key));
+        assert!(store.resolve(key).is_none());
+    }
+
+    #[test]
+    fn r32float_clear_enqueues_and_zeroes_tile() {
+        let (device, queue) = create_device_queue();
+        if !supports_r32float_storage(&device) {
+            let create = GenericTileAtlasStore::with_config(
+                &device,
+                GenericTileAtlasConfig {
+                    max_layers: 1,
+                    format: wgpu::TextureFormat::R32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::STORAGE_BINDING,
+                    payload_kind: TilePayloadKind::R32Float,
+                },
+            );
+            assert!(matches!(
+                create,
+                Err(TileAtlasCreateError::StorageBindingUnsupportedForFormat)
+            ));
+            return;
+        }
+
+        let (store, gpu) = create_generic_store(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::STORAGE_BINDING,
+                payload_kind: TilePayloadKind::R32Float,
+            },
+        );
+
+        let key = store.allocate().expect("allocate key");
+        let address = store.resolve(key).expect("resolve key");
+
+        let ones = vec![1u8; rgba8_tile_len()];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: gpu.texture(),
+                mip_level: 0,
+                origin: tile_origin(address),
+                aspect: wgpu::TextureAspect::All,
+            },
+            &ones,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(TILE_SIZE * 4),
+                rows_per_image: Some(TILE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        assert_eq!(store.clear(key).expect("clear key"), true);
+        assert_eq!(gpu.drain_and_execute(&queue).expect("drain clear"), 1);
+        let tile = read_tile_r32float(&device, &queue, gpu.texture(), address);
+        assert!(tile.iter().all(|&value| value == 0.0));
+    }
+
+    #[test]
+    fn r8uint_create_and_allocate_release_path() {
+        let (device, queue) = create_device_queue();
+        let (store, gpu) = create_generic_store(
+            &device,
+            GenericTileAtlasConfig {
+                max_layers: 1,
+                format: wgpu::TextureFormat::R8Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                payload_kind: TilePayloadKind::R8Uint,
+            },
+        );
+
+        let key = store.allocate().expect("allocate key");
+        let address = store.resolve(key).expect("resolve key");
+        assert!(store.release(key));
+        let key2 = store.allocate().expect("allocate key2");
+        assert_eq!(store.resolve(key2).expect("resolve key2"), address);
+
+        assert_eq!(store.clear(key2).expect("clear key2"), true);
+        assert_eq!(gpu.drain_and_execute(&queue).expect("drain clear"), 2);
+        let tile = read_tile_r8uint(&device, &queue, gpu.texture(), address);
+        assert!(tile.iter().all(|&value| value == 0));
     }
 
     #[test]

@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use render_protocol::TransformMatrix4x4;
-use tiles::{GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray};
+use tiles::{
+    GenericTileAtlasConfig, GenericTileAtlasGpuArray, GenericTileAtlasStore, GroupTileAtlasStore,
+    TileAtlasConfig, TileAtlasGpuArray, TilePayloadKind,
+};
 
 use crate::{
     create_composite_pipeline, multiply_blend_state, BrushWorkState, CacheState, DataState,
@@ -17,6 +20,25 @@ use crate::{
 };
 
 impl Renderer {
+    pub fn create_brush_scratch_atlas_f32(
+        device: &wgpu::Device,
+        max_layers: u32,
+    ) -> Result<(GenericTileAtlasStore, GenericTileAtlasGpuArray), tiles::TileAtlasCreateError>
+    {
+        GenericTileAtlasStore::with_config(
+            device,
+            GenericTileAtlasConfig {
+                max_layers,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::STORAGE_BINDING,
+                payload_kind: TilePayloadKind::R32Float,
+            },
+        )
+    }
+
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
