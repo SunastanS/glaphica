@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
-use driver::{
-    DriverEngine, FrameDispatchSignal, PointerDeviceKind, PointerEventPhase, RawPointerInput,
-};
+use driver::PointerEventPhase;
+use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult};
 use glaphica::GpuState;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -20,58 +18,41 @@ const DRIVER_QUEUE_CAPACITY: usize = 64;
 const DRIVER_RESAMPLE_SPACING_PIXELS: f32 = 2.0;
 
 struct DriverDebugState {
-    engine: DriverEngine<driver::NoSmoothingUniformResampling>,
-    pointer_id: u64,
-    clock_start: Instant,
+    bridge: DriverUiBridge,
 }
 
 impl DriverDebugState {
     fn new() -> Self {
-        let engine = DriverEngine::new(
-            DRIVER_QUEUE_CAPACITY,
-            driver::NoSmoothingUniformResampling::new,
-            driver::NoSmoothingUniformResamplingConfig {
-                spacing_pixels: DRIVER_RESAMPLE_SPACING_PIXELS,
-            },
-        )
-        .expect("create driver engine");
-        Self {
-            engine,
-            pointer_id: 1,
-            clock_start: Instant::now(),
-        }
+        let bridge = DriverUiBridge::new(DRIVER_QUEUE_CAPACITY, DRIVER_RESAMPLE_SPACING_PIXELS)
+            .expect("create driver ui bridge");
+        Self { bridge }
     }
 
     fn push_input(&mut self, phase: PointerEventPhase, x: f32, y: f32) {
-        let timestamp_micros = self
-            .clock_start
-            .elapsed()
-            .as_micros()
-            .try_into()
-            .expect("timestamp micros overflow");
-
-        let input = RawPointerInput {
-            pointer_id: self.pointer_id,
-            device_kind: PointerDeviceKind::Mouse,
-            phase,
-            timestamp_micros,
-            screen_x: x,
-            screen_y: y,
-            pressure: Some(1.0),
-            tilt_x_degrees: None,
-            tilt_y_degrees: None,
-            twist_degrees: None,
-        };
-
-        self.engine
-            .handle_pointer_event(input)
-            .expect("handle pointer event in driver engine");
+        self.bridge
+            .ingest_mouse_event(phase, x, y)
+            .expect("ingest mouse event into driver bridge");
     }
 
     fn drain_debug_output(&mut self, frame_sequence_id: u64) {
-        let chunks = self
-            .engine
-            .dispatch_frame(FrameDispatchSignal { frame_sequence_id });
+        let FrameDrainResult { stats, chunks } = self.bridge.drain_frame(frame_sequence_id);
+        if stats.has_activity() {
+            println!(
+                "[driver] frame={} input(total={} down={} move={} up={} cancel={} hover={} handle_us={}) output(chunks={} dabs={} discontinuity_chunks={} dropped_before={})",
+                stats.frame_sequence_id,
+                stats.input.total_events,
+                stats.input.down_events,
+                stats.input.move_events,
+                stats.input.up_events,
+                stats.input.cancel_events,
+                stats.input.hover_events,
+                stats.input.handle_time_micros_total,
+                stats.output.chunk_count,
+                stats.output.dab_count,
+                stats.output.discontinuity_chunk_count,
+                stats.output.dropped_chunk_count_before_total,
+            );
+        }
         for framed_chunk in chunks {
             let chunk = framed_chunk.chunk;
             let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
