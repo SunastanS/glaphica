@@ -42,11 +42,11 @@ fn apply_mark_layer_dirty(frame_state: &mut FrameState, layer_id: u64) {
     frame_state.dirty_state_store.mark_layer_full(layer_id);
 }
 
-fn apply_frame_budget(view_state: &mut ViewState, budget_micros: u32) -> bool {
-    if view_state.frame_budget_micros == budget_micros {
+fn apply_brush_command_quota(view_state: &mut ViewState, max_commands: u32) -> bool {
+    if view_state.brush_command_quota == max_commands {
         return false;
     }
-    view_state.frame_budget_micros = budget_micros;
+    view_state.brush_command_quota = max_commands;
     true
 }
 
@@ -142,8 +142,8 @@ impl Renderer {
                 apply_mark_layer_dirty(&mut self.frame_state, layer_id);
                 state_changed = true;
             }
-            RenderOp::SetFrameBudgetMicros { budget_micros } => {
-                state_changed |= apply_frame_budget(&mut self.view_state, budget_micros);
+            RenderOp::SetBrushCommandQuota { max_commands } => {
+                state_changed |= apply_brush_command_quota(&mut self.view_state, max_commands);
             }
             RenderOp::DropStaleWorkBeforeRevision { revision } => {
                 let stale_work_result = drop_stale_work_before_revision(
@@ -175,8 +175,8 @@ impl Renderer {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn frame_budget_micros(&self) -> u32 {
-        self.view_state.frame_budget_micros
+    pub(crate) fn brush_command_quota(&self) -> u32 {
+        self.view_state.brush_command_quota
     }
 
     #[allow(dead_code)]

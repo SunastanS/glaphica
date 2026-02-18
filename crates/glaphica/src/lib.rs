@@ -4,8 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use document::Document;
-use render_protocol::{BlendMode, ImageHandle, RenderOp, RenderStepSupportMatrix, Viewport};
-use renderer::{PresentError, RenderDataResolver, Renderer, ViewOpSender};
+use render_protocol::{
+    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle, RenderOp,
+    RenderStepSupportMatrix, Viewport,
+};
+use renderer::{
+    BrushControlError, BrushRenderEnqueueError, FrameGpuTimingReport, PresentError,
+    RenderDataResolver, Renderer, ViewOpSender,
+};
 use tiles::{TileAddress, TileAtlasStore, TileKey};
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -207,6 +213,34 @@ impl GpuState {
                 panic!("tile atlas drain failed during present: {error}")
             }
         }
+    }
+
+    pub fn set_brush_command_quota(&self, max_commands: u32) {
+        self.view_sender
+            .send(RenderOp::SetBrushCommandQuota { max_commands })
+            .expect("send brush command quota");
+    }
+
+    pub fn take_latest_gpu_timing_report(&mut self) -> Option<FrameGpuTimingReport> {
+        self.renderer.take_latest_gpu_timing_report()
+    }
+
+    pub fn apply_brush_control_command(
+        &mut self,
+        command: BrushControlCommand,
+    ) -> Result<BrushControlAck, BrushControlError> {
+        self.renderer.apply_brush_control_command(command)
+    }
+
+    pub fn enqueue_brush_render_command(
+        &mut self,
+        command: BrushRenderCommand,
+    ) -> Result<(), BrushRenderEnqueueError> {
+        self.renderer.enqueue_brush_render_command(command)
+    }
+
+    pub fn pending_brush_dab_count(&self) -> u64 {
+        self.renderer.pending_brush_dab_count()
     }
 
     pub fn pan_canvas(&mut self, delta_x: f32, delta_y: f32) {

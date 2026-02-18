@@ -1,5 +1,6 @@
 use crate::{
-    DabEmitter, DabPoint, DabSamplingAlgorithm, DabSamplingError, RawPointerInput, StrokeContext,
+    InputSamplingAlgorithm, RawPointerInput, SampleEmitter, SampleProcessingError, StrokeContext,
+    StrokeSample,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,7 +33,7 @@ pub struct NoSmoothingUniformResampling {
     spacing_pixels: f32,
     last_input: Option<SamplePoint>,
     last_emitted: Option<SamplePoint>,
-    distance_since_last_dab: f32,
+    distance_since_last_sample: f32,
 }
 
 impl NoSmoothingUniformResampling {
@@ -42,22 +43,22 @@ impl NoSmoothingUniformResampling {
 
     fn emit_sample<E>(
         &mut self,
-        sample: SamplePoint,
+        point: SamplePoint,
         emitter: &mut E,
-    ) -> Result<(), DabSamplingError>
+    ) -> Result<(), SampleProcessingError>
     where
-        E: DabEmitter,
+        E: SampleEmitter,
     {
         let velocity_pixels_per_second = match self.last_emitted {
             Some(previous) => {
-                let delta_time_micros = sample
+                let delta_time_micros = point
                     .timestamp_micros
                     .saturating_sub(previous.timestamp_micros);
                 if delta_time_micros == 0 {
                     0.0
                 } else {
-                    let delta_x = sample.canvas_x - previous.canvas_x;
-                    let delta_y = sample.canvas_y - previous.canvas_y;
+                    let delta_x = point.canvas_x - previous.canvas_x;
+                    let delta_y = point.canvas_y - previous.canvas_y;
                     let distance = (delta_x * delta_x + delta_y * delta_y).sqrt();
                     distance / (delta_time_micros as f32 / 1_000_000.0)
                 }
@@ -65,40 +66,40 @@ impl NoSmoothingUniformResampling {
             None => 0.0,
         };
 
-        let dab = DabPoint {
-            timestamp_micros: sample.timestamp_micros,
-            canvas_x: sample.canvas_x,
-            canvas_y: sample.canvas_y,
-            pressure: sample.pressure,
+        let sample = StrokeSample {
+            timestamp_micros: point.timestamp_micros,
+            canvas_x: point.canvas_x,
+            canvas_y: point.canvas_y,
+            pressure: point.pressure,
             velocity_pixels_per_second,
-            tilt_x_degrees: sample.tilt_x_degrees,
-            tilt_y_degrees: sample.tilt_y_degrees,
-            twist_degrees: sample.twist_degrees,
+            tilt_x_degrees: point.tilt_x_degrees,
+            tilt_y_degrees: point.tilt_y_degrees,
+            twist_degrees: point.twist_degrees,
         };
 
-        emitter.emit_dab(dab)?;
-        self.last_emitted = Some(sample);
+        emitter.emit_sample(sample)?;
+        self.last_emitted = Some(point);
         Ok(())
     }
 }
 
-impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
+impl InputSamplingAlgorithm for NoSmoothingUniformResampling {
     type Config = NoSmoothingUniformResamplingConfig;
 
     fn begin_stroke(
         &mut self,
         context: StrokeContext,
         config: &Self::Config,
-    ) -> Result<(), DabSamplingError> {
+    ) -> Result<(), SampleProcessingError> {
         if !config.spacing_pixels.is_finite() || config.spacing_pixels <= 0.0 {
-            return Err(DabSamplingError::InvalidInput);
+            return Err(SampleProcessingError::InvalidInput);
         }
 
         self.stroke_context = Some(context);
         self.spacing_pixels = config.spacing_pixels;
         self.last_input = None;
         self.last_emitted = None;
-        self.distance_since_last_dab = 0.0;
+        self.distance_since_last_sample = 0.0;
         Ok(())
     }
 
@@ -106,12 +107,12 @@ impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
         &mut self,
         input: RawPointerInput,
         emitter: &mut E,
-    ) -> Result<(), DabSamplingError>
+    ) -> Result<(), SampleProcessingError>
     where
-        E: DabEmitter,
+        E: SampleEmitter,
     {
         if self.stroke_context.is_none() {
-            return Err(DabSamplingError::InvalidInput);
+            return Err(SampleProcessingError::InvalidInput);
         }
 
         let current = SamplePoint {
@@ -126,7 +127,7 @@ impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
 
         if let Some(previous_input) = self.last_input {
             if current.timestamp_micros < previous_input.timestamp_micros {
-                return Err(DabSamplingError::NonMonotonicTimestamp);
+                return Err(SampleProcessingError::NonMonotonicTimestamp);
             }
 
             let mut segment_start = previous_input;
@@ -135,12 +136,12 @@ impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
             let mut segment_dy = segment_end.canvas_y - segment_start.canvas_y;
             let mut segment_length = (segment_dx * segment_dx + segment_dy * segment_dy).sqrt();
 
-            while self.distance_since_last_dab + segment_length >= self.spacing_pixels {
-                let distance_to_next_dab = self.spacing_pixels - self.distance_since_last_dab;
+            while self.distance_since_last_sample + segment_length >= self.spacing_pixels {
+                let distance_to_next_sample = self.spacing_pixels - self.distance_since_last_sample;
                 let interpolation_t = if segment_length == 0.0 {
                     0.0
                 } else {
-                    distance_to_next_dab / segment_length
+                    distance_to_next_sample / segment_length
                 };
 
                 let timestamp_delta = segment_end
@@ -167,7 +168,7 @@ impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
                 };
 
                 self.emit_sample(next_sample, emitter)?;
-                self.distance_since_last_dab = 0.0;
+                self.distance_since_last_sample = 0.0;
                 segment_start = next_sample;
 
                 segment_dx = segment_end.canvas_x - segment_start.canvas_x;
@@ -175,20 +176,20 @@ impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
                 segment_length = (segment_dx * segment_dx + segment_dy * segment_dy).sqrt();
             }
 
-            self.distance_since_last_dab += segment_length;
+            self.distance_since_last_sample += segment_length;
             self.last_input = Some(current);
             Ok(())
         } else {
             self.emit_sample(current, emitter)?;
             self.last_input = Some(current);
-            self.distance_since_last_dab = 0.0;
+            self.distance_since_last_sample = 0.0;
             Ok(())
         }
     }
 
-    fn end_stroke<E>(&mut self, _emitter: &mut E) -> Result<(), DabSamplingError>
+    fn end_stroke<E>(&mut self, _emitter: &mut E) -> Result<(), SampleProcessingError>
     where
-        E: DabEmitter,
+        E: SampleEmitter,
     {
         self.stroke_context = None;
         Ok(())
@@ -197,7 +198,7 @@ impl DabSamplingAlgorithm for NoSmoothingUniformResampling {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DabChunkBuilder, PointerDeviceKind, PointerEventPhase};
+    use crate::{PointerDeviceKind, PointerEventPhase, SampleChunkBuilder};
 
     use super::*;
 
@@ -216,8 +217,8 @@ mod tests {
         }
     }
 
-    fn chunk_builder() -> DabChunkBuilder {
-        DabChunkBuilder::new(1, 1, true, false)
+    fn chunk_builder() -> SampleChunkBuilder {
+        SampleChunkBuilder::new(1, 1, true, false)
     }
 
     #[test]
@@ -244,7 +245,7 @@ mod tests {
             .expect("second input");
 
         let chunk = output_chunk.finish();
-        assert_eq!(chunk.dab_count(), 4);
+        assert_eq!(chunk.sample_count(), 4);
         assert_eq!(chunk.canvas_x(), &[0.0, 3.0, 6.0, 9.0]);
     }
 
@@ -275,7 +276,7 @@ mod tests {
             .expect("third input");
 
         let chunk = output_chunk.finish();
-        assert_eq!(chunk.dab_count(), 4);
+        assert_eq!(chunk.sample_count(), 4);
         assert_eq!(chunk.canvas_x(), &[0.0, 3.0, 6.0, 9.0]);
     }
 
@@ -293,7 +294,7 @@ mod tests {
                 },
             )
             .expect_err("invalid spacing should fail");
-        assert_eq!(error, DabSamplingError::InvalidInput);
+        assert_eq!(error, SampleProcessingError::InvalidInput);
     }
 
     #[test]
@@ -319,6 +320,6 @@ mod tests {
             .feed_input(pointer_input(9, 1.0, 0.0), &mut output_chunk)
             .expect_err("non-monotonic timestamp should fail");
 
-        assert_eq!(error, DabSamplingError::NonMonotonicTimestamp);
+        assert_eq!(error, SampleProcessingError::NonMonotonicTimestamp);
     }
 }

@@ -1,7 +1,8 @@
 [workspace]
-members = [
+members = ["crates/brush_execution",
     "crates/document",
     "crates/driver",
+    "crates/frame_scheduler",
     "crates/glaphica",
     "crates/render_protocol",
     "crates/renderer",

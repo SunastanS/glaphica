@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use driver::{
-    DriverEngine, DriverEventError, FrameDispatchSignal, FramedDabChunk,
+    DriverEngine, DriverEventError, FrameDispatchSignal, FramedSampleChunk,
     NoSmoothingUniformResampling, NoSmoothingUniformResamplingConfig, PointerDeviceKind,
     PointerEventPhase, RawPointerInput,
 };
@@ -70,13 +70,13 @@ impl InputFrameStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OutputFrameStats {
     pub chunk_count: u32,
-    pub dab_count: u32,
+    pub sample_count: u32,
     pub discontinuity_chunk_count: u32,
     pub dropped_chunk_count_before_total: u32,
 }
 
 impl OutputFrameStats {
-    fn from_chunks(chunks: &[FramedDabChunk]) -> Self {
+    fn from_chunks(chunks: &[FramedSampleChunk]) -> Self {
         let mut stats = Self::default();
         for framed_chunk in chunks {
             let chunk = &framed_chunk.chunk;
@@ -84,10 +84,10 @@ impl OutputFrameStats {
                 .chunk_count
                 .checked_add(1)
                 .expect("chunk count overflow");
-            stats.dab_count = stats
-                .dab_count
-                .checked_add(u32::try_from(chunk.dab_count()).expect("dab count overflow"))
-                .expect("dab count overflow");
+            stats.sample_count = stats
+                .sample_count
+                .checked_add(u32::try_from(chunk.sample_count()).expect("sample count overflow"))
+                .expect("sample count overflow");
             if chunk.discontinuity_before {
                 stats.discontinuity_chunk_count = stats
                     .discontinuity_chunk_count
@@ -119,7 +119,7 @@ impl FrameDrainStats {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameDrainResult {
     pub stats: FrameDrainStats,
-    pub chunks: Vec<FramedDabChunk>,
+    pub chunks: Vec<FramedSampleChunk>,
 }
 
 pub struct DriverUiBridge {
@@ -194,6 +194,10 @@ impl DriverUiBridge {
             },
             chunks,
         }
+    }
+
+    pub fn has_active_stroke(&self) -> bool {
+        self.engine.has_active_stroke()
     }
 }
 

@@ -10,9 +10,10 @@ use render_protocol::TransformMatrix4x4;
 use tiles::{GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray};
 
 use crate::{
-    CacheState, DataState, DirtyStateStore, FrameState, FrameSync, GpuState, GroupTargetCacheEntry,
-    IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer,
-    TileInstanceGpu, ViewState, create_composite_pipeline, multiply_blend_state,
+    create_composite_pipeline, multiply_blend_state, BrushWorkState, CacheState, DataState,
+    DirtyStateStore, FrameState, FrameSync, GpuFrameTimingSlot, GpuFrameTimingSlotState,
+    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, InputState, RenderDataResolver, Renderer,
+    TileInstanceGpu, ViewState, GPU_TIMING_SLOTS, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY,
 };
 
 impl Renderer {
@@ -192,6 +193,13 @@ impl Renderer {
             &view_uniform_buffer,
             &tile_instance_buffer,
         );
+        let gpu_timing = Self::create_gpu_frame_timing_state(&device, &queue);
+        let brush_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("renderer.brush_pipeline_layout"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
 
         let renderer = Self {
             input_state: InputState { view_receiver },
@@ -219,18 +227,33 @@ impl Renderer {
                 tile_instance_gpu_staging: Vec::new(),
                 atlas_bind_group_linear,
                 tile_atlas,
+                gpu_timing,
+                brush_pipeline_layout,
             },
             view_state: ViewState {
                 view_matrix: IDENTITY_MATRIX,
                 view_matrix_dirty: false,
                 viewport: None,
-                frame_budget_micros: 16_000,
+                brush_command_quota: 0,
                 drop_before_revision: 0,
                 present_requested: false,
             },
             cache_state: CacheState {
                 group_target_cache: HashMap::<u64, GroupTargetCacheEntry>::new(),
                 leaf_draw_cache: HashMap::new(),
+            },
+            brush_work_state: BrushWorkState {
+                pending_commands: std::collections::VecDeque::new(),
+                pending_dab_count: 0,
+                carry_credit_dabs: 0,
+                prepared_programs: HashMap::new(),
+                active_program_by_brush: HashMap::new(),
+                active_strokes: HashMap::new(),
+                executing_strokes: HashMap::new(),
+                reference_sets: HashMap::new(),
+                stroke_reference_set: HashMap::new(),
+                stroke_target_layer: HashMap::new(),
+                ended_strokes_pending_merge: HashMap::new(),
             },
             frame_state: FrameState {
                 bound_tree: None,
@@ -324,5 +347,59 @@ impl Renderer {
             &self.gpu_state.tile_instance_buffer,
         );
         self.gpu_state.tile_instance_capacity = expanded_capacity;
+    }
+
+    pub(super) fn create_gpu_frame_timing_state(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> GpuFrameTimingState {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return GpuFrameTimingState {
+                query_set: None,
+                timestamp_period_ns: 0.0,
+                slots: Vec::new(),
+                latest_report: None,
+            };
+        }
+
+        let query_count = u32::try_from(
+            GPU_TIMING_SLOTS
+                .checked_mul(2)
+                .expect("gpu timing query count overflow"),
+        )
+        .expect("gpu timing query count exceeds u32");
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("renderer.frame_gpu_timing.query_set"),
+            ty: wgpu::QueryType::Timestamp,
+            count: query_count,
+        });
+
+        let mut slots = Vec::with_capacity(GPU_TIMING_SLOTS);
+        for slot_index in 0..GPU_TIMING_SLOTS {
+            let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("renderer.frame_gpu_timing.resolve.{slot_index}")),
+                size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("renderer.frame_gpu_timing.readback.{slot_index}")),
+                size: 16,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            slots.push(GpuFrameTimingSlot {
+                resolve_buffer,
+                readback_buffer,
+                state: GpuFrameTimingSlotState::Idle,
+            });
+        }
+
+        GpuFrameTimingState {
+            query_set: Some(query_set),
+            timestamp_period_ns: f64::from(queue.get_timestamp_period()),
+            slots,
+            latest_report: None,
+        }
     }
 }

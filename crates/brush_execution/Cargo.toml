@@ -1,0 +1,9 @@
+[package]
+name = "brush_execution"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+driver = { path = "../driver" }
+render_protocol = { path = "../render_protocol" }
+rtrb = "0.3.2"

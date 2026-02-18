@@ -1,9 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use brush_execution::{
+    BrushExecutionCommandReceiver, BrushExecutionConfig, BrushExecutionRuntime,
+    BrushExecutionSampleSender,
+};
 use driver::PointerEventPhase;
-use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult};
+use frame_scheduler::{FrameScheduler, FrameSchedulerDecision, FrameSchedulerInput};
+use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
 use glaphica::GpuState;
+use render_protocol::{
+    BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramUpsert,
+    ReferenceLayerSelection, ReferenceSetUpsert,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -16,6 +25,17 @@ const WHEEL_ZOOM_SPEED: f32 = 0.1;
 const PIXELS_PER_SCROLL_LINE: f32 = 120.0;
 const DRIVER_QUEUE_CAPACITY: usize = 64;
 const DRIVER_RESAMPLE_SPACING_PIXELS: f32 = 2.0;
+const BRUSH_EXECUTION_INPUT_QUEUE_CAPACITY: usize = 64;
+const BRUSH_EXECUTION_OUTPUT_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_BRUSH_ID: u64 = 1;
+const DEFAULT_PROGRAM_REVISION: u64 = 1;
+const DEFAULT_REFERENCE_SET_ID: u64 = 1;
+const DEFAULT_TARGET_LAYER_ID: u64 = 1;
+const DEFAULT_PROGRAM_WGSL: &str = r#"
+@compute @workgroup_size(1)
+fn main() {
+}
+"#;
 
 struct DriverDebugState {
     bridge: DriverUiBridge,
@@ -34,11 +54,18 @@ impl DriverDebugState {
             .expect("ingest mouse event into driver bridge");
     }
 
-    fn drain_debug_output(&mut self, frame_sequence_id: u64) {
+    fn has_active_stroke(&self) -> bool {
+        self.bridge.has_active_stroke()
+    }
+
+    fn drain_debug_output(
+        &mut self,
+        frame_sequence_id: u64,
+    ) -> (FrameDrainStats, Vec<driver::FramedSampleChunk>) {
         let FrameDrainResult { stats, chunks } = self.bridge.drain_frame(frame_sequence_id);
         if stats.has_activity() {
             println!(
-                "[driver] frame={} input(total={} down={} move={} up={} cancel={} hover={} handle_us={}) output(chunks={} dabs={} discontinuity_chunks={} dropped_before={})",
+                "[driver] frame={} input(total={} down={} move={} up={} cancel={} hover={} handle_us={}) output(chunks={} samples={} discontinuity_chunks={} dropped_before={})",
                 stats.frame_sequence_id,
                 stats.input.total_events,
                 stats.input.down_events,
@@ -48,22 +75,22 @@ impl DriverDebugState {
                 stats.input.hover_events,
                 stats.input.handle_time_micros_total,
                 stats.output.chunk_count,
-                stats.output.dab_count,
+                stats.output.sample_count,
                 stats.output.discontinuity_chunk_count,
                 stats.output.dropped_chunk_count_before_total,
             );
         }
-        for framed_chunk in chunks {
-            let chunk = framed_chunk.chunk;
+        for framed_chunk in &chunks {
+            let chunk = &framed_chunk.chunk;
             let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
             let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
             let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
             let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
             println!(
-                "[driver] chunk frame={} stroke={} dabs={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
+                "[driver] chunk frame={} stroke={} samples={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
                 framed_chunk.frame_sequence_id,
                 chunk.stroke_session_id,
-                chunk.dab_count(),
+                chunk.sample_count(),
                 chunk.starts_stroke,
                 chunk.ends_stroke,
                 chunk.discontinuity_before,
@@ -74,6 +101,7 @@ impl DriverDebugState {
                 last_y,
             );
         }
+        (stats, chunks)
     }
 }
 
@@ -93,7 +121,11 @@ struct App {
     is_left_mouse_pressed: bool,
     last_cursor_position: Option<(f64, f64)>,
     driver_debug: DriverDebugState,
+    brush_execution_runtime: Option<BrushExecutionRuntime>,
+    brush_execution_sender: Option<BrushExecutionSampleSender>,
+    brush_execution_receiver: Option<BrushExecutionCommandReceiver>,
     next_driver_frame_sequence_id: u64,
+    frame_scheduler: FrameScheduler,
 }
 
 impl App {
@@ -128,6 +160,7 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.gpu = Some(gpu);
+        self.initialize_brush_execution();
     }
 
     fn window_event(
@@ -249,8 +282,37 @@ impl ApplicationHandler for App {
                     return;
                 };
 
-                self.driver_debug
-                    .drain_debug_output(self.next_driver_frame_sequence_id);
+                let frame_sequence_id = self.next_driver_frame_sequence_id;
+                let previous_frame_gpu_micros = gpu
+                    .take_latest_gpu_timing_report()
+                    .map(|report| report.gpu_time_micros);
+                let (frame_stats, sample_chunks) =
+                    self.driver_debug.drain_debug_output(frame_sequence_id);
+                if let Some(sender) = self.brush_execution_sender.as_mut() {
+                    for sample_chunk in sample_chunks {
+                        sender
+                            .push_chunk(sample_chunk)
+                            .expect("push sample chunk into brush execution");
+                    }
+                }
+                if let Some(receiver) = self.brush_execution_receiver.as_mut() {
+                    while let Some(command) = receiver.pop_command() {
+                        gpu.enqueue_brush_render_command(command)
+                            .expect("enqueue brush render command");
+                    }
+                }
+                let brush_hot_path_active = self.driver_debug.has_active_stroke()
+                    || frame_stats.input.total_events > 0
+                    || frame_stats.output.chunk_count > 0;
+                let pending_brush_commands =
+                    u32::try_from(gpu.pending_brush_dab_count()).unwrap_or(u32::MAX);
+                let scheduler_decision = self.frame_scheduler.schedule_frame(FrameSchedulerInput {
+                    frame_sequence_id,
+                    brush_hot_path_active,
+                    pending_brush_commands,
+                    previous_frame_gpu_micros,
+                });
+                apply_frame_scheduler_decision(gpu, scheduler_decision);
                 self.next_driver_frame_sequence_id = self
                     .next_driver_frame_sequence_id
                     .checked_add(1)
@@ -290,14 +352,92 @@ impl ApplicationHandler for App {
     }
 }
 
+impl App {
+    fn initialize_brush_execution(&mut self) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let upsert_ack = gpu
+            .apply_brush_control_command(BrushControlCommand::UpsertBrushProgram(
+                BrushProgramUpsert {
+                    brush_id: DEFAULT_BRUSH_ID,
+                    program_revision: DEFAULT_PROGRAM_REVISION,
+                    payload_hash: fxhash(DEFAULT_PROGRAM_WGSL),
+                    wgsl_source: Arc::<str>::from(DEFAULT_PROGRAM_WGSL),
+                },
+            ))
+            .expect("prepare default brush program");
+        assert!(
+            matches!(
+                upsert_ack,
+                BrushControlAck::Prepared | BrushControlAck::AlreadyPrepared
+            ),
+            "unexpected upsert ack: {upsert_ack:?}"
+        );
+        let activate_ack = gpu
+            .apply_brush_control_command(BrushControlCommand::ActivateBrushProgram(
+                BrushProgramActivation {
+                    brush_id: DEFAULT_BRUSH_ID,
+                    program_revision: DEFAULT_PROGRAM_REVISION,
+                },
+            ))
+            .expect("activate default brush program");
+        assert_eq!(activate_ack, BrushControlAck::Activated);
+        let reference_ack = gpu
+            .apply_brush_control_command(BrushControlCommand::UpsertReferenceSet(
+                ReferenceSetUpsert {
+                    reference_set_id: DEFAULT_REFERENCE_SET_ID,
+                    selection: ReferenceLayerSelection::CurrentLayer,
+                },
+            ))
+            .expect("upsert default reference set");
+        assert_eq!(reference_ack, BrushControlAck::ReferenceSetUpserted);
+
+        let (runtime, sender, receiver) = BrushExecutionRuntime::start(
+            BrushExecutionConfig {
+                brush_id: DEFAULT_BRUSH_ID,
+                program_revision: DEFAULT_PROGRAM_REVISION,
+                reference_set_id: DEFAULT_REFERENCE_SET_ID,
+                target_layer_id: DEFAULT_TARGET_LAYER_ID,
+            },
+            BRUSH_EXECUTION_INPUT_QUEUE_CAPACITY,
+            BRUSH_EXECUTION_OUTPUT_QUEUE_CAPACITY,
+        )
+        .expect("start brush execution runtime");
+        self.brush_execution_runtime = Some(runtime);
+        self.brush_execution_sender = Some(sender);
+        self.brush_execution_receiver = Some(receiver);
+    }
+}
+
+fn fxhash(input: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    input.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App {
         startup_image_path: parse_startup_image_path(),
         driver_debug: DriverDebugState::new(),
+        frame_scheduler: FrameScheduler::default(),
         ..App::default()
     };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecision) {
+    let Some(max_commands) = decision.brush_commands_to_render else {
+        return;
+    };
+    gpu.set_brush_command_quota(max_commands);
+    println!(
+        "[frame_scheduler] frame={} active={} brush_commands={} reason={:?}",
+        decision.frame_sequence_id, decision.scheduler_active, max_commands, decision.update_reason,
+    );
 }
 
 fn parse_startup_image_path() -> Option<PathBuf> {

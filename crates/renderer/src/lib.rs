@@ -11,11 +11,13 @@
 //! - `renderer_cache_draw`: maintains group cache and submits draw runs.
 //! - `dirty`/`planning`/`render_tree`/`geometry`: domain logic shared by orchestration modules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 
 use render_protocol::{
-    BlendMode, ImageHandle, RenderOp, RenderTreeSnapshot, TransformMatrix4x4, Viewport,
+    BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, ImageHandle, ProgramRevision,
+    LayerId, ReferenceLayerSelection, ReferenceSetId, RenderOp, RenderTreeSnapshot,
+    TransformMatrix4x4, Viewport,
 };
 #[cfg(test)]
 use tiles::TILE_STRIDE;
@@ -196,7 +198,7 @@ struct ViewState {
     view_matrix: TransformMatrix4x4,
     view_matrix_dirty: bool,
     viewport: Option<Viewport>,
-    frame_budget_micros: u32,
+    brush_command_quota: u32,
     drop_before_revision: u64,
     present_requested: bool,
 }
@@ -212,6 +214,31 @@ struct FrameState {
 struct CacheState {
     group_target_cache: HashMap<u64, GroupTargetCacheEntry>,
     leaf_draw_cache: HashMap<u64, CachedLeafDraw>,
+}
+
+struct BrushWorkState {
+    pending_commands: VecDeque<BrushRenderCommand>,
+    pending_dab_count: u64,
+    carry_credit_dabs: u8,
+    prepared_programs: HashMap<BrushProgramKey, PreparedBrushProgram>,
+    active_program_by_brush: HashMap<BrushId, ProgramRevision>,
+    active_strokes: HashMap<u64, BrushProgramKey>,
+    executing_strokes: HashMap<u64, BrushProgramKey>,
+    reference_sets: HashMap<ReferenceSetId, ReferenceSetState>,
+    stroke_reference_set: HashMap<u64, ReferenceSetId>,
+    stroke_target_layer: HashMap<u64, LayerId>,
+    ended_strokes_pending_merge: HashMap<u64, LayerId>,
+}
+
+struct PreparedBrushProgram {
+    payload_hash: u64,
+    _wgsl_source: std::sync::Arc<str>,
+    compute_pipeline: wgpu::ComputePipeline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReferenceSetState {
+    selection: ReferenceLayerSelection,
 }
 
 struct GpuState {
@@ -235,6 +262,8 @@ struct GpuState {
     tile_instance_gpu_staging: Vec<TileInstanceGpu>,
     atlas_bind_group_linear: wgpu::BindGroup,
     tile_atlas: TileAtlasGpuArray,
+    gpu_timing: GpuFrameTimingState,
+    brush_pipeline_layout: wgpu::PipelineLayout,
 }
 
 struct DataState {
@@ -251,8 +280,34 @@ pub struct Renderer {
     gpu_state: GpuState,
     view_state: ViewState,
     cache_state: CacheState,
+    brush_work_state: BrushWorkState,
 
     frame_state: FrameState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrushControlError {
+    ProgramNotPrepared { key: BrushProgramKey },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrushRenderEnqueueError {
+    ProgramNotPrepared { key: BrushProgramKey },
+    ProgramNotActivated { key: BrushProgramKey },
+    StrokeProgramMismatch {
+        stroke_session_id: u64,
+        expected: BrushProgramKey,
+        received: BrushProgramKey,
+    },
+    UnknownStroke { stroke_session_id: u64 },
+    ReferenceSetMissing { reference_set_id: ReferenceSetId },
+    MergeBeforeStrokeEnd { stroke_session_id: u64 },
+    MergeTargetLayerMismatch {
+        stroke_session_id: u64,
+        expected_layer_id: LayerId,
+        received_layer_id: LayerId,
+    },
+    BeginWithPendingMerge,
 }
 
 const IDENTITY_MATRIX: TransformMatrix4x4 = [
@@ -301,6 +356,38 @@ struct DrawPassContext<'a> {
 pub enum PresentError {
     Surface(wgpu::SurfaceError),
     TileDrain(TileGpuDrainError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameGpuTimingReport {
+    pub frame_id: u64,
+    pub gpu_time_micros: u64,
+}
+
+const GPU_TIMING_SLOTS: usize = 4;
+
+struct GpuFrameTimingState {
+    query_set: Option<wgpu::QuerySet>,
+    timestamp_period_ns: f64,
+    slots: Vec<GpuFrameTimingSlot>,
+    latest_report: Option<FrameGpuTimingReport>,
+}
+
+struct GpuFrameTimingSlot {
+    resolve_buffer: wgpu::Buffer,
+    readback_buffer: wgpu::Buffer,
+    state: GpuFrameTimingSlotState,
+}
+
+enum GpuFrameTimingSlotState {
+    Idle,
+    Submitted {
+        frame_id: u64,
+    },
+    Mapping {
+        frame_id: u64,
+        receiver: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    },
 }
 
 fn dirty_rect_to_tile_coords(dirty_rect: DirtyRect) -> HashSet<TileCoord> {

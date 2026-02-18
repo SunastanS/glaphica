@@ -5,6 +5,226 @@ slotmap::new_key_type! {
 }
 
 pub type TransformMatrix4x4 = [f32; 16];
+pub const BRUSH_COMMAND_BATCH_CAPACITY: usize = 16;
+pub const BRUSH_DAB_CHUNK_CAPACITY: usize = 16;
+
+pub type BrushId = u64;
+pub type ProgramRevision = u64;
+pub type StrokeSessionId = u64;
+pub type ReferenceSetId = u64;
+pub type LayerId = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BrushProgramKey {
+    pub brush_id: BrushId,
+    pub program_revision: ProgramRevision,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushProgramUpsert {
+    pub brush_id: BrushId,
+    pub program_revision: ProgramRevision,
+    pub payload_hash: u64,
+    pub wgsl_source: Arc<str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrushProgramActivation {
+    pub brush_id: BrushId,
+    pub program_revision: ProgramRevision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushStrokeBegin {
+    pub stroke_session_id: StrokeSessionId,
+    pub brush_id: BrushId,
+    pub program_revision: ProgramRevision,
+    pub reference_set_id: ReferenceSetId,
+    pub target_layer_id: LayerId,
+    pub discontinuity_before: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceLayerSelection {
+    CurrentLayer,
+    CurrentAndBelow,
+    AllLayers,
+    ExplicitLayer { layer_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceSetUpsert {
+    pub reference_set_id: ReferenceSetId,
+    pub selection: ReferenceLayerSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushDabChunkBuildError {
+    TooManyDabs,
+    MismatchedFieldLengths,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushDabChunkF32 {
+    pub stroke_session_id: StrokeSessionId,
+    len: u8,
+    canvas_x: [f32; BRUSH_DAB_CHUNK_CAPACITY],
+    canvas_y: [f32; BRUSH_DAB_CHUNK_CAPACITY],
+    pressure: [f32; BRUSH_DAB_CHUNK_CAPACITY],
+}
+
+impl BrushDabChunkF32 {
+    pub fn from_slices(
+        stroke_session_id: StrokeSessionId,
+        canvas_x: &[f32],
+        canvas_y: &[f32],
+        pressure: &[f32],
+    ) -> Result<Self, BrushDabChunkBuildError> {
+        if canvas_x.len() > BRUSH_DAB_CHUNK_CAPACITY {
+            return Err(BrushDabChunkBuildError::TooManyDabs);
+        }
+        if canvas_x.len() != canvas_y.len() || canvas_x.len() != pressure.len() {
+            return Err(BrushDabChunkBuildError::MismatchedFieldLengths);
+        }
+
+        let mut chunk_canvas_x = [0.0; BRUSH_DAB_CHUNK_CAPACITY];
+        let mut chunk_canvas_y = [0.0; BRUSH_DAB_CHUNK_CAPACITY];
+        let mut chunk_pressure = [0.0; BRUSH_DAB_CHUNK_CAPACITY];
+        for index in 0..canvas_x.len() {
+            chunk_canvas_x[index] = canvas_x[index];
+            chunk_canvas_y[index] = canvas_y[index];
+            chunk_pressure[index] = pressure[index];
+        }
+
+        Ok(Self {
+            stroke_session_id,
+            len: u8::try_from(canvas_x.len()).expect("dab count exceeds u8"),
+            canvas_x: chunk_canvas_x,
+            canvas_y: chunk_canvas_y,
+            pressure: chunk_pressure,
+        })
+    }
+
+    pub fn dab_count(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn canvas_x(&self) -> &[f32] {
+        &self.canvas_x[..self.dab_count()]
+    }
+
+    pub fn canvas_y(&self) -> &[f32] {
+        &self.canvas_y[..self.dab_count()]
+    }
+
+    pub fn pressure(&self) -> &[f32] {
+        &self.pressure[..self.dab_count()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushStrokeEnd {
+    pub stroke_session_id: StrokeSessionId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrushBufferMerge {
+    pub stroke_session_id: StrokeSessionId,
+    pub target_layer_id: LayerId,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrushControlCommand {
+    UpsertBrushProgram(BrushProgramUpsert),
+    ActivateBrushProgram(BrushProgramActivation),
+    UpsertReferenceSet(ReferenceSetUpsert),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushControlAck {
+    Prepared,
+    AlreadyPrepared,
+    Activated,
+    ReferenceSetUpserted,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrushRenderCommand {
+    BeginStroke(BrushStrokeBegin),
+    PushDabChunkF32(BrushDabChunkF32),
+    MergeBuffer(BrushBufferMerge),
+    EndStroke(BrushStrokeEnd),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushCommandBatchBuildError {
+    TooManyCommands,
+    MismatchedFieldLengths,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushCommandBatch {
+    pub revision: u64,
+    pub stroke_session_id: u64,
+    pub discontinuity_before: bool,
+    len: u8,
+    canvas_x: [f32; BRUSH_COMMAND_BATCH_CAPACITY],
+    canvas_y: [f32; BRUSH_COMMAND_BATCH_CAPACITY],
+    pressure: [f32; BRUSH_COMMAND_BATCH_CAPACITY],
+}
+
+impl BrushCommandBatch {
+    pub fn from_slices(
+        revision: u64,
+        stroke_session_id: u64,
+        discontinuity_before: bool,
+        canvas_x: &[f32],
+        canvas_y: &[f32],
+        pressure: &[f32],
+    ) -> Result<Self, BrushCommandBatchBuildError> {
+        if canvas_x.len() > BRUSH_COMMAND_BATCH_CAPACITY {
+            return Err(BrushCommandBatchBuildError::TooManyCommands);
+        }
+        if canvas_x.len() != canvas_y.len() || canvas_x.len() != pressure.len() {
+            return Err(BrushCommandBatchBuildError::MismatchedFieldLengths);
+        }
+
+        let mut batch_canvas_x = [0.0; BRUSH_COMMAND_BATCH_CAPACITY];
+        let mut batch_canvas_y = [0.0; BRUSH_COMMAND_BATCH_CAPACITY];
+        let mut batch_pressure = [0.0; BRUSH_COMMAND_BATCH_CAPACITY];
+        for index in 0..canvas_x.len() {
+            batch_canvas_x[index] = canvas_x[index];
+            batch_canvas_y[index] = canvas_y[index];
+            batch_pressure[index] = pressure[index];
+        }
+
+        Ok(Self {
+            revision,
+            stroke_session_id,
+            discontinuity_before,
+            len: u8::try_from(canvas_x.len()).expect("brush command count exceeds u8"),
+            canvas_x: batch_canvas_x,
+            canvas_y: batch_canvas_y,
+            pressure: batch_pressure,
+        })
+    }
+
+    pub fn command_count(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn canvas_x(&self) -> &[f32] {
+        &self.canvas_x[..self.command_count()]
+    }
+
+    pub fn canvas_y(&self) -> &[f32] {
+        &self.canvas_y[..self.command_count()]
+    }
+
+    pub fn pressure(&self) -> &[f32] {
+        &self.pressure[..self.command_count()]
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
@@ -155,7 +375,7 @@ pub enum RenderOp {
     SetViewport(Viewport),
     BindRenderTree(RenderTreeSnapshot),
     MarkLayerDirty { layer_id: u64 },
-    SetFrameBudgetMicros { budget_micros: u32 },
+    SetBrushCommandQuota { max_commands: u32 },
     DropStaleWorkBeforeRevision { revision: u64 },
     PresentToSurface,
 }
@@ -231,5 +451,49 @@ mod tests {
                 blend_mode: BlendMode::Multiply,
             }
         );
+    }
+
+    #[test]
+    fn brush_batch_from_slices_preserves_lengths() {
+        let batch = BrushCommandBatch::from_slices(
+            9,
+            100,
+            false,
+            &[1.0, 2.0, 3.0],
+            &[4.0, 5.0, 6.0],
+            &[0.5, 0.6, 0.7],
+        )
+        .expect("build brush command batch");
+
+        assert_eq!(batch.command_count(), 3);
+        assert_eq!(batch.canvas_x(), &[1.0, 2.0, 3.0]);
+        assert_eq!(batch.canvas_y(), &[4.0, 5.0, 6.0]);
+        assert_eq!(batch.pressure(), &[0.5, 0.6, 0.7]);
+    }
+
+    #[test]
+    fn brush_batch_rejects_mismatched_lengths() {
+        let error = BrushCommandBatch::from_slices(1, 2, false, &[1.0, 2.0], &[3.0], &[0.5, 0.6])
+            .expect_err("batch should reject mismatched field lengths");
+        assert_eq!(error, BrushCommandBatchBuildError::MismatchedFieldLengths);
+    }
+
+    #[test]
+    fn dab_chunk_from_slices_preserves_lengths() {
+        let chunk = BrushDabChunkF32::from_slices(99, &[1.0, 2.0], &[3.0, 4.0], &[0.6, 0.7])
+            .expect("build brush dab chunk");
+
+        assert_eq!(chunk.stroke_session_id, 99);
+        assert_eq!(chunk.dab_count(), 2);
+        assert_eq!(chunk.canvas_x(), &[1.0, 2.0]);
+        assert_eq!(chunk.canvas_y(), &[3.0, 4.0]);
+        assert_eq!(chunk.pressure(), &[0.6, 0.7]);
+    }
+
+    #[test]
+    fn dab_chunk_rejects_mismatched_lengths() {
+        let error = BrushDabChunkF32::from_slices(4, &[1.0], &[2.0, 3.0], &[0.4])
+            .expect_err("dab chunk should reject mismatched field lengths");
+        assert_eq!(error, BrushDabChunkBuildError::MismatchedFieldLengths);
     }
 }
