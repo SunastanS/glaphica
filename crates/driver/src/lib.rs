@@ -80,6 +80,12 @@ pub struct FrameDispatchSignal {
     pub frame_sequence_id: FrameSequenceId,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FramedDabChunk {
+    pub frame_sequence_id: FrameSequenceId,
+    pub chunk: DabChunk,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DabChunkBuildError {
     TooManyDabs,
@@ -87,7 +93,6 @@ pub enum DabChunkBuildError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DabChunk {
-    pub frame_sequence_id: FrameSequenceId,
     pub stroke_session_id: StrokeSessionId,
     pub pointer_id: u64,
     pub starts_stroke: bool,
@@ -107,7 +112,6 @@ pub struct DabChunk {
 
 impl DabChunk {
     pub fn from_dabs(
-        frame_sequence_id: FrameSequenceId,
         stroke_session_id: StrokeSessionId,
         pointer_id: u64,
         starts_stroke: bool,
@@ -138,7 +142,6 @@ impl DabChunk {
         }
 
         Ok(Self {
-            frame_sequence_id,
             stroke_session_id,
             pointer_id,
             starts_stroke,
@@ -326,7 +329,6 @@ pub struct DabChunkBuilder {
 
 impl DabChunkBuilder {
     pub fn new(
-        frame_sequence_id: FrameSequenceId,
         stroke_session_id: StrokeSessionId,
         pointer_id: u64,
         starts_stroke: bool,
@@ -334,7 +336,6 @@ impl DabChunkBuilder {
     ) -> Self {
         Self {
             chunk: DabChunk {
-                frame_sequence_id,
                 stroke_session_id,
                 pointer_id,
                 starts_stroke,
@@ -401,19 +402,16 @@ impl DabEmitter for DabChunkBuilder {
 
 #[derive(Debug)]
 pub struct StrokeChunkSplitter {
-    frame_sequence_id: FrameSequenceId,
     stroke_context: StrokeContext,
     current_builder: DabChunkBuilder,
     emitted_chunk_count: usize,
 }
 
 impl StrokeChunkSplitter {
-    pub fn new(frame_sequence_id: FrameSequenceId, stroke_context: StrokeContext) -> Self {
+    pub fn new(stroke_context: StrokeContext) -> Self {
         Self {
-            frame_sequence_id,
             stroke_context,
             current_builder: DabChunkBuilder::new(
-                frame_sequence_id,
                 stroke_context.stroke_session_id,
                 stroke_context.pointer_id,
                 true,
@@ -452,7 +450,6 @@ impl StrokeChunkSplitter {
         ends_stroke: bool,
     ) -> Result<(), DabSamplingError> {
         let next_builder = DabChunkBuilder::new(
-            self.frame_sequence_id,
             self.stroke_context.stroke_session_id,
             self.stroke_context.pointer_id,
             false,
@@ -582,7 +579,6 @@ where
     A: DabSamplingAlgorithm,
 {
     pub fn new(
-        frame_sequence_id: FrameSequenceId,
         context: StrokeContext,
         algorithm: A,
         config: A::Config,
@@ -592,7 +588,7 @@ where
         Ok(Self {
             context,
             sampling_pipeline,
-            splitter: StrokeChunkSplitter::new(frame_sequence_id, context),
+            splitter: StrokeChunkSplitter::new(context),
         })
     }
 
@@ -632,6 +628,139 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriverEventError {
+    StrokeAlreadyActive,
+    NoActiveStroke,
+    PointerIdMismatch,
+    QueueCreate(DabChunkQueueCreateError),
+    Sampling(DabSamplingError),
+}
+
+impl From<DabSamplingError> for DriverEventError {
+    fn from(error: DabSamplingError) -> Self {
+        Self::Sampling(error)
+    }
+}
+
+pub struct DriverEngine<A>
+where
+    A: DabSamplingAlgorithm,
+    A::Config: Clone,
+{
+    queue: DabChunkRealtimeQueue,
+    active_stroke: Option<DriverStrokeSession<A>>,
+    next_stroke_session_id: StrokeSessionId,
+    algorithm_factory: Box<dyn Fn() -> A>,
+    algorithm_config: A::Config,
+}
+
+impl<A> DriverEngine<A>
+where
+    A: DabSamplingAlgorithm,
+    A::Config: Clone,
+{
+    pub fn new(
+        queue_capacity: usize,
+        algorithm_factory: impl Fn() -> A + 'static,
+        algorithm_config: A::Config,
+    ) -> Result<Self, DriverEventError> {
+        let queue = create_dab_chunk_realtime_queue(queue_capacity)
+            .map_err(DriverEventError::QueueCreate)?;
+        Ok(Self {
+            queue,
+            active_stroke: None,
+            next_stroke_session_id: 1,
+            algorithm_factory: Box::new(algorithm_factory),
+            algorithm_config,
+        })
+    }
+
+    pub fn handle_pointer_event(&mut self, input: RawPointerInput) -> Result<(), DriverEventError> {
+        match input.phase {
+            PointerEventPhase::Down => self.handle_pointer_down(input),
+            PointerEventPhase::Move => self.handle_pointer_move(input),
+            PointerEventPhase::Up => self.handle_pointer_up(input),
+            PointerEventPhase::Cancel => self.handle_pointer_cancel(input),
+            PointerEventPhase::Hover => Ok(()),
+        }
+    }
+
+    pub fn dispatch_frame(&mut self, signal: FrameDispatchSignal) -> Vec<FramedDabChunk> {
+        let mut output = Vec::new();
+        while let Some(chunk) = self.queue.pop_dab_chunk() {
+            output.push(FramedDabChunk {
+                frame_sequence_id: signal.frame_sequence_id,
+                chunk,
+            });
+        }
+        output
+    }
+
+    fn handle_pointer_down(&mut self, input: RawPointerInput) -> Result<(), DriverEventError> {
+        if self.active_stroke.is_some() {
+            return Err(DriverEventError::StrokeAlreadyActive);
+        }
+
+        let stroke_context = StrokeContext {
+            stroke_session_id: self.next_stroke_session_id,
+            pointer_id: input.pointer_id,
+        };
+        self.next_stroke_session_id = self
+            .next_stroke_session_id
+            .checked_add(1)
+            .expect("stroke session id overflow");
+
+        let mut session = DriverStrokeSession::new(
+            stroke_context,
+            (self.algorithm_factory)(),
+            self.algorithm_config.clone(),
+        )?;
+        session.feed_input(input, &mut self.queue)?;
+        self.active_stroke = Some(session);
+        Ok(())
+    }
+
+    fn handle_pointer_move(&mut self, input: RawPointerInput) -> Result<(), DriverEventError> {
+        let session = self
+            .active_stroke
+            .as_mut()
+            .ok_or(DriverEventError::NoActiveStroke)?;
+        if session.stroke_context().pointer_id != input.pointer_id {
+            return Err(DriverEventError::PointerIdMismatch);
+        }
+        session.feed_input(input, &mut self.queue)?;
+        Ok(())
+    }
+
+    fn handle_pointer_up(&mut self, input: RawPointerInput) -> Result<(), DriverEventError> {
+        let mut session = self
+            .active_stroke
+            .take()
+            .ok_or(DriverEventError::NoActiveStroke)?;
+        if session.stroke_context().pointer_id != input.pointer_id {
+            self.active_stroke = Some(session);
+            return Err(DriverEventError::PointerIdMismatch);
+        }
+        session.feed_input(input, &mut self.queue)?;
+        session.end_stroke(&mut self.queue)?;
+        Ok(())
+    }
+
+    fn handle_pointer_cancel(&mut self, input: RawPointerInput) -> Result<(), DriverEventError> {
+        let mut session = self
+            .active_stroke
+            .take()
+            .ok_or(DriverEventError::NoActiveStroke)?;
+        if session.stroke_context().pointer_id != input.pointer_id {
+            self.active_stroke = Some(session);
+            return Err(DriverEventError::PointerIdMismatch);
+        }
+        session.end_stroke(&mut self.queue)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,11 +785,32 @@ mod tests {
         }
     }
 
+    fn test_pointer_input(
+        phase: PointerEventPhase,
+        timestamp_micros: u64,
+        pointer_id: u64,
+        x: f32,
+        y: f32,
+    ) -> RawPointerInput {
+        RawPointerInput {
+            pointer_id,
+            device_kind: PointerDeviceKind::Mouse,
+            phase,
+            timestamp_micros,
+            screen_x: x,
+            screen_y: y,
+            pressure: Some(1.0),
+            tilt_x_degrees: None,
+            tilt_y_degrees: None,
+            twist_degrees: None,
+        }
+    }
+
     #[test]
     fn splitter_emits_single_chunk_for_one_dab() {
         let (mut queue_sender, mut queue_receiver) =
             create_dab_chunk_ring_buffer(8).expect("create queue");
-        let mut splitter = StrokeChunkSplitter::new(9, test_context());
+        let mut splitter = StrokeChunkSplitter::new(test_context());
 
         splitter
             .push_dab(test_dab(0), &mut queue_sender)
@@ -683,7 +833,7 @@ mod tests {
     fn splitter_emits_two_chunks_for_seventeen_dabs() {
         let (mut queue_sender, mut queue_receiver) =
             create_dab_chunk_ring_buffer(8).expect("create queue");
-        let mut splitter = StrokeChunkSplitter::new(9, test_context());
+        let mut splitter = StrokeChunkSplitter::new(test_context());
 
         for index in 0..17 {
             splitter
@@ -716,7 +866,7 @@ mod tests {
     fn splitter_emits_two_chunks_for_thirty_two_dabs() {
         let (mut queue_sender, mut queue_receiver) =
             create_dab_chunk_ring_buffer(8).expect("create queue");
-        let mut splitter = StrokeChunkSplitter::new(9, test_context());
+        let mut splitter = StrokeChunkSplitter::new(test_context());
 
         for index in 0..32 {
             splitter
@@ -749,7 +899,7 @@ mod tests {
     fn finish_stroke_without_dabs_emits_no_chunk() {
         let (mut queue_sender, mut queue_receiver) =
             create_dab_chunk_ring_buffer(8).expect("create queue");
-        let mut splitter = StrokeChunkSplitter::new(9, test_context());
+        let mut splitter = StrokeChunkSplitter::new(test_context());
 
         splitter
             .finish_stroke(&mut queue_sender)
@@ -768,7 +918,7 @@ mod tests {
     #[test]
     fn realtime_queue_marks_discontinuity_when_dropping_old_chunks() {
         let mut queue = create_dab_chunk_realtime_queue(1).expect("create realtime queue");
-        let mut splitter = StrokeChunkSplitter::new(9, test_context());
+        let mut splitter = StrokeChunkSplitter::new(test_context());
 
         for index in 0..17 {
             splitter
@@ -784,5 +934,70 @@ mod tests {
         assert!(only_chunk.discontinuity_before);
         assert_eq!(only_chunk.dropped_chunk_count_before, 1);
         assert!(queue.pop_dab_chunk().is_none());
+    }
+
+    #[test]
+    fn driver_engine_requires_down_before_move() {
+        let mut engine = DriverEngine::new(
+            8,
+            NoSmoothingUniformResampling::new,
+            NoSmoothingUniformResamplingConfig {
+                spacing_pixels: 1.0,
+            },
+        )
+        .expect("create driver engine");
+
+        let error = engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Move, 1, 1, 0.0, 0.0))
+            .expect_err("move without down should fail");
+        assert_eq!(error, DriverEventError::NoActiveStroke);
+    }
+
+    #[test]
+    fn driver_engine_assigns_frame_id_on_dispatch() {
+        let mut engine = DriverEngine::new(
+            8,
+            NoSmoothingUniformResampling::new,
+            NoSmoothingUniformResamplingConfig {
+                spacing_pixels: 1.0,
+            },
+        )
+        .expect("create driver engine");
+
+        engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Down, 1, 1, 0.0, 0.0))
+            .expect("stroke one down");
+        engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Move, 2, 1, 2.0, 0.0))
+            .expect("stroke one move");
+        engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Up, 3, 1, 3.0, 0.0))
+            .expect("stroke one up");
+
+        let first_dispatch = engine.dispatch_frame(FrameDispatchSignal {
+            frame_sequence_id: 10,
+        });
+        assert!(!first_dispatch.is_empty());
+        assert!(first_dispatch
+            .iter()
+            .all(|chunk| chunk.frame_sequence_id == 10));
+
+        engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Down, 4, 1, 10.0, 0.0))
+            .expect("stroke two down");
+        engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Move, 5, 1, 12.0, 0.0))
+            .expect("stroke two move");
+        engine
+            .handle_pointer_event(test_pointer_input(PointerEventPhase::Up, 6, 1, 13.0, 0.0))
+            .expect("stroke two up");
+
+        let second_dispatch = engine.dispatch_frame(FrameDispatchSignal {
+            frame_sequence_id: 11,
+        });
+        assert!(!second_dispatch.is_empty());
+        assert!(second_dispatch
+            .iter()
+            .all(|chunk| chunk.frame_sequence_id == 11));
     }
 }

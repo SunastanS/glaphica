@@ -3,8 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use driver::{
-    DabChunkRealtimeQueue, DriverStrokeSession, PointerDeviceKind, PointerEventPhase,
-    RawPointerInput, StrokeContext, create_dab_chunk_realtime_queue,
+    DriverEngine, FrameDispatchSignal, PointerDeviceKind, PointerEventPhase, RawPointerInput,
 };
 use glaphica::GpuState;
 use winit::application::ApplicationHandler;
@@ -20,64 +19,30 @@ const PIXELS_PER_SCROLL_LINE: f32 = 120.0;
 const DRIVER_QUEUE_CAPACITY: usize = 64;
 const DRIVER_RESAMPLE_SPACING_PIXELS: f32 = 2.0;
 
-struct ActiveDriverStroke {
-    session: DriverStrokeSession<driver::NoSmoothingUniformResampling>,
-}
-
 struct DriverDebugState {
-    queue: DabChunkRealtimeQueue,
-    active_stroke: Option<ActiveDriverStroke>,
-    next_stroke_session_id: u64,
+    engine: DriverEngine<driver::NoSmoothingUniformResampling>,
     pointer_id: u64,
     clock_start: Instant,
 }
 
 impl DriverDebugState {
     fn new() -> Self {
-        let queue = create_dab_chunk_realtime_queue(DRIVER_QUEUE_CAPACITY)
-            .expect("create driver realtime queue");
+        let engine = DriverEngine::new(
+            DRIVER_QUEUE_CAPACITY,
+            driver::NoSmoothingUniformResampling::new,
+            driver::NoSmoothingUniformResamplingConfig {
+                spacing_pixels: DRIVER_RESAMPLE_SPACING_PIXELS,
+            },
+        )
+        .expect("create driver engine");
         Self {
-            queue,
-            active_stroke: None,
-            next_stroke_session_id: 1,
+            engine,
             pointer_id: 1,
             clock_start: Instant::now(),
         }
     }
 
-    fn begin_stroke(&mut self, frame_sequence_id: u64) {
-        let stroke_context = StrokeContext {
-            stroke_session_id: self.next_stroke_session_id,
-            pointer_id: self.pointer_id,
-        };
-        self.next_stroke_session_id = self
-            .next_stroke_session_id
-            .checked_add(1)
-            .expect("stroke session id overflow");
-
-        let session = DriverStrokeSession::new(
-            frame_sequence_id,
-            stroke_context,
-            driver::NoSmoothingUniformResampling::new(),
-            driver::NoSmoothingUniformResamplingConfig {
-                spacing_pixels: DRIVER_RESAMPLE_SPACING_PIXELS,
-            },
-        )
-        .expect("begin driver stroke");
-
-        self.active_stroke = Some(ActiveDriverStroke { session });
-
-        println!(
-            "[driver] begin stroke session={} pointer={} frame={}",
-            stroke_context.stroke_session_id, stroke_context.pointer_id, frame_sequence_id
-        );
-    }
-
     fn push_input(&mut self, phase: PointerEventPhase, x: f32, y: f32) {
-        let Some(active_stroke) = self.active_stroke.as_mut() else {
-            return;
-        };
-
         let timestamp_micros = self
             .clock_start
             .elapsed()
@@ -86,7 +51,7 @@ impl DriverDebugState {
             .expect("timestamp micros overflow");
 
         let input = RawPointerInput {
-            pointer_id: active_stroke.session.stroke_context().pointer_id,
+            pointer_id: self.pointer_id,
             device_kind: PointerDeviceKind::Mouse,
             phase,
             timestamp_micros,
@@ -98,63 +63,24 @@ impl DriverDebugState {
             twist_degrees: None,
         };
 
-        active_stroke
-            .session
-            .feed_input(input, &mut self.queue)
-            .expect("feed pointer input into driver algorithm");
+        self.engine
+            .handle_pointer_event(input)
+            .expect("handle pointer event in driver engine");
     }
 
-    fn end_stroke(&mut self, x: f32, y: f32) {
-        let Some(mut active_stroke) = self.active_stroke.take() else {
-            return;
-        };
-
-        let timestamp_micros = self
-            .clock_start
-            .elapsed()
-            .as_micros()
-            .try_into()
-            .expect("timestamp micros overflow");
-        let up_input = RawPointerInput {
-            pointer_id: active_stroke.session.stroke_context().pointer_id,
-            device_kind: PointerDeviceKind::Mouse,
-            phase: PointerEventPhase::Up,
-            timestamp_micros,
-            screen_x: x,
-            screen_y: y,
-            pressure: Some(1.0),
-            tilt_x_degrees: None,
-            tilt_y_degrees: None,
-            twist_degrees: None,
-        };
-
-        active_stroke
-            .session
-            .feed_input(up_input, &mut self.queue)
-            .expect("feed pointer up into driver algorithm");
-        active_stroke
-            .session
-            .end_stroke(&mut self.queue)
-            .expect("end driver stroke");
-
-        let stroke_context = active_stroke.session.stroke_context();
-
-        println!(
-            "[driver] end stroke session={} emitted_chunks={}",
-            stroke_context.stroke_session_id,
-            active_stroke.session.emitted_chunk_count()
-        );
-    }
-
-    fn drain_debug_output(&mut self) {
-        while let Some(chunk) = self.queue.pop_dab_chunk() {
+    fn drain_debug_output(&mut self, frame_sequence_id: u64) {
+        let chunks = self
+            .engine
+            .dispatch_frame(FrameDispatchSignal { frame_sequence_id });
+        for framed_chunk in chunks {
+            let chunk = framed_chunk.chunk;
             let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
             let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
             let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
             let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
             println!(
                 "[driver] chunk frame={} stroke={} dabs={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
-                chunk.frame_sequence_id,
+                framed_chunk.frame_sequence_id,
                 chunk.stroke_session_id,
                 chunk.dab_count(),
                 chunk.starts_stroke,
@@ -256,8 +182,6 @@ impl ApplicationHandler for App {
                         && !self.is_space_pressed
                         && !self.is_rotate_pressed
                     {
-                        self.driver_debug
-                            .begin_stroke(self.next_driver_frame_sequence_id);
                         if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
                             self.driver_debug.push_input(
                                 PointerEventPhase::Down,
@@ -270,8 +194,11 @@ impl ApplicationHandler for App {
                         && !self.is_rotate_pressed
                     {
                         if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
-                            self.driver_debug
-                                .end_stroke(cursor_x as f32, cursor_y as f32);
+                            self.driver_debug.push_input(
+                                PointerEventPhase::Up,
+                                cursor_x as f32,
+                                cursor_y as f32,
+                            );
                         }
                         self.last_cursor_position = None;
                     }
@@ -341,7 +268,8 @@ impl ApplicationHandler for App {
                     return;
                 };
 
-                self.driver_debug.drain_debug_output();
+                self.driver_debug
+                    .drain_debug_output(self.next_driver_frame_sequence_id);
                 self.next_driver_frame_sequence_id = self
                     .next_driver_frame_sequence_id
                     .checked_add(1)

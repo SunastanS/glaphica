@@ -217,7 +217,7 @@ mod tests {
     }
 
     fn chunk_builder() -> DabChunkBuilder {
-        DabChunkBuilder::new(1, 1, 1, true, false)
+        DabChunkBuilder::new(1, 1, true, false)
     }
 
     #[test]
