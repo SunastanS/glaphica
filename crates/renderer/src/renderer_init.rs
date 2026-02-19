@@ -8,33 +8,39 @@ use std::sync::mpsc;
 
 use render_protocol::TransformMatrix4x4;
 use tiles::{
-    GenericTileAtlasConfig, GenericTileAtlasGpuArray, GenericTileAtlasStore, GroupTileAtlasStore,
-    TileAtlasConfig, TileAtlasGpuArray, TilePayloadKind,
+    GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore, GenericTileAtlasConfig,
+    GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray,
 };
+use wgpu::util::DeviceExt;
 
 use crate::{
     create_composite_pipeline, multiply_blend_state, BrushWorkState, CacheState, DataState,
     DirtyStateStore, FrameState, FrameSync, GpuFrameTimingSlot, GpuFrameTimingSlotState,
     GpuFrameTimingState, GpuState, GroupTargetCacheEntry, InputState, RenderDataResolver, Renderer,
-    TileInstanceGpu, ViewState, GPU_TIMING_SLOTS, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY,
+    TileInstanceGpu, TileTextureManagerGpu, ViewState, GPU_TIMING_SLOTS, IDENTITY_MATRIX,
+    INITIAL_TILE_INSTANCE_CAPACITY,
 };
 
 impl Renderer {
     pub fn create_brush_scratch_atlas_f32(
         device: &wgpu::Device,
         max_layers: u32,
-    ) -> Result<(GenericTileAtlasStore, GenericTileAtlasGpuArray), tiles::TileAtlasCreateError>
-    {
-        GenericTileAtlasStore::with_config(
+    ) -> Result<
+        (
+            GenericR32FloatTileAtlasStore,
+            GenericR32FloatTileAtlasGpuArray,
+        ),
+        tiles::TileAtlasCreateError,
+    > {
+        GenericR32FloatTileAtlasStore::with_config(
             device,
             GenericTileAtlasConfig {
                 max_layers,
-                format: wgpu::TextureFormat::R32Float,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::STORAGE_BINDING,
-                payload_kind: TilePayloadKind::R32Float,
+                ..GenericTileAtlasConfig::default()
             },
         )
     }
@@ -110,6 +116,16 @@ impl Renderer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -173,11 +189,17 @@ impl Renderer {
             "renderer.composite_pipeline.slot.multiply",
         );
 
+        let tile_texture_manager_buffer = Self::create_texture_manager_buffer(
+            &device,
+            tile_atlas.layout(),
+            "renderer.tile_texture_manager",
+        );
         let atlas_bind_group_linear = Self::create_atlas_bind_group(
             &device,
             &atlas_bind_group_layout,
             tile_atlas.view(),
             &tile_sampler_linear,
+            &tile_texture_manager_buffer,
             "renderer.atlas_bind_group.linear",
         );
 
@@ -189,14 +211,21 @@ impl Renderer {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::COPY_SRC,
+                ..TileAtlasConfig::default()
             },
         )
         .expect("create group tile atlas");
+        let group_texture_manager_buffer = Self::create_texture_manager_buffer(
+            &device,
+            group_tile_atlas.layout(),
+            "renderer.group_texture_manager",
+        );
         let group_atlas_bind_group_linear = Self::create_atlas_bind_group(
             &device,
             &atlas_bind_group_layout,
             group_tile_atlas.view(),
             &tile_sampler_linear,
+            &group_texture_manager_buffer,
             "renderer.group_atlas_bind_group.linear",
         );
         let group_atlas_bind_group_nearest = Self::create_atlas_bind_group(
@@ -204,6 +233,7 @@ impl Renderer {
             &atlas_bind_group_layout,
             group_tile_atlas.view(),
             &tile_sampler_nearest,
+            &group_texture_manager_buffer,
             "renderer.group_atlas_bind_group.nearest",
         );
 
@@ -244,10 +274,12 @@ impl Renderer {
                 group_tile_atlas,
                 group_atlas_bind_group_linear,
                 group_atlas_bind_group_nearest,
+                _group_texture_manager_buffer: group_texture_manager_buffer,
                 tile_instance_buffer,
                 tile_instance_capacity: INITIAL_TILE_INSTANCE_CAPACITY,
                 tile_instance_gpu_staging: Vec::new(),
                 atlas_bind_group_linear,
+                _tile_texture_manager_buffer: tile_texture_manager_buffer,
                 tile_atlas,
                 gpu_timing,
                 brush_pipeline_layout,
@@ -333,6 +365,7 @@ impl Renderer {
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
         atlas_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        texture_manager_buffer: &wgpu::Buffer,
         label: &str,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -347,7 +380,24 @@ impl Renderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: texture_manager_buffer.as_entire_binding(),
+                },
             ],
+        })
+    }
+
+    fn create_texture_manager_buffer(
+        device: &wgpu::Device,
+        atlas_layout: tiles::TileAtlasLayout,
+        label: &str,
+    ) -> wgpu::Buffer {
+        let manager = TileTextureManagerGpu::from_layout(atlas_layout);
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::bytes_of(&manager),
+            usage: wgpu::BufferUsages::UNIFORM,
         })
     }
 

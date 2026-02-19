@@ -370,6 +370,7 @@ mod tests {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         texture: &wgpu::Texture,
+        atlas_layout: tiles::TileAtlasLayout,
         address: TileAddress,
     ) -> Vec<u8> {
         let buffer_size = (tiles::TILE_SIZE as u64) * (tiles::TILE_SIZE as u64) * 4;
@@ -383,7 +384,7 @@ mod tests {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("glaphica.tests.readback"),
         });
-        let (origin_x, origin_y) = address.atlas_content_origin_pixels();
+        let (origin_x, origin_y) = address.atlas_content_origin_pixels_in(atlas_layout);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -457,6 +458,7 @@ mod tests {
         atlas_gpu
             .drain_and_execute(&queue)
             .expect("flush tile uploads to gpu atlas");
+        let atlas_layout = atlas_gpu.layout();
 
         let mut document = Document::new(size_x, size_y);
         let _layer_id = document.new_layer_root_with_image(virtual_image, BlendMode::Normal);
@@ -474,6 +476,7 @@ mod tests {
                     &device,
                     &queue,
                     atlas_gpu.texture(),
+                    atlas_layout,
                     address,
                 ))
             })

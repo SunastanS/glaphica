@@ -8,11 +8,11 @@ use std::collections::{HashMap, HashSet};
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_STRIDE, TileKey, VirtualImage};
+use tiles::{TileKey, VirtualImage, TILE_STRIDE};
 
 use crate::{
-    BlendMode, DrawPassContext, GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord,
-    TileDrawInstance, ViewportMode, build_group_tile_draw_instances, tile_coord_from_draw_instance,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
+    GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord, TileDrawInstance, ViewportMode,
 };
 
 impl Renderer {
@@ -131,13 +131,19 @@ impl Renderer {
     }
 
     pub(super) fn release_group_cache_entry(&self, entry: GroupTargetCacheEntry) {
-        for (_, _, tile_key) in entry.image.iter_tiles() {
-            let released = self.gpu_state.group_tile_store.release(*tile_key);
-            assert!(
-                released,
-                "group cache tile key must be allocated before release"
-            );
+        let mut tile_key_iterator = entry.image.iter_tiles().map(|(_, _, tile_key)| *tile_key);
+        if tile_key_iterator.next().is_none() {
+            return;
         }
+        let set = self
+            .gpu_state
+            .group_tile_store
+            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| *tile_key))
+            .unwrap_or_else(|error| panic!("adopt group cache tile set for release: {error}"));
+        self.gpu_state
+            .group_tile_store
+            .release_tile_set(set)
+            .unwrap_or_else(|error| panic!("release group cache tile set: {error}"));
     }
 
     pub(super) fn group_cache_extent(&self) -> wgpu::Extent3d {
@@ -350,7 +356,9 @@ impl Renderer {
         let source_y = tile_y
             .checked_mul(TILE_STRIDE)
             .expect("source group tile y overflow");
-        let (destination_slot_x, destination_slot_y) = tile_address.atlas_slot_origin_pixels();
+        let group_atlas_layout = self.gpu_state.group_tile_atlas.layout();
+        let (destination_slot_x, destination_slot_y) =
+            tile_address.atlas_slot_origin_pixels_in(group_atlas_layout);
         let destination_layer = tile_address.atlas_layer;
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {

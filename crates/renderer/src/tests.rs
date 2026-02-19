@@ -157,8 +157,8 @@ fn leaf_should_rebuild_when_dirty_even_with_cache_hit() {
                 document_x: 0.0,
                 document_y: 0.0,
                 atlas_layer: 0.0,
-                atlas_u: 0.0,
-                atlas_v: 0.0,
+                tile_index: 0,
+                _padding0: 0,
             },
         }],
         tile_instance_index: HashMap::new(),
@@ -187,8 +187,8 @@ fn leaf_should_not_rebuild_when_cache_matches_and_clean() {
                 document_x: 0.0,
                 document_y: 0.0,
                 atlas_layer: 0.0,
-                atlas_u: 0.0,
-                atlas_v: 0.0,
+                tile_index: 0,
+                _padding0: 0,
             },
         }],
         tile_instance_index: HashMap::new(),
@@ -213,8 +213,8 @@ fn cached_leaf_partial_replace_keeps_index_consistent() {
                     document_x: 0.0,
                     document_y: 0.0,
                     atlas_layer: 0.0,
-                    atlas_u: 0.0,
-                    atlas_v: 0.0,
+                    tile_index: 0,
+                    _padding0: 0,
                 },
             },
             TileDrawInstance {
@@ -223,8 +223,8 @@ fn cached_leaf_partial_replace_keeps_index_consistent() {
                     document_x: TILE_SIZE as f32,
                     document_y: 0.0,
                     atlas_layer: 0.0,
-                    atlas_u: 0.0,
-                    atlas_v: 0.0,
+                    tile_index: 0,
+                    _padding0: 0,
                 },
             },
         ],
@@ -956,8 +956,9 @@ fn allocate_tile_keys(count: usize) -> Vec<TileKey> {
         )
         .expect("create test tile atlas");
 
-        (0..count)
-            .map(|_| atlas_store.allocate().expect("allocate test tile key"))
-            .collect()
+        atlas_store
+            .reserve_tile_set(u32::try_from(count).expect("test tile key count exceeds u32"))
+            .expect("reserve test tile set")
+            .into_keys()
     })
 }

@@ -7,8 +7,8 @@ use brush_execution::{
 };
 use driver::PointerEventPhase;
 use frame_scheduler::{FrameScheduler, FrameSchedulerDecision, FrameSchedulerInput};
-use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
 use glaphica::GpuState;
+use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
 use render_protocol::{
     BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramUpsert,
     ReferenceLayerSelection, ReferenceSetUpsert,

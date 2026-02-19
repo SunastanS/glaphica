@@ -15,15 +15,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 
 use render_protocol::{
-    BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, ImageHandle, ProgramRevision,
-    LayerId, ReferenceLayerSelection, ReferenceSetId, RenderOp, RenderTreeSnapshot,
-    TransformMatrix4x4, Viewport,
+    BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, ImageHandle, LayerId, ProgramRevision,
+    ReferenceLayerSelection, ReferenceSetId, RenderOp, RenderTreeSnapshot, TransformMatrix4x4,
+    Viewport,
 };
 #[cfg(test)]
 use tiles::TILE_STRIDE;
 use tiles::{
     GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_SIZE, TileAddress, TileAtlasGpuArray,
-    TileGpuDrainError, TileKey, VirtualImage,
+    TileAtlasLayout, TileGpuDrainError, TileKey, VirtualImage,
 };
 
 #[repr(C)]
@@ -32,8 +32,28 @@ pub struct TileInstanceGpu {
     pub document_x: f32,
     pub document_y: f32,
     pub atlas_layer: f32,
-    pub atlas_u: f32,
-    pub atlas_v: f32,
+    pub tile_index: u32,
+    pub _padding0: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TileTextureManagerGpu {
+    atlas_width: f32,
+    atlas_height: f32,
+    tiles_per_row: u32,
+    _padding0: u32,
+}
+
+impl TileTextureManagerGpu {
+    fn from_layout(layout: TileAtlasLayout) -> Self {
+        Self {
+            atlas_width: layout.atlas_width as f32,
+            atlas_height: layout.atlas_height as f32,
+            tiles_per_row: layout.tiles_per_row,
+            _padding0: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,10 +277,12 @@ struct GpuState {
     group_tile_atlas: GroupTileAtlasGpuArray,
     group_atlas_bind_group_linear: wgpu::BindGroup,
     group_atlas_bind_group_nearest: wgpu::BindGroup,
+    _group_texture_manager_buffer: wgpu::Buffer,
     tile_instance_buffer: wgpu::Buffer,
     tile_instance_capacity: usize,
     tile_instance_gpu_staging: Vec<TileInstanceGpu>,
     atlas_bind_group_linear: wgpu::BindGroup,
+    _tile_texture_manager_buffer: wgpu::Buffer,
     tile_atlas: TileAtlasGpuArray,
     gpu_timing: GpuFrameTimingState,
     brush_pipeline_layout: wgpu::PipelineLayout,
@@ -292,16 +314,26 @@ pub enum BrushControlError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrushRenderEnqueueError {
-    ProgramNotPrepared { key: BrushProgramKey },
-    ProgramNotActivated { key: BrushProgramKey },
+    ProgramNotPrepared {
+        key: BrushProgramKey,
+    },
+    ProgramNotActivated {
+        key: BrushProgramKey,
+    },
     StrokeProgramMismatch {
         stroke_session_id: u64,
         expected: BrushProgramKey,
         received: BrushProgramKey,
     },
-    UnknownStroke { stroke_session_id: u64 },
-    ReferenceSetMissing { reference_set_id: ReferenceSetId },
-    MergeBeforeStrokeEnd { stroke_session_id: u64 },
+    UnknownStroke {
+        stroke_session_id: u64,
+    },
+    ReferenceSetMissing {
+        reference_set_id: ReferenceSetId,
+    },
+    MergeBeforeStrokeEnd {
+        stroke_session_id: u64,
+    },
     MergeTargetLayerMismatch {
         stroke_session_id: u64,
         expected_layer_id: LayerId,

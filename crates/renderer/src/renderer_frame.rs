@@ -7,9 +7,8 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use render_protocol::{
-    BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramKey,
-    BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ReferenceSetUpsert,
-    BRUSH_DAB_CHUNK_CAPACITY,
+    BRUSH_DAB_CHUNK_CAPACITY, BrushControlAck, BrushControlCommand, BrushProgramActivation,
+    BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ReferenceSetUpsert,
 };
 
 use crate::{

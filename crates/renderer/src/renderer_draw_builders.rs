@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use render_protocol::{BlendMode, ImageHandle};
-use tiles::{GroupTileAtlasStore, TILE_SIZE, TileKey, VirtualImage};
+use tiles::{GroupTileAtlasStore, TileKey, VirtualImage, TILE_SIZE};
 
 use crate::{
     CachedLeafDraw, DirtyTileMask, RenderDataResolver, TileCoord, TileDrawInstance, TileInstanceGpu,
@@ -22,7 +22,6 @@ pub(crate) fn build_leaf_tile_draw_instances(
         let Some(address) = render_data_resolver.resolve_tile_address(tile_key) else {
             return;
         };
-        let (atlas_u, atlas_v) = address.atlas_uv_origin();
         let document_x = tile_x
             .checked_mul(TILE_SIZE)
             .expect("tile x position overflow") as f32;
@@ -36,8 +35,8 @@ pub(crate) fn build_leaf_tile_draw_instances(
                 document_x,
                 document_y,
                 atlas_layer: address.atlas_layer as f32,
-                atlas_u,
-                atlas_v,
+                tile_index: address.tile_index as u32,
+                _padding0: 0,
             },
         });
     };
@@ -64,7 +63,6 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
         let Some(address) = render_data_resolver.resolve_tile_address(tile_key) else {
             return;
         };
-        let (atlas_u, atlas_v) = address.atlas_uv_origin();
         let document_x = tile_x
             .checked_mul(TILE_SIZE)
             .expect("tile x position overflow") as f32;
@@ -78,8 +76,8 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
                 document_x,
                 document_y,
                 atlas_layer: address.atlas_layer as f32,
-                atlas_u,
-                atlas_v,
+                tile_index: address.tile_index as u32,
+                _padding0: 0,
             },
         });
     };
@@ -102,7 +100,6 @@ pub(crate) fn build_group_tile_draw_instances(
             let tile_address = tile_store
                 .resolve(*tile_key)
                 .expect("group tile key must resolve to atlas address");
-            let (atlas_u, atlas_v) = tile_address.atlas_uv_origin();
             let document_x = tile_x
                 .checked_mul(TILE_SIZE)
                 .expect("group tile x position overflow") as f32;
@@ -115,8 +112,8 @@ pub(crate) fn build_group_tile_draw_instances(
                     document_x,
                     document_y,
                     atlas_layer: tile_address.atlas_layer as f32,
-                    atlas_u,
-                    atlas_v,
+                    tile_index: tile_address.tile_index as u32,
+                    _padding0: 0,
                 },
             }
         })

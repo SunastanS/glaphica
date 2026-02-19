@@ -988,9 +988,11 @@ mod tests {
             frame_sequence_id: 10,
         });
         assert!(!first_dispatch.is_empty());
-        assert!(first_dispatch
-            .iter()
-            .all(|chunk| chunk.frame_sequence_id == 10));
+        assert!(
+            first_dispatch
+                .iter()
+                .all(|chunk| chunk.frame_sequence_id == 10)
+        );
 
         engine
             .handle_pointer_event(test_pointer_input(PointerEventPhase::Down, 4, 1, 10.0, 0.0))
@@ -1006,8 +1008,10 @@ mod tests {
             frame_sequence_id: 11,
         });
         assert!(!second_dispatch.is_empty());
-        assert!(second_dispatch
-            .iter()
-            .all(|chunk| chunk.frame_sequence_id == 11));
+        assert!(
+            second_dispatch
+                .iter()
+                .all(|chunk| chunk.frame_sequence_id == 11)
+        );
     }
 }
