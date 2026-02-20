@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/brush_execution",
+    "crates/code_analysis",
     "crates/document",
     "crates/driver",
     "crates/frame_scheduler",
