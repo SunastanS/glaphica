@@ -21,7 +21,11 @@ struct TileTextureManager {
     atlas_width: f32,
     atlas_height: f32,
     tiles_per_row: u32,
-    _padding0: u32,
+    tiles_per_column: u32,
+    tile_size: f32,
+    tile_stride: f32,
+    tile_gutter: f32,
+    _padding0: f32,
 };
 
 @group(1) @binding(2) var<uniform> tile_texture_manager: TileTextureManager;
@@ -32,10 +36,6 @@ struct VertexOutput {
     @location(1) @interpolate(flat) atlas_layer: u32,
     @location(2) @interpolate(flat) tile_index: u32,
 };
-
-const TILE_SIZE: f32 = 256.0;
-const TILE_GUTTER: f32 = 1.0;
-const TILE_STRIDE: f32 = TILE_SIZE + TILE_GUTTER * 2.0;
 
 @vertex
 fn vs_main(
@@ -49,13 +49,13 @@ fn vs_main(
     let local_x = quad_x[vertex_index];
     let local_y = quad_y[vertex_index];
 
-    let tile_index_x = floor(tile.document_x / TILE_SIZE + 0.5);
-    let tile_index_y = floor(tile.document_y / TILE_SIZE + 0.5);
-    let slot_origin_x = tile_index_x * TILE_STRIDE;
-    let slot_origin_y = tile_index_y * TILE_STRIDE;
+    let tile_index_x = floor(tile.document_x / tile_texture_manager.tile_size + 0.5);
+    let tile_index_y = floor(tile.document_y / tile_texture_manager.tile_size + 0.5);
+    let slot_origin_x = tile_index_x * tile_texture_manager.tile_stride;
+    let slot_origin_y = tile_index_y * tile_texture_manager.tile_stride;
     let document_pos = vec4<f32>(
-        slot_origin_x + local_x * TILE_STRIDE,
-        slot_origin_y + local_y * TILE_STRIDE,
+        slot_origin_x + local_x * tile_texture_manager.tile_stride,
+        slot_origin_y + local_y * tile_texture_manager.tile_stride,
         0.0,
         1.0,
     );
@@ -72,14 +72,17 @@ fn vs_main(
 fn tile_slot_uv_origin(tile_index: u32) -> vec2<f32> {
     let tile_x = tile_index % tile_texture_manager.tiles_per_row;
     let tile_y = tile_index / tile_texture_manager.tiles_per_row;
-    let slot_origin = vec2<f32>(f32(tile_x) * TILE_STRIDE, f32(tile_y) * TILE_STRIDE);
+    let slot_origin = vec2<f32>(
+        f32(tile_x) * tile_texture_manager.tile_stride,
+        f32(tile_y) * tile_texture_manager.tile_stride,
+    );
     return slot_origin
         / vec2<f32>(tile_texture_manager.atlas_width, tile_texture_manager.atlas_height);
 }
 
 fn sample_tile_slot(tile_layer: i32, tile_index: u32, slot_uv: vec2<f32>) -> vec4<f32> {
     let atlas_uv = tile_slot_uv_origin(tile_index)
-        + slot_uv * (vec2<f32>(TILE_STRIDE, TILE_STRIDE)
+        + slot_uv * (vec2<f32>(tile_texture_manager.tile_stride, tile_texture_manager.tile_stride)
             / vec2<f32>(tile_texture_manager.atlas_width, tile_texture_manager.atlas_height));
     return textureSampleLevel(tile_atlas, tile_sampler, atlas_uv, tile_layer, 0.0);
 }

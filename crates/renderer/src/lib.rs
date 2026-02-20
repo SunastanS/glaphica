@@ -19,11 +19,9 @@ use render_protocol::{
     ReferenceLayerSelection, ReferenceSetId, RenderOp, RenderTreeSnapshot, TransformMatrix4x4,
     Viewport,
 };
-#[cfg(test)]
-use tiles::TILE_STRIDE;
 use tiles::{
-    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_SIZE, TileAddress, TileAtlasGpuArray,
-    TileAtlasLayout, TileGpuDrainError, TileKey, VirtualImage,
+    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE,
+    TileAddress, TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey, VirtualImage,
 };
 
 #[repr(C)]
@@ -42,7 +40,11 @@ struct TileTextureManagerGpu {
     atlas_width: f32,
     atlas_height: f32,
     tiles_per_row: u32,
-    _padding0: u32,
+    tiles_per_column: u32,
+    tile_size: f32,
+    tile_stride: f32,
+    tile_gutter: f32,
+    _padding0: f32,
 }
 
 impl TileTextureManagerGpu {
@@ -51,7 +53,11 @@ impl TileTextureManagerGpu {
             atlas_width: layout.atlas_width as f32,
             atlas_height: layout.atlas_height as f32,
             tiles_per_row: layout.tiles_per_row,
-            _padding0: 0,
+            tiles_per_column: layout.tiles_per_column,
+            tile_size: TILE_SIZE as f32,
+            tile_stride: TILE_STRIDE as f32,
+            tile_gutter: TILE_GUTTER as f32,
+            _padding0: 0.0,
         }
     }
 }

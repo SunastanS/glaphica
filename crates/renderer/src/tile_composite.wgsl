@@ -23,7 +23,11 @@ struct TileTextureManager {
     atlas_width: f32,
     atlas_height: f32,
     tiles_per_row: u32,
-    _padding0: u32,
+    tiles_per_column: u32,
+    tile_size: f32,
+    tile_stride: f32,
+    tile_gutter: f32,
+    _padding0: f32,
 };
 
 @group(1) @binding(2) var<uniform> tile_texture_manager: TileTextureManager;
@@ -34,10 +38,6 @@ struct VertexOutput {
     @location(1) @interpolate(flat) atlas_layer: u32,
     @location(2) @interpolate(flat) tile_index: u32,
 };
-
-const TILE_SIZE: f32 = 256.0;
-const TILE_GUTTER: f32 = 1.0;
-const TILE_STRIDE: f32 = TILE_SIZE + TILE_GUTTER * 2.0;
 
 @vertex
 fn vs_main(
@@ -53,8 +53,8 @@ fn vs_main(
     let local_y = quad_y[vertex_index];
 
     let document_pos = vec4<f32>(
-        tile.document_x + local_x * TILE_SIZE,
-        tile.document_y + local_y * TILE_SIZE,
+        tile.document_x + local_x * tile_texture_manager.tile_size,
+        tile.document_y + local_y * tile_texture_manager.tile_size,
         0.0,
         1.0,
     );
@@ -72,8 +72,8 @@ fn tile_content_uv_origin(tile_index: u32) -> vec2<f32> {
     let tile_x = tile_index % tile_texture_manager.tiles_per_row;
     let tile_y = tile_index / tile_texture_manager.tiles_per_row;
     let content_origin = vec2<f32>(
-        f32(tile_x) * TILE_STRIDE + TILE_GUTTER,
-        f32(tile_y) * TILE_STRIDE + TILE_GUTTER,
+        f32(tile_x) * tile_texture_manager.tile_stride + tile_texture_manager.tile_gutter,
+        f32(tile_y) * tile_texture_manager.tile_stride + tile_texture_manager.tile_gutter,
     );
     return content_origin
         / vec2<f32>(tile_texture_manager.atlas_width, tile_texture_manager.atlas_height);
@@ -81,7 +81,7 @@ fn tile_content_uv_origin(tile_index: u32) -> vec2<f32> {
 
 fn sample_tile_content(tile_layer: i32, tile_index: u32, content_uv: vec2<f32>) -> vec4<f32> {
     let atlas_uv = tile_content_uv_origin(tile_index)
-        + content_uv * (vec2<f32>(TILE_SIZE, TILE_SIZE)
+        + content_uv * (vec2<f32>(tile_texture_manager.tile_size, tile_texture_manager.tile_size)
             / vec2<f32>(tile_texture_manager.atlas_width, tile_texture_manager.atlas_height));
     return textureSampleLevel(tile_atlas, tile_sampler, atlas_uv, tile_layer, 0.0);
 }

@@ -1,6 +1,6 @@
 use std::fmt;
 
-pub const TILE_SIZE: u32 = 256;
+pub const TILE_SIZE: u32 = 128;
 pub const TILE_GUTTER: u32 = 1;
 pub const TILE_STRIDE: u32 = TILE_SIZE + TILE_GUTTER * 2;
 pub const DEFAULT_MAX_LAYERS: u32 = 4;
@@ -183,6 +183,7 @@ pub enum TileSetError {
     UnknownTileKey,
     DuplicateTileKey,
     SetNotOwnedByStore,
+    RollbackReleaseFailed,
 }
 
 impl From<TileAllocError> for TileSetError {
@@ -203,6 +204,9 @@ impl fmt::Display for TileSetError {
             TileSetError::SetNotOwnedByStore => {
                 write!(formatter, "tile set handle does not belong to this atlas store")
             }
+            TileSetError::RollbackReleaseFailed => {
+                write!(formatter, "tile set rollback failed to release reserved tile key")
+            }
         }
     }
 }
@@ -212,7 +216,6 @@ impl std::error::Error for TileSetError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileIngestError {
     SizeMismatch,
-    UnsupportedFormat,
     MissingCopyDstUsage,
     SizeOverflow,
     StrideTooSmall,
@@ -261,6 +264,7 @@ pub enum TileAtlasCreateError {
     MaxLayersExceedsDeviceLimit,
     AtlasSizeExceedsDeviceLimit,
     UnsupportedPayloadFormat,
+    UnsupportedFormatUsage,
     StorageBindingUnsupportedForFormat,
 }
 
@@ -295,6 +299,12 @@ impl fmt::Display for TileAtlasCreateError {
                 write!(
                     formatter,
                     "tile atlas payload kind is incompatible with texture format"
+                )
+            }
+            TileAtlasCreateError::UnsupportedFormatUsage => {
+                write!(
+                    formatter,
+                    "tile atlas texture format does not support requested usage"
                 )
             }
             TileAtlasCreateError::StorageBindingUnsupportedForFormat => {

@@ -237,7 +237,10 @@ fn read_tile_r8uint(
     texture: &wgpu::Texture,
     address: TileAddress,
 ) -> Vec<u8> {
-    let buffer_size = (TILE_SIZE as u64) * (TILE_SIZE as u64);
+    let row_bytes = TILE_SIZE as usize;
+    let padded_row_bytes = row_bytes
+        .next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+    let buffer_size = (padded_row_bytes as u64) * (TILE_SIZE as u64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile r8uint readback"),
         size: buffer_size,
@@ -259,7 +262,7 @@ fn read_tile_r8uint(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(TILE_SIZE),
+                bytes_per_row: Some(padded_row_bytes as u32),
                 rows_per_image: Some(TILE_SIZE),
             },
         },
@@ -283,7 +286,16 @@ fn read_tile_r8uint(
         .recv()
         .expect("map callback recv")
         .expect("map tile readback");
-    let tile = slice.get_mapped_range().to_vec();
+    let mapped = slice.get_mapped_range();
+    let mut tile = vec![0u8; row_bytes * (TILE_SIZE as usize)];
+    for row in 0..(TILE_SIZE as usize) {
+        let source_start = row * padded_row_bytes;
+        let source_end = source_start + row_bytes;
+        let destination_start = row * row_bytes;
+        let destination_end = destination_start + row_bytes;
+        tile[destination_start..destination_end].copy_from_slice(&mapped[source_start..source_end]);
+    }
+    drop(mapped);
     buffer.unmap();
     tile
 }
@@ -356,7 +368,8 @@ fn ingest_tile_should_define_gutter_pixels_from_edge_texels() {
         .expect("ingest tile")
         .expect("non-empty tile");
     let address = store.resolve(key).expect("resolve key");
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain upload"), 1);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain upload");
+    assert_eq!(tile_count, 1);
 
     let tile_stride = TILE_STRIDE;
     let atlas_tile_origin_x = address.tile_x() * tile_stride;
@@ -445,18 +458,18 @@ fn release_is_cpu_only_and_dirty_triggers_clear_on_reuse() {
 
     let key0 = store.allocate().expect("allocate key0");
     let address0 = store.resolve(key0).expect("key0 address");
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain after key0"), 0);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain after key0");
+    assert_eq!(tile_count, 0);
 
     assert!(store.release(key0));
-    assert_eq!(
-        gpu.drain_and_execute(&queue).expect("drain after release"),
-        0
-    );
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain after release");
+    assert_eq!(tile_count, 0);
 
     let key1 = store.allocate().expect("allocate key1");
     let address1 = store.resolve(key1).expect("key1 address");
     assert_eq!(address1, address0);
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain clear"), 1);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain clear");
+    assert_eq!(tile_count, 1);
 
     let tile = read_tile_rgba8(&device, &queue, gpu.texture(), address1);
     assert!(tile.iter().all(|&byte| byte == 0));
@@ -478,7 +491,8 @@ fn ingest_tile_enqueues_upload_and_writes_after_drain() {
         .expect("non-empty tile");
     let address = store.resolve(key).expect("resolve key");
 
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain upload"), 1);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain upload");
+    assert_eq!(tile_count, 1);
     let tile = read_tile_rgba8(&device, &queue, gpu.texture(), address);
     assert_eq!(&tile[..4], &[9, 8, 7, 6]);
 }
@@ -510,7 +524,8 @@ fn ingest_image_rgba8_strided_keeps_sparse_tiles() {
     assert_eq!(image.get_tile(0, 1), Ok(None));
     assert!(image.get_tile(1, 1).expect("get tile").copied().is_some());
 
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain"), 1);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain");
+    assert_eq!(tile_count, 1);
 }
 
 #[test]
@@ -714,10 +729,118 @@ fn clear_tile_set_fails_without_partial_clear_enqueue() {
     assert!(store.release(released_key));
 
     assert_eq!(store.clear_tile_set(&set), Err(TileSetError::UnknownTileKey));
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain clear set"), 0);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain clear set");
+    assert_eq!(tile_count, 0);
 
     let kept_tile = read_tile_r8uint(&device, &queue, gpu.texture(), kept_address);
     assert!(kept_tile.iter().all(|&value| value == 1));
+}
+
+#[test]
+fn clear_tile_set_skips_stale_targets_after_release_and_reuse() {
+    let (device, queue) = create_device_queue();
+    let (store, gpu) = create_generic_store_r8u(
+        &device,
+        GenericTileAtlasConfig {
+            max_layers: 1,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            ..GenericTileAtlasConfig::default()
+        },
+    );
+
+    let set = store.reserve_tile_set(1).expect("reserve tile set");
+    let original_key = set.keys()[0];
+    let original_address = store.resolve(original_key).expect("resolve original key");
+
+    assert_eq!(store.clear_tile_set(&set).expect("enqueue clear set"), 1);
+
+    assert!(store.release(original_key));
+    let reused_key = store.allocate().expect("allocate reused key");
+    let reused_address = store.resolve(reused_key).expect("resolve reused key");
+    assert_eq!(reused_address, original_address);
+
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain after stale clear");
+    assert_eq!(tile_count, 1);
+
+    let tile_bytes = vec![7u8; (TILE_SIZE as usize) * (TILE_SIZE as usize)];
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: gpu.texture(),
+            mip_level: 0,
+            origin: tile_origin(reused_address),
+            aspect: wgpu::TextureAspect::All,
+        },
+        &tile_bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(TILE_SIZE),
+            rows_per_image: Some(TILE_SIZE),
+        },
+        wgpu::Extent3d {
+            width: TILE_SIZE,
+            height: TILE_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let reused_tile = read_tile_r8uint(&device, &queue, gpu.texture(), reused_address);
+    assert!(reused_tile.iter().all(|&value| value == 7));
+}
+
+#[test]
+fn clear_tile_set_reports_total_executed_tile_count() {
+    let (device, queue) = create_device_queue();
+    let (store, gpu) = create_generic_store_r8u(
+        &device,
+        GenericTileAtlasConfig {
+            max_layers: 1,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+            ..GenericTileAtlasConfig::default()
+        },
+    );
+
+    let set = store.reserve_tile_set(2).expect("reserve tile set");
+    assert_eq!(store.clear_tile_set(&set).expect("enqueue clear set"), 2);
+
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain clear set");
+    assert_eq!(tile_count, 2);
+}
+
+#[test]
+fn stale_upload_is_skipped_after_release_and_reuse() {
+    let (device, queue) = create_device_queue();
+    let (store, gpu) = create_store(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            ..TileAtlasConfig::default()
+        },
+    );
+
+    let mut bytes = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
+    bytes[0] = 255;
+    let old_key = store
+        .ingest_tile(TILE_SIZE, TILE_SIZE, &bytes)
+        .expect("ingest old tile")
+        .expect("old tile key");
+    let old_address = store.resolve(old_key).expect("resolve old key");
+
+    assert!(store.release(old_key));
+    let new_key = store.allocate().expect("allocate new key");
+    let new_address = store.resolve(new_key).expect("resolve new key");
+    assert_eq!(new_address, old_address);
+
+    let tile_count = gpu
+        .drain_and_execute(&queue)
+        .expect("drain stale upload and clear");
+    assert_eq!(tile_count, 1);
+
+    let tile = read_tile_rgba8(&device, &queue, gpu.texture(), new_address);
+    assert!(tile.iter().all(|&byte| byte == 0));
 }
 
 #[test]
@@ -787,7 +910,8 @@ fn runtime_factory_r8uint_allocate_clear_and_drain() {
     let key = store.allocate().expect("allocate runtime key");
     let address = store.resolve(key).expect("resolve runtime key");
     assert!(store.clear(key).expect("clear runtime key"));
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain runtime ops"), 1);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain runtime ops");
+    assert_eq!(tile_count, 1);
     let tile = read_tile_r8uint(&device, &queue, gpu.texture(), address);
     assert!(tile.iter().all(|&value| value == 0));
 }
@@ -857,6 +981,37 @@ fn r32float_storage_only_clear_fails_fast_at_drain() {
         gpu.drain_and_execute(&queue),
         Err(TileGpuDrainError::MissingCopyDstUsage)
     );
+}
+
+#[test]
+fn group_atlas_requires_copy_dst_and_texture_binding_usage() {
+    let (device, _queue) = create_device_queue();
+
+    let missing_copy_dst = GroupTileAtlasStore::with_config(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            ..TileAtlasConfig::default()
+        },
+    );
+    assert!(matches!(
+        missing_copy_dst,
+        Err(TileAtlasCreateError::MissingCopyDstUsage)
+    ));
+
+    let missing_texture_binding = GroupTileAtlasStore::with_config(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            usage: wgpu::TextureUsages::COPY_DST,
+            ..TileAtlasConfig::default()
+        },
+    );
+    assert!(matches!(
+        missing_texture_binding,
+        Err(TileAtlasCreateError::MissingTextureBindingUsage)
+    ));
 }
 
 #[test]
@@ -960,7 +1115,8 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
     );
 
     assert_eq!(store.clear(key).expect("clear key"), true);
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain clear"), 1);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain clear");
+    assert_eq!(tile_count, 1);
     let tile = read_tile_r32float(&device, &queue, gpu.texture(), address);
     assert!(tile.iter().all(|&value| value == 0.0));
 }
@@ -986,7 +1142,8 @@ fn r8uint_create_and_allocate_release_path() {
     assert_eq!(store.resolve(key2).expect("resolve key2"), address);
 
     assert_eq!(store.clear(key2).expect("clear key2"), true);
-    assert_eq!(gpu.drain_and_execute(&queue).expect("drain clear"), 2);
+    let tile_count = gpu.drain_and_execute(&queue).expect("drain clear");
+    assert_eq!(tile_count, 2);
     let tile = read_tile_r8uint(&device, &queue, gpu.texture(), address);
     assert!(tile.iter().all(|&value| value == 0));
 }
