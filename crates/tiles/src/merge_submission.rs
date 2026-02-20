@@ -24,6 +24,8 @@ pub enum ReceiptState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergePlanTileOp {
+    pub tile_x: u32,
+    pub tile_y: u32,
     pub existing_layer_key: Option<TileKey>,
     pub stroke_buffer_key: TileKey,
     pub blend_mode: BlendMode,
@@ -33,6 +35,8 @@ pub struct MergePlanTileOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileKeyMapping {
+    pub tile_x: u32,
+    pub tile_y: u32,
     pub layer_id: LayerId,
     pub previous_key: Option<TileKey>,
     pub new_key: TileKey,
@@ -99,6 +103,20 @@ pub enum TileMergeError {
         stroke_session_id: StrokeSessionId,
         layer_id: LayerId,
         source: TileAllocError,
+    },
+    DuplicateTxToken {
+        stroke_session_id: StrokeSessionId,
+        tx_token: TxToken,
+        existing_receipt_id: StrokeExecutionReceiptId,
+    },
+    SharedPreviousKeyNotAllowed {
+        stroke_session_id: StrokeSessionId,
+        layer_id: LayerId,
+        previous_key: TileKey,
+        first_tile_x: u32,
+        first_tile_y: u32,
+        duplicate_tile_x: u32,
+        duplicate_tile_y: u32,
     },
     UnknownTileKey {
         receipt_id: Option<StrokeExecutionReceiptId>,
@@ -179,6 +197,7 @@ struct ReceiptEntry {
 pub struct TileMergeEngine<S: MergeTileStore> {
     store: S,
     next_receipt_id: AtomicU64,
+    submitted_tokens: HashMap<SubmissionKey, StrokeExecutionReceiptId>,
     receipts: HashMap<StrokeExecutionReceiptId, ReceiptEntry>,
     ackable_notices: HashMap<NoticeKey, TileMergeCompletionNotice>,
     consumed_notices: HashSet<NoticeKey>,
@@ -188,12 +207,14 @@ pub struct TileMergeEngine<S: MergeTileStore> {
 }
 
 type NoticeKey = (TileMergeCompletionNoticeId, StrokeExecutionReceiptId);
+type SubmissionKey = (StrokeSessionId, TxToken);
 
 impl<S: MergeTileStore> TileMergeEngine<S> {
     pub fn new(store: S) -> Self {
         Self {
             store,
             next_receipt_id: AtomicU64::new(0),
+            submitted_tokens: HashMap::new(),
             receipts: HashMap::new(),
             ackable_notices: HashMap::new(),
             consumed_notices: HashSet::new(),
@@ -215,6 +236,34 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
                 stroke_session_id: request.stroke_session_id,
                 layer_id: request.layer_id,
             });
+        }
+        let submission_key = (request.stroke_session_id, request.tx_token);
+        if let Some(existing_receipt_id) = self.submitted_tokens.get(&submission_key) {
+            return Err(TileMergeError::DuplicateTxToken {
+                stroke_session_id: request.stroke_session_id,
+                tx_token: request.tx_token,
+                existing_receipt_id: *existing_receipt_id,
+            });
+        }
+
+        let mut previous_key_tiles = HashMap::new();
+        for tile_op in &request.tile_ops {
+            let Some(previous_key) = tile_op.existing_layer_key else {
+                continue;
+            };
+            if let Some((first_tile_x, first_tile_y)) =
+                previous_key_tiles.insert(previous_key, (tile_op.tile_x, tile_op.tile_y))
+            {
+                return Err(TileMergeError::SharedPreviousKeyNotAllowed {
+                    stroke_session_id: request.stroke_session_id,
+                    layer_id: request.layer_id,
+                    previous_key,
+                    first_tile_x,
+                    first_tile_y,
+                    duplicate_tile_x: tile_op.tile_x,
+                    duplicate_tile_y: tile_op.tile_y,
+                });
+            }
         }
 
         let receipt_id = next_receipt_id(&self.next_receipt_id)?;
@@ -296,6 +345,8 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
                 op_trace_id: tile_op.op_trace_id,
             });
             new_key_mappings.push(TileKeyMapping {
+                tile_x: tile_op.tile_x,
+                tile_y: tile_op.tile_y,
                 layer_id: request.layer_id,
                 previous_key: tile_op.existing_layer_key,
                 new_key,
@@ -313,6 +364,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
                 drop_key_list: drop_key_list.clone(),
             },
         );
+        self.submitted_tokens.insert(submission_key, receipt_id);
 
         Ok(MergeSubmission {
             receipt_id,
@@ -472,6 +524,18 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         }
 
         for old_key in &entry.drop_key_list {
+            if self.store.resolve(*old_key).is_none() {
+                return Err(TileMergeError::UnknownTileKey {
+                    receipt_id: Some(receipt_id),
+                    stroke_session_id: entry.stroke_session_id,
+                    layer_id: entry.layer_id,
+                    key: *old_key,
+                    stage: "finalize.precheck_drop_key",
+                });
+            }
+        }
+
+        for old_key in &entry.drop_key_list {
             let released = self.store.release(*old_key);
             if !released {
                 return Err(TileMergeError::UnknownTileKey {
@@ -503,6 +567,18 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
                 from: entry.state,
                 to: ReceiptState::Aborted,
             });
+        }
+
+        for mapping in &entry.new_key_mappings {
+            if self.store.resolve(mapping.new_key).is_none() {
+                return Err(TileMergeError::UnknownTileKey {
+                    receipt_id: Some(receipt_id),
+                    stroke_session_id: entry.stroke_session_id,
+                    layer_id: entry.layer_id,
+                    key: mapping.new_key,
+                    stage: "abort.precheck_new_key",
+                });
+            }
         }
 
         for mapping in &entry.new_key_mappings {
@@ -704,6 +780,14 @@ mod tests {
                 .expect("fake tile store mutex should not be poisoned");
             guard.map.contains_key(&key)
         }
+
+        fn remove_key_for_test(&self, key: TileKey) {
+            let mut guard = self
+                .0
+                .lock()
+                .expect("fake tile store mutex should not be poisoned");
+            guard.map.remove(&key);
+        }
     }
 
     impl MergeTileStore for SharedFakeTileStore {
@@ -746,19 +830,60 @@ mod tests {
         }
     }
 
-    fn request_with_single_op(existing_layer_key: Option<TileKey>) -> MergePlanRequest {
+    fn request_with_single_op_with_token(
+        existing_layer_key: Option<TileKey>,
+        tx_token: TxToken,
+    ) -> MergePlanRequest {
         MergePlanRequest {
             stroke_session_id: 100,
-            tx_token: 900,
+            tx_token,
             program_revision: Some(3),
             layer_id: 22,
             tile_ops: vec![MergePlanTileOp {
+                tile_x: 0,
+                tile_y: 0,
                 existing_layer_key,
                 stroke_buffer_key: TileKey(500),
                 blend_mode: BlendMode::Normal,
                 opacity: 1.0,
                 op_trace_id: 7,
             }],
+        }
+    }
+
+    fn request_with_single_op(existing_layer_key: Option<TileKey>) -> MergePlanRequest {
+        request_with_single_op_with_token(existing_layer_key, 900)
+    }
+
+    fn request_with_two_ops(
+        first_existing_layer_key: Option<TileKey>,
+        second_existing_layer_key: Option<TileKey>,
+    ) -> MergePlanRequest {
+        MergePlanRequest {
+            stroke_session_id: 100,
+            tx_token: 901,
+            program_revision: Some(3),
+            layer_id: 22,
+            tile_ops: vec![
+                MergePlanTileOp {
+                    tile_x: 0,
+                    tile_y: 0,
+                    existing_layer_key: first_existing_layer_key,
+                    stroke_buffer_key: TileKey(500),
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    op_trace_id: 7,
+                },
+                MergePlanTileOp {
+                    tile_x: 1,
+                    tile_y: 0,
+                    existing_layer_key: second_existing_layer_key,
+                    stroke_buffer_key: TileKey(501),
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    op_trace_id: 8,
+                },
+            ],
         }
     }
 
@@ -951,7 +1076,7 @@ mod tests {
             .ack_merge_result(submission.receipt_id, notice.notice_id)
             .expect("ack completion notice before unlock");
         let _ = engine.drain_business_results();
-        let second = engine.submit_merge_plan(request_with_single_op(None));
+        let second = engine.submit_merge_plan(request_with_single_op_with_token(None, 901));
         assert!(second.is_ok());
     }
 
@@ -1163,7 +1288,7 @@ mod tests {
             .submit_merge_plan(request_with_single_op(None))
             .expect("submit first plan");
         let second_submission = engine
-            .submit_merge_plan(request_with_single_op(None))
+            .submit_merge_plan(request_with_single_op_with_token(None, 901))
             .expect("submit second plan");
 
         let duplicated_notice_id = TileMergeCompletionNoticeId {
@@ -1236,5 +1361,188 @@ mod tests {
         let notices = engine.poll_submission_results();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].receipt_id, submission.receipt_id);
+    }
+
+    #[test]
+    fn submit_rejects_duplicate_tx_token_for_same_stroke_session() {
+        let store = SharedFakeTileStore::default();
+        store.seed_key(
+            TileKey(500),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 9,
+            },
+        );
+        let mut engine = TileMergeEngine::new(store);
+        let request = request_with_single_op(None);
+
+        let first = engine
+            .submit_merge_plan(request.clone())
+            .expect("first submit");
+        let duplicate = engine
+            .submit_merge_plan(request)
+            .expect_err("duplicate tx token must fail fast");
+        assert!(matches!(
+            duplicate,
+            TileMergeError::DuplicateTxToken {
+                stroke_session_id,
+                tx_token,
+                existing_receipt_id
+            } if stroke_session_id == 100 && tx_token == 900 && existing_receipt_id == first.receipt_id
+        ));
+    }
+
+    #[test]
+    fn submit_rejects_shared_previous_key_across_multiple_tile_ops() {
+        let store = SharedFakeTileStore::default();
+        let shared_previous_key = TileKey(600);
+        store.seed_key(
+            TileKey(500),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 9,
+            },
+        );
+        store.seed_key(
+            TileKey(501),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 11,
+            },
+        );
+        store.seed_key(
+            shared_previous_key,
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 10,
+            },
+        );
+
+        let mut engine = TileMergeEngine::new(store);
+        let error = engine
+            .submit_merge_plan(request_with_two_ops(
+                Some(shared_previous_key),
+                Some(shared_previous_key),
+            ))
+            .expect_err("shared previous key must be rejected");
+        assert!(matches!(
+            error,
+            TileMergeError::SharedPreviousKeyNotAllowed {
+                stroke_session_id,
+                layer_id,
+                previous_key,
+                first_tile_x,
+                first_tile_y,
+                duplicate_tile_x,
+                duplicate_tile_y,
+            } if stroke_session_id == 100
+                && layer_id == 22
+                && previous_key == shared_previous_key
+                && first_tile_x == 0
+                && first_tile_y == 0
+                && duplicate_tile_x == 1
+                && duplicate_tile_y == 0
+        ));
+    }
+
+    #[test]
+    fn new_key_mapping_preserves_tile_coordinates() {
+        let store = SharedFakeTileStore::default();
+        store.seed_key(
+            TileKey(500),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 9,
+            },
+        );
+        store.seed_key(
+            TileKey(501),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 11,
+            },
+        );
+
+        let mut engine = TileMergeEngine::new(store);
+        let submission = engine
+            .submit_merge_plan(request_with_two_ops(None, None))
+            .expect("submit merge plan");
+        assert_eq!(submission.new_key_mappings.len(), 2);
+        assert_eq!(submission.new_key_mappings[0].tile_x, 0);
+        assert_eq!(submission.new_key_mappings[0].tile_y, 0);
+        assert_eq!(submission.new_key_mappings[1].tile_x, 1);
+        assert_eq!(submission.new_key_mappings[1].tile_y, 0);
+    }
+
+    #[test]
+    fn finalize_precheck_prevents_partial_drop_key_release() {
+        let store = SharedFakeTileStore::default();
+        let first_old_layer_key = TileKey(600);
+        let second_old_layer_key = TileKey(601);
+        store.seed_key(
+            TileKey(500),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 9,
+            },
+        );
+        store.seed_key(
+            TileKey(501),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 11,
+            },
+        );
+        store.seed_key(
+            first_old_layer_key,
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 10,
+            },
+        );
+        store.seed_key(
+            second_old_layer_key,
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 12,
+            },
+        );
+
+        let mut engine = TileMergeEngine::new(store.clone());
+        let submission = engine
+            .submit_merge_plan(request_with_two_ops(
+                Some(first_old_layer_key),
+                Some(second_old_layer_key),
+            ))
+            .expect("submit merge plan");
+        let notice = completion_notice(&submission, MergeExecutionResult::Succeeded);
+
+        engine
+            .on_renderer_merge_completion(notice.clone())
+            .expect("enqueue completion notice");
+        let _ = engine.poll_submission_results();
+        engine
+            .ack_merge_result(submission.receipt_id, notice.notice_id)
+            .expect("ack completion notice");
+
+        store.remove_key_for_test(second_old_layer_key);
+        let finalize_error = engine
+            .finalize_receipt(submission.receipt_id)
+            .expect_err("missing drop key must fail precheck");
+        assert!(matches!(
+            finalize_error,
+            TileMergeError::UnknownTileKey {
+                key,
+                stage,
+                ..
+            } if key == second_old_layer_key && stage == "finalize.precheck_drop_key"
+        ));
+        assert!(store.has_key(first_old_layer_key));
+        assert_eq!(
+            engine
+                .query_receipt_state(submission.receipt_id)
+                .expect("state remains succeeded"),
+            ReceiptState::Succeeded
+        );
     }
 }
