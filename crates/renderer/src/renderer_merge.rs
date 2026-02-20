@@ -159,6 +159,12 @@ struct SubmissionGpuOp {
     gpu_merge_op: GpuMergeOp,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedSubmission {
+    report: SubmissionReport,
+    submission_gpu_ops: Vec<SubmissionGpuOp>,
+}
+
 #[derive(Debug)]
 struct InFlightSubmission {
     renderer_submission_id: RendererSubmissionId,
@@ -324,27 +330,29 @@ impl MergeOrchestrator {
         Ok(())
     }
 
-    pub(crate) fn submit_pending_merges(
+    fn prepare_pending_submission(
         &mut self,
         frame_id: u64,
         budget: u32,
-    ) -> Result<SubmissionReport, MergeSubmitError> {
+    ) -> Result<PreparedSubmission, MergeSubmitError> {
         if budget == 0 {
             return Err(MergeSubmitError::ZeroBudget);
         }
-        let mut submitted_receipt_ids = Vec::new();
-        while submitted_receipt_ids.len() < (budget as usize) {
-            let Some(receipt_id) = self.pending_receipts.pop_front() else {
-                break;
-            };
-            submitted_receipt_ids.push(receipt_id);
-        }
+        let submitted_receipt_ids: Vec<_> = self
+            .pending_receipts
+            .iter()
+            .take(budget as usize)
+            .copied()
+            .collect();
 
         if submitted_receipt_ids.is_empty() {
-            return Ok(SubmissionReport {
-                frame_id,
-                renderer_submission_id: None,
-                receipt_ids: Vec::new(),
+            return Ok(PreparedSubmission {
+                report: SubmissionReport {
+                    frame_id,
+                    renderer_submission_id: None,
+                    receipt_ids: Vec::new(),
+                },
+                submission_gpu_ops: Vec::new(),
             });
         }
 
@@ -354,95 +362,50 @@ impl MergeOrchestrator {
             .checked_add(1)
             .expect("renderer submission id overflow");
 
+        let mut submission_gpu_ops = Vec::new();
         for receipt_id in &submitted_receipt_ids {
-            let entry =
-                self.receipts
-                    .get_mut(receipt_id)
-                    .ok_or(MergeSubmitError::UnknownReceipt {
-                        receipt_id: *receipt_id,
-                    })?;
-            match entry.state {
-                MergeReceiptState::Planned => {
-                    entry.state = MergeReceiptState::Submitted {
-                        renderer_submission_id,
-                        frame_id,
-                    };
-                    entry.state = MergeReceiptState::Pending {
-                        renderer_submission_id,
-                        frame_id,
-                    };
-                    self.progress_queue.push_back(ReceiptProgress {
-                        receipt: entry.receipt.clone(),
-                        status: ExecutionStatus::Pending,
-                    });
-                }
-                _ => {
-                    return Err(MergeSubmitError::IllegalState {
-                        receipt_id: *receipt_id,
-                        state: entry.state.label(),
-                    });
-                }
-            }
-        }
-
-        self.submissions.insert(
-            renderer_submission_id,
-            SubmissionEntry {
-                frame_id,
-                receipt_ids: submitted_receipt_ids.clone(),
-            },
-        );
-
-        Ok(SubmissionReport {
-            frame_id,
-            renderer_submission_id: Some(renderer_submission_id),
-            receipt_ids: submitted_receipt_ids,
-        })
-    }
-
-    pub(crate) fn poll_submission_results(&mut self, _frame_id: u64) -> Vec<ReceiptProgress> {
-        self.progress_queue.drain(..).collect()
-    }
-
-    fn submission_gpu_ops(
-        &self,
-        renderer_submission_id: RendererSubmissionId,
-    ) -> Result<Vec<SubmissionGpuOp>, MergeSubmitError> {
-        let submission = self.submissions.get(&renderer_submission_id).ok_or(
-            MergeSubmitError::UnknownSubmission {
-                renderer_submission_id,
-            },
-        )?;
-        let mut ops = Vec::new();
-        for receipt_id in &submission.receipt_ids {
             let entry = self
                 .receipts
                 .get(receipt_id)
                 .ok_or(MergeSubmitError::UnknownReceipt {
                     receipt_id: *receipt_id,
                 })?;
-            ops.extend(
-                entry
-                    .gpu_merge_ops
-                    .iter()
-                    .copied()
-                    .map(|gpu_merge_op| SubmissionGpuOp {
-                        receipt_id: *receipt_id,
-                        gpu_merge_op,
-                    }),
-            );
+            if !matches!(entry.state, MergeReceiptState::Planned) {
+                return Err(MergeSubmitError::IllegalState {
+                    receipt_id: *receipt_id,
+                    state: entry.state.label(),
+                });
+            }
+            submission_gpu_ops.extend(entry.gpu_merge_ops.iter().copied().map(|gpu_merge_op| {
+                SubmissionGpuOp {
+                    receipt_id: *receipt_id,
+                    gpu_merge_op,
+                }
+            }));
         }
-        Ok(ops)
+
+        Ok(PreparedSubmission {
+            report: SubmissionReport {
+                frame_id,
+                renderer_submission_id: Some(renderer_submission_id),
+                receipt_ids: submitted_receipt_ids,
+            },
+            submission_gpu_ops,
+        })
     }
 
-    fn register_in_flight_submission(
+    fn commit_submitted_submission(
         &mut self,
-        renderer_submission_id: RendererSubmissionId,
-        frame_id: u64,
+        prepared: PreparedSubmission,
         done_receiver: mpsc::Receiver<()>,
-    ) -> Result<(), MergeSubmitError> {
-        if !self.submissions.contains_key(&renderer_submission_id) {
-            return Err(MergeSubmitError::UnknownSubmission {
+    ) -> Result<SubmissionReport, MergeSubmitError> {
+        let Some(renderer_submission_id) = prepared.report.renderer_submission_id else {
+            return Ok(prepared.report);
+        };
+        let frame_id = prepared.report.frame_id;
+
+        if self.submissions.contains_key(&renderer_submission_id) {
+            return Err(MergeSubmitError::DuplicateSubmissionInFlight {
                 renderer_submission_id,
             });
         }
@@ -455,12 +418,81 @@ impl MergeOrchestrator {
                 renderer_submission_id,
             });
         }
+
+        for (index, receipt_id) in prepared.report.receipt_ids.iter().enumerate() {
+            let pending_receipt_id =
+                self.pending_receipts
+                    .get(index)
+                    .ok_or(MergeSubmitError::UnknownReceipt {
+                        receipt_id: *receipt_id,
+                    })?;
+            if pending_receipt_id != receipt_id {
+                return Err(MergeSubmitError::IllegalState {
+                    receipt_id: *receipt_id,
+                    state: "QueueOrderMismatch",
+                });
+            }
+
+            let entry = self
+                .receipts
+                .get(receipt_id)
+                .ok_or(MergeSubmitError::UnknownReceipt {
+                    receipt_id: *receipt_id,
+                })?;
+            if !matches!(entry.state, MergeReceiptState::Planned) {
+                return Err(MergeSubmitError::IllegalState {
+                    receipt_id: *receipt_id,
+                    state: entry.state.label(),
+                });
+            }
+        }
+
+        for _ in 0..prepared.report.receipt_ids.len() {
+            self.pending_receipts
+                .pop_front()
+                .expect("pending queue must contain committed receipt");
+        }
+
+        for receipt_id in &prepared.report.receipt_ids {
+            let entry =
+                self.receipts
+                    .get_mut(receipt_id)
+                    .ok_or(MergeSubmitError::UnknownReceipt {
+                        receipt_id: *receipt_id,
+                    })?;
+            entry.state = MergeReceiptState::Submitted {
+                renderer_submission_id,
+                frame_id,
+            };
+            entry.state = MergeReceiptState::Pending {
+                renderer_submission_id,
+                frame_id,
+            };
+            self.progress_queue.push_back(ReceiptProgress {
+                receipt: entry.receipt.clone(),
+                status: ExecutionStatus::Pending,
+            });
+        }
+
+        self.submissions.insert(
+            renderer_submission_id,
+            SubmissionEntry {
+                frame_id,
+                receipt_ids: prepared.report.receipt_ids.clone(),
+            },
+        );
+
         self.in_flight_submissions.push(InFlightSubmission {
             renderer_submission_id,
             frame_id,
             done_receiver,
         });
-        Ok(())
+
+        Ok(prepared.report)
+    }
+
+    pub(crate) fn poll_submission_results(&mut self, _frame_id: u64) -> Vec<ReceiptProgress> {
+        self.progress_queue.drain(..).collect()
     }
 
     fn drain_completed_submissions(&mut self) -> Vec<CompletedSubmission> {
@@ -748,36 +780,34 @@ impl Renderer {
         frame_id: u64,
         budget: u32,
     ) -> Result<SubmissionReport, MergeSubmitError> {
-        let report = self
+        let prepared = self
             .merge_orchestrator
-            .submit_pending_merges(frame_id, budget)?;
-        let Some(renderer_submission_id) = report.renderer_submission_id else {
-            return Ok(report);
+            .prepare_pending_submission(frame_id, budget)?;
+        let Some(renderer_submission_id) = prepared.report.renderer_submission_id else {
+            return Ok(prepared.report);
         };
 
-        let gpu_merge_ops = self
-            .merge_orchestrator
-            .submission_gpu_ops(renderer_submission_id)?;
         let mut encoder =
             self.gpu_state
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("renderer.merge_submission"),
                 });
-        self.encode_merge_submission(renderer_submission_id, &mut encoder, &gpu_merge_ops)?;
+        self.encode_merge_submission(
+            renderer_submission_id,
+            &mut encoder,
+            &prepared.submission_gpu_ops,
+        )?;
         self.gpu_state.queue.submit(Some(encoder.finish()));
 
         let (done_sender, done_receiver) = mpsc::channel();
         self.gpu_state.queue.on_submitted_work_done(move || {
-            let _ = done_sender.send(());
+            if let Err(error) = done_sender.send(()) {
+                eprintln!("merge completion callback channel send failed: {error}");
+            }
         });
-        self.merge_orchestrator.register_in_flight_submission(
-            renderer_submission_id,
-            frame_id,
-            done_receiver,
-        )?;
-
-        Ok(report)
+        self.merge_orchestrator
+            .commit_submitted_submission(prepared, done_receiver)
     }
 
     pub fn poll_submission_results(
@@ -1037,6 +1067,70 @@ mod tests {
         }]
     }
 
+    fn commit_submission_for_test(
+        orchestrator: &mut MergeOrchestrator,
+        frame_id: u64,
+        budget: u32,
+    ) -> (SubmissionReport, mpsc::Sender<()>) {
+        let prepared = orchestrator
+            .prepare_pending_submission(frame_id, budget)
+            .expect("prepare pending submission");
+        let report = prepared.report.clone();
+        let (done_sender, done_receiver) = mpsc::channel();
+        orchestrator
+            .commit_submitted_submission(prepared, done_receiver)
+            .expect("commit submitted submission");
+        (report, done_sender)
+    }
+
+    #[test]
+    fn prepare_submission_is_side_effect_free_until_commit() {
+        let mut orchestrator = MergeOrchestrator::default();
+        let receipt = receipt(9);
+        orchestrator
+            .enqueue_planned_merge(
+                receipt.clone(),
+                merge_ops(),
+                MergePlanMeta {
+                    stroke_session_id: receipt.stroke_session_id,
+                    tx_token: receipt.tx_token,
+                    program_revision: receipt.program_revision,
+                },
+            )
+            .expect("enqueue planned merge");
+
+        let prepared = orchestrator
+            .prepare_pending_submission(21, 1)
+            .expect("prepare pending submission");
+        assert_eq!(prepared.report.receipt_ids, vec![receipt.receipt_id]);
+
+        let state = orchestrator
+            .receipts
+            .get(&receipt.receipt_id)
+            .expect("receipt must exist")
+            .state
+            .label();
+        assert_eq!(state, "Planned");
+        assert_eq!(orchestrator.pending_receipts.len(), 1);
+        assert!(orchestrator.submissions.is_empty());
+        assert!(orchestrator.in_flight_submissions.is_empty());
+
+        let (done_sender, done_receiver) = mpsc::channel();
+        orchestrator
+            .commit_submitted_submission(prepared, done_receiver)
+            .expect("commit submitted submission");
+        done_sender.send(()).expect("send completion");
+
+        let state = orchestrator
+            .receipts
+            .get(&receipt.receipt_id)
+            .expect("receipt must exist")
+            .state
+            .label();
+        assert_eq!(state, "Pending");
+        assert!(orchestrator.pending_receipts.is_empty());
+    }
+
     #[test]
     fn submit_and_ack_success_flow_reaches_finalized() {
         let mut orchestrator = MergeOrchestrator::default();
@@ -1053,9 +1147,7 @@ mod tests {
             )
             .expect("enqueue planned merge");
 
-        let report = orchestrator
-            .submit_pending_merges(10, 1)
-            .expect("submit pending merge");
+        let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 10, 1);
         assert_eq!(report.receipt_ids, vec![receipt.receipt_id]);
         let submission_id = report
             .renderer_submission_id
@@ -1107,9 +1199,7 @@ mod tests {
                 },
             )
             .expect("enqueue planned merge");
-        let report = orchestrator
-            .submit_pending_merges(12, 1)
-            .expect("submit pending merge");
+        let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 12, 1);
         let submission_id = report
             .renderer_submission_id
             .expect("submission id must be assigned");
@@ -1154,17 +1244,10 @@ mod tests {
                 },
             )
             .expect("enqueue planned merge");
-        let report = orchestrator
-            .submit_pending_merges(14, 1)
-            .expect("submit pending merge");
-        let submission_id = report
+        let (report, done_sender) = commit_submission_for_test(&mut orchestrator, 14, 1);
+        report
             .renderer_submission_id
             .expect("submission id must be assigned");
-
-        let (done_sender, done_receiver) = mpsc::channel();
-        orchestrator
-            .register_in_flight_submission(submission_id, 14, done_receiver)
-            .expect("register in-flight submission");
         done_sender.send(()).expect("mark submission completed");
 
         let completed_submissions = orchestrator.drain_completed_submissions();
@@ -1199,9 +1282,7 @@ mod tests {
                 },
             )
             .expect("enqueue planned merge");
-        let report = orchestrator
-            .submit_pending_merges(13, 1)
-            .expect("submit pending merge");
+        let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 13, 1);
         let submission_id = report
             .renderer_submission_id
             .expect("submission id must be assigned");
