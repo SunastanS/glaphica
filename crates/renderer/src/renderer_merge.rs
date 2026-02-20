@@ -68,6 +68,9 @@ pub enum MergePollError {
     UnknownSubmission {
         renderer_submission_id: RendererSubmissionId,
     },
+    DuplicateAckableNotice {
+        receipt_id: StrokeExecutionReceiptId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +82,12 @@ pub struct MergeCompletionNotice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeAckError {
+    NoticeNotAckable {
+        receipt_id: StrokeExecutionReceiptId,
+    },
+    NoticeMismatch {
+        receipt_id: StrokeExecutionReceiptId,
+    },
     UnknownReceipt {
         receipt_id: StrokeExecutionReceiptId,
     },
@@ -105,6 +114,10 @@ pub enum MergeAckError {
 pub enum MergeFinalizeError {
     UnknownReceipt {
         receipt_id: StrokeExecutionReceiptId,
+    },
+    SubmissionStillInFlight {
+        receipt_id: StrokeExecutionReceiptId,
+        renderer_submission_id: RendererSubmissionId,
     },
     IllegalTransition {
         receipt_id: StrokeExecutionReceiptId,
@@ -286,6 +299,7 @@ pub(crate) struct MergeOrchestrator {
     pending_receipts: VecDeque<StrokeExecutionReceiptId>,
     submissions: HashMap<RendererSubmissionId, SubmissionEntry>,
     in_flight_submissions: Vec<InFlightSubmission>,
+    ackable_notices: HashMap<StrokeExecutionReceiptId, MergeCompletionNotice>,
     progress_queue: VecDeque<ReceiptProgress>,
     succeeded_receipts: VecDeque<StrokeExecutionReceipt>,
     failed_receipts: VecDeque<StrokeExecutionFailure>,
@@ -491,7 +505,7 @@ impl MergeOrchestrator {
         Ok(prepared.report)
     }
 
-    pub(crate) fn poll_submission_results(&mut self, _frame_id: u64) -> Vec<ReceiptProgress> {
+    pub(crate) fn drain_receipt_progress_events(&mut self, _frame_id: u64) -> Vec<ReceiptProgress> {
         self.progress_queue.drain(..).collect()
     }
 
@@ -553,7 +567,7 @@ impl MergeOrchestrator {
     }
 
     fn collect_completion_notices(
-        &self,
+        &mut self,
         completed_submissions: Vec<CompletedSubmission>,
     ) -> Result<Vec<MergeCompletionNotice>, MergePollError> {
         let mut notices = Vec::new();
@@ -576,7 +590,7 @@ impl MergeOrchestrator {
                         }
                     }
                 };
-                notices.push(MergeCompletionNotice {
+                let notice = MergeCompletionNotice {
                     receipt_id,
                     audit_meta: MergeAuditMeta {
                         frame_id: completed.frame_id,
@@ -584,7 +598,12 @@ impl MergeOrchestrator {
                         op_trace_id: None,
                     },
                     result,
-                });
+                };
+                if self.ackable_notices.contains_key(&receipt_id) {
+                    return Err(MergePollError::DuplicateAckableNotice { receipt_id });
+                }
+                self.ackable_notices.insert(receipt_id, notice.clone());
+                notices.push(notice);
             }
         }
         Ok(notices)
@@ -592,21 +611,27 @@ impl MergeOrchestrator {
 
     pub(crate) fn ack_merge_result(
         &mut self,
-        receipt_id: StrokeExecutionReceiptId,
-        result: MergeExecutionResult,
-        audit_meta: MergeAuditMeta,
+        notice: MergeCompletionNotice,
     ) -> Result<(), MergeAckError> {
+        let receipt_id = notice.receipt_id;
+        let Some(registered_notice) = self.ackable_notices.get(&receipt_id) else {
+            return Err(MergeAckError::NoticeNotAckable { receipt_id });
+        };
+        if registered_notice != &notice {
+            return Err(MergeAckError::NoticeMismatch { receipt_id });
+        }
+
         let submission = self
             .submissions
-            .get(&audit_meta.renderer_submission_id)
+            .get(&notice.audit_meta.renderer_submission_id)
             .ok_or(MergeAckError::UnknownSubmission {
                 receipt_id,
-                renderer_submission_id: audit_meta.renderer_submission_id,
+                renderer_submission_id: notice.audit_meta.renderer_submission_id,
             })?;
         if !submission.receipt_ids.contains(&receipt_id) {
             return Err(MergeAckError::ReceiptNotInSubmission {
                 receipt_id,
-                renderer_submission_id: audit_meta.renderer_submission_id,
+                renderer_submission_id: notice.audit_meta.renderer_submission_id,
             });
         }
 
@@ -637,17 +662,16 @@ impl MergeOrchestrator {
                 });
             }
         };
-        if state_submission_id != audit_meta.renderer_submission_id {
+        if state_submission_id != notice.audit_meta.renderer_submission_id {
             return Err(MergeAckError::ReceiptSubmissionMismatch {
                 receipt_id,
                 expected_submission_id: state_submission_id,
-                received_submission_id: audit_meta.renderer_submission_id,
+                received_submission_id: notice.audit_meta.renderer_submission_id,
             });
         }
 
-        match result {
+        match notice.result {
             MergeExecutionResult::Succeeded => {
-                let _ = audit_meta;
                 entry.state = MergeReceiptState::Succeeded;
                 self.succeeded_receipts.push_back(entry.receipt.clone());
                 self.progress_queue.push_back(ReceiptProgress {
@@ -660,8 +684,8 @@ impl MergeOrchestrator {
                     receipt_id,
                     stroke_session_id: entry.receipt.stroke_session_id,
                     tx_token: entry.receipt.tx_token,
-                    frame_id: audit_meta.frame_id,
-                    renderer_submission_id: audit_meta.renderer_submission_id,
+                    frame_id: notice.audit_meta.frame_id,
+                    renderer_submission_id: notice.audit_meta.renderer_submission_id,
                     op_stage: MergeOpStage::Merge,
                     message,
                 };
@@ -678,6 +702,8 @@ impl MergeOrchestrator {
             }
         }
 
+        self.ackable_notices.remove(&receipt_id);
+
         Ok(())
     }
 
@@ -686,6 +712,15 @@ impl MergeOrchestrator {
         receipt_id: StrokeExecutionReceiptId,
         terminal_state: ReceiptTerminalState,
     ) -> Result<(), MergeFinalizeError> {
+        if let Some(renderer_submission_id) = self.receipt_submission_id(receipt_id) {
+            if self.is_submission_in_flight(renderer_submission_id) {
+                return Err(MergeFinalizeError::SubmissionStillInFlight {
+                    receipt_id,
+                    renderer_submission_id,
+                });
+            }
+        }
+
         let state = self
             .receipts
             .get(&receipt_id)
@@ -736,9 +771,13 @@ impl MergeOrchestrator {
             .unwrap_or(false);
         if should_remove_submission {
             self.submissions.remove(&renderer_submission_id);
-            self.in_flight_submissions
-                .retain(|entry| entry.renderer_submission_id != renderer_submission_id);
         }
+    }
+
+    fn is_submission_in_flight(&self, renderer_submission_id: RendererSubmissionId) -> bool {
+        self.in_flight_submissions
+            .iter()
+            .any(|entry| entry.renderer_submission_id == renderer_submission_id)
     }
 
     fn receipt_submission_id(
@@ -810,7 +849,7 @@ impl Renderer {
             .commit_submitted_submission(prepared, done_receiver)
     }
 
-    pub fn poll_submission_results(
+    pub fn poll_completion_notices(
         &mut self,
         frame_id: u64,
     ) -> Result<Vec<MergeCompletionNotice>, MergePollError> {
@@ -852,18 +891,13 @@ impl Renderer {
             .collect_completion_notices(completed_submissions)
     }
 
-    pub fn ack_merge_result(
-        &mut self,
-        receipt_id: StrokeExecutionReceiptId,
-        result: MergeExecutionResult,
-        audit_meta: MergeAuditMeta,
-    ) -> Result<(), MergeAckError> {
-        self.merge_orchestrator
-            .ack_merge_result(receipt_id, result, audit_meta)
+    pub fn ack_merge_result(&mut self, notice: MergeCompletionNotice) -> Result<(), MergeAckError> {
+        self.merge_orchestrator.ack_merge_result(notice)
     }
 
-    pub fn drain_receipt_progress(&mut self, frame_id: u64) -> Vec<ReceiptProgress> {
-        self.merge_orchestrator.poll_submission_results(frame_id)
+    pub fn drain_receipt_progress_events(&mut self, frame_id: u64) -> Vec<ReceiptProgress> {
+        self.merge_orchestrator
+            .drain_receipt_progress_events(frame_id)
     }
 
     pub fn ack_receipt_terminal_state(
@@ -1083,6 +1117,21 @@ mod tests {
         (report, done_sender)
     }
 
+    fn complete_and_collect_single_notice(
+        orchestrator: &mut MergeOrchestrator,
+        done_sender: mpsc::Sender<()>,
+    ) -> MergeCompletionNotice {
+        done_sender
+            .send(())
+            .expect("mark submission completed for notice collection");
+        let completed_submissions = orchestrator.drain_completed_submissions();
+        let notices = orchestrator
+            .collect_completion_notices(completed_submissions)
+            .expect("collect completion notices");
+        assert_eq!(notices.len(), 1);
+        notices[0].clone()
+    }
+
     #[test]
     fn prepare_submission_is_side_effect_free_until_commit() {
         let mut orchestrator = MergeOrchestrator::default();
@@ -1147,29 +1196,21 @@ mod tests {
             )
             .expect("enqueue planned merge");
 
-        let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 10, 1);
+        let (report, done_sender) = commit_submission_for_test(&mut orchestrator, 10, 1);
         assert_eq!(report.receipt_ids, vec![receipt.receipt_id]);
-        let submission_id = report
+        report
             .renderer_submission_id
             .expect("submission id must be assigned");
 
-        let progress = orchestrator.poll_submission_results(10);
+        let progress = orchestrator.drain_receipt_progress_events(10);
         assert_eq!(progress.len(), 1);
         assert!(matches!(progress[0].status, ExecutionStatus::Pending));
 
-        orchestrator
-            .ack_merge_result(
-                receipt.receipt_id,
-                MergeExecutionResult::Succeeded,
-                MergeAuditMeta {
-                    frame_id: 10,
-                    renderer_submission_id: submission_id,
-                    op_trace_id: Some(77),
-                },
-            )
-            .expect("ack success");
+        let notice = complete_and_collect_single_notice(&mut orchestrator, done_sender);
 
-        let progress = orchestrator.poll_submission_results(11);
+        orchestrator.ack_merge_result(notice).expect("ack success");
+
+        let progress = orchestrator.drain_receipt_progress_events(11);
         assert_eq!(progress.len(), 1);
         assert!(matches!(progress[0].status, ExecutionStatus::Succeeded));
         assert_eq!(
@@ -1199,34 +1240,19 @@ mod tests {
                 },
             )
             .expect("enqueue planned merge");
-        let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 12, 1);
-        let submission_id = report
+        let (report, done_sender) = commit_submission_for_test(&mut orchestrator, 12, 1);
+        report
             .renderer_submission_id
             .expect("submission id must be assigned");
+        let notice = complete_and_collect_single_notice(&mut orchestrator, done_sender);
 
         orchestrator
-            .ack_merge_result(
-                receipt.receipt_id,
-                MergeExecutionResult::Succeeded,
-                MergeAuditMeta {
-                    frame_id: 12,
-                    renderer_submission_id: submission_id,
-                    op_trace_id: None,
-                },
-            )
+            .ack_merge_result(notice.clone())
             .expect("first ack success");
         let error = orchestrator
-            .ack_merge_result(
-                receipt.receipt_id,
-                MergeExecutionResult::Succeeded,
-                MergeAuditMeta {
-                    frame_id: 12,
-                    renderer_submission_id: submission_id,
-                    op_trace_id: None,
-                },
-            )
+            .ack_merge_result(notice)
             .expect_err("duplicate ack must fail fast");
-        assert!(matches!(error, MergeAckError::IllegalState { .. }));
+        assert!(matches!(error, MergeAckError::NoticeNotAckable { .. }));
     }
 
     #[test]
@@ -1259,12 +1285,75 @@ mod tests {
         assert!(matches!(notices[0].result, MergeExecutionResult::Succeeded));
 
         orchestrator
-            .ack_merge_result(
-                notices[0].receipt_id,
-                notices[0].result.clone(),
-                notices[0].audit_meta,
-            )
+            .ack_merge_result(notices[0].clone())
             .expect("manual ack must succeed");
+    }
+
+    #[test]
+    fn forged_ack_without_polled_notice_is_rejected() {
+        let mut orchestrator = MergeOrchestrator::default();
+        let receipt = receipt(5);
+        orchestrator
+            .enqueue_planned_merge(
+                receipt.clone(),
+                merge_ops(),
+                MergePlanMeta {
+                    stroke_session_id: receipt.stroke_session_id,
+                    tx_token: receipt.tx_token,
+                    program_revision: receipt.program_revision,
+                },
+            )
+            .expect("enqueue planned merge");
+        let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 15, 1);
+        let submission_id = report
+            .renderer_submission_id
+            .expect("submission id must be assigned");
+
+        let error = orchestrator
+            .ack_merge_result(MergeCompletionNotice {
+                receipt_id: receipt.receipt_id,
+                result: MergeExecutionResult::Succeeded,
+                audit_meta: MergeAuditMeta {
+                    frame_id: 15,
+                    renderer_submission_id: submission_id,
+                    op_trace_id: None,
+                },
+            })
+            .expect_err("forged ack must fail fast");
+        assert!(matches!(error, MergeAckError::NoticeNotAckable { .. }));
+    }
+
+    #[test]
+    fn terminal_ack_is_rejected_while_submission_in_flight() {
+        let mut orchestrator = MergeOrchestrator::default();
+        let receipt = receipt(6);
+        orchestrator
+            .enqueue_planned_merge(
+                receipt.clone(),
+                merge_ops(),
+                MergePlanMeta {
+                    stroke_session_id: receipt.stroke_session_id,
+                    tx_token: receipt.tx_token,
+                    program_revision: receipt.program_revision,
+                },
+            )
+            .expect("enqueue planned merge");
+        let (_report, done_sender) = commit_submission_for_test(&mut orchestrator, 16, 1);
+        let finalize_error = orchestrator
+            .ack_receipt_terminal_state(receipt.receipt_id, ReceiptTerminalState::Finalized)
+            .expect_err("terminal ack must fail while submission is in flight");
+        assert!(matches!(
+            finalize_error,
+            MergeFinalizeError::SubmissionStillInFlight { .. }
+        ));
+
+        let notice = complete_and_collect_single_notice(&mut orchestrator, done_sender);
+        orchestrator
+            .ack_merge_result(notice)
+            .expect("ack succeeds after completion notice");
+        orchestrator
+            .ack_receipt_terminal_state(receipt.receipt_id, ReceiptTerminalState::Finalized)
+            .expect("finalize succeeds after ack and completion");
     }
 
     #[test]
@@ -1283,22 +1372,21 @@ mod tests {
             )
             .expect("enqueue planned merge");
         let (report, _done_sender) = commit_submission_for_test(&mut orchestrator, 13, 1);
-        let submission_id = report
+        report
             .renderer_submission_id
             .expect("submission id must be assigned");
+        let completed_submissions =
+            orchestrator.fail_all_in_flight_submissions(GpuSubmissionCompletion::DeviceError {
+                message: "gpu merge failed".to_owned(),
+            });
+        let notices = orchestrator
+            .collect_completion_notices(completed_submissions)
+            .expect("collect failed completion notices");
+        assert_eq!(notices.len(), 1);
+        let notice = notices[0].clone();
 
         orchestrator
-            .ack_merge_result(
-                receipt.receipt_id,
-                MergeExecutionResult::Failed {
-                    message: "gpu merge failed".to_owned(),
-                },
-                MergeAuditMeta {
-                    frame_id: 13,
-                    renderer_submission_id: submission_id,
-                    op_trace_id: Some(8),
-                },
-            )
+            .ack_merge_result(notice)
             .expect("ack failed result");
 
         let failures = orchestrator.take_failed_receipts();

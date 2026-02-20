@@ -5,7 +5,7 @@
 This document defines how `tiles` should consume renderer merge completion data after
 the ack-path refactor:
 
-- `Renderer::poll_submission_results` only reports completion notices.
+- `Renderer::poll_completion_notices` only reports completion notices.
 - `Renderer::ack_merge_result` is the only state transition entry for receipt settlement.
 
 This contract is intentionally limited to renderer-facing integration.
@@ -22,7 +22,7 @@ This contract is intentionally limited to renderer-facing integration.
 ### Tiles (renderer caller)
 
 - Consume renderer completion notices.
-- Execute unified ack for each notice via `renderer.ack_merge_result(...)`.
+- Execute unified ack for each notice via `renderer.ack_merge_result(notice)`.
 - Own any higher-level aggregation policy outside renderer.
 
 ## API Contract
@@ -35,7 +35,7 @@ This contract is intentionally limited to renderer-facing integration.
 - `audit_meta: MergeAuditMeta`
 - `result: MergeExecutionResult`
 
-`Renderer::poll_submission_results(frame_id) -> Result<Vec<MergeCompletionNotice>, MergePollError>`
+`Renderer::poll_completion_notices(frame_id) -> Result<Vec<MergeCompletionNotice>, MergePollError>`
 
 Semantics:
 
@@ -47,7 +47,7 @@ Semantics:
 
 For each completion notice:
 
-1. Call `renderer.ack_merge_result(notice.receipt_id, notice.result, notice.audit_meta)`.
+1. Call `renderer.ack_merge_result(notice)`.
 2. Record ack result according to tiles-level policy.
 
 Recommended tiles-side aggregation shape:
@@ -85,7 +85,8 @@ Notes:
 
 ## Invariants
 
-- Receipt settlement is single-path only: `ack_merge_result`.
+- Receipt settlement is single-path only: `ack_merge_result` with a notice produced by
+  `poll_completion_notices`.
 - Polling path must not call ack implicitly.
 - Duplicate ack remains fail-fast (`MergeAckError::IllegalState`).
 - Renderer does not define how tiles forwards outcomes further upstream.
@@ -102,6 +103,12 @@ Notes:
   channel in the same frame tick.
 - If ack fails for a receipt, record per-receipt failure and continue processing remaining
   notices for deterministic batch reporting.
+
+## API naming and usage
+
+- `poll_completion_notices`: source of truth for ackable completion data.
+- `drain_receipt_progress_events`: status/event stream for observers only.
+- Only `poll_completion_notices` output may drive `ack_merge_result`.
 
 ## Current limits
 
