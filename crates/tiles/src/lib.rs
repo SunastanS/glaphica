@@ -492,6 +492,8 @@ impl<K> VirtualImage<K> {
 pub(crate) use atlas::{rgba8_tile_len, tile_origin};
 
 mod atlas;
+mod merge_callback;
+mod merge_submission;
 
 pub use atlas::{
     GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
@@ -499,6 +501,15 @@ pub use atlas::{
     GenericTileAtlasGpuArray, GenericTileAtlasStore, GroupTileAtlasGpuArray, GroupTileAtlasStore,
     RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray, RuntimeGenericTileAtlasStore,
     TileAtlasConfig, TileAtlasGpuArray, TileAtlasStore, TilePayloadKind,
+};
+pub use merge_callback::{
+    TileMergeAckFailure, TileMergeBatchAck, TileMergeCompletionCallback,
+    TileMergeCompletionNotice, TileMergeCompletionNoticeId, TileMergeTerminalUpdate,
+};
+pub use merge_submission::{
+    AckOutcome, MergePlanRequest, MergePlanTileOp, MergeSubmission, MergeTileStore,
+    ReceiptState, RendererSubmitPayload, TileKeyMapping, TileMergeEngine, TileMergeError,
+    TilesBusinessResult,
 };
 
 #[cfg(test)]

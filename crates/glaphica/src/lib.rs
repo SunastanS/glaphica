@@ -2,17 +2,22 @@ pub mod driver_bridge;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use document::Document;
 use render_protocol::{
-    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle, RenderOp,
-    RenderStepSupportMatrix, Viewport,
+    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle,
+    ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId, Viewport,
 };
 use renderer::{
-    BrushControlError, BrushRenderEnqueueError, FrameGpuTimingReport, PresentError,
-    RenderDataResolver, Renderer, ViewOpSender,
+    BrushControlError, BrushRenderEnqueueError, FrameGpuTimingReport, MergeAckError,
+    MergeCompletionNotice, MergeFinalizeError, MergePollError, PresentError, RenderDataResolver,
+    Renderer, ViewOpSender,
 };
-use tiles::{TileAddress, TileAtlasStore, TileKey};
+use tiles::{
+    TileAddress, TileAtlasStore, TileKey, TileMergeCompletionNoticeId, TileMergeEngine,
+    TileMergeError, TilesBusinessResult,
+};
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -73,9 +78,22 @@ impl RenderDataResolver for DocumentRenderDataResolver {
 pub struct GpuState {
     renderer: Renderer,
     view_sender: ViewOpSender,
+    tile_merge_engine: TileMergeEngine<Arc<TileAtlasStore>>,
     view_transform: ViewTransform,
     surface_size: PhysicalSize<u32>,
     next_frame_id: u64,
+}
+
+#[derive(Debug)]
+pub enum MergeBridgeError {
+    RendererPoll(MergePollError),
+    RendererAck(MergeAckError),
+    RendererFinalize(MergeFinalizeError),
+    Tiles(TileMergeError),
+    MissingRendererNotice {
+        receipt_id: StrokeExecutionReceiptId,
+        notice_id: TileMergeCompletionNoticeId,
+    },
 }
 
 impl GpuState {
@@ -158,8 +176,10 @@ impl GpuState {
 
         let render_data_resolver = Box::new(DocumentRenderDataResolver {
             document,
-            atlas_store,
+            atlas_store: Arc::clone(&atlas_store),
         });
+
+        let tile_merge_engine = TileMergeEngine::new(Arc::clone(&atlas_store));
 
         let (renderer, view_sender) = Renderer::new(
             device,
@@ -179,6 +199,7 @@ impl GpuState {
         Self {
             renderer,
             view_sender,
+            tile_merge_engine,
             view_transform,
             surface_size: size,
             next_frame_id: 0,
@@ -241,6 +262,78 @@ impl GpuState {
 
     pub fn pending_brush_dab_count(&self) -> u64 {
         self.renderer.pending_brush_dab_count()
+    }
+
+    pub fn process_renderer_merge_completions(
+        &mut self,
+        frame_id: u64,
+    ) -> Result<Vec<TilesBusinessResult>, MergeBridgeError> {
+        let renderer_notices = self
+            .renderer
+            .poll_completion_notices(frame_id)
+            .map_err(MergeBridgeError::RendererPoll)?;
+
+        let mut renderer_notice_by_key = HashMap::new();
+        for renderer_notice in renderer_notices {
+            let notice_id = notice_id_from_renderer(&renderer_notice);
+            let notice_key = (notice_id, renderer_notice.receipt_id);
+            self.tile_merge_engine
+                .on_renderer_completion_signal(
+                    renderer_notice.receipt_id,
+                    renderer_notice.audit_meta,
+                    renderer_notice.result.clone(),
+                )
+                .map_err(MergeBridgeError::Tiles)?;
+            let previous = renderer_notice_by_key.insert(notice_key, renderer_notice);
+            assert!(
+                previous.is_none(),
+                "renderer poll yielded duplicate merge notice key"
+            );
+        }
+
+        let completion_notices = self.tile_merge_engine.poll_submission_results();
+        for notice in completion_notices {
+            let notice_key = (notice.notice_id, notice.receipt_id);
+            let renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
+                MergeBridgeError::MissingRendererNotice {
+                    receipt_id: notice.receipt_id,
+                    notice_id: notice.notice_id,
+                },
+            )?;
+
+            self.renderer
+                .ack_merge_result(renderer_notice)
+                .map_err(MergeBridgeError::RendererAck)?;
+            self.tile_merge_engine
+                .ack_merge_result(notice.receipt_id, notice.notice_id)
+                .map_err(MergeBridgeError::Tiles)?;
+        }
+
+        Ok(self.tile_merge_engine.drain_business_results())
+    }
+
+    pub fn finalize_merge_receipt(
+        &mut self,
+        receipt_id: StrokeExecutionReceiptId,
+    ) -> Result<(), MergeBridgeError> {
+        self.renderer
+            .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Finalized)
+            .map_err(MergeBridgeError::RendererFinalize)?;
+        self.tile_merge_engine
+            .finalize_receipt(receipt_id)
+            .map_err(MergeBridgeError::Tiles)
+    }
+
+    pub fn abort_merge_receipt(
+        &mut self,
+        receipt_id: StrokeExecutionReceiptId,
+    ) -> Result<(), MergeBridgeError> {
+        self.renderer
+            .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Aborted)
+            .map_err(MergeBridgeError::RendererFinalize)?;
+        self.tile_merge_engine
+            .abort_receipt(receipt_id)
+            .map_err(MergeBridgeError::Tiles)
     }
 
     pub fn pan_canvas(&mut self, delta_x: f32, delta_y: f32) {
@@ -332,6 +425,14 @@ fn push_view_state(
     view_sender
         .send(RenderOp::SetViewTransform { matrix })
         .expect("send view transform");
+}
+
+fn notice_id_from_renderer(notice: &MergeCompletionNotice) -> TileMergeCompletionNoticeId {
+    TileMergeCompletionNoticeId {
+        renderer_submission_id: notice.audit_meta.renderer_submission_id,
+        frame_id: notice.audit_meta.frame_id,
+        op_trace_id: notice.audit_meta.op_trace_id,
+    }
 }
 
 #[cfg(test)]
