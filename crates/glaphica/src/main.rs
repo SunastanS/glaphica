@@ -14,7 +14,7 @@ use render_protocol::{
     ReferenceLayerSelection, ReferenceSetUpsert,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -116,8 +116,8 @@ struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     startup_image_path: Option<PathBuf>,
-    is_space_pressed: bool,
-    is_rotate_pressed: bool,
+    input_modifiers: InputModifierState,
+    interaction_mode: InteractionMode,
     is_left_mouse_pressed: bool,
     last_cursor_position: Option<(f64, f64)>,
     driver_debug: DriverDebugState,
@@ -128,9 +128,39 @@ struct App {
     frame_scheduler: FrameScheduler,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InteractionMode {
+    #[default]
+    Draw,
+    Pan,
+    Rotate,
+}
+
+#[derive(Default)]
+struct InputModifierState {
+    is_space_pressed: bool,
+    is_rotate_pressed: bool,
+}
+
+impl InputModifierState {
+    fn interaction_mode(&self) -> InteractionMode {
+        if self.is_space_pressed {
+            InteractionMode::Pan
+        } else if self.is_rotate_pressed {
+            InteractionMode::Rotate
+        } else {
+            InteractionMode::Draw
+        }
+    }
+}
+
 impl App {
     fn window_id(&self) -> Option<WindowId> {
         self.window.as_ref().map(|w| w.id())
+    }
+
+    fn update_interaction_mode(&mut self) {
+        self.interaction_mode = self.input_modifiers.interaction_mode();
     }
 }
 
@@ -173,176 +203,18 @@ impl ApplicationHandler for App {
             return;
         }
 
-        match event {
+        match &event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let is_pressed = event.state == ElementState::Pressed;
-                match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Space) => {
-                        self.is_space_pressed = is_pressed;
-                    }
-                    PhysicalKey::Code(KeyCode::KeyR) => {
-                        self.is_rotate_pressed = is_pressed;
-                    }
-                    _ => {}
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left {
-                    self.is_left_mouse_pressed = state == ElementState::Pressed;
-                    if self.is_left_mouse_pressed
-                        && !self.is_space_pressed
-                        && !self.is_rotate_pressed
-                    {
-                        if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
-                            self.driver_debug.push_input(
-                                PointerEventPhase::Down,
-                                cursor_x as f32,
-                                cursor_y as f32,
-                            );
-                        }
-                    } else if !self.is_left_mouse_pressed
-                        && !self.is_space_pressed
-                        && !self.is_rotate_pressed
-                    {
-                        if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
-                            self.driver_debug.push_input(
-                                PointerEventPhase::Up,
-                                cursor_x as f32,
-                                cursor_y as f32,
-                            );
-                        }
-                        self.last_cursor_position = None;
-                    }
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                if self.is_left_mouse_pressed {
-                    if let Some((last_x, last_y)) = self.last_cursor_position {
-                        let delta_x = (position.x - last_x) as f32;
-                        let delta_y = (position.y - last_y) as f32;
-
-                        if let Some(gpu) = self.gpu.as_mut() {
-                            if self.is_space_pressed {
-                                gpu.pan_canvas(delta_x, delta_y);
-                            } else if self.is_rotate_pressed {
-                                gpu.rotate_canvas(delta_x * ROTATION_RADIANS_PER_PIXEL);
-                            } else {
-                                self.driver_debug.push_input(
-                                    PointerEventPhase::Move,
-                                    position.x as f32,
-                                    position.y as f32,
-                                );
-                            }
-                        }
-                    }
-                }
-                self.last_cursor_position = Some((position.x, position.y));
-
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let scroll_lines = match delta {
-                    MouseScrollDelta::LineDelta(_, vertical_lines) => vertical_lines,
-                    MouseScrollDelta::PixelDelta(physical_position) => {
-                        (physical_position.y as f32) / PIXELS_PER_SCROLL_LINE
-                    }
-                };
-                let zoom_factor = (scroll_lines * WHEEL_ZOOM_SPEED).exp();
-                let (anchor_x, anchor_y) =
-                    if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
-                        (cursor_x as f32, cursor_y as f32)
-                    } else if let Some(window) = self.window.as_ref() {
-                        let size = window.inner_size();
-                        (size.width as f32 * 0.5, size.height as f32 * 0.5)
-                    } else {
-                        (0.0, 0.0)
-                    };
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.zoom_canvas_about_viewport_point(zoom_factor, anchor_x, anchor_y);
-                }
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::Resized(new_size) => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.resize(new_size);
-                }
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
             WindowEvent::RedrawRequested => {
-                let Some(gpu) = self.gpu.as_mut() else {
-                    return;
-                };
-
-                let frame_sequence_id = self.next_driver_frame_sequence_id;
-                let previous_frame_gpu_micros = gpu
-                    .take_latest_gpu_timing_report()
-                    .map(|report| report.gpu_time_micros);
-                let (frame_stats, sample_chunks) =
-                    self.driver_debug.drain_debug_output(frame_sequence_id);
-                if let Some(sender) = self.brush_execution_sender.as_mut() {
-                    for sample_chunk in sample_chunks {
-                        sender
-                            .push_chunk(sample_chunk)
-                            .expect("push sample chunk into brush execution");
-                    }
-                }
-                if let Some(receiver) = self.brush_execution_receiver.as_mut() {
-                    while let Some(command) = receiver.pop_command() {
-                        gpu.enqueue_brush_render_command(command)
-                            .expect("enqueue brush render command");
-                    }
-                }
-                let brush_hot_path_active = self.driver_debug.has_active_stroke()
-                    || frame_stats.input.total_events > 0
-                    || frame_stats.output.chunk_count > 0;
-                let pending_brush_commands =
-                    u32::try_from(gpu.pending_brush_dab_count()).unwrap_or(u32::MAX);
-                let scheduler_decision = self.frame_scheduler.schedule_frame(FrameSchedulerInput {
-                    frame_sequence_id,
-                    brush_hot_path_active,
-                    pending_brush_commands,
-                    previous_frame_gpu_micros,
-                });
-                apply_frame_scheduler_decision(gpu, scheduler_decision);
-                self.next_driver_frame_sequence_id = self
-                    .next_driver_frame_sequence_id
-                    .checked_add(1)
-                    .expect("driver frame sequence id overflow");
-
-                match gpu.render() {
-                    Ok(()) => {}
-                    Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
-                        if let Some(window) = self.window.as_ref() {
-                            gpu.resize(window.inner_size());
-                            window.request_redraw();
-                        }
-                    }
-                    Err(wgpu::SurfaceError::Timeout) => {
-                        if let Some(window) = self.window.as_ref() {
-                            window.request_redraw();
-                        }
-                    }
-                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                        event_loop.exit();
-                    }
-                    Err(_) => {
-                        if let Some(window) = self.window.as_ref() {
-                            window.request_redraw();
-                        }
-                    }
-                }
+                self.render_frame(event_loop);
             }
             _ => {}
         }
+
+        self.handle_input_event(&event);
+        self.handle_pointer_event(&event);
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
@@ -353,6 +225,224 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    fn handle_input_event(&mut self, event: &WindowEvent) {
+        match event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.handle_keyboard_input(event);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.handle_mouse_wheel(delta);
+            }
+            WindowEvent::Resized(new_size) => {
+                self.handle_resize(*new_size);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_pointer_event(&mut self, event: &WindowEvent) {
+        match event {
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.handle_mouse_input(*state, *button);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.handle_cursor_moved(*position);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_keyboard_input(&mut self, event: &winit::event::KeyEvent) {
+        let is_pressed = event.state == ElementState::Pressed;
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::Space) => {
+                self.input_modifiers.is_space_pressed = is_pressed;
+                self.update_interaction_mode();
+            }
+            PhysicalKey::Code(KeyCode::KeyR) => {
+                self.input_modifiers.is_rotate_pressed = is_pressed;
+                self.update_interaction_mode();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        if button != MouseButton::Left {
+            return;
+        }
+
+        self.is_left_mouse_pressed = state == ElementState::Pressed;
+        if self.is_left_mouse_pressed {
+            if self.interaction_mode == InteractionMode::Draw {
+                if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
+                    self.driver_debug.push_input(
+                        PointerEventPhase::Down,
+                        cursor_x as f32,
+                        cursor_y as f32,
+                    );
+                }
+            }
+        } else {
+            if self.driver_debug.has_active_stroke() {
+                if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
+                    self.driver_debug.push_input(
+                        PointerEventPhase::Up,
+                        cursor_x as f32,
+                        cursor_y as f32,
+                    );
+                }
+            }
+            self.last_cursor_position = None;
+        }
+    }
+
+    fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        if self.is_left_mouse_pressed {
+            if let Some((last_x, last_y)) = self.last_cursor_position {
+                let delta_x = (position.x - last_x) as f32;
+                let delta_y = (position.y - last_y) as f32;
+
+                if let Some(gpu) = self.gpu.as_mut() {
+                    match self.interaction_mode {
+                        InteractionMode::Pan => {
+                            gpu.pan_canvas(delta_x, delta_y);
+                        }
+                        InteractionMode::Rotate => {
+                            gpu.rotate_canvas(delta_x * ROTATION_RADIANS_PER_PIXEL);
+                        }
+                        InteractionMode::Draw => {
+                            self.driver_debug.push_input(
+                                PointerEventPhase::Move,
+                                position.x as f32,
+                                position.y as f32,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.last_cursor_position = Some((position.x, position.y));
+
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
+    fn handle_mouse_wheel(&mut self, delta: &MouseScrollDelta) {
+        let scroll_lines = match delta {
+            MouseScrollDelta::LineDelta(_, vertical_lines) => *vertical_lines,
+            MouseScrollDelta::PixelDelta(physical_position) => {
+                (physical_position.y as f32) / PIXELS_PER_SCROLL_LINE
+            }
+        };
+        let zoom_factor = (scroll_lines * WHEEL_ZOOM_SPEED).exp();
+        let (anchor_x, anchor_y) = if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
+            (cursor_x as f32, cursor_y as f32)
+        } else if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            (size.width as f32 * 0.5, size.height as f32 * 0.5)
+        } else {
+            (0.0, 0.0)
+        };
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.zoom_canvas_about_viewport_point(zoom_factor, anchor_x, anchor_y);
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
+    fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.resize(new_size);
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
+    fn drain_brush_pipeline(
+        driver_debug: &mut DriverDebugState,
+        brush_execution_sender: &mut Option<BrushExecutionSampleSender>,
+        brush_execution_receiver: &mut Option<BrushExecutionCommandReceiver>,
+        frame_sequence_id: u64,
+        gpu: &mut GpuState,
+    ) -> FrameDrainStats {
+        let (frame_stats, sample_chunks) = driver_debug.drain_debug_output(frame_sequence_id);
+        if let Some(sender) = brush_execution_sender.as_mut() {
+            for sample_chunk in sample_chunks {
+                sender
+                    .push_chunk(sample_chunk)
+                    .expect("push sample chunk into brush execution");
+            }
+        }
+        if let Some(receiver) = brush_execution_receiver.as_mut() {
+            while let Some(command) = receiver.pop_command() {
+                gpu.enqueue_brush_render_command(command)
+                    .expect("enqueue brush render command");
+            }
+        }
+        frame_stats
+    }
+
+    fn render_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+
+        let frame_sequence_id = self.next_driver_frame_sequence_id;
+        let previous_frame_gpu_micros = gpu
+            .take_latest_gpu_timing_report()
+            .map(|report| report.gpu_time_micros);
+        let frame_stats = Self::drain_brush_pipeline(
+            &mut self.driver_debug,
+            &mut self.brush_execution_sender,
+            &mut self.brush_execution_receiver,
+            frame_sequence_id,
+            gpu,
+        );
+        let brush_hot_path_active = self.driver_debug.has_active_stroke()
+            || frame_stats.input.total_events > 0
+            || frame_stats.output.chunk_count > 0;
+        let pending_brush_commands =
+            u32::try_from(gpu.pending_brush_dab_count()).unwrap_or(u32::MAX);
+        let scheduler_decision = self.frame_scheduler.schedule_frame(FrameSchedulerInput {
+            frame_sequence_id,
+            brush_hot_path_active,
+            pending_brush_commands,
+            previous_frame_gpu_micros,
+        });
+        apply_frame_scheduler_decision(gpu, scheduler_decision);
+        self.next_driver_frame_sequence_id = self
+            .next_driver_frame_sequence_id
+            .checked_add(1)
+            .expect("driver frame sequence id overflow");
+
+        match gpu.render() {
+            Ok(()) => {}
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                if let Some(window) = self.window.as_ref() {
+                    gpu.resize(window.inner_size());
+                    window.request_redraw();
+                }
+            }
+            Err(wgpu::SurfaceError::Timeout) => {
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                event_loop.exit();
+            }
+            Err(_) => {
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
     fn initialize_brush_execution(&mut self) {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
