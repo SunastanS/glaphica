@@ -1,10 +1,10 @@
 pub mod driver_bridge;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
-use document::Document;
+use document::{Document, DocumentMergeError, MergeDirtyHint, TileCoordinate, TileReplacement};
 use render_protocol::{
     BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle,
     ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId, Viewport,
@@ -15,8 +15,8 @@ use renderer::{
     Renderer, ViewOpSender,
 };
 use tiles::{
-    TileAddress, TileAtlasStore, TileKey, TileMergeCompletionNoticeId, TileMergeEngine,
-    TileMergeError, TilesBusinessResult,
+    MergeAuditRecord, TileAddress, TileAtlasStore, TileKey, TileMergeCompletionNoticeId,
+    TileMergeEngine, TileMergeError, TilesBusinessResult,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -26,13 +26,17 @@ const DEFAULT_DOCUMENT_WIDTH: u32 = 1280;
 const DEFAULT_DOCUMENT_HEIGHT: u32 = 720;
 
 struct DocumentRenderDataResolver {
-    document: Arc<Document>,
+    document: Arc<RwLock<Document>>,
     atlas_store: Arc<TileAtlasStore>,
 }
 
 impl RenderDataResolver for DocumentRenderDataResolver {
     fn document_size(&self) -> (u32, u32) {
-        (self.document.size_x(), self.document.size_y())
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        (document.size_x(), document.size_y())
     }
 
     fn visit_image_tiles(
@@ -40,7 +44,11 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         image_handle: ImageHandle,
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
-        let Some(image) = self.document.image(image_handle) else {
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        let Some(image) = document.image(image_handle) else {
             return;
         };
 
@@ -55,7 +63,11 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         tile_coords: &[(u32, u32)],
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
-        let Some(image) = self.document.image(image_handle) else {
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        let Some(image) = document.image(image_handle) else {
             return;
         };
 
@@ -79,6 +91,7 @@ pub struct GpuState {
     renderer: Renderer,
     view_sender: ViewOpSender,
     tile_merge_engine: TileMergeEngine<Arc<TileAtlasStore>>,
+    document: Arc<RwLock<Document>>,
     view_transform: ViewTransform,
     surface_size: PhysicalSize<u32>,
     next_frame_id: u64,
@@ -90,6 +103,7 @@ pub enum MergeBridgeError {
     RendererAck(MergeAckError),
     RendererFinalize(MergeFinalizeError),
     Tiles(TileMergeError),
+    Document(DocumentMergeError),
     MissingRendererNotice {
         receipt_id: StrokeExecutionReceiptId,
         notice_id: TileMergeCompletionNoticeId,
@@ -163,7 +177,7 @@ impl GpuState {
         let atlas_store = Arc::new(atlas_store);
 
         let document = create_startup_document(&atlas_store, startup_image_path.as_deref());
-        let initial_snapshot = document.render_tree_snapshot(0);
+        let initial_snapshot = document.render_tree_snapshot(document.revision());
         initial_snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
             .unwrap_or_else(|error| {
@@ -172,10 +186,10 @@ impl GpuState {
                     error.step_index, error.reason
                 )
             });
-        let document = Arc::new(document);
+        let document = Arc::new(RwLock::new(document));
 
         let render_data_resolver = Box::new(DocumentRenderDataResolver {
-            document,
+            document: Arc::clone(&document),
             atlas_store: Arc::clone(&atlas_store),
         });
 
@@ -200,6 +214,7 @@ impl GpuState {
             renderer,
             view_sender,
             tile_merge_engine,
+            document,
             view_transform,
             surface_size: size,
             next_frame_id: 0,
@@ -267,7 +282,7 @@ impl GpuState {
     pub fn process_renderer_merge_completions(
         &mut self,
         frame_id: u64,
-    ) -> Result<Vec<TilesBusinessResult>, MergeBridgeError> {
+    ) -> Result<(), MergeBridgeError> {
         let renderer_notices = self
             .renderer
             .poll_completion_notices(frame_id)
@@ -309,7 +324,9 @@ impl GpuState {
                 .map_err(MergeBridgeError::Tiles)?;
         }
 
-        Ok(self.tile_merge_engine.drain_business_results())
+        let business_results = self.tile_merge_engine.drain_business_results();
+        self.apply_tiles_business_results(&business_results)?;
+        Ok(())
     }
 
     pub fn finalize_merge_receipt(
@@ -333,6 +350,15 @@ impl GpuState {
             .map_err(MergeBridgeError::RendererFinalize)?;
         self.tile_merge_engine
             .abort_receipt(receipt_id)
+            .map_err(MergeBridgeError::Tiles)
+    }
+
+    pub fn query_merge_audit_record(
+        &self,
+        receipt_id: StrokeExecutionReceiptId,
+    ) -> Result<MergeAuditRecord, MergeBridgeError> {
+        self.tile_merge_engine
+            .query_merge_audit_record(receipt_id)
             .map_err(MergeBridgeError::Tiles)
     }
 
@@ -360,6 +386,87 @@ impl GpuState {
             .zoom_about_point(zoom_factor, viewport_x, viewport_y)
             .unwrap_or_else(|error| panic!("zoom canvas failed: {error:?}"));
         push_view_state(&self.view_sender, &self.view_transform, self.surface_size);
+    }
+
+    fn apply_tiles_business_results(
+        &mut self,
+        business_results: &[TilesBusinessResult],
+    ) -> Result<(), MergeBridgeError> {
+        for result in business_results {
+            match result {
+                TilesBusinessResult::CanFinalize {
+                    receipt_id,
+                    stroke_session_id,
+                    layer_id,
+                    new_key_mappings,
+                    ..
+                } => {
+                    {
+                        let mut document = self
+                            .document
+                            .write()
+                            .unwrap_or_else(|_| panic!("document write lock poisoned"));
+                        let expected_revision = document.revision();
+                        document
+                            .begin_merge(*layer_id, *stroke_session_id, expected_revision)
+                            .map_err(MergeBridgeError::Document)?;
+                        let replacements: Vec<TileReplacement> = new_key_mappings
+                            .iter()
+                            .map(|mapping| TileReplacement {
+                                tile_x: mapping.tile_x,
+                                tile_y: mapping.tile_y,
+                                new_key: mapping.new_key,
+                            })
+                            .collect();
+                        let dirty_tiles: Vec<TileCoordinate> = replacements
+                            .iter()
+                            .map(|replacement| TileCoordinate {
+                                tile_x: replacement.tile_x,
+                                tile_y: replacement.tile_y,
+                            })
+                            .collect();
+                        document
+                            .commit_tile_replacements(*layer_id, &replacements)
+                            .map_err(MergeBridgeError::Document)?;
+                        let summary = document
+                            .finalize_merge(
+                                *layer_id,
+                                *stroke_session_id,
+                                MergeDirtyHint::Tiles(dirty_tiles),
+                            )
+                            .map_err(MergeBridgeError::Document)?;
+                        if document.take_render_tree_cache_dirty() {
+                            let render_tree = document.render_tree_snapshot(summary.revision);
+                            self.view_sender
+                                .send(RenderOp::BindRenderTree(render_tree))
+                                .expect("send updated render tree after merge");
+                        }
+                        let _dirty_layers = document.take_dirty_layers();
+                    }
+                    self.finalize_merge_receipt(*receipt_id)?;
+                }
+                TilesBusinessResult::RequiresAbort {
+                    receipt_id,
+                    stroke_session_id,
+                    layer_id,
+                    ..
+                } => {
+                    {
+                        let mut document = self
+                            .document
+                            .write()
+                            .unwrap_or_else(|_| panic!("document write lock poisoned"));
+                        if document.has_active_merge(*layer_id, *stroke_session_id) {
+                            document
+                                .abort_merge(*layer_id, *stroke_session_id)
+                                .map_err(MergeBridgeError::Document)?;
+                        }
+                    }
+                    self.abort_merge_receipt(*receipt_id)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

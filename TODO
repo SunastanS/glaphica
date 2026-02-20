@@ -4,3 +4,17 @@
 - crates/renderer/src/renderer_merge.rs:1074
   - 问题：测试主要覆盖 orchestrator 内部，不覆盖 Renderer 公共 API 的端到端时序（poll_completion_notices + ack_merge_result + drain_receipt_progress_events 联动）。
   - 建议：补 1-2 个 renderer 级集成测试，验证你文档 crates/renderer/docs/merge_ack_integration.md 的关键不变量，特别是“poll 只产出、ack 才推进、重复 ack fail-fast”。
+crates/tiles/src/merge_submission.rs:554 abort_receipt 状态约束
+- 问题：abort_receipt 只允许 Failed -> Aborted。但真实集成里可能出现“GPU 成功、document finalize 失败”（版本冲突/层不存在/重复 tile 提交等），这时 receipt 是 Succeeded，却无法 abort 并回收 new_key。
+- 建议：允许上层在业务失败时执行 Succeeded -> Aborted（或新增 abort_after_business_reject），明确“业务终态由上层策略决定”。
+- 影响：这是 document 集成时的阻塞点，不修会产生 key 泄漏和悬挂 receipt。
+crates/tiles/src/merge_submission.rs:249 submit_merge_plan 缺少重复 tile 坐标防御
+- 问题：当前校验了 shared previous_key，但没校验同一 (tile_x, tile_y) 在同一 plan 内重复出现。会产生多条 mapping 指向同坐标，后续 document 很可能拒绝提交。
+- 建议：在 submit 阶段 fail-fast 检测重复 tile 坐标，返回结构化错误（例如 DuplicateTileCoordInPlan）。
+- 影响：避免“GPU 成功但业务层不可提交”的高成本失败路径。
+crates/tiles/src/merge_submission.rs:200 submitted_tokens 生命周期
+- 问题：submitted_tokens 只增不减。若 token 不是全局单调唯一，会导致长期误拒绝；即使 token 全局唯一，也会无限增长。
+- 建议：明确 token 语义并固化策略：
+  - 若“全局唯一且永久拒绝重放”，需文档化并考虑容量治理；
+  - 若“仅在活动窗口去重”，在 Finalized/Aborted 后清理索引。
+- 影响：偏 RFC（可演进性）问题，短期不一定阻塞，但建议在 document 开发前定死规则。

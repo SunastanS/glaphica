@@ -7,8 +7,8 @@ use brush_execution::{
 };
 use driver::PointerEventPhase;
 use frame_scheduler::{FrameScheduler, FrameSchedulerDecision, FrameSchedulerInput};
-use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
 use glaphica::GpuState;
+use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
 use render_protocol::{
     BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramUpsert,
     ReferenceLayerSelection, ReferenceSetUpsert,
@@ -414,13 +414,8 @@ impl App {
             previous_frame_gpu_micros,
         });
         apply_frame_scheduler_decision(gpu, scheduler_decision);
-        let merge_business_results = gpu
-            .process_renderer_merge_completions(frame_sequence_id)
+        gpu.process_renderer_merge_completions(frame_sequence_id)
             .expect("process renderer merge completions");
-        assert!(
-            merge_business_results.is_empty(),
-            "tiles merge business results are not wired to document yet"
-        );
         self.next_driver_frame_sequence_id = self
             .next_driver_frame_sequence_id
             .checked_add(1)

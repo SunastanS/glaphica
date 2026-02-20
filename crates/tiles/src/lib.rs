@@ -507,9 +507,9 @@ pub use merge_callback::{
     TileMergeCompletionNotice, TileMergeCompletionNoticeId, TileMergeTerminalUpdate,
 };
 pub use merge_submission::{
-    AckOutcome, MergePlanRequest, MergePlanTileOp, MergeSubmission, MergeTileStore,
-    ReceiptState, RendererSubmitPayload, TileKeyMapping, TileMergeEngine, TileMergeError,
-    TilesBusinessResult,
+    AckOutcome, MergeAuditRecord, MergeCompletionAuditRecord, MergePlanRequest, MergePlanTileOp,
+    MergeSubmission, MergeTileStore, ReceiptState, RendererSubmitPayload, TileKeyMapping,
+    TileMergeEngine, TileMergeError, TilesBusinessResult,
 };
 
 #[cfg(test)]

@@ -92,6 +92,24 @@ pub enum TilesBusinessResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeCompletionAuditRecord {
+    pub notice_id: TileMergeCompletionNoticeId,
+    pub audit_meta: MergeAuditMeta,
+    pub result: MergeExecutionResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeAuditRecord {
+    pub receipt_id: StrokeExecutionReceiptId,
+    pub stroke_session_id: StrokeSessionId,
+    pub tx_token: TxToken,
+    pub program_revision: Option<ProgramRevision>,
+    pub layer_id: LayerId,
+    pub receipt_state: ReceiptState,
+    pub completion: Option<MergeCompletionAuditRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TileMergeError {
     EmptyMergePlan {
         stroke_session_id: StrokeSessionId,
@@ -187,8 +205,11 @@ impl MergeTileStore for Arc<TileAtlasStore> {
 #[derive(Debug)]
 struct ReceiptEntry {
     stroke_session_id: StrokeSessionId,
+    tx_token: TxToken,
+    program_revision: Option<ProgramRevision>,
     layer_id: LayerId,
     state: ReceiptState,
+    completion: Option<MergeCompletionAuditRecord>,
     new_key_mappings: Vec<TileKeyMapping>,
     drop_key_list: Vec<TileKey>,
 }
@@ -358,8 +379,11 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
             receipt_id,
             ReceiptEntry {
                 stroke_session_id: request.stroke_session_id,
+                tx_token: request.tx_token,
+                program_revision: request.program_revision,
                 layer_id: request.layer_id,
                 state: ReceiptState::Pending,
+                completion: None,
                 new_key_mappings: new_key_mappings.clone(),
                 drop_key_list: drop_key_list.clone(),
             },
@@ -457,6 +481,11 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         }
 
         entry.state = next_state;
+        entry.completion = Some(MergeCompletionAuditRecord {
+            notice_id,
+            audit_meta: notice.audit_meta,
+            result: notice.result.clone(),
+        });
         self.consumed_notices.insert(notice_key);
 
         match &notice.result {
@@ -503,6 +532,25 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
             .get(&receipt_id)
             .ok_or(TileMergeError::UnknownReceipt { receipt_id })?;
         Ok(entry.state)
+    }
+
+    pub fn query_merge_audit_record(
+        &self,
+        receipt_id: StrokeExecutionReceiptId,
+    ) -> Result<MergeAuditRecord, TileMergeError> {
+        let entry = self
+            .receipts
+            .get(&receipt_id)
+            .ok_or(TileMergeError::UnknownReceipt { receipt_id })?;
+        Ok(MergeAuditRecord {
+            receipt_id,
+            stroke_session_id: entry.stroke_session_id,
+            tx_token: entry.tx_token,
+            program_revision: entry.program_revision,
+            layer_id: entry.layer_id,
+            receipt_state: entry.state,
+            completion: entry.completion.clone(),
+        })
     }
 
     pub fn finalize_receipt(
@@ -965,6 +1013,58 @@ mod tests {
                 .expect("query succeeded state"),
             ReceiptState::Succeeded
         );
+    }
+
+    #[test]
+    fn query_merge_audit_record_reports_minimal_receipt_and_completion_metadata() {
+        let store = SharedFakeTileStore::default();
+        store.seed_key(
+            TileKey(500),
+            TileAddress {
+                atlas_layer: 0,
+                tile_index: 9,
+            },
+        );
+        let mut engine = TileMergeEngine::new(store);
+        let submission = engine
+            .submit_merge_plan(request_with_single_op_with_token(None, 913))
+            .expect("submit merge plan");
+
+        let pending_audit = engine
+            .query_merge_audit_record(submission.receipt_id)
+            .expect("query pending audit record");
+        assert_eq!(pending_audit.receipt_id, submission.receipt_id);
+        assert_eq!(pending_audit.stroke_session_id, 100);
+        assert_eq!(pending_audit.tx_token, 913);
+        assert_eq!(pending_audit.program_revision, Some(3));
+        assert_eq!(pending_audit.layer_id, 22);
+        assert_eq!(pending_audit.receipt_state, ReceiptState::Pending);
+        assert!(pending_audit.completion.is_none());
+
+        let notice = completion_notice(
+            &submission,
+            MergeExecutionResult::Failed {
+                message: "gpu merge failed".to_owned(),
+            },
+        );
+        engine
+            .on_renderer_merge_completion(notice.clone())
+            .expect("enqueue completion notice");
+        let _ = engine.poll_submission_results();
+        engine
+            .ack_merge_result(submission.receipt_id, notice.notice_id)
+            .expect("ack failed completion");
+
+        let failed_audit = engine
+            .query_merge_audit_record(submission.receipt_id)
+            .expect("query failed audit record");
+        assert_eq!(failed_audit.receipt_state, ReceiptState::Failed);
+        let completion = failed_audit
+            .completion
+            .expect("completion audit should be recorded after ack");
+        assert_eq!(completion.notice_id, notice.notice_id);
+        assert_eq!(completion.audit_meta, notice.audit_meta);
+        assert_eq!(completion.result, notice.result);
     }
 
     #[test]
