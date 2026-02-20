@@ -1,0 +1,6 @@
+- crates/renderer/src/renderer_merge.rs:612
+  - 问题：ack_merge_result 依赖调用方逐条 ack；如果上层漏掉某条 notice，receipt 会永久停在 Pending，并阻塞 submission 清理。当前没有超时/补偿策略。
+  - 建议：给 orchestrator 加一个可观测的“ack backlog”接口（如 pending_ack_notice_count / oldest frame），并在 frame scheduler 加 fail-fast 监控或超时告警，避免静默堆积。
+- crates/renderer/src/renderer_merge.rs:1074
+  - 问题：测试主要覆盖 orchestrator 内部，不覆盖 Renderer 公共 API 的端到端时序（poll_completion_notices + ack_merge_result + drain_receipt_progress_events 联动）。
+  - 建议：补 1-2 个 renderer 级集成测试，验证你文档 crates/renderer/docs/merge_ack_integration.md 的关键不变量，特别是“poll 只产出、ack 才推进、重复 ack fail-fast”。
