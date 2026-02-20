@@ -412,53 +412,41 @@ impl MergeOrchestrator {
         &mut self,
         prepared: PreparedSubmission,
         done_receiver: mpsc::Receiver<()>,
-    ) -> Result<SubmissionReport, MergeSubmitError> {
+    ) -> SubmissionReport {
         let Some(renderer_submission_id) = prepared.report.renderer_submission_id else {
-            return Ok(prepared.report);
+            return prepared.report;
         };
         let frame_id = prepared.report.frame_id;
 
-        if self.submissions.contains_key(&renderer_submission_id) {
-            return Err(MergeSubmitError::DuplicateSubmissionInFlight {
-                renderer_submission_id,
-            });
-        }
-        if self
+        assert!(
+            !self.submissions.contains_key(&renderer_submission_id),
+            "internal invariant violated: submission already exists before commit ({renderer_submission_id:?})"
+        );
+        assert!(
+            !self
             .in_flight_submissions
             .iter()
-            .any(|entry| entry.renderer_submission_id == renderer_submission_id)
-        {
-            return Err(MergeSubmitError::DuplicateSubmissionInFlight {
-                renderer_submission_id,
-            });
-        }
+            .any(|entry| entry.renderer_submission_id == renderer_submission_id),
+            "internal invariant violated: submission already in-flight before commit ({renderer_submission_id:?})"
+        );
 
         for (index, receipt_id) in prepared.report.receipt_ids.iter().enumerate() {
-            let pending_receipt_id =
-                self.pending_receipts
-                    .get(index)
-                    .ok_or(MergeSubmitError::UnknownReceipt {
-                        receipt_id: *receipt_id,
-                    })?;
-            if pending_receipt_id != receipt_id {
-                return Err(MergeSubmitError::IllegalState {
-                    receipt_id: *receipt_id,
-                    state: "QueueOrderMismatch",
-                });
-            }
+            let pending_receipt_id = self.pending_receipts.get(index).expect(
+                "internal invariant violated: pending queue shorter than prepared submission",
+            );
+            assert_eq!(
+                *pending_receipt_id, *receipt_id,
+                "internal invariant violated: pending queue order diverged before commit"
+            );
 
             let entry = self
                 .receipts
                 .get(receipt_id)
-                .ok_or(MergeSubmitError::UnknownReceipt {
-                    receipt_id: *receipt_id,
-                })?;
-            if !matches!(entry.state, MergeReceiptState::Planned) {
-                return Err(MergeSubmitError::IllegalState {
-                    receipt_id: *receipt_id,
-                    state: entry.state.label(),
-                });
-            }
+                .expect("internal invariant violated: prepared receipt missing at commit");
+            assert!(
+                matches!(entry.state, MergeReceiptState::Planned),
+                "internal invariant violated: prepared receipt not Planned at commit"
+            );
         }
 
         for _ in 0..prepared.report.receipt_ids.len() {
@@ -468,12 +456,9 @@ impl MergeOrchestrator {
         }
 
         for receipt_id in &prepared.report.receipt_ids {
-            let entry =
-                self.receipts
-                    .get_mut(receipt_id)
-                    .ok_or(MergeSubmitError::UnknownReceipt {
-                        receipt_id: *receipt_id,
-                    })?;
+            let entry = self.receipts.get_mut(receipt_id).expect(
+                "internal invariant violated: prepared receipt missing during state transition",
+            );
             entry.state = MergeReceiptState::Submitted {
                 renderer_submission_id,
                 frame_id,
@@ -502,7 +487,7 @@ impl MergeOrchestrator {
             done_receiver,
         });
 
-        Ok(prepared.report)
+        prepared.report
     }
 
     pub(crate) fn drain_receipt_progress_events(&mut self, _frame_id: u64) -> Vec<ReceiptProgress> {
@@ -845,8 +830,9 @@ impl Renderer {
                 eprintln!("merge completion callback channel send failed: {error}");
             }
         });
-        self.merge_orchestrator
-            .commit_submitted_submission(prepared, done_receiver)
+        Ok(self
+            .merge_orchestrator
+            .commit_submitted_submission(prepared, done_receiver))
     }
 
     pub fn poll_completion_notices(
@@ -1111,9 +1097,7 @@ mod tests {
             .expect("prepare pending submission");
         let report = prepared.report.clone();
         let (done_sender, done_receiver) = mpsc::channel();
-        orchestrator
-            .commit_submitted_submission(prepared, done_receiver)
-            .expect("commit submitted submission");
+        orchestrator.commit_submitted_submission(prepared, done_receiver);
         (report, done_sender)
     }
 
@@ -1165,9 +1149,7 @@ mod tests {
         assert!(orchestrator.in_flight_submissions.is_empty());
 
         let (done_sender, done_receiver) = mpsc::channel();
-        orchestrator
-            .commit_submitted_submission(prepared, done_receiver)
-            .expect("commit submitted submission");
+        orchestrator.commit_submitted_submission(prepared, done_receiver);
         done_sender.send(()).expect("send completion");
 
         let state = orchestrator
