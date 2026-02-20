@@ -1,3 +1,9 @@
+//! Agent collaboration rule for protocol message field changes:
+//! - Receiver/executor side may implement first and then report.
+//! - Initiator/caller side must report first and only modify after approval.
+//!
+//! Apply this rule to all message-passing fields defined in this crate.
+
 use std::sync::Arc;
 
 slotmap::new_key_type! {
@@ -13,6 +19,7 @@ pub type ProgramRevision = u64;
 pub type StrokeSessionId = u64;
 pub type ReferenceSetId = u64;
 pub type LayerId = u64;
+pub type TxToken = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BrushProgramKey {
@@ -131,6 +138,104 @@ pub struct BrushStrokeEnd {
 pub struct BrushBufferMerge {
     pub stroke_session_id: StrokeSessionId,
     pub target_layer_id: LayerId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StrokeExecutionReceiptId(pub u64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrokeExecutionReceipt {
+    pub receipt_id: StrokeExecutionReceiptId,
+    pub stroke_session_id: StrokeSessionId,
+    pub tx_token: TxToken,
+    pub program_revision: Option<ProgramRevision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RendererSubmissionId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergePlanMeta {
+    pub stroke_session_id: StrokeSessionId,
+    pub tx_token: TxToken,
+    pub program_revision: Option<ProgramRevision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeAuditMeta {
+    pub frame_id: u64,
+    pub renderer_submission_id: RendererSubmissionId,
+    pub op_trace_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeOpStage {
+    Merge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeErrorContext {
+    pub receipt_id: StrokeExecutionReceiptId,
+    pub stroke_session_id: StrokeSessionId,
+    pub tx_token: TxToken,
+    pub frame_id: u64,
+    pub renderer_submission_id: RendererSubmissionId,
+    pub op_stage: MergeOpStage,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrokeExecutionFailure {
+    pub receipt: StrokeExecutionReceipt,
+    pub error_ctx: MergeErrorContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionStatus {
+    Pending,
+    Succeeded,
+    Failed(MergeErrorContext),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptProgress {
+    pub receipt: StrokeExecutionReceipt,
+    pub status: ExecutionStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeExecutionResult {
+    Succeeded,
+    Failed { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionReport {
+    pub frame_id: u64,
+    pub renderer_submission_id: Option<RendererSubmissionId>,
+    pub receipt_ids: Vec<StrokeExecutionReceiptId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptTerminalState {
+    Finalized,
+    Aborted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuMergeOp {
+    pub base_tile: Option<GpuTileRef>,
+    pub stroke_tile: GpuTileRef,
+    pub output_tile: GpuTileRef,
+    pub blend_mode: BlendMode,
+    pub opacity: f32,
+    pub op_trace_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuTileRef {
+    pub atlas_layer: u32,
+    pub tile_index: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]

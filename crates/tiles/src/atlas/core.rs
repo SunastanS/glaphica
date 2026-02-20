@@ -60,12 +60,27 @@ impl AtlasLayout {
 #[derive(Debug, Clone)]
 pub(in crate::atlas) enum TileOp<UploadPayload> {
     Clear {
-        address: TileAddress,
+        target: TileOpTarget,
+    },
+    ClearBatch {
+        targets: Vec<TileOpTarget>,
     },
     Upload {
-        address: TileAddress,
+        target: TileOpTarget,
         payload: UploadPayload,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::atlas) struct TileOpTarget {
+    pub address: TileAddress,
+    generation: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TileRecord {
+    address: TileAddress,
+    generation: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +135,7 @@ impl<UploadPayload> TileOpQueue<UploadPayload> {
 struct TileAllocatorPage {
     free_tiles: Mutex<Vec<u16>>,
     dirty_bits: Mutex<Vec<u64>>,
+    generations: Mutex<Vec<u32>>,
     tiles_per_atlas: u32,
     atlas_occupancy_words: usize,
 }
@@ -136,6 +152,7 @@ impl TileAllocatorPage {
         Ok(Self {
             free_tiles: Mutex::new(free_tiles),
             dirty_bits: Mutex::new(vec![0; layout.atlas_occupancy_words]),
+            generations: Mutex::new(vec![0; layout.tiles_per_atlas as usize]),
             tiles_per_atlas: layout.tiles_per_atlas,
             atlas_occupancy_words: layout.atlas_occupancy_words,
         })
@@ -177,12 +194,39 @@ impl TileAllocatorPage {
         dirty_bits[word] &= !mask;
         Ok(was_dirty)
     }
+
+    fn generation(&self, tile_index: u16) -> Result<u32, TileAllocError> {
+        let index =
+            tile_slot_index(tile_index, self.tiles_per_atlas).ok_or(TileAllocError::AtlasFull)?;
+        let generations = self
+            .generations
+            .lock()
+            .expect("tile allocator generations lock poisoned");
+        generations
+            .get(index)
+            .copied()
+            .ok_or(TileAllocError::AtlasFull)
+    }
+
+    fn bump_generation(&self, tile_index: u16) -> Result<(), TileAllocError> {
+        let index =
+            tile_slot_index(tile_index, self.tiles_per_atlas).ok_or(TileAllocError::AtlasFull)?;
+        let mut generations = self
+            .generations
+            .lock()
+            .expect("tile allocator generations lock poisoned");
+        let generation = generations
+            .get_mut(index)
+            .ok_or(TileAllocError::AtlasFull)?;
+        *generation = generation.wrapping_add(1);
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 pub(in crate::atlas) struct TileAtlasCpu {
     pages: Vec<TileAllocatorPage>,
-    index_shards: [Mutex<HashMap<TileKey, TileAddress>>; INDEX_SHARDS],
+    index_shards: [Mutex<HashMap<TileKey, TileRecord>>; INDEX_SHARDS],
     next_key: AtomicU64,
     owner_tag: u64,
     next_set_id: AtomicU64,
@@ -247,23 +291,43 @@ impl TileAtlasCpu {
             .lock()
             .expect("tile index shard lock poisoned")
             .get(&key)
-            .copied()
+            .map(|record| record.address)
+    }
+
+    pub(in crate::atlas) fn resolve_op_target(&self, key: TileKey) -> Option<TileOpTarget> {
+        let shard = self.shard_for_key(key);
+        self.index_shards[shard]
+            .lock()
+            .expect("tile index shard lock poisoned")
+            .get(&key)
+            .map(|record| TileOpTarget {
+                address: record.address,
+                generation: record.generation,
+            })
     }
 
     fn allocate_raw(&self) -> Result<(TileKey, TileAddress, bool), TileAllocError> {
         let key = self.next_key()?;
         let address = self.take_free_address()?;
 
-        let shard = self.shard_for_key(key);
-        self.index_shards[shard]
-            .lock()
-            .expect("tile index shard lock poisoned")
-            .insert(key, address);
-
         let page = self
             .pages
             .get(address.atlas_layer as usize)
             .ok_or(TileAllocError::AtlasFull)?;
+        let generation = page.generation(address.tile_index)?;
+
+        let shard = self.shard_for_key(key);
+        self.index_shards[shard]
+            .lock()
+            .expect("tile index shard lock poisoned")
+            .insert(
+                key,
+                TileRecord {
+                    address,
+                    generation,
+                },
+            );
+
         let was_dirty = page.take_dirty(address.tile_index)?;
 
         Ok((key, address, was_dirty))
@@ -275,7 +339,10 @@ impl TileAtlasCpu {
     ) -> Result<(TileKey, TileAddress), TileAllocError> {
         let (key, address, was_dirty) = self.allocate_raw()?;
         if was_dirty {
-            if op_sender.send(TileOp::Clear { address }).is_err() {
+            let Some(target) = self.resolve_op_target(key) else {
+                panic!("allocated tile key must resolve to clear target");
+            };
+            if op_sender.send(TileOp::Clear { target }).is_err() {
                 self.rollback_allocate(key, address, true);
                 return Err(TileAllocError::QueueDisconnected);
             }
@@ -300,14 +367,17 @@ impl TileAtlasCpu {
             index.remove(&key)
         };
 
-        let Some(address) = address else {
+        let Some(record) = address else {
             return false;
         };
+        let address = record.address;
         let page = self
             .pages
             .get(address.atlas_layer as usize)
             .expect("tile address layer must be valid");
         page.mark_dirty(address.tile_index)
+            .expect("tile index must be in range");
+        page.bump_generation(address.tile_index)
             .expect("tile index must be in range");
         page.push_free(address.tile_index);
         true
@@ -354,33 +424,36 @@ impl TileAtlasCpu {
             }
         }
 
-        let mut released_addresses = Vec::with_capacity(keys.len());
+        let mut released_records = Vec::with_capacity(keys.len());
         for key in keys {
             let shard_id = self.shard_for_key(*key);
             let (_, shard) = shard_locks
                 .iter_mut()
                 .find(|(id, _)| *id == shard_id)
                 .expect("target shard lock must exist");
-            let address = shard
+            let record = shard
                 .remove(key)
                 .expect("tile key must exist after atomic precheck");
-            released_addresses.push(address);
+            released_records.push(record);
         }
 
         drop(shard_locks);
 
-        for address in &released_addresses {
+        for record in &released_records {
+            let address = record.address;
             let page = self
                 .pages
                 .get(address.atlas_layer as usize)
                 .expect("tile address layer must be valid");
             page.mark_dirty(address.tile_index)
                 .expect("tile index must be in range");
+            page.bump_generation(address.tile_index)
+                .expect("tile index must be in range");
             page.push_free(address.tile_index);
         }
 
         let mut released_count = 0u32;
-        for _ in &released_addresses {
+        for _ in &released_records {
             released_count = released_count
                 .checked_add(1)
                 .ok_or(TileSetError::KeySpaceExhausted)?;
@@ -408,7 +481,20 @@ impl TileAtlasCpu {
             page.mark_dirty(address.tile_index)
                 .expect("tile index must be in range");
         }
+        page.bump_generation(address.tile_index)
+            .expect("tile index must be in range");
         page.push_free(address.tile_index);
+    }
+
+    pub(in crate::atlas) fn should_execute_target(&self, target: TileOpTarget) -> bool {
+        let page = self
+            .pages
+            .get(target.address.atlas_layer as usize)
+            .expect("tile address layer must be valid");
+        let Ok(generation) = page.generation(target.address.tile_index) else {
+            return false;
+        };
+        generation == target.generation
     }
 
     fn shard_for_key(&self, key: TileKey) -> usize {
@@ -497,7 +583,9 @@ pub(in crate::atlas) fn reserve_tile_set_with(
             Err(error) => {
                 for key in keys {
                     let released = release(key);
-                    assert!(released, "reserved tile key must release during rollback");
+                    if !released {
+                        return Err(TileSetError::RollbackReleaseFailed);
+                    }
                 }
                 return Err(error.into());
             }
@@ -586,6 +674,29 @@ pub(in crate::atlas) fn create_atlas_texture_and_array_view(
     (texture, view)
 }
 
+pub(in crate::atlas) fn supports_texture_usage_for_format(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+) -> bool {
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _probe_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tiles.format_usage_probe"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    });
+    pollster::block_on(error_scope.pop()).is_none()
+}
+
 fn tile_bit(
     tile_index: u16,
     tiles_per_atlas: u32,
@@ -601,6 +712,14 @@ fn tile_bit(
     }
     let mask = 1u64 << (index % 64);
     Some((word, mask))
+}
+
+fn tile_slot_index(tile_index: u16, tiles_per_atlas: u32) -> Option<usize> {
+    let index = tile_index as usize;
+    if index >= (tiles_per_atlas as usize) {
+        return None;
+    }
+    Some(index)
 }
 
 pub(in crate::atlas) fn tile_coords_from_index_with_row(

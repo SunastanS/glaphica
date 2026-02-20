@@ -292,6 +292,13 @@ struct GpuState {
     tile_atlas: TileAtlasGpuArray,
     gpu_timing: GpuFrameTimingState,
     brush_pipeline_layout: wgpu::PipelineLayout,
+    merge_bind_group: wgpu::BindGroup,
+    merge_uniform_buffer: wgpu::Buffer,
+    merge_pipeline: wgpu::RenderPipeline,
+    _merge_scratch_texture: wgpu::Texture,
+    merge_scratch_view: wgpu::TextureView,
+    merge_device_lost_receiver: mpsc::Receiver<(wgpu::DeviceLostReason, String)>,
+    merge_uncaptured_error_receiver: mpsc::Receiver<String>,
 }
 
 struct DataState {
@@ -309,6 +316,7 @@ pub struct Renderer {
     view_state: ViewState,
     cache_state: CacheState,
     brush_work_state: BrushWorkState,
+    merge_orchestrator: renderer_merge::MergeOrchestrator,
 
     frame_state: FrameState,
 }
@@ -476,6 +484,13 @@ mod renderer_draw_builders;
 mod renderer_pipeline;
 
 mod renderer_view_ops;
+
+mod renderer_merge;
+
+pub use renderer_merge::{
+    MergeAckError, MergeCompletionNotice, MergeEnqueueError, MergeFinalizeError, MergePollError,
+    MergeSubmitError, MergeTileRefRole,
+};
 
 #[cfg(test)]
 mod tests;

@@ -43,6 +43,7 @@ impl GroupTileAtlasStore {
         config: TileAtlasConfig,
     ) -> Result<(Self, GroupTileAtlasGpuArray), TileAtlasCreateError> {
         core::validate_generic_atlas_config(device, GenericTileAtlasConfig::from(config))?;
+        validate_group_atlas_config(device, config)?;
         let layout = core::AtlasLayout::from_config(GenericTileAtlasConfig::from(config))?;
 
         let cpu = Arc::new(
@@ -119,6 +120,22 @@ impl GroupTileAtlasStore {
     ) -> Result<Vec<(TileKey, TileAddress)>, TileSetError> {
         core::resolve_tile_set(&self.cpu, set)
     }
+}
+
+fn validate_group_atlas_config(
+    device: &wgpu::Device,
+    config: TileAtlasConfig,
+) -> Result<(), TileAtlasCreateError> {
+    if !config.usage.contains(wgpu::TextureUsages::COPY_DST) {
+        return Err(TileAtlasCreateError::MissingCopyDstUsage);
+    }
+    if !config.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING) {
+        return Err(TileAtlasCreateError::MissingTextureBindingUsage);
+    }
+    if !core::supports_texture_usage_for_format(device, config.format, config.usage) {
+        return Err(TileAtlasCreateError::UnsupportedFormatUsage);
+    }
+    Ok(())
 }
 
 impl GroupTileAtlasGpuArray {

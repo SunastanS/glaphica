@@ -254,6 +254,10 @@ impl TileAtlasStore {
         bytes_per_row: u32,
     ) -> Result<VirtualImage<TileKey>, ImageIngestError> {
         let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
+        Rgba8Spec::validate_ingest_contract(self.usage()).map_err(ImageIngestError::from)?;
+        let bytes_per_row_usize: usize = bytes_per_row
+            .try_into()
+            .map_err(|_| ImageIngestError::SizeOverflow)?;
         let mut image = VirtualImage::new(size_x, size_y)?;
 
         for tile_y in 0..image.tiles_per_column() {
@@ -275,7 +279,7 @@ impl TileAtlasStore {
                     size_x,
                     size_y,
                     bytes,
-                    bytes_per_row,
+                    bytes_per_row_usize,
                     source_x,
                     source_y,
                     rect_width,
@@ -296,20 +300,12 @@ impl TileAtlasStore {
         source_size_x: u32,
         source_size_y: u32,
         source_bytes: &[u8],
-        source_bytes_per_row: u32,
+        source_bytes_per_row: usize,
         source_x: u32,
         source_y: u32,
         rect_width: u32,
         rect_height: u32,
     ) -> Result<Option<TileKey>, ImageIngestError> {
-        let _layout = rgba8_strided_layout(
-            source_size_x,
-            source_size_y,
-            source_bytes,
-            source_bytes_per_row,
-        )?;
-        Rgba8Spec::validate_ingest_contract(self.usage()).map_err(ImageIngestError::from)?;
-
         if rect_width == 0 || rect_height == 0 {
             return Ok(None);
         }
@@ -317,7 +313,7 @@ impl TileAtlasStore {
             return Err(ImageIngestError::NonTileAligned);
         }
 
-        let all_zero = rgba8_rect_all_zero_strided(
+        let all_zero = rgba8_rect_all_zero_strided_prevalidated(
             source_size_x,
             source_size_y,
             source_bytes,
@@ -331,9 +327,6 @@ impl TileAtlasStore {
             return Ok(None);
         }
 
-        let source_bytes_per_row_usize: usize = source_bytes_per_row
-            .try_into()
-            .map_err(|_| ImageIngestError::SizeOverflow)?;
         let rect_row_bytes: usize = rect_width
             .checked_mul(4)
             .ok_or(ImageIngestError::SizeOverflow)?
@@ -352,7 +345,7 @@ impl TileAtlasStore {
                 .checked_add(row)
                 .ok_or(ImageIngestError::SizeOverflow)?;
             let source_row_start = source_row
-                .checked_mul(source_bytes_per_row_usize)
+                .checked_mul(source_bytes_per_row)
                 .ok_or(ImageIngestError::SizeOverflow)?;
             let source_start = source_row_start
                 .checked_add(source_x_bytes)
@@ -415,6 +408,13 @@ impl TileAtlasGpuArray {
         }
     }
 
+    pub fn format(&self) -> wgpu::TextureFormat {
+        match &self.generic {
+            LayerGpuBackend::Unorm(_) => wgpu::TextureFormat::Rgba8Unorm,
+            LayerGpuBackend::Srgb(_) => wgpu::TextureFormat::Rgba8UnormSrgb,
+        }
+    }
+
     pub fn drain_and_execute(&self, queue: &wgpu::Queue) -> Result<usize, TileGpuDrainError> {
         match &self.generic {
             LayerGpuBackend::Unorm(gpu) => gpu.drain_and_execute(queue),
@@ -471,17 +471,16 @@ fn rgba8_strided_layout(
     })
 }
 
-fn rgba8_rect_all_zero_strided(
+fn rgba8_rect_all_zero_strided_prevalidated(
     size_x: u32,
     size_y: u32,
     bytes: &[u8],
-    bytes_per_row: u32,
+    bytes_per_row: usize,
     rect_x: u32,
     rect_y: u32,
     rect_width: u32,
     rect_height: u32,
 ) -> Result<bool, ImageIngestError> {
-    let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
     if rect_width == 0 || rect_height == 0 {
         return Ok(true);
     }
@@ -499,9 +498,6 @@ fn rgba8_rect_all_zero_strided(
     let rect_row_bytes = rect_width
         .checked_mul(4)
         .ok_or(ImageIngestError::SizeOverflow)? as usize;
-    let bytes_per_row_usize: usize = bytes_per_row
-        .try_into()
-        .map_err(|_| ImageIngestError::SizeOverflow)?;
     let rect_x_bytes: usize = rect_x
         .checked_mul(4)
         .ok_or(ImageIngestError::SizeOverflow)? as usize;
@@ -511,7 +507,7 @@ fn rgba8_rect_all_zero_strided(
             .checked_add(row)
             .ok_or(ImageIngestError::SizeOverflow)?;
         let row_start = (y as usize)
-            .checked_mul(bytes_per_row_usize)
+            .checked_mul(bytes_per_row)
             .ok_or(ImageIngestError::SizeOverflow)?;
         let start = row_start
             .checked_add(rect_x_bytes)

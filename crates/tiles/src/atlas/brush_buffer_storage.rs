@@ -95,6 +95,7 @@ pub struct GenericTileAtlasStore<F: TileFormatSpec + TileGpuOpAdapter = Rgba8Spe
 
 #[derive(Debug)]
 pub struct GenericTileAtlasGpuArray<F: TileFormatSpec + TileGpuOpAdapter = Rgba8Spec> {
+    cpu: Arc<core::TileAtlasCpu>,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     op_queue: core::TileOpQueue<F::UploadPayload>,
@@ -261,12 +262,13 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
 
         Ok((
             Self {
-                cpu,
+                cpu: Arc::clone(&cpu),
                 op_sender,
                 usage: config.usage,
                 _format: PhantomData,
             },
             GenericTileAtlasGpuArray {
+                cpu: Arc::clone(&cpu),
                 texture,
                 view,
                 op_queue,
@@ -295,10 +297,10 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
     }
 
     pub fn clear(&self, key: TileKey) -> Result<bool, TileAllocError> {
-        let Some(address) = self.cpu.resolve(key) else {
+        let Some(target) = self.cpu.resolve_op_target(key) else {
             return Ok(false);
         };
-        self.op_sender.send(core::TileOp::Clear { address })?;
+        self.op_sender.send(core::TileOp::Clear { target })?;
         Ok(true)
     }
 
@@ -324,21 +326,21 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
 
     pub fn clear_tile_set(&self, set: &TileSetHandle) -> Result<u32, TileSetError> {
         core::validate_tile_set_ownership(&self.cpu, set)?;
-        let mut addresses = Vec::with_capacity(set.len());
+        let mut targets = Vec::with_capacity(set.len());
         for key in set.keys() {
-            let Some(address) = self.cpu.resolve(*key) else {
+            let Some(target) = self.cpu.resolve_op_target(*key) else {
                 return Err(TileSetError::UnknownTileKey);
             };
-            addresses.push(address);
+            targets.push(target);
         }
 
-        let mut cleared_count = 0u32;
-        for address in addresses {
-            self.op_sender.send(core::TileOp::Clear { address })?;
-            cleared_count = cleared_count
-                .checked_add(1)
-                .ok_or(TileSetError::KeySpaceExhausted)?;
+        if targets.is_empty() {
+            return Ok(0);
         }
+
+        let cleared_count =
+            u32::try_from(targets.len()).map_err(|_| TileSetError::KeySpaceExhausted)?;
+        self.op_sender.send(core::TileOp::ClearBatch { targets })?;
         Ok(cleared_count)
     }
 
@@ -361,8 +363,11 @@ impl<F: TileUploadFormatSpec> GenericTileAtlasStore<F> {
     ) -> Result<TileKey, TileIngestError> {
         F::validate_upload_bytes(&bytes)?;
         let (key, address) = self.cpu.allocate(&self.op_sender)?;
+        let Some(target) = self.cpu.resolve_op_target(key) else {
+            panic!("allocated tile key must resolve to op target");
+        };
         if let Err(error) = self.op_sender.send(core::TileOp::Upload {
-            address,
+            target,
             payload: bytes,
         }) {
             self.cpu.rollback_allocate(key, address, true);
@@ -394,23 +399,50 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasGpuArray<F> {
         F::validate_gpu_drain_usage(self.usage)?;
 
         let operations = self.op_queue.drain();
-        let operation_count = operations.len();
+        let mut executed_tile_count = 0usize;
         for operation in operations {
             match operation {
-                core::TileOp::Clear { address } => {
+                core::TileOp::Clear { target } => {
+                    if !self.cpu.should_execute_target(target) {
+                        continue;
+                    }
                     let slot_origin =
-                        core::tile_slot_origin_with_row(address, self.layout.tiles_per_row);
+                        core::tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
                     F::execute_clear_slot(queue, &self.texture, slot_origin)?;
+                    executed_tile_count = executed_tile_count
+                        .checked_add(1)
+                        .expect("tile execute count overflow");
                 }
-                core::TileOp::Upload { address, payload } => {
+                core::TileOp::ClearBatch { targets } => {
+                    for target in targets {
+                        if !self.cpu.should_execute_target(target) {
+                            continue;
+                        }
+                        let slot_origin = core::tile_slot_origin_with_row(
+                            target.address,
+                            self.layout.tiles_per_row,
+                        );
+                        F::execute_clear_slot(queue, &self.texture, slot_origin)?;
+                        executed_tile_count = executed_tile_count
+                            .checked_add(1)
+                            .expect("tile execute count overflow");
+                    }
+                }
+                core::TileOp::Upload { target, payload } => {
+                    if !self.cpu.should_execute_target(target) {
+                        continue;
+                    }
                     let slot_origin =
-                        core::tile_slot_origin_with_row(address, self.layout.tiles_per_row);
+                        core::tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
                     F::execute_upload_payload(queue, &self.texture, slot_origin, payload)?;
+                    executed_tile_count = executed_tile_count
+                        .checked_add(1)
+                        .expect("tile execute count overflow");
                 }
             }
         }
 
-        Ok(operation_count)
+        Ok(executed_tile_count)
     }
 }
 

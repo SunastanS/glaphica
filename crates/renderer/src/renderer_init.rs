@@ -4,12 +4,12 @@
 //! bind groups, and per-frame buffers.
 
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use render_protocol::TransformMatrix4x4;
 use tiles::{
     GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore, GenericTileAtlasConfig,
-    GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray,
+    GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray, TILE_SIZE,
 };
 use wgpu::util::DeviceExt;
 
@@ -54,6 +54,16 @@ impl Renderer {
         render_data_resolver: Box<dyn RenderDataResolver>,
     ) -> (Self, crate::ViewOpSender) {
         let (view_sender, view_receiver) = mpsc::channel();
+
+        let (merge_device_lost_sender, merge_device_lost_receiver) = mpsc::channel();
+        device.set_device_lost_callback(move |reason, message| {
+            let _ = merge_device_lost_sender.send((reason, message));
+        });
+
+        let (merge_uncaptured_error_sender, merge_uncaptured_error_receiver) = mpsc::channel();
+        device.on_uncaptured_error(Arc::new(move |error| {
+            let _ = merge_uncaptured_error_sender.send(error.to_string());
+        }));
 
         surface.configure(&device, &surface_config);
 
@@ -252,6 +262,122 @@ impl Renderer {
                 bind_group_layouts: &[],
                 immediate_size: 0,
             });
+        let merge_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.merge.uniform"),
+            size: std::mem::size_of::<crate::renderer_merge::MergeUniformGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let merge_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("renderer.merge.sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let merge_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("renderer.merge.bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let merge_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("renderer.merge.bind_group"),
+            layout: &merge_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(tile_atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&merge_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: merge_uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let merge_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("renderer.merge.pipeline_layout"),
+                bind_group_layouts: &[&merge_bind_group_layout],
+                immediate_size: 0,
+            });
+        let merge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.merge.shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("merge_tile.wgsl").into()),
+        });
+        let merge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("renderer.merge.pipeline"),
+            layout: Some(&merge_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &merge_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &merge_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: tile_atlas.format(),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let merge_scratch_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("renderer.merge.scratch"),
+            size: wgpu::Extent3d {
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: tile_atlas.format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let merge_scratch_view =
+            merge_scratch_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let renderer = Self {
             input_state: InputState { view_receiver },
@@ -283,6 +409,13 @@ impl Renderer {
                 tile_atlas,
                 gpu_timing,
                 brush_pipeline_layout,
+                merge_bind_group,
+                merge_uniform_buffer,
+                merge_pipeline,
+                _merge_scratch_texture: merge_scratch_texture,
+                merge_scratch_view,
+                merge_device_lost_receiver,
+                merge_uncaptured_error_receiver,
             },
             view_state: ViewState {
                 view_matrix: IDENTITY_MATRIX,
@@ -309,6 +442,7 @@ impl Renderer {
                 stroke_target_layer: HashMap::new(),
                 ended_strokes_pending_merge: HashMap::new(),
             },
+            merge_orchestrator: crate::renderer_merge::MergeOrchestrator::default(),
             frame_state: FrameState {
                 bound_tree: None,
                 cached_render_tree: None,
