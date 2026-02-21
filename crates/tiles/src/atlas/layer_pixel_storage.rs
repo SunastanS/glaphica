@@ -129,10 +129,10 @@ impl TileAtlasStore {
         }
     }
 
-    pub fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+    pub fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
         match &self.generic {
-            LayerStoreBackend::Unorm(store) => store.retain_keys(retain_id, keys),
-            LayerStoreBackend::Srgb(store) => store.retain_keys(retain_id, keys),
+            LayerStoreBackend::Unorm(store) => store.retain_keys_new_batch(keys),
+            LayerStoreBackend::Srgb(store) => store.retain_keys_new_batch(keys),
         }
     }
 

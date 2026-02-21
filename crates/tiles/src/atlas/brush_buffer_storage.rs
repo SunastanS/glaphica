@@ -179,8 +179,8 @@ impl RuntimeGenericTileAtlasStore {
         dispatch_runtime_store!(self, store => store.mark_keys_active(keys))
     }
 
-    pub fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
-        dispatch_runtime_store!(self, store => store.retain_keys(retain_id, keys))
+    pub fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        dispatch_runtime_store!(self, store => store.retain_keys_new_batch(keys))
     }
 
     pub fn drain_evicted_retain_batches(&self) -> Vec<EvictedRetainBatch> {
@@ -321,8 +321,8 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
         self.cpu.mark_keys_active(keys);
     }
 
-    pub fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
-        self.cpu.retain_keys(retain_id, keys);
+    pub fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        self.cpu.retain_keys_new_batch(keys)
     }
 
     pub fn drain_evicted_retain_batches(&self) -> Vec<EvictedRetainBatch> {

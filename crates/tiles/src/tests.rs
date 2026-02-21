@@ -1280,7 +1280,7 @@ fn gc_eviction_batches_are_reported_via_store_drain() {
 
     let key0 = store.allocate().expect("allocate key0");
     let key1 = store.allocate().expect("allocate key1");
-    store.retain_keys(42, &[key0, key1]);
+    let retain_id = store.retain_keys_new_batch(&[key0, key1]);
 
     assert!(store.drain_evicted_retain_batches().is_empty());
 
@@ -1291,7 +1291,7 @@ fn gc_eviction_batches_are_reported_via_store_drain() {
 
     let evicted = store.drain_evicted_retain_batches();
     assert_eq!(evicted.len(), 1);
-    assert_eq!(evicted[0].retain_id, 42);
+    assert_eq!(evicted[0].retain_id, retain_id);
     assert_eq!(evicted[0].keys.len(), 2);
     assert!(evicted[0].keys.contains(&key0));
     assert!(evicted[0].keys.contains(&key1));

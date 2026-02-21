@@ -173,7 +173,7 @@ pub trait MergeTileStore {
     fn release(&self, key: TileKey) -> bool;
     fn resolve(&self, key: TileKey) -> Option<TileAddress>;
     fn mark_keys_active(&self, keys: &[TileKey]);
-    fn retain_keys(&self, retain_id: u64, keys: &[TileKey]);
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64;
 }
 
 impl MergeTileStore for TileAtlasStore {
@@ -193,8 +193,8 @@ impl MergeTileStore for TileAtlasStore {
         TileAtlasStore::mark_keys_active(self, keys);
     }
 
-    fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
-        TileAtlasStore::retain_keys(self, retain_id, keys);
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        TileAtlasStore::retain_keys_new_batch(self, keys)
     }
 }
 
@@ -215,8 +215,8 @@ impl MergeTileStore for Arc<TileAtlasStore> {
         TileAtlasStore::mark_keys_active(self, keys);
     }
 
-    fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
-        TileAtlasStore::retain_keys(self, retain_id, keys);
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        TileAtlasStore::retain_keys_new_batch(self, keys)
     }
 }
 
@@ -603,8 +603,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         }
 
         if !entry.drop_key_list.is_empty() {
-            self.store
-                .retain_keys(entry.stroke_session_id, &entry.drop_key_list);
+            self.store.retain_keys_new_batch(&entry.drop_key_list);
         }
         entry.state = ReceiptState::Finalized;
         Ok(())
@@ -803,6 +802,7 @@ mod tests {
     struct FakeTileStore {
         next_key: u64,
         next_tile_index: u16,
+        next_retain_id: u64,
         map: HashMap<TileKey, TileAddress>,
         mark_active_calls: Vec<Vec<TileKey>>,
         retain_calls: Vec<(u64, Vec<TileKey>)>,
@@ -825,7 +825,7 @@ mod tests {
             panic!("mark active mutation requires mutable fake store")
         }
 
-        fn retain_keys(&self, _retain_id: u64, _keys: &[TileKey]) {
+        fn retain_keys_new_batch(&self, _keys: &[TileKey]) -> u64 {
             panic!("retain mutation requires mutable fake store")
         }
     }
@@ -927,7 +927,7 @@ mod tests {
             guard.mark_active_calls.push(keys.to_vec());
         }
 
-        fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
             let mut guard = self
                 .0
                 .lock()
@@ -937,7 +937,13 @@ mod tests {
                     panic!("cannot retain unknown key in fake store");
                 }
             }
+            let retain_id = guard.next_retain_id;
+            guard.next_retain_id = guard
+                .next_retain_id
+                .checked_add(1)
+                .expect("fake retain id overflow");
             guard.retain_calls.push((retain_id, keys.to_vec()));
+            retain_id
         }
     }
 
@@ -1313,10 +1319,6 @@ mod tests {
         assert!(store.has_key(old_layer_key));
         let retain_calls = store.retain_calls();
         assert_eq!(retain_calls.len(), 1);
-        assert_eq!(
-            retain_calls[0].0,
-            submission.renderer_submit_payload.receipt.stroke_session_id
-        );
         assert_eq!(retain_calls[0].1, vec![old_layer_key]);
         assert_eq!(
             engine
