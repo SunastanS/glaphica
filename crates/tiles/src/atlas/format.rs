@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    TileAtlasCreateError, TileGpuDrainError, TileIngestError, TILE_GUTTER, TILE_SIZE, TILE_STRIDE,
+    TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAtlasCreateError, TileGpuDrainError, TileIngestError,
 };
 
 pub trait TileFormatSpec {

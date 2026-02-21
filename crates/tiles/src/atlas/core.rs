@@ -1,15 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{Mutex, mpsc};
 
 use super::GenericTileAtlasConfig;
+use crate::{INDEX_SHARDS, TILE_STRIDE};
+#[cfg(test)]
+use crate::{TILE_GUTTER, TILES_PER_ROW};
 use crate::{
     TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle,
     TileSetId,
 };
-use crate::{INDEX_SHARDS, TILE_STRIDE};
-#[cfg(test)]
-use crate::{TILES_PER_ROW, TILE_GUTTER};
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::atlas) struct AtlasLayout {
@@ -81,6 +81,138 @@ pub(in crate::atlas) struct TileOpTarget {
 struct TileRecord {
     address: TileAddress,
     generation: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileKeyState {
+    Active,
+    Retained { retain_id: u64 },
+}
+
+#[derive(Debug)]
+struct RetainedBatchState {
+    keys: HashSet<TileKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvictedRetainBatch {
+    pub retain_id: u64,
+    pub keys: Vec<TileKey>,
+}
+
+#[derive(Debug, Default)]
+struct TileKeyLifecycleGcState {
+    key_states: HashMap<TileKey, TileKeyState>,
+    retained_batches: HashMap<u64, RetainedBatchState>,
+    retained_order: VecDeque<u64>,
+    evicted_retain_batches: VecDeque<EvictedRetainBatch>,
+}
+
+impl TileKeyLifecycleGcState {
+    fn on_key_allocated(&mut self, key: TileKey) {
+        let previous = self.key_states.insert(key, TileKeyState::Active);
+        if previous.is_some() {
+            panic!("allocated key already exists in lifecycle state");
+        }
+    }
+
+    fn on_key_released(&mut self, key: TileKey) {
+        let Some(previous_state) = self.key_states.remove(&key) else {
+            panic!("released key missing from lifecycle state");
+        };
+        if let TileKeyState::Retained { retain_id } = previous_state {
+            self.remove_key_from_retain_batch(retain_id, key);
+        }
+    }
+
+    fn mark_keys_active(&mut self, keys: &[TileKey]) {
+        for key in keys {
+            let Some(previous_state) = self.key_states.get(key).copied() else {
+                panic!("cannot mark unknown key as active");
+            };
+            if let TileKeyState::Retained { retain_id } = previous_state {
+                self.remove_key_from_retain_batch(retain_id, *key);
+            }
+            self.key_states.insert(*key, TileKeyState::Active);
+        }
+    }
+
+    fn retain_keys(&mut self, retain_id: u64, keys: &[TileKey]) {
+        for key in keys {
+            let Some(previous_state) = self.key_states.get(key).copied() else {
+                panic!("cannot retain unknown key");
+            };
+            if let TileKeyState::Retained {
+                retain_id: previous_retain_id,
+            } = previous_state
+            {
+                if previous_retain_id == retain_id {
+                    continue;
+                }
+                self.remove_key_from_retain_batch(previous_retain_id, *key);
+            }
+            let batch = self.get_or_create_retain_batch(retain_id);
+            let inserted = batch.keys.insert(*key);
+            if !inserted {
+                panic!("retain batch duplicated key");
+            }
+            self.key_states
+                .insert(*key, TileKeyState::Retained { retain_id });
+        }
+    }
+
+    fn oldest_retain_batch_keys(&mut self) -> Option<(u64, Vec<TileKey>)> {
+        loop {
+            let retain_id = *self.retained_order.front()?;
+            let Some(batch) = self.retained_batches.get(&retain_id) else {
+                let _ = self.retained_order.pop_front();
+                continue;
+            };
+            if batch.keys.is_empty() {
+                self.retained_batches.remove(&retain_id);
+                let _ = self.retained_order.pop_front();
+                continue;
+            }
+            return Some((retain_id, batch.keys.iter().copied().collect()));
+        }
+    }
+
+    fn record_evicted_batch(&mut self, retain_id: u64, keys: Vec<TileKey>) {
+        self.evicted_retain_batches
+            .push_back(EvictedRetainBatch { retain_id, keys });
+    }
+
+    fn drain_evicted_retain_batches(&mut self) -> Vec<EvictedRetainBatch> {
+        self.evicted_retain_batches.drain(..).collect()
+    }
+
+    fn remove_key_from_retain_batch(&mut self, retain_id: u64, key: TileKey) {
+        let Some(batch) = self.retained_batches.get_mut(&retain_id) else {
+            panic!("retained key points to missing retain batch");
+        };
+        let removed = batch.keys.remove(&key);
+        if !removed {
+            panic!("retained key missing from retain batch");
+        }
+        if batch.keys.is_empty() {
+            self.retained_batches.remove(&retain_id);
+        }
+    }
+
+    fn get_or_create_retain_batch(&mut self, retain_id: u64) -> &mut RetainedBatchState {
+        if !self.retained_batches.contains_key(&retain_id) {
+            self.retained_order.push_back(retain_id);
+            self.retained_batches.insert(
+                retain_id,
+                RetainedBatchState {
+                    keys: HashSet::new(),
+                },
+            );
+        }
+        self.retained_batches
+            .get_mut(&retain_id)
+            .expect("retain batch must exist")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -227,6 +359,7 @@ impl TileAllocatorPage {
 pub(in crate::atlas) struct TileAtlasCpu {
     pages: Vec<TileAllocatorPage>,
     index_shards: [Mutex<HashMap<TileKey, TileRecord>>; INDEX_SHARDS],
+    lifecycle_gc: Mutex<TileKeyLifecycleGcState>,
     next_key: AtomicU64,
     owner_tag: u64,
     next_set_id: AtomicU64,
@@ -249,6 +382,7 @@ impl TileAtlasCpu {
         Ok(Self {
             pages,
             index_shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+            lifecycle_gc: Mutex::new(TileKeyLifecycleGcState::default()),
             next_key: AtomicU64::new(0),
             owner_tag: NEXT_ATLAS_OWNER_TAG.fetch_add(1, Ordering::Relaxed),
             next_set_id: AtomicU64::new(0),
@@ -327,6 +461,10 @@ impl TileAtlasCpu {
                     generation,
                 },
             );
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .on_key_allocated(key);
 
         let was_dirty = page.take_dirty(address.tile_index)?;
 
@@ -370,6 +508,10 @@ impl TileAtlasCpu {
         let Some(record) = address else {
             return false;
         };
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .on_key_released(key);
         let address = record.address;
         let page = self
             .pages
@@ -381,6 +523,41 @@ impl TileAtlasCpu {
             .expect("tile index must be in range");
         page.push_free(address.tile_index);
         true
+    }
+
+    pub(in crate::atlas) fn release_all(&self) -> usize {
+        let mut released = Vec::new();
+        for shard_id in 0..INDEX_SHARDS {
+            let mut shard = self.index_shards[shard_id]
+                .lock()
+                .expect("tile index shard lock poisoned");
+            released.extend(shard.drain());
+        }
+
+        {
+            let mut lifecycle_gc = self
+                .lifecycle_gc
+                .lock()
+                .expect("tile lifecycle gc lock poisoned");
+            for (key, _) in &released {
+                lifecycle_gc.on_key_released(*key);
+            }
+        }
+
+        for (_, record) in &released {
+            let address = record.address;
+            let page = self
+                .pages
+                .get(address.atlas_layer as usize)
+                .expect("tile address layer must be valid");
+            page.mark_dirty(address.tile_index)
+                .expect("tile index must be in range");
+            page.bump_generation(address.tile_index)
+                .expect("tile index must be in range");
+            page.push_free(address.tile_index);
+        }
+
+        released.len()
     }
 
     pub(in crate::atlas) fn release_set_atomic(
@@ -424,7 +601,7 @@ impl TileAtlasCpu {
             }
         }
 
-        let mut released_records = Vec::with_capacity(keys.len());
+        let mut released = Vec::with_capacity(keys.len());
         for key in keys {
             let shard_id = self.shard_for_key(*key);
             let (_, shard) = shard_locks
@@ -434,12 +611,22 @@ impl TileAtlasCpu {
             let record = shard
                 .remove(key)
                 .expect("tile key must exist after atomic precheck");
-            released_records.push(record);
+            released.push((*key, record));
         }
 
         drop(shard_locks);
 
-        for record in &released_records {
+        {
+            let mut lifecycle_gc = self
+                .lifecycle_gc
+                .lock()
+                .expect("tile lifecycle gc lock poisoned");
+            for (key, _) in &released {
+                lifecycle_gc.on_key_released(*key);
+            }
+        }
+
+        for (_, record) in &released {
             let address = record.address;
             let page = self
                 .pages
@@ -453,7 +640,7 @@ impl TileAtlasCpu {
         }
 
         let mut released_count = 0u32;
-        for _ in &released_records {
+        for _ in &released {
             released_count = released_count
                 .checked_add(1)
                 .ok_or(TileSetError::KeySpaceExhausted)?;
@@ -472,6 +659,10 @@ impl TileAtlasCpu {
             .lock()
             .expect("tile index shard lock poisoned")
             .remove(&key);
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .on_key_released(key);
 
         let page = self
             .pages
@@ -518,21 +709,78 @@ impl TileAtlasCpu {
     }
 
     fn take_free_address(&self) -> Result<TileAddress, TileAllocError> {
+        loop {
+            if let Some(address) = self.try_take_free_address() {
+                return Ok(address);
+            }
+            let Some((retain_id, evict_keys)) = self.select_oldest_retain_batch_for_eviction()
+            else {
+                return Err(TileAllocError::AtlasFull);
+            };
+            let released_count = self
+                .release_set_atomic(&evict_keys)
+                .expect("gc retain batch eviction failed to release keys");
+            if usize::try_from(released_count).ok() != Some(evict_keys.len()) {
+                panic!("gc retain batch eviction released unexpected key count");
+            }
+            self.lifecycle_gc
+                .lock()
+                .expect("tile lifecycle gc lock poisoned")
+                .record_evicted_batch(retain_id, evict_keys);
+        }
+    }
+
+    fn try_take_free_address(&self) -> Option<TileAddress> {
         let start = self.next_layer_hint.fetch_add(1, Ordering::Relaxed) % self.max_layers;
         for offset in 0..self.max_layers {
             let layer = (start + offset) % self.max_layers;
-            let page = self
-                .pages
-                .get(layer as usize)
-                .ok_or(TileAllocError::AtlasFull)?;
+            let page = self.pages.get(layer as usize)?;
             if let Some(tile_index) = page.pop_free() {
-                return Ok(TileAddress {
+                return Some(TileAddress {
                     atlas_layer: layer,
                     tile_index,
                 });
             }
         }
-        Err(TileAllocError::AtlasFull)
+        None
+    }
+
+    fn select_oldest_retain_batch_for_eviction(&self) -> Option<(u64, Vec<TileKey>)> {
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .oldest_retain_batch_keys()
+    }
+
+    pub(in crate::atlas) fn mark_keys_active(&self, keys: &[TileKey]) {
+        for key in keys {
+            if !self.is_allocated(*key) {
+                panic!("cannot mark non-allocated key as active");
+            }
+        }
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .mark_keys_active(keys);
+    }
+
+    pub(in crate::atlas) fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        for key in keys {
+            if !self.is_allocated(*key) {
+                panic!("cannot retain non-allocated key");
+            }
+        }
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .retain_keys(retain_id, keys);
+    }
+
+    pub(in crate::atlas) fn drain_evicted_retain_batches(&self) -> Vec<EvictedRetainBatch> {
+        self.lifecycle_gc
+            .lock()
+            .expect("tile lifecycle gc lock poisoned")
+            .drain_evicted_retain_batches()
     }
 }
 
@@ -749,5 +997,103 @@ pub(in crate::atlas) fn tile_slot_origin_with_row(
         x: tile_x * TILE_STRIDE,
         y: tile_y * TILE_STRIDE,
         z: address.atlas_layer,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AtlasLayout, TileAtlasCpu};
+    use crate::{TILE_STRIDE, TileAllocError};
+
+    fn test_layout(tiles_per_row: u32, tiles_per_column: u32) -> AtlasLayout {
+        let tiles_per_atlas = tiles_per_row
+            .checked_mul(tiles_per_column)
+            .expect("tiles per atlas overflow");
+        AtlasLayout {
+            tiles_per_row,
+            tiles_per_column,
+            atlas_width: tiles_per_row
+                .checked_mul(TILE_STRIDE)
+                .expect("atlas width overflow"),
+            atlas_height: tiles_per_column
+                .checked_mul(TILE_STRIDE)
+                .expect("atlas height overflow"),
+            tiles_per_atlas,
+            atlas_occupancy_words: (tiles_per_atlas as usize).div_ceil(64),
+        }
+    }
+
+    #[test]
+    fn allocate_evicts_oldest_retain_batch_when_full() {
+        let cpu = TileAtlasCpu::new(1, test_layout(3, 1)).expect("create cpu atlas");
+        let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
+        let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
+        let (key_c, _) = cpu.allocate_without_ops().expect("allocate key c");
+
+        cpu.retain_keys(10, &[key_a, key_b]);
+        cpu.retain_keys(20, &[key_c]);
+
+        let (new_key, _) = cpu
+            .allocate_without_ops()
+            .expect("allocate with gc eviction");
+
+        assert!(!cpu.is_allocated(key_a));
+        assert!(!cpu.is_allocated(key_b));
+        assert!(cpu.is_allocated(key_c));
+        assert!(cpu.is_allocated(new_key));
+    }
+
+    #[test]
+    fn allocate_fails_when_full_and_no_retain_batches_exist() {
+        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
+        let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
+        let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
+        cpu.mark_keys_active(&[key_a, key_b]);
+
+        let error = cpu
+            .allocate_without_ops()
+            .expect_err("allocate should fail without retained keys");
+        assert!(matches!(error, TileAllocError::AtlasFull));
+        assert!(cpu.is_allocated(key_a));
+        assert!(cpu.is_allocated(key_b));
+    }
+
+    #[test]
+    fn retain_batch_eviction_uses_batch_insertion_order() {
+        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
+        let (oldest_key, _) = cpu.allocate_without_ops().expect("allocate oldest key");
+        let (newer_key, _) = cpu.allocate_without_ops().expect("allocate newer key");
+
+        cpu.retain_keys(100, &[oldest_key]);
+        cpu.retain_keys(200, &[newer_key]);
+
+        let (_replacement_key, _) = cpu
+            .allocate_without_ops()
+            .expect("allocate with retain eviction");
+
+        assert!(!cpu.is_allocated(oldest_key));
+        assert!(cpu.is_allocated(newer_key));
+    }
+
+    #[test]
+    fn drain_evicted_batches_reports_gc_evictions_and_is_idempotent() {
+        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
+        let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
+        let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
+        cpu.retain_keys(77, &[key_a, key_b]);
+
+        let _ = cpu
+            .allocate_without_ops()
+            .expect("allocate with gc retain eviction");
+
+        let first = cpu.drain_evicted_retain_batches();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].retain_id, 77);
+        assert_eq!(first[0].keys.len(), 2);
+        assert!(first[0].keys.contains(&key_a));
+        assert!(first[0].keys.contains(&key_b));
+
+        let second = cpu.drain_evicted_retain_batches();
+        assert!(second.is_empty());
     }
 }

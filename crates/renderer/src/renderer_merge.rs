@@ -424,9 +424,9 @@ impl MergeOrchestrator {
         );
         assert!(
             !self
-            .in_flight_submissions
-            .iter()
-            .any(|entry| entry.renderer_submission_id == renderer_submission_id),
+                .in_flight_submissions
+                .iter()
+                .any(|entry| entry.renderer_submission_id == renderer_submission_id),
             "internal invariant violated: submission already in-flight before commit ({renderer_submission_id:?})"
         );
 

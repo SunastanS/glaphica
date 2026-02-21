@@ -18,3 +18,20 @@ crates/tiles/src/merge_submission.rs:200 submitted_tokens 生命周期
   - 若“全局唯一且永久拒绝重放”，需文档化并考虑容量治理；
   - 若“仅在活动窗口去重”，在 Finalized/Aborted 后清理索引。
 - 影响：偏 RFC（可演进性）问题，短期不一定阻塞，但建议在 document 开发前定死规则。
+
+  [crates/glaphica/src/lib.rs:122]
+
+  - enqueue_stroke_merge_submission 对 brush_buffer_tile_keys 缺失直接
+    panic（merge requested ... without buffer tile mapping）。
+  - 当前协议强依赖“先收到 Allocate 再收到 Merge”，一旦上游时序/输入异常，直接崩
+    溃，且不会走你新增的 feedback 错误回传链。
+  - 建议：把“每个 stroke 必有映射条目”做成前置不变量（例如 BeginStroke 时建立空映
+    射），这样仍可保持 fail-fast，但不会在 merge 阶段出现结构性缺口。
+
+  [crates/renderer/src/renderer_frame.rs:198]
+
+  - renderer 仍保留 AllocateBufferTiles/ReleaseBufferTiles 的入队校验与消费分支，
+    但在当前实现中由 glaphica 截获后不会下发到 renderer。
+  - 这会影响 ETU/RFC：职责边界看起来仍是“双持有”。
+  - 建议：明确一种边界并收敛实现（要么删掉 renderer 对这两类命令的处理，要么在代码
+    注释中声明“仅保留兼容，不应被调用”并加断言）。

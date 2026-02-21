@@ -195,6 +195,18 @@ impl Renderer {
     ) -> Result<(), BrushRenderEnqueueError> {
         match &command {
             BrushRenderCommand::BeginStroke(begin) => self.validate_begin_stroke(*begin)?,
+            BrushRenderCommand::AllocateBufferTiles(allocate) => {
+                if !self
+                    .brush_work_state
+                    .active_strokes
+                    .contains_key(&allocate.stroke_session_id)
+                {
+                    return Err(BrushRenderEnqueueError::UnknownStroke {
+                        stroke_session_id: allocate.stroke_session_id,
+                    });
+                }
+            }
+            BrushRenderCommand::ReleaseBufferTiles(_release) => {}
             BrushRenderCommand::PushDabChunkF32(chunk) => {
                 if !self
                     .brush_work_state
@@ -431,6 +443,12 @@ impl Renderer {
                     self.brush_work_state
                         .executing_strokes
                         .insert(begin.stroke_session_id, key);
+                    let _ = self.brush_work_state.pending_commands.pop_front();
+                }
+                BrushRenderCommand::AllocateBufferTiles(_allocate) => {
+                    let _ = self.brush_work_state.pending_commands.pop_front();
+                }
+                BrushRenderCommand::ReleaseBufferTiles(_release) => {
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
                 BrushRenderCommand::EndStroke(end) => {

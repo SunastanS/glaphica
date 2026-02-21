@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use crate::{
-    ImageIngestError, TileAddress, TileAllocError, TileAtlasCreateError, TileAtlasLayout,
-    TileGpuDrainError, TileIngestError, TileKey, TileSetError, TileSetHandle, VirtualImage,
-    TILE_SIZE,
+    ImageIngestError, TILE_SIZE, TileAddress, TileAllocError, TileAtlasCreateError,
+    TileAtlasLayout, TileGpuDrainError, TileIngestError, TileKey, TileSetError, TileSetHandle,
+    VirtualImage,
 };
 
 use super::brush_buffer_storage;
-use super::format::{rgba8_tile_len, Rgba8Spec, Rgba8SrgbSpec, TileUploadFormatSpec};
+use super::format::{Rgba8Spec, Rgba8SrgbSpec, TileUploadFormatSpec, rgba8_tile_len};
 use super::{GenericTileAtlasConfig, TileAtlasConfig};
 
 #[derive(Debug)]
@@ -112,6 +112,34 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.release(key),
             LayerStoreBackend::Srgb(store) => store.release(key),
+        }
+    }
+
+    pub fn force_release_all_keys(&self) -> usize {
+        match &self.generic {
+            LayerStoreBackend::Unorm(store) => store.force_release_all_keys(),
+            LayerStoreBackend::Srgb(store) => store.force_release_all_keys(),
+        }
+    }
+
+    pub fn mark_keys_active(&self, keys: &[TileKey]) {
+        match &self.generic {
+            LayerStoreBackend::Unorm(store) => store.mark_keys_active(keys),
+            LayerStoreBackend::Srgb(store) => store.mark_keys_active(keys),
+        }
+    }
+
+    pub fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        match &self.generic {
+            LayerStoreBackend::Unorm(store) => store.retain_keys(retain_id, keys),
+            LayerStoreBackend::Srgb(store) => store.retain_keys(retain_id, keys),
+        }
+    }
+
+    pub fn drain_evicted_retain_batches(&self) -> Vec<brush_buffer_storage::EvictedRetainBatch> {
+        match &self.generic {
+            LayerStoreBackend::Unorm(store) => store.drain_evicted_retain_batches(),
+            LayerStoreBackend::Srgb(store) => store.drain_evicted_retain_batches(),
         }
     }
 

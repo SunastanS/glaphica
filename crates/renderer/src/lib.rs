@@ -20,8 +20,8 @@ use render_protocol::{
     Viewport,
 };
 use tiles::{
-    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE,
-    TileAddress, TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey, VirtualImage,
+    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAddress,
+    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey, VirtualImage,
 };
 
 #[repr(C)]

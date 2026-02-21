@@ -4,47 +4,21 @@
 //! bind groups, and per-frame buffers.
 
 use std::collections::HashMap;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use render_protocol::TransformMatrix4x4;
-use tiles::{
-    GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore, GenericTileAtlasConfig,
-    GroupTileAtlasStore, TileAtlasConfig, TileAtlasGpuArray, TILE_SIZE,
-};
+use tiles::{GroupTileAtlasStore, TILE_SIZE, TileAtlasConfig, TileAtlasGpuArray};
 use wgpu::util::DeviceExt;
 
 use crate::{
-    create_composite_pipeline, multiply_blend_state, BrushWorkState, CacheState, DataState,
-    DirtyStateStore, FrameState, FrameSync, GpuFrameTimingSlot, GpuFrameTimingSlotState,
-    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, InputState, RenderDataResolver, Renderer,
-    TileInstanceGpu, TileTextureManagerGpu, ViewState, GPU_TIMING_SLOTS, IDENTITY_MATRIX,
-    INITIAL_TILE_INSTANCE_CAPACITY,
+    BrushWorkState, CacheState, DataState, DirtyStateStore, FrameState, FrameSync,
+    GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState, GpuFrameTimingState, GpuState,
+    GroupTargetCacheEntry, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY, InputState,
+    RenderDataResolver, Renderer, TileInstanceGpu, TileTextureManagerGpu, ViewState,
+    create_composite_pipeline, multiply_blend_state,
 };
 
 impl Renderer {
-    pub fn create_brush_scratch_atlas_f32(
-        device: &wgpu::Device,
-        max_layers: u32,
-    ) -> Result<
-        (
-            GenericR32FloatTileAtlasStore,
-            GenericR32FloatTileAtlasGpuArray,
-        ),
-        tiles::TileAtlasCreateError,
-    > {
-        GenericR32FloatTileAtlasStore::with_config(
-            device,
-            GenericTileAtlasConfig {
-                max_layers,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::STORAGE_BINDING,
-                ..GenericTileAtlasConfig::default()
-            },
-        )
-    }
-
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -378,7 +352,6 @@ impl Renderer {
         });
         let merge_scratch_view =
             merge_scratch_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let renderer = Self {
             input_state: InputState { view_receiver },
             data_state: DataState {

@@ -5,7 +5,7 @@ use crate::{
     TileSetHandle,
 };
 
-use super::{core, GenericTileAtlasConfig, TileAtlasConfig};
+use super::{GenericTileAtlasConfig, TileAtlasConfig, core};
 
 #[derive(Debug)]
 pub struct GroupTileAtlasStore {
@@ -92,6 +92,10 @@ impl GroupTileAtlasStore {
 
     pub fn release(&self, key: TileKey) -> bool {
         self.cpu.release(key)
+    }
+
+    pub fn force_release_all_keys(&self) -> usize {
+        self.cpu.release_all()
     }
 
     pub fn reserve_tile_set(&self, count: u32) -> Result<TileSetHandle, TileSetError> {

@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use brush_execution::{
-    BrushExecutionCommandReceiver, BrushExecutionConfig, BrushExecutionRuntime,
-    BrushExecutionSampleSender,
+    BrushExecutionCommandReceiver, BrushExecutionConfig, BrushExecutionFeedbackSender,
+    BrushExecutionRuntime, BrushExecutionSampleSender,
 };
 use driver::PointerEventPhase;
 use frame_scheduler::{FrameScheduler, FrameSchedulerDecision, FrameSchedulerInput};
@@ -27,6 +27,10 @@ const DRIVER_QUEUE_CAPACITY: usize = 64;
 const DRIVER_RESAMPLE_SPACING_PIXELS: f32 = 2.0;
 const BRUSH_EXECUTION_INPUT_QUEUE_CAPACITY: usize = 64;
 const BRUSH_EXECUTION_OUTPUT_QUEUE_CAPACITY: usize = 256;
+const BRUSH_BUFFER_TILE_SIZE: u32 = 128;
+const BRUSH_MAX_AFFECTED_RADIUS: f32 = 64.0;
+const LIFECYCLE_FLUSH_MAX_STEPS: usize = 64;
+const LIFECYCLE_FLUSH_IDLE_BREAK_STEPS: usize = 2;
 const DEFAULT_BRUSH_ID: u64 = 1;
 const DEFAULT_PROGRAM_REVISION: u64 = 1;
 const DEFAULT_REFERENCE_SET_ID: u64 = 1;
@@ -123,6 +127,7 @@ struct App {
     driver_debug: DriverDebugState,
     brush_execution_runtime: Option<BrushExecutionRuntime>,
     brush_execution_sender: Option<BrushExecutionSampleSender>,
+    brush_execution_feedback_sender: Option<BrushExecutionFeedbackSender>,
     brush_execution_receiver: Option<BrushExecutionCommandReceiver>,
     next_driver_frame_sequence_id: u64,
     frame_scheduler: FrameScheduler,
@@ -205,6 +210,7 @@ impl ApplicationHandler for App {
 
         match &event {
             WindowEvent::CloseRequested => {
+                self.flush_brush_pipeline_lifecycle();
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
@@ -235,6 +241,11 @@ impl App {
             }
             WindowEvent::Resized(new_size) => {
                 self.handle_resize(*new_size);
+            }
+            WindowEvent::Focused(has_focus) => {
+                if !has_focus {
+                    self.flush_brush_pipeline_lifecycle();
+                }
             }
             _ => {}
         }
@@ -416,6 +427,19 @@ impl App {
         apply_frame_scheduler_decision(gpu, scheduler_decision);
         gpu.process_renderer_merge_completions(frame_sequence_id)
             .expect("process renderer merge completions");
+        if let Some(feedback_sender) = self.brush_execution_feedback_sender.as_mut() {
+            for feedback in gpu.drain_brush_execution_merge_feedbacks() {
+                feedback_sender
+                    .push_feedback(feedback)
+                    .expect("send merge feedback into brush execution");
+            }
+        }
+        if let Some(receiver) = self.brush_execution_receiver.as_mut() {
+            while let Some(command) = receiver.pop_command() {
+                gpu.enqueue_brush_render_command(command)
+                    .expect("enqueue brush render command after merge feedback");
+            }
+        }
         self.next_driver_frame_sequence_id = self
             .next_driver_frame_sequence_id
             .checked_add(1)
@@ -440,6 +464,69 @@ impl App {
             Err(_) => {
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn flush_brush_pipeline_lifecycle(&mut self) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+
+        let mut consecutive_idle_steps = 0usize;
+        for _ in 0..LIFECYCLE_FLUSH_MAX_STEPS {
+            let frame_sequence_id = self.next_driver_frame_sequence_id;
+
+            let frame_stats = Self::drain_brush_pipeline(
+                &mut self.driver_debug,
+                &mut self.brush_execution_sender,
+                &mut self.brush_execution_receiver,
+                frame_sequence_id,
+                gpu,
+            );
+            gpu.process_renderer_merge_completions(frame_sequence_id)
+                .expect("process renderer merge completions during lifecycle flush");
+            let mut drained_merge_feedback_count = 0u32;
+            if let Some(feedback_sender) = self.brush_execution_feedback_sender.as_mut() {
+                for feedback in gpu.drain_brush_execution_merge_feedbacks() {
+                    drained_merge_feedback_count = drained_merge_feedback_count
+                        .checked_add(1)
+                        .expect("lifecycle flush drained merge feedback count overflow");
+                    feedback_sender
+                        .push_feedback(feedback)
+                        .expect("send merge feedback during lifecycle flush");
+                }
+            }
+
+            let mut drained_commands_after_feedback = 0u32;
+            if let Some(receiver) = self.brush_execution_receiver.as_mut() {
+                while let Some(command) = receiver.pop_command() {
+                    drained_commands_after_feedback = drained_commands_after_feedback
+                        .checked_add(1)
+                        .expect("lifecycle flush drained command count overflow");
+                    gpu.enqueue_brush_render_command(command)
+                        .expect("enqueue brush render command during lifecycle flush");
+                }
+            }
+
+            let has_activity = frame_stats.has_activity()
+                || drained_merge_feedback_count > 0
+                || drained_commands_after_feedback > 0
+                || gpu.pending_brush_dab_count() > 0;
+
+            self.next_driver_frame_sequence_id = self
+                .next_driver_frame_sequence_id
+                .checked_add(1)
+                .expect("driver frame sequence id overflow");
+            if has_activity {
+                consecutive_idle_steps = 0;
+            } else {
+                consecutive_idle_steps = consecutive_idle_steps
+                    .checked_add(1)
+                    .expect("lifecycle flush idle step overflow");
+                if consecutive_idle_steps >= LIFECYCLE_FLUSH_IDLE_BREAK_STEPS {
+                    break;
                 }
             }
         }
@@ -485,12 +572,14 @@ impl App {
             .expect("upsert default reference set");
         assert_eq!(reference_ack, BrushControlAck::ReferenceSetUpserted);
 
-        let (runtime, sender, receiver) = BrushExecutionRuntime::start(
+        let (runtime, sender, feedback_sender, receiver) = BrushExecutionRuntime::start(
             BrushExecutionConfig {
                 brush_id: DEFAULT_BRUSH_ID,
                 program_revision: DEFAULT_PROGRAM_REVISION,
                 reference_set_id: DEFAULT_REFERENCE_SET_ID,
                 target_layer_id: DEFAULT_TARGET_LAYER_ID,
+                buffer_tile_size: BRUSH_BUFFER_TILE_SIZE,
+                max_affected_radius: BRUSH_MAX_AFFECTED_RADIUS,
             },
             BRUSH_EXECUTION_INPUT_QUEUE_CAPACITY,
             BRUSH_EXECUTION_OUTPUT_QUEUE_CAPACITY,
@@ -498,6 +587,7 @@ impl App {
         .expect("start brush execution runtime");
         self.brush_execution_runtime = Some(runtime);
         self.brush_execution_sender = Some(sender);
+        self.brush_execution_feedback_sender = Some(feedback_sender);
         self.brush_execution_receiver = Some(receiver);
     }
 }

@@ -227,6 +227,36 @@ impl Document {
         self.images.get(image_handle).cloned()
     }
 
+    pub fn leaf_tile_key_at(&self, layer_id: LayerId, tile_x: u32, tile_y: u32) -> Option<TileKey> {
+        let layer_lookup = self
+            .layer_tree
+            .lookup_layer(layer_id)
+            .unwrap_or_else(|| panic!("layer {layer_id} not found while querying tile key"));
+        assert!(
+            layer_lookup.is_leaf,
+            "layer {layer_id} is not a leaf while querying tile key"
+        );
+        let image_handle = layer_lookup
+            .image_handle
+            .unwrap_or_else(|| panic!("leaf layer {layer_id} missing image handle"));
+        let image = self
+            .images
+            .get(image_handle)
+            .unwrap_or_else(|| panic!("image handle for layer {layer_id} not found"));
+        if tile_x >= image.tiles_per_row() || tile_y >= image.tiles_per_column() {
+            return None;
+        }
+        image
+            .get_tile(tile_x, tile_y)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "virtual image query failed for layer {} at ({}, {}): {:?}",
+                    layer_id, tile_x, tile_y, error
+                )
+            })
+            .copied()
+    }
+
     pub fn new_layer_root(&mut self) -> LayerNodeId {
         let (id, layer) = self.new_empty_leaf();
         self.root_mut().push(layer);

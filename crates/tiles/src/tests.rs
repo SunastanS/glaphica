@@ -39,7 +39,10 @@ fn create_store(
 fn create_generic_store_r32f(
     device: &wgpu::Device,
     config: GenericTileAtlasConfig,
-) -> (GenericR32FloatTileAtlasStore, GenericR32FloatTileAtlasGpuArray) {
+) -> (
+    GenericR32FloatTileAtlasStore,
+    GenericR32FloatTileAtlasGpuArray,
+) {
     GenericR32FloatTileAtlasStore::with_config(device, config)
         .expect("GenericR32FloatTileAtlasStore::with_config")
 }
@@ -238,8 +241,7 @@ fn read_tile_r8uint(
     address: TileAddress,
 ) -> Vec<u8> {
     let row_bytes = TILE_SIZE as usize;
-    let padded_row_bytes = row_bytes
-        .next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+    let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
     let buffer_size = (padded_row_bytes as u64) * (TILE_SIZE as u64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile r8uint readback"),
@@ -728,7 +730,10 @@ fn clear_tile_set_fails_without_partial_clear_enqueue() {
 
     assert!(store.release(released_key));
 
-    assert_eq!(store.clear_tile_set(&set), Err(TileSetError::UnknownTileKey));
+    assert_eq!(
+        store.clear_tile_set(&set),
+        Err(TileSetError::UnknownTileKey)
+    );
     let tile_count = gpu.drain_and_execute(&queue).expect("drain clear set");
     assert_eq!(tile_count, 0);
 
@@ -761,7 +766,9 @@ fn clear_tile_set_skips_stale_targets_after_release_and_reuse() {
     let reused_address = store.resolve(reused_key).expect("resolve reused key");
     assert_eq!(reused_address, original_address);
 
-    let tile_count = gpu.drain_and_execute(&queue).expect("drain after stale clear");
+    let tile_count = gpu
+        .drain_and_execute(&queue)
+        .expect("drain after stale clear");
     assert_eq!(tile_count, 1);
 
     let tile_bytes = vec![7u8; (TILE_SIZE as usize) * (TILE_SIZE as usize)];
@@ -864,7 +871,10 @@ fn release_tile_set_fails_without_partial_release() {
 
     assert!(store.release(released_key));
 
-    assert_eq!(store.release_tile_set(set), Err(TileSetError::UnknownTileKey));
+    assert_eq!(
+        store.release_tile_set(set),
+        Err(TileSetError::UnknownTileKey)
+    );
     assert!(store.is_allocated(kept_key));
 }
 
@@ -1225,4 +1235,65 @@ fn new_export_is_transparent_black() {
         .expect("export");
     assert_eq!(bytes.len(), 17 * 9 * 4);
     assert!(bytes.iter().all(|&byte| byte == 0));
+}
+
+#[test]
+fn force_release_all_keys_releases_allocated_tiles_and_is_idempotent() {
+    let (device, _queue) = create_device_queue();
+    let (store, _gpu) = create_store(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            ..TileAtlasConfig::default()
+        },
+    );
+
+    let key0 = store.allocate().expect("allocate key0");
+    let key1 = store.allocate().expect("allocate key1");
+    let key2 = store.allocate().expect("allocate key2");
+    assert!(store.is_allocated(key0));
+    assert!(store.is_allocated(key1));
+    assert!(store.is_allocated(key2));
+
+    let released = store.force_release_all_keys();
+    assert_eq!(released, 3);
+    assert!(!store.is_allocated(key0));
+    assert!(!store.is_allocated(key1));
+    assert!(!store.is_allocated(key2));
+
+    let released_again = store.force_release_all_keys();
+    assert_eq!(released_again, 0);
+}
+
+#[test]
+fn gc_eviction_batches_are_reported_via_store_drain() {
+    let (device, _queue) = create_device_queue();
+    let (store, _gpu) = create_store(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            tiles_per_row: 2,
+            tiles_per_column: 1,
+            ..TileAtlasConfig::default()
+        },
+    );
+
+    let key0 = store.allocate().expect("allocate key0");
+    let key1 = store.allocate().expect("allocate key1");
+    store.retain_keys(42, &[key0, key1]);
+
+    assert!(store.drain_evicted_retain_batches().is_empty());
+
+    let replacement = store.allocate().expect("allocate with gc retain eviction");
+    assert!(store.is_allocated(replacement));
+    assert!(!store.is_allocated(key0));
+    assert!(!store.is_allocated(key1));
+
+    let evicted = store.drain_evicted_retain_batches();
+    assert_eq!(evicted.len(), 1);
+    assert_eq!(evicted[0].retain_id, 42);
+    assert_eq!(evicted[0].keys.len(), 2);
+    assert!(evicted[0].keys.contains(&key0));
+    assert!(evicted[0].keys.contains(&key1));
+    assert!(store.drain_evicted_retain_batches().is_empty());
 }

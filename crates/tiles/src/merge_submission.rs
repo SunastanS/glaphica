@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use render_protocol::{
     BlendMode, GpuMergeOp, GpuTileRef, LayerId, MergeAuditMeta, MergeExecutionResult,
@@ -172,6 +172,8 @@ pub trait MergeTileStore {
     fn allocate(&self) -> Result<TileKey, TileAllocError>;
     fn release(&self, key: TileKey) -> bool;
     fn resolve(&self, key: TileKey) -> Option<TileAddress>;
+    fn mark_keys_active(&self, keys: &[TileKey]);
+    fn retain_keys(&self, retain_id: u64, keys: &[TileKey]);
 }
 
 impl MergeTileStore for TileAtlasStore {
@@ -186,6 +188,14 @@ impl MergeTileStore for TileAtlasStore {
     fn resolve(&self, key: TileKey) -> Option<TileAddress> {
         TileAtlasStore::resolve(self, key)
     }
+
+    fn mark_keys_active(&self, keys: &[TileKey]) {
+        TileAtlasStore::mark_keys_active(self, keys);
+    }
+
+    fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        TileAtlasStore::retain_keys(self, retain_id, keys);
+    }
 }
 
 impl MergeTileStore for Arc<TileAtlasStore> {
@@ -199,6 +209,14 @@ impl MergeTileStore for Arc<TileAtlasStore> {
 
     fn resolve(&self, key: TileKey) -> Option<TileAddress> {
         TileAtlasStore::resolve(self, key)
+    }
+
+    fn mark_keys_active(&self, keys: &[TileKey]) {
+        TileAtlasStore::mark_keys_active(self, keys);
+    }
+
+    fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        TileAtlasStore::retain_keys(self, retain_id, keys);
     }
 }
 
@@ -374,6 +392,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
             });
         }
 
+        self.store.mark_keys_active(&allocated_new_keys);
         let drop_key_list = collect_drop_keys(&new_key_mappings);
         self.receipts.insert(
             receipt_id,
@@ -583,17 +602,9 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
             }
         }
 
-        for old_key in &entry.drop_key_list {
-            let released = self.store.release(*old_key);
-            if !released {
-                return Err(TileMergeError::UnknownTileKey {
-                    receipt_id: Some(receipt_id),
-                    stroke_session_id: entry.stroke_session_id,
-                    layer_id: entry.layer_id,
-                    key: *old_key,
-                    stage: "finalize.release_drop_key",
-                });
-            }
+        if !entry.drop_key_list.is_empty() {
+            self.store
+                .retain_keys(entry.stroke_session_id, &entry.drop_key_list);
         }
         entry.state = ReceiptState::Finalized;
         Ok(())
@@ -793,6 +804,8 @@ mod tests {
         next_key: u64,
         next_tile_index: u16,
         map: HashMap<TileKey, TileAddress>,
+        mark_active_calls: Vec<Vec<TileKey>>,
+        retain_calls: Vec<(u64, Vec<TileKey>)>,
     }
 
     impl MergeTileStore for FakeTileStore {
@@ -806,6 +819,14 @@ mod tests {
 
         fn resolve(&self, key: TileKey) -> Option<TileAddress> {
             self.map.get(&key).copied()
+        }
+
+        fn mark_keys_active(&self, _keys: &[TileKey]) {
+            panic!("mark active mutation requires mutable fake store")
+        }
+
+        fn retain_keys(&self, _retain_id: u64, _keys: &[TileKey]) {
+            panic!("retain mutation requires mutable fake store")
         }
     }
 
@@ -835,6 +856,22 @@ mod tests {
                 .lock()
                 .expect("fake tile store mutex should not be poisoned");
             guard.map.remove(&key);
+        }
+
+        fn mark_active_calls(&self) -> Vec<Vec<TileKey>> {
+            let guard = self
+                .0
+                .lock()
+                .expect("fake tile store mutex should not be poisoned");
+            guard.mark_active_calls.clone()
+        }
+
+        fn retain_calls(&self) -> Vec<(u64, Vec<TileKey>)> {
+            let guard = self
+                .0
+                .lock()
+                .expect("fake tile store mutex should not be poisoned");
+            guard.retain_calls.clone()
         }
     }
 
@@ -875,6 +912,32 @@ mod tests {
                 .lock()
                 .expect("fake tile store mutex should not be poisoned");
             guard.map.get(&key).copied()
+        }
+
+        fn mark_keys_active(&self, keys: &[TileKey]) {
+            let mut guard = self
+                .0
+                .lock()
+                .expect("fake tile store mutex should not be poisoned");
+            for key in keys {
+                if !guard.map.contains_key(key) {
+                    panic!("cannot mark unknown key as active in fake store");
+                }
+            }
+            guard.mark_active_calls.push(keys.to_vec());
+        }
+
+        fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+            let mut guard = self
+                .0
+                .lock()
+                .expect("fake tile store mutex should not be poisoned");
+            for key in keys {
+                if !guard.map.contains_key(key) {
+                    panic!("cannot retain unknown key in fake store");
+                }
+            }
+            guard.retain_calls.push((retain_id, keys.to_vec()));
         }
     }
 
@@ -962,7 +1025,7 @@ mod tests {
                 tile_index: 9,
             },
         );
-        let mut engine = TileMergeEngine::new(store);
+        let mut engine = TileMergeEngine::new(store.clone());
         let submission = engine
             .submit_merge_plan(request_with_single_op(None))
             .expect("submit merge plan");
@@ -992,7 +1055,7 @@ mod tests {
                 tile_index: 9,
             },
         );
-        let mut engine = TileMergeEngine::new(store);
+        let mut engine = TileMergeEngine::new(store.clone());
         let submission = engine
             .submit_merge_plan(request_with_single_op(None))
             .expect("submit merge plan");
@@ -1013,6 +1076,7 @@ mod tests {
                 .expect("query succeeded state"),
             ReceiptState::Succeeded
         );
+        assert_eq!(store.mark_active_calls().len(), 1);
     }
 
     #[test]
@@ -1210,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_releases_drop_keys_only_after_explicit_finalize() {
+    fn finalize_marks_drop_keys_retained_without_releasing_them() {
         let store = SharedFakeTileStore::default();
         let old_layer_key = TileKey(600);
         store.seed_key(
@@ -1246,7 +1310,14 @@ mod tests {
         engine
             .finalize_receipt(submission.receipt_id)
             .expect("finalize receipt");
-        assert!(!store.has_key(old_layer_key));
+        assert!(store.has_key(old_layer_key));
+        let retain_calls = store.retain_calls();
+        assert_eq!(retain_calls.len(), 1);
+        assert_eq!(
+            retain_calls[0].0,
+            submission.renderer_submit_payload.receipt.stroke_session_id
+        );
+        assert_eq!(retain_calls[0].1, vec![old_layer_key]);
         assert_eq!(
             engine
                 .query_receipt_state(submission.receipt_id)

@@ -70,10 +70,9 @@ impl Default for TileAtlasConfig {
 }
 
 pub use brush_buffer_storage::{
-    GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
-    GenericR8UintTileAtlasGpuArray, GenericR8UintTileAtlasStore, GenericTileAtlasGpuArray,
-    GenericTileAtlasStore, RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray,
-    RuntimeGenericTileAtlasStore,
+    GenericR8UintTileAtlasGpuArray, GenericR8UintTileAtlasStore, GenericR32FloatTileAtlasGpuArray,
+    GenericR32FloatTileAtlasStore, GenericTileAtlasGpuArray, GenericTileAtlasStore,
+    RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray, RuntimeGenericTileAtlasStore,
 };
 pub use group_preview::{GroupTileAtlasGpuArray, GroupTileAtlasStore};
 pub use layer_pixel_storage::{TileAtlasGpuArray, TileAtlasStore};

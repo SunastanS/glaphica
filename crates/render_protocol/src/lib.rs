@@ -141,6 +141,24 @@ pub struct BrushBufferMerge {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BufferTileCoordinate {
+    pub tile_x: i32,
+    pub tile_y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrushBufferTileAllocate {
+    pub stroke_session_id: StrokeSessionId,
+    pub tiles: Vec<BufferTileCoordinate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrushBufferTileRelease {
+    pub stroke_session_id: StrokeSessionId,
+    pub tiles: Vec<BufferTileCoordinate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrokeExecutionReceiptId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +274,8 @@ pub enum BrushControlAck {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrushRenderCommand {
     BeginStroke(BrushStrokeBegin),
+    AllocateBufferTiles(BrushBufferTileAllocate),
+    ReleaseBufferTiles(BrushBufferTileRelease),
     PushDabChunkF32(BrushDabChunkF32),
     MergeBuffer(BrushBufferMerge),
     EndStroke(BrushStrokeEnd),

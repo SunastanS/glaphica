@@ -7,8 +7,9 @@ use crate::{
 };
 
 use super::core;
+pub use super::core::EvictedRetainBatch;
 use super::format::{
-    R32FloatSpec, R8UintSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec, TileGpuOpAdapter,
+    R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec, TileGpuOpAdapter,
     TileUploadFormatSpec,
 };
 use super::{GenericTileAtlasConfig, TilePayloadKind};
@@ -170,6 +171,22 @@ impl RuntimeGenericTileAtlasStore {
         dispatch_runtime_store!(self, store => store.release(key))
     }
 
+    pub fn force_release_all_keys(&self) -> usize {
+        dispatch_runtime_store!(self, store => store.force_release_all_keys())
+    }
+
+    pub fn mark_keys_active(&self, keys: &[TileKey]) {
+        dispatch_runtime_store!(self, store => store.mark_keys_active(keys))
+    }
+
+    pub fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        dispatch_runtime_store!(self, store => store.retain_keys(retain_id, keys))
+    }
+
+    pub fn drain_evicted_retain_batches(&self) -> Vec<EvictedRetainBatch> {
+        dispatch_runtime_store!(self, store => store.drain_evicted_retain_batches())
+    }
+
     pub fn clear(&self, key: TileKey) -> Result<bool, TileAllocError> {
         dispatch_runtime_store!(self, store => store.clear(key))
     }
@@ -294,6 +311,22 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
 
     pub fn release(&self, key: TileKey) -> bool {
         self.cpu.release(key)
+    }
+
+    pub fn force_release_all_keys(&self) -> usize {
+        self.cpu.release_all()
+    }
+
+    pub fn mark_keys_active(&self, keys: &[TileKey]) {
+        self.cpu.mark_keys_active(keys);
+    }
+
+    pub fn retain_keys(&self, retain_id: u64, keys: &[TileKey]) {
+        self.cpu.retain_keys(retain_id, keys);
+    }
+
+    pub fn drain_evicted_retain_batches(&self) -> Vec<EvictedRetainBatch> {
+        self.cpu.drain_evicted_retain_batches()
     }
 
     pub fn clear(&self, key: TileKey) -> Result<bool, TileAllocError> {

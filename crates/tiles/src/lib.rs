@@ -202,10 +202,16 @@ impl fmt::Display for TileSetError {
                 write!(formatter, "tile set cannot contain duplicate tile keys")
             }
             TileSetError::SetNotOwnedByStore => {
-                write!(formatter, "tile set handle does not belong to this atlas store")
+                write!(
+                    formatter,
+                    "tile set handle does not belong to this atlas store"
+                )
             }
             TileSetError::RollbackReleaseFailed => {
-                write!(formatter, "tile set rollback failed to release reserved tile key")
+                write!(
+                    formatter,
+                    "tile set rollback failed to release reserved tile key"
+                )
             }
         }
     }
@@ -284,10 +290,16 @@ impl fmt::Display for TileAtlasCreateError {
                 write!(formatter, "tile atlas max_layers must be at least 1")
             }
             TileAtlasCreateError::AtlasTileGridZero => {
-                write!(formatter, "tile atlas tiles_per_row/tiles_per_column must be at least 1")
+                write!(
+                    formatter,
+                    "tile atlas tiles_per_row/tiles_per_column must be at least 1"
+                )
             }
             TileAtlasCreateError::AtlasTileGridTooLarge => {
-                write!(formatter, "tile atlas tile grid exceeds supported tile index range")
+                write!(
+                    formatter,
+                    "tile atlas tile grid exceeds supported tile index range"
+                )
             }
             TileAtlasCreateError::MaxLayersExceedsDeviceLimit => {
                 write!(formatter, "tile atlas max_layers exceeds device limit")
@@ -492,19 +504,21 @@ impl<K> VirtualImage<K> {
 pub(crate) use atlas::{rgba8_tile_len, tile_origin};
 
 mod atlas;
+mod lifecycle;
 mod merge_callback;
 mod merge_submission;
 
 pub use atlas::{
-    GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
-    GenericR8UintTileAtlasGpuArray, GenericR8UintTileAtlasStore, GenericTileAtlasConfig,
-    GenericTileAtlasGpuArray, GenericTileAtlasStore, GroupTileAtlasGpuArray, GroupTileAtlasStore,
+    GenericR8UintTileAtlasGpuArray, GenericR8UintTileAtlasStore, GenericR32FloatTileAtlasGpuArray,
+    GenericR32FloatTileAtlasStore, GenericTileAtlasConfig, GenericTileAtlasGpuArray,
+    GenericTileAtlasStore, GroupTileAtlasGpuArray, GroupTileAtlasStore,
     RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray, RuntimeGenericTileAtlasStore,
     TileAtlasConfig, TileAtlasGpuArray, TileAtlasStore, TilePayloadKind,
 };
+pub use lifecycle::{BufferTileLifecycle, TileLifecycleManager, TileReleaseBatch};
 pub use merge_callback::{
-    TileMergeAckFailure, TileMergeBatchAck, TileMergeCompletionCallback,
-    TileMergeCompletionNotice, TileMergeCompletionNoticeId, TileMergeTerminalUpdate,
+    TileMergeAckFailure, TileMergeBatchAck, TileMergeCompletionCallback, TileMergeCompletionNotice,
+    TileMergeCompletionNoticeId, TileMergeTerminalUpdate,
 };
 pub use merge_submission::{
     AckOutcome, MergeAuditRecord, MergeCompletionAuditRecord, MergePlanRequest, MergePlanTileOp,

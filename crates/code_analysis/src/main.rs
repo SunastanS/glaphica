@@ -54,9 +54,8 @@ fn main() -> Result<()> {
     let arguments = Arguments::parse();
     let workspace_root = std::env::current_dir().context("resolve workspace root")?;
 
-    fs::create_dir_all(&arguments.output).with_context(|| {
-        format!("create output directory {}", arguments.output.display())
-    })?;
+    fs::create_dir_all(&arguments.output)
+        .with_context(|| format!("create output directory {}", arguments.output.display()))?;
     let output_root = arguments
         .output
         .canonicalize()
@@ -92,9 +91,8 @@ fn main() -> Result<()> {
         }
 
         for entry in WalkDir::new(&canonical_input) {
-            let entry = entry.with_context(|| {
-                format!("walk directory {}", canonical_input.display())
-            })?;
+            let entry =
+                entry.with_context(|| format!("walk directory {}", canonical_input.display()))?;
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -116,20 +114,18 @@ fn main() -> Result<()> {
             None => continue,
         };
 
-        let source = read_file_with_eol(&path)
-            .with_context(|| format!("read source {}", path.display()))?;
-        let source = source.ok_or_else(|| {
-            anyhow::anyhow!("{} returned no source content", path.display())
-        })?;
+        let source =
+            read_file_with_eol(&path).with_context(|| format!("read source {}", path.display()))?;
+        let source = source
+            .ok_or_else(|| anyhow::anyhow!("{} returned no source content", path.display()))?;
         let functions_space = get_function_spaces(&language, source, &path, None)
             .ok_or_else(|| anyhow::anyhow!("failed to compute metrics for {}", path.display()))?;
 
         let mut output_path = output_root.join(relative_path);
         output_path.set_extension(arguments.format.extension());
         if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("create output directory {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create output directory {}", parent.display()))?;
         }
 
         match arguments.format {
@@ -253,8 +249,7 @@ fn write_summary(output_root: &PathBuf, workspace_root: &PathBuf, top: usize) ->
         found_json = true;
         let content = fs::read_to_string(entry.path())
             .with_context(|| format!("read {}", entry.path().display()))?;
-        let value: Value =
-            serde_json::from_str(&content).with_context(|| "parse json output")?;
+        let value: Value = serde_json::from_str(&content).with_context(|| "parse json output")?;
         let file_path = extract_file_path(&value)
             .with_context(|| format!("extract file path from {}", entry.path().display()))?;
         let relative = file_path
@@ -438,11 +433,7 @@ fn metric_sum(metrics: &serde_json::Map<String, Value>, key: &str) -> Result<f64
     Ok(sum)
 }
 
-fn metric_field(
-    metrics: &serde_json::Map<String, Value>,
-    group: &str,
-    field: &str,
-) -> Result<f64> {
+fn metric_field(metrics: &serde_json::Map<String, Value>, group: &str, field: &str) -> Result<f64> {
     let value = metrics
         .get(group)
         .and_then(|value| value.get(field))

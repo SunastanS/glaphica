@@ -7,3 +7,4 @@ edition = "2024"
 driver = { path = "../driver" }
 render_protocol = { path = "../render_protocol" }
 rtrb = "0.3.2"
+tiles = { path = "../tiles" }
