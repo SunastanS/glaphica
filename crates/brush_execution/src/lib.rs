@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use driver::FramedSampleChunk;
 use render_protocol::{
@@ -196,12 +196,6 @@ fn brush_execution_loop(
     let mut buffer_tile_lifecycle = BufferTileLifecycle::<u64, BufferTileCoordinate>::new();
     let mut merge_feedback_pending_strokes = HashSet::<u64>::new();
     while !stop_requested.load(Ordering::Acquire) {
-        drain_releasable_tiles(
-            &mut buffer_tile_lifecycle,
-            Instant::now(),
-            &mut command_producer,
-        );
-
         while let Ok(feedback) = feedback_consumer.pop() {
             let stroke_session_id = match &feedback {
                 BrushExecutionMergeFeedback::MergeApplied { stroke_session_id } => {
@@ -217,13 +211,9 @@ fn brush_execution_loop(
                     stroke_session_id
                 );
             }
-            buffer_tile_lifecycle.move_allocated_to_pending(stroke_session_id);
+            buffer_tile_lifecycle.forget_owner(stroke_session_id);
             match feedback {
                 BrushExecutionMergeFeedback::MergeApplied { .. } => {
-                    buffer_tile_lifecycle.retain_pending_until(
-                        stroke_session_id,
-                        Instant::now() + MERGE_APPLIED_RELEASE_RETAIN_DURATION,
-                    );
                     continue;
                 }
                 BrushExecutionMergeFeedback::MergeFailed { message, .. } => {
@@ -233,83 +223,82 @@ fn brush_execution_loop(
                     );
                 }
             }
-            drain_releasable_tiles(
-                &mut buffer_tile_lifecycle,
-                Instant::now(),
-                &mut command_producer,
-            );
         }
 
         let sample_chunk = match sample_consumer.pop() {
-            Ok(sample_chunk) => sample_chunk,
-            Err(rtrb::PopError::Empty) => {
-                std::thread::sleep(IDLE_SLEEP_DURATION);
-                continue;
-            }
+            Ok(sample_chunk) => Some(sample_chunk),
+            Err(rtrb::PopError::Empty) => None,
         };
 
-        let chunk = sample_chunk.chunk;
-        if chunk.starts_stroke {
-            push_command(
-                &mut command_producer,
-                BrushRenderCommand::BeginStroke(BrushStrokeBegin {
-                    stroke_session_id: chunk.stroke_session_id,
-                    brush_id: config.brush_id,
-                    program_revision: config.program_revision,
-                    reference_set_id: config.reference_set_id,
-                    target_layer_id: config.target_layer_id,
-                    discontinuity_before: chunk.discontinuity_before,
-                }),
-                "begin stroke",
-            );
-        }
+        let had_sample = sample_chunk.is_some();
+        if let Some(sample_chunk) = sample_chunk {
+            let chunk = sample_chunk.chunk;
+            if chunk.starts_stroke {
+                push_command(
+                    &mut command_producer,
+                    BrushRenderCommand::BeginStroke(BrushStrokeBegin {
+                        stroke_session_id: chunk.stroke_session_id,
+                        brush_id: config.brush_id,
+                        program_revision: config.program_revision,
+                        reference_set_id: config.reference_set_id,
+                        target_layer_id: config.target_layer_id,
+                        discontinuity_before: chunk.discontinuity_before,
+                    }),
+                    "begin stroke",
+                );
+            }
 
-        let affected_tiles = collect_affected_tiles(
-            chunk.canvas_x(),
-            chunk.canvas_y(),
-            config.max_affected_radius,
-            config.buffer_tile_size,
-        );
-        let newly_affected_tiles =
-            buffer_tile_lifecycle.record_allocated_batch(chunk.stroke_session_id, affected_tiles);
-        if !newly_affected_tiles.is_empty() {
-            push_command(
-                &mut command_producer,
-                BrushRenderCommand::AllocateBufferTiles(BrushBufferTileAllocate {
-                    stroke_session_id: chunk.stroke_session_id,
-                    tiles: newly_affected_tiles,
-                }),
-                "allocate buffer tiles",
+            let affected_tiles = collect_affected_tiles(
+                chunk.canvas_x(),
+                chunk.canvas_y(),
+                config.max_affected_radius,
+                config.buffer_tile_size,
             );
-        }
+            let newly_affected_tiles = buffer_tile_lifecycle
+                .record_allocated_batch(chunk.stroke_session_id, affected_tiles);
+            if !newly_affected_tiles.is_empty() {
+                push_command(
+                    &mut command_producer,
+                    BrushRenderCommand::AllocateBufferTiles(BrushBufferTileAllocate {
+                        stroke_session_id: chunk.stroke_session_id,
+                        tiles: newly_affected_tiles,
+                    }),
+                    "allocate buffer tiles",
+                );
+            }
 
-        let dab_chunk = BrushDabChunkF32::from_slices(
-            chunk.stroke_session_id,
-            chunk.canvas_x(),
-            chunk.canvas_y(),
-            chunk.pressure(),
-        )
-        .expect("convert sample chunk to dab chunk");
-        push_command(
-            &mut command_producer,
-            BrushRenderCommand::PushDabChunkF32(dab_chunk),
-            "push dab chunk",
-        );
-
-        if chunk.ends_stroke {
-            push_command(
-                &mut command_producer,
-                BrushRenderCommand::EndStroke(BrushStrokeEnd {
-                    stroke_session_id: chunk.stroke_session_id,
-                }),
-                "end stroke",
-            );
-            emit_merge_for_stroke(
+            let dab_chunk = BrushDabChunkF32::from_slices(
                 chunk.stroke_session_id,
-                config.target_layer_id,
-                &mut merge_feedback_pending_strokes,
+                chunk.canvas_x(),
+                chunk.canvas_y(),
+                chunk.pressure(),
+            )
+            .expect("convert sample chunk to dab chunk");
+            push_command(
                 &mut command_producer,
+                BrushRenderCommand::PushDabChunkF32(dab_chunk),
+                "push dab chunk",
             );
+
+            if chunk.ends_stroke {
+                push_command(
+                    &mut command_producer,
+                    BrushRenderCommand::EndStroke(BrushStrokeEnd {
+                        stroke_session_id: chunk.stroke_session_id,
+                    }),
+                    "end stroke",
+                );
+                emit_merge_for_stroke(
+                    chunk.stroke_session_id,
+                    config.target_layer_id,
+                    &mut merge_feedback_pending_strokes,
+                    &mut command_producer,
+                );
+            }
+        }
+
+        if !had_sample {
+            std::thread::sleep(IDLE_SLEEP_DURATION);
         }
     }
 
@@ -336,16 +325,6 @@ fn emit_merge_for_stroke(
     let inserted = merge_feedback_pending_strokes.insert(stroke_session_id);
     if !inserted {
         panic!("pending merge feedback duplicated for ended stroke");
-    }
-}
-
-fn drain_releasable_tiles(
-    buffer_tile_lifecycle: &mut BufferTileLifecycle<u64, BufferTileCoordinate>,
-    now: Instant,
-    command_producer: &mut rtrb::Producer<BrushRenderCommand>,
-) {
-    for batch in buffer_tile_lifecycle.drain_releasable(now) {
-        push_release_command(command_producer, batch.owner, batch.tiles);
     }
 }
 
@@ -489,8 +468,14 @@ mod tests {
                         tile_x: 0,
                         tile_y: -1,
                     },
-                    BufferTileCoordinate { tile_x: -1, tile_y: 0 },
-                    BufferTileCoordinate { tile_x: 0, tile_y: 0 },
+                    BufferTileCoordinate {
+                        tile_x: -1,
+                        tile_y: 0,
+                    },
+                    BufferTileCoordinate {
+                        tile_x: 0,
+                        tile_y: 0,
+                    },
                 ];
                 assert_eq!(allocate.tiles.len(), expected_tiles.len());
                 let actual_tiles: HashSet<BufferTileCoordinate> =
@@ -618,32 +603,11 @@ mod tests {
             })
         ));
 
-        let release_start = std::time::Instant::now();
         feedback_sender
             .push_feedback(BrushExecutionMergeFeedback::MergeApplied {
                 stroke_session_id: 100,
             })
             .expect("push merge applied feedback");
-        let start = std::time::Instant::now();
-        let release = loop {
-            if let Some(command) = receiver.pop_command() {
-                break command;
-            }
-            if start.elapsed() >= std::time::Duration::from_secs(1) {
-                panic!("timed out waiting for release command");
-            }
-        };
-        assert!(matches!(
-            release,
-            BrushRenderCommand::ReleaseBufferTiles(BrushBufferTileRelease {
-                stroke_session_id: 100,
-                ..
-            })
-        ));
-        assert!(
-            release_start.elapsed() >= std::time::Duration::from_millis(200),
-            "release must be retained briefly after merge applied"
-        );
 
         drop(runtime);
     }

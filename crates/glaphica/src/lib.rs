@@ -698,10 +698,7 @@ impl GpuState {
         );
         eprintln!(
             "tiles gc evicted retain batch: retain_id={} key_count={} total_batches={} total_keys={}",
-            retain_id,
-            key_count,
-            self.gc_evicted_batches_total,
-            self.gc_evicted_keys_total
+            retain_id, key_count, self.gc_evicted_batches_total, self.gc_evicted_keys_total
         );
     }
 }

@@ -106,6 +106,15 @@ where
         });
     }
 
+    pub fn forget_owner(&mut self, owner: Owner) {
+        self.allocated_by_owner.remove(&owner);
+        self.pending_by_owner.remove(&owner);
+        if self.retained.is_empty() {
+            return;
+        }
+        self.retained.retain(|batch| batch.owner != owner);
+    }
+
     fn assert_accepting_new_requests(&self, stage: &'static str) {
         if self.shutdown_started {
             panic!(
