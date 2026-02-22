@@ -418,7 +418,8 @@ impl RenderDataResolver for FakeResolver {
 }
 
 #[test]
-fn build_leaf_tile_draw_instances_keeps_blend_and_filters_unresolved_tiles() {
+#[should_panic(expected = "layer tile key unresolved while building full leaf draw instances")]
+fn build_leaf_tile_draw_instances_panics_on_unresolved_tile_key() {
     let tile_keys = allocate_tile_keys(2);
     let resolver = FakeResolver {
         emit_tiles: true,
@@ -427,21 +428,12 @@ fn build_leaf_tile_draw_instances_keeps_blend_and_filters_unresolved_tiles() {
         ..Default::default()
     };
 
-    let draw_instances =
-        build_leaf_tile_draw_instances(BlendMode::Multiply, image_handle(), &resolver);
-
-    assert_eq!(resolver.visit_calls.get(), 1);
-    assert_eq!(resolver.resolve_calls.get(), 2);
-    assert_eq!(draw_instances.len(), 1);
-    let draw_instance = draw_instances[0];
-    assert_eq!(draw_instance.blend_mode, BlendMode::Multiply);
-    assert_eq!(draw_instance.tile.document_x, TILE_SIZE as f32);
-    assert_eq!(draw_instance.tile.document_y, (2 * TILE_SIZE) as f32);
-    assert_eq!(draw_instance.tile.atlas_layer, 2.0);
+    let _ = build_leaf_tile_draw_instances(BlendMode::Multiply, image_handle(), &resolver);
 }
 
 #[test]
-fn build_leaf_tile_draw_instances_for_tiles_filters_to_requested_tiles() {
+#[should_panic(expected = "layer tile key unresolved while building partial leaf draw instances")]
+fn build_leaf_tile_draw_instances_for_tiles_panics_on_unresolved_tile_key() {
     let tile_keys = allocate_tile_keys(2);
     let resolver = FakeResolver {
         emit_tiles: true,
@@ -460,10 +452,7 @@ fn build_leaf_tile_draw_instances_for_tiles_filters_to_requested_tiles() {
         &resolver,
         &requested_tiles,
     );
-
-    assert_eq!(resolver.visit_calls.get(), 1);
-    assert_eq!(resolver.resolve_calls.get(), 1);
-    assert_eq!(draw_instances.len(), 0);
+    let _ = draw_instances;
 }
 
 #[test]

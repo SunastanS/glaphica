@@ -813,18 +813,7 @@ impl Renderer {
         let submission_op_count = prepared.submission_gpu_ops.len();
         let submit_started = Instant::now();
 
-        let mut encoder =
-            self.gpu_state
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("renderer.merge_submission"),
-                });
-        self.encode_merge_submission(
-            renderer_submission_id,
-            &mut encoder,
-            &prepared.submission_gpu_ops,
-        )?;
-        self.gpu_state.queue.submit(Some(encoder.finish()));
+        self.encode_merge_submission(renderer_submission_id, &prepared.submission_gpu_ops)?;
 
         let (done_sender, done_receiver) = mpsc::channel();
         self.gpu_state.queue.on_submitted_work_done(move || {
@@ -873,7 +862,20 @@ impl Renderer {
         while let Ok(message) = self.gpu_state.merge_uncaptured_error_receiver.try_recv() {
             uncaptured_messages.push(message);
         }
+        if !uncaptured_messages.is_empty() && crate::renderer_brush_trace_enabled() {
+            eprintln!(
+                "[brush_trace] merge_poll observed_uncaptured_gpu_errors frame_id={} in_flight_merge_submissions={} messages={}",
+                frame_id,
+                self.merge_orchestrator.has_in_flight_submissions(),
+                uncaptured_messages.join(" | ")
+            );
+        }
         if !uncaptured_messages.is_empty() && self.merge_orchestrator.has_in_flight_submissions() {
+            if crate::renderer_brush_trace_enabled() {
+                eprintln!(
+                    "[brush_trace] merge_poll failing in-flight merges due to uncaptured gpu error; error source may be outside merge submission"
+                );
+            }
             completed_submissions.extend(self.merge_orchestrator.fail_all_in_flight_submissions(
                 GpuSubmissionCompletion::DeviceError {
                     message: format!(
@@ -936,7 +938,6 @@ impl Renderer {
     fn encode_merge_submission(
         &mut self,
         renderer_submission_id: RendererSubmissionId,
-        encoder: &mut wgpu::CommandEncoder,
         gpu_merge_ops: &[SubmissionGpuOp],
     ) -> Result<(), MergeSubmitError> {
         if gpu_merge_ops.is_empty() {
@@ -949,18 +950,35 @@ impl Renderer {
                 tile_ref_role: None,
             });
         }
-        let atlas_layout = self.gpu_state.tile_atlas.layout();
-        let atlas_layer_count = self
+        let layer_atlas_layout = self.gpu_state.tile_atlas.layout();
+        let layer_atlas_layer_count = self
             .gpu_state
             .tile_atlas
             .texture()
             .size()
             .depth_or_array_layers;
+        let stroke_atlas_layout = self.gpu_state.brush_buffer_atlas.layout();
+        let stroke_atlas_layer_count = self
+            .gpu_state
+            .brush_buffer_atlas
+            .texture()
+            .size()
+            .depth_or_array_layers;
+        if layer_atlas_layout != stroke_atlas_layout {
+            return Err(MergeSubmitError::InvalidGpuMergeOp {
+                renderer_submission_id,
+                receipt_id: None,
+                op_trace_id: 0,
+                reason: "merge requires matching layer/stroke atlas layouts",
+                tile_ref: None,
+                tile_ref_role: None,
+            });
+        }
         let slot_uv_size = [
-            TILE_STRIDE as f32 / atlas_layout.atlas_width as f32,
-            TILE_STRIDE as f32 / atlas_layout.atlas_height as f32,
+            TILE_STRIDE as f32 / layer_atlas_layout.atlas_width as f32,
+            TILE_STRIDE as f32 / layer_atlas_layout.atlas_height as f32,
         ];
-        for submission_gpu_op in gpu_merge_ops {
+        for (op_index, submission_gpu_op) in gpu_merge_ops.iter().enumerate() {
             let receipt_id = submission_gpu_op.receipt_id;
             let gpu_merge_op = submission_gpu_op.gpu_merge_op;
             if !(0.0..=1.0).contains(&gpu_merge_op.opacity) {
@@ -973,7 +991,11 @@ impl Renderer {
                     tile_ref_role: None,
                 });
             }
-            if !validate_tile_ref(gpu_merge_op.stroke_tile, atlas_layout, atlas_layer_count) {
+            if !validate_tile_ref(
+                gpu_merge_op.stroke_tile,
+                stroke_atlas_layout,
+                stroke_atlas_layer_count,
+            ) {
                 return Err(MergeSubmitError::InvalidGpuMergeOp {
                     renderer_submission_id,
                     receipt_id: Some(receipt_id),
@@ -983,7 +1005,11 @@ impl Renderer {
                     tile_ref_role: Some(MergeTileRefRole::Stroke),
                 });
             }
-            if !validate_tile_ref(gpu_merge_op.output_tile, atlas_layout, atlas_layer_count) {
+            if !validate_tile_ref(
+                gpu_merge_op.output_tile,
+                layer_atlas_layout,
+                layer_atlas_layer_count,
+            ) {
                 return Err(MergeSubmitError::InvalidGpuMergeOp {
                     renderer_submission_id,
                     receipt_id: Some(receipt_id),
@@ -994,7 +1020,7 @@ impl Renderer {
                 });
             }
             if let Some(base_tile) = gpu_merge_op.base_tile {
-                if !validate_tile_ref(base_tile, atlas_layout, atlas_layer_count) {
+                if !validate_tile_ref(base_tile, layer_atlas_layout, layer_atlas_layer_count) {
                     return Err(MergeSubmitError::InvalidGpuMergeOp {
                         renderer_submission_id,
                         receipt_id: Some(receipt_id),
@@ -1006,23 +1032,23 @@ impl Renderer {
                 }
             }
 
-            if atlas_layer_count == 0 {
+            if layer_atlas_layer_count == 0 || stroke_atlas_layer_count == 0 {
                 return Err(MergeSubmitError::InvalidGpuMergeOp {
                     renderer_submission_id,
                     receipt_id: Some(receipt_id),
                     op_trace_id: gpu_merge_op.op_trace_id,
-                    reason: "tile atlas has zero array layers",
+                    reason: "merge atlas has zero array layers",
                     tile_ref: None,
                     tile_ref_role: None,
                 });
             }
             let merge_uniform = MergeUniformGpu {
                 base_slot_origin_uv: gpu_merge_op.base_tile.map_or([0.0, 0.0], |base_tile| {
-                    tile_ref_slot_origin_uv(base_tile, atlas_layout)
+                    tile_ref_slot_origin_uv(base_tile, layer_atlas_layout)
                 }),
                 stroke_slot_origin_uv: tile_ref_slot_origin_uv(
                     gpu_merge_op.stroke_tile,
-                    atlas_layout,
+                    layer_atlas_layout,
                 ),
                 slot_uv_size,
                 base_layer: gpu_merge_op
@@ -1043,6 +1069,24 @@ impl Renderer {
                 0,
                 bytemuck::bytes_of(&merge_uniform),
             );
+            if crate::renderer_brush_trace_enabled() && op_index < 6 {
+                eprintln!(
+                    "[brush_trace] merge_encode_op submission_id={} op_index={} op_trace_id={} base={:?} stroke={:?} output={:?}",
+                    renderer_submission_id.0,
+                    op_index,
+                    gpu_merge_op.op_trace_id,
+                    gpu_merge_op.base_tile,
+                    gpu_merge_op.stroke_tile,
+                    gpu_merge_op.output_tile,
+                );
+            }
+
+            let mut encoder =
+                self.gpu_state
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("renderer.merge_submission.op"),
+                    });
 
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1076,11 +1120,12 @@ impl Renderer {
                 wgpu::TexelCopyTextureInfo {
                     texture: self.gpu_state.tile_atlas.texture(),
                     mip_level: 0,
-                    origin: tile_ref_slot_origin(gpu_merge_op.output_tile, atlas_layout),
+                    origin: tile_ref_slot_origin(gpu_merge_op.output_tile, layer_atlas_layout),
                     aspect: wgpu::TextureAspect::All,
                 },
                 merge_output_copy_extent(),
             );
+            self.gpu_state.queue.submit(Some(encoder.finish()));
         }
         Ok(())
     }

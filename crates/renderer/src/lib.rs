@@ -13,18 +13,18 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs::OpenOptions, io::Write};
 
 use render_protocol::{
-    BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, ImageHandle, LayerId, ProgramRevision,
-    ReferenceLayerSelection, ReferenceSetId, RenderOp, RenderTreeSnapshot, TransformMatrix4x4,
-    Viewport,
+    BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, BufferTileCoordinate, ImageHandle,
+    LayerId, ProgramRevision, ReferenceLayerSelection, ReferenceSetId, RenderOp,
+    RenderTreeSnapshot, TransformMatrix4x4, Viewport,
 };
 use tiles::{
-    DirtySinceResult, GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE,
-    TILE_STRIDE, TileAddress, TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImage,
-    TileKey,
+    DirtySinceResult, GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
+    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAddress,
+    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImage, TileKey,
 };
 
 #[repr(C)]
@@ -106,8 +106,13 @@ impl CachedLeafDraw {
     fn rebuild_tile_index(&mut self) {
         self.tile_instance_index.clear();
         for (index, instance) in self.draw_instances.iter().enumerate() {
-            self.tile_instance_index
-                .insert(tile_coord_from_draw_instance(instance), index);
+            let tile_coord = tile_coord_from_draw_instance(instance);
+            if let Some(previous_index) = self.tile_instance_index.insert(tile_coord, index) {
+                panic!(
+                    "cached leaf draw instances contain duplicate tile coord {:?}: previous_index={} duplicate_index={}",
+                    tile_coord, previous_index, index
+                );
+            }
         }
     }
 
@@ -152,6 +157,12 @@ impl CachedLeafDraw {
         self.ensure_tile_index_consistent();
         for instance in new_instances {
             let tile_coord = tile_coord_from_draw_instance(&instance);
+            if self.tile_instance_index.contains_key(&tile_coord) {
+                panic!(
+                    "append_instances would duplicate tile coord {:?} in cached leaf draw",
+                    tile_coord
+                );
+            }
             let index = self.draw_instances.len();
             self.draw_instances.push(instance);
             self.tile_instance_index.insert(tile_coord, index);
@@ -230,6 +241,12 @@ pub(crate) fn renderer_perf_jsonl_enabled() -> bool {
         .get_or_init(|| std::env::var_os("GLAPHICA_PERF_JSONL").is_some_and(|value| value != "0"))
 }
 
+pub(crate) fn renderer_brush_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("GLAPHICA_BRUSH_TRACE").is_some_and(|value| value != "0"))
+}
+
 fn renderer_perf_jsonl_file() -> Option<&'static Mutex<std::fs::File>> {
     static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
     FILE.get_or_init(|| {
@@ -303,12 +320,13 @@ struct BrushWorkState {
     stroke_reference_set: HashMap<u64, ReferenceSetId>,
     stroke_target_layer: HashMap<u64, LayerId>,
     ended_strokes_pending_merge: HashMap<u64, LayerId>,
+    bound_buffer_tile_keys_by_stroke: HashMap<u64, HashMap<BufferTileCoordinate, TileKey>>,
 }
 
 struct PreparedBrushProgram {
     payload_hash: u64,
     _wgsl_source: std::sync::Arc<str>,
-    compute_pipeline: wgpu::ComputePipeline,
+    _compute_pipeline: wgpu::ComputePipeline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +359,12 @@ struct GpuState {
     tile_atlas: TileAtlasGpuArray,
     gpu_timing: GpuFrameTimingState,
     brush_pipeline_layout: wgpu::PipelineLayout,
+    brush_dab_write_pipeline: wgpu::ComputePipeline,
+    brush_dab_write_bind_group: wgpu::BindGroup,
+    brush_dab_write_buffer: wgpu::Buffer,
+    brush_dab_write_meta_buffer: wgpu::Buffer,
+    brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+    brush_buffer_atlas: GenericR32FloatTileAtlasGpuArray,
     merge_bind_group: wgpu::BindGroup,
     merge_uniform_buffer: wgpu::Buffer,
     merge_pipeline: wgpu::RenderPipeline,
@@ -348,6 +372,24 @@ struct GpuState {
     merge_scratch_view: wgpu::TextureView,
     merge_device_lost_receiver: mpsc::Receiver<(wgpu::DeviceLostReason, String)>,
     merge_uncaptured_error_receiver: mpsc::Receiver<String>,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BrushDabWriteGpu {
+    pixel_x: u32,
+    pixel_y: u32,
+    atlas_layer: u32,
+    pressure: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BrushDabWriteMetaGpu {
+    dab_count: u32,
+    texture_width: u32,
+    texture_height: u32,
+    _padding0: u32,
 }
 
 struct DataState {
@@ -543,3 +585,6 @@ pub use renderer_merge::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wgsl_tests;

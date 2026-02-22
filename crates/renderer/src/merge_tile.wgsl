@@ -12,9 +12,11 @@ struct MergeUniform {
     _padding2: u32,
 };
 
-@group(0) @binding(0) var tile_atlas: texture_2d_array<f32>;
-@group(0) @binding(1) var tile_sampler: sampler;
-@group(0) @binding(2) var<uniform> merge_uniform: MergeUniform;
+@group(0) @binding(0) var layer_tile_atlas: texture_2d_array<f32>;
+@group(0) @binding(1) var layer_tile_sampler: sampler;
+@group(0) @binding(2) var stroke_tile_atlas: texture_2d_array<f32>;
+@group(0) @binding(3) var stroke_tile_sampler: sampler;
+@group(0) @binding(4) var<uniform> merge_uniform: MergeUniform;
 
 struct VsOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -56,22 +58,22 @@ fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
     let base = select(
         vec4<f32>(0.0, 0.0, 0.0, 0.0),
         textureSampleLevel(
-            tile_atlas,
-            tile_sampler,
+            layer_tile_atlas,
+            layer_tile_sampler,
             base_uv,
             i32(merge_uniform.base_layer),
             0.0,
         ),
         merge_uniform.has_base > 0.5,
     );
-    let stroke_sample = textureSampleLevel(
-        tile_atlas,
-        tile_sampler,
+    let stroke_alpha = textureSampleLevel(
+        stroke_tile_atlas,
+        stroke_tile_sampler,
         stroke_uv,
         i32(merge_uniform.stroke_layer),
         0.0,
-    );
-    let stroke = vec4<f32>(stroke_sample.rgb, stroke_sample.a * merge_uniform.opacity);
+    ).r;
+    let stroke = vec4<f32>(0.0, 0.0, 0.0, stroke_alpha * merge_uniform.opacity);
 
     if merge_uniform.blend_mode == 1u {
         return blend_multiply(base, stroke);

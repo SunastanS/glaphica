@@ -3,7 +3,7 @@
 //! This module converts resolver/tile-store data into GPU draw-instance vectors
 //! for leaf and group rendering paths.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use render_protocol::{BlendMode, ImageHandle};
 use tiles::{GroupTileAtlasStore, TILE_SIZE, TileImage, TileKey};
@@ -110,6 +110,21 @@ pub(crate) fn build_group_tile_draw_instances(
     blend: BlendMode,
     tile_store: &GroupTileAtlasStore,
 ) -> Vec<TileDrawInstance> {
+    #[cfg(debug_assertions)]
+    {
+        let mut coord_by_key = HashMap::new();
+        for (tile_x, tile_y, tile_key) in image.iter_tiles() {
+            if let Some((existing_x, existing_y)) = coord_by_key.insert(tile_key, (tile_x, tile_y))
+            {
+                if (existing_x, existing_y) != (tile_x, tile_y) {
+                    panic!(
+                        "group tile image uses duplicated key across coordinates: key={:?} first_tile=({}, {}) duplicate_tile=({}, {})",
+                        tile_key, existing_x, existing_y, tile_x, tile_y
+                    );
+                }
+            }
+        }
+    }
     image
         .iter_tiles()
         .map(|(tile_x, tile_y, tile_key)| {

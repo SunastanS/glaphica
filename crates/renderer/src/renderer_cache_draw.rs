@@ -465,6 +465,9 @@ impl Renderer {
             return;
         }
 
+        #[cfg(debug_assertions)]
+        self.assert_unique_effective_tile_coords(effective_instances);
+
         self.upload_effective_instances(effective_instances);
 
         let support_matrix =
@@ -511,6 +514,20 @@ impl Renderer {
             context.composite_space,
             support_matrix,
         );
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_unique_effective_tile_coords(&self, effective_instances: &[TileDrawInstance]) {
+        let mut seen = HashSet::with_capacity(effective_instances.len());
+        for (index, instance) in effective_instances.iter().enumerate() {
+            let tile_coord = tile_coord_from_draw_instance(instance);
+            if !seen.insert(tile_coord) {
+                panic!(
+                    "effective draw instances contain duplicate tile coord {:?} at index {}",
+                    tile_coord, index
+                );
+            }
+        }
     }
 
     fn resolve_effective_draw_instances<'a>(

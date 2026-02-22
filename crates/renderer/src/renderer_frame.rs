@@ -9,9 +9,10 @@ use std::sync::mpsc;
 
 use render_protocol::{
     BRUSH_DAB_CHUNK_CAPACITY, BrushControlAck, BrushControlCommand, BrushProgramActivation,
-    BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ReferenceSetUpsert,
+    BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin,
+    BufferTileCoordinate, ReferenceSetUpsert,
 };
-use tiles::{DirtySinceResult, TILE_SIZE};
+use tiles::{DirtySinceResult, TILE_SIZE, TileAtlasLayout, TileKey};
 
 use crate::{
     BrushControlError, BrushRenderEnqueueError, CompositeEmission, CompositeNodePlan,
@@ -300,6 +301,77 @@ static FRAME_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 static EXECUTE_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 impl Renderer {
+    pub fn bind_brush_buffer_tiles(
+        &mut self,
+        stroke_session_id: u64,
+        tile_bindings: Vec<(BufferTileCoordinate, TileKey)>,
+    ) {
+        let stroke_tiles = self
+            .brush_work_state
+            .bound_buffer_tile_keys_by_stroke
+            .entry(stroke_session_id)
+            .or_default();
+        let mut coordinate_by_key = HashMap::with_capacity(stroke_tiles.len());
+        for (existing_coordinate, existing_key) in stroke_tiles.iter() {
+            if let Some(previous_coordinate) =
+                coordinate_by_key.insert(*existing_key, *existing_coordinate)
+            {
+                if previous_coordinate != *existing_coordinate {
+                    panic!(
+                        "renderer brush tile binding invariant violated before insert for stroke {}: key {:?} is mapped to both ({}, {}) and ({}, {})",
+                        stroke_session_id,
+                        existing_key,
+                        previous_coordinate.tile_x,
+                        previous_coordinate.tile_y,
+                        existing_coordinate.tile_x,
+                        existing_coordinate.tile_y
+                    );
+                }
+            }
+        }
+        for (tile_coordinate, tile_key) in tile_bindings {
+            if self
+                .gpu_state
+                .brush_buffer_store
+                .resolve(tile_key)
+                .is_none()
+            {
+                panic!(
+                    "renderer received unresolved brush buffer tile key for stroke {} at ({}, {})",
+                    stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
+                );
+            }
+            if let Some(previous_coordinate) = coordinate_by_key.get(&tile_key).copied() {
+                if previous_coordinate != tile_coordinate {
+                    panic!(
+                        "renderer received duplicate brush tile key binding for stroke {}: key {:?} is mapped to both ({}, {}) and ({}, {})",
+                        stroke_session_id,
+                        tile_key,
+                        previous_coordinate.tile_x,
+                        previous_coordinate.tile_y,
+                        tile_coordinate.tile_x,
+                        tile_coordinate.tile_y
+                    );
+                }
+            } else {
+                coordinate_by_key.insert(tile_key, tile_coordinate);
+            }
+            let previous = stroke_tiles.insert(tile_coordinate, tile_key);
+            if let Some(previous_key) = previous {
+                if previous_key != tile_key {
+                    panic!(
+                        "renderer received conflicting brush tile binding for stroke {} at ({}, {}): previous={:?} new={:?}",
+                        stroke_session_id,
+                        tile_coordinate.tile_x,
+                        tile_coordinate.tile_y,
+                        previous_key,
+                        tile_key
+                    );
+                }
+            }
+        }
+    }
+
     pub fn apply_brush_control_command(
         &mut self,
         command: BrushControlCommand,
@@ -366,7 +438,7 @@ impl Renderer {
             PreparedBrushProgram {
                 payload_hash: program.payload_hash,
                 _wgsl_source: wgsl_source,
-                compute_pipeline,
+                _compute_pipeline: compute_pipeline,
             },
         );
         BrushControlAck::Prepared
@@ -553,6 +625,11 @@ impl Renderer {
         self.brush_work_state.pending_dab_count
     }
 
+    pub fn pending_brush_command_count(&self) -> u64 {
+        u64::try_from(self.brush_work_state.pending_commands.len())
+            .expect("pending brush command count exceeds u64")
+    }
+
     pub fn take_latest_gpu_timing_report(&mut self) -> Option<FrameGpuTimingReport> {
         self.poll_gpu_timing_reports();
         self.gpu_state.gpu_timing.latest_report.take()
@@ -564,6 +641,10 @@ impl Renderer {
 
         self.gpu_state
             .tile_atlas
+            .drain_and_execute(&self.gpu_state.queue)
+            .map_err(PresentError::TileDrain)?;
+        self.gpu_state
+            .brush_buffer_atlas
             .drain_and_execute(&self.gpu_state.queue)
             .map_err(PresentError::TileDrain)?;
         self.consume_brush_batches_for_frame();
@@ -644,7 +725,22 @@ impl Renderer {
                         .insert(begin.stroke_session_id, key);
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
-                BrushRenderCommand::AllocateBufferTiles(_allocate) => {
+                BrushRenderCommand::AllocateBufferTiles(allocate) => {
+                    let stroke_tiles = self
+                        .brush_work_state
+                        .bound_buffer_tile_keys_by_stroke
+                        .entry(allocate.stroke_session_id)
+                        .or_default();
+                    for tile_coordinate in allocate.tiles.iter().copied() {
+                        if !stroke_tiles.contains_key(&tile_coordinate) {
+                            panic!(
+                                "renderer missing brush tile binding for stroke {} at ({}, {})",
+                                allocate.stroke_session_id,
+                                tile_coordinate.tile_x,
+                                tile_coordinate.tile_y
+                            );
+                        }
+                    }
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
                 BrushRenderCommand::EndStroke(end) => {
@@ -653,8 +749,17 @@ impl Renderer {
                         .remove(&end.stroke_session_id);
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
-                BrushRenderCommand::MergeBuffer(_merge) => {
+                BrushRenderCommand::MergeBuffer(merge) => {
                     self.dispatch_brush_merge(&mut brush_encoder);
+                    self.brush_work_state
+                        .bound_buffer_tile_keys_by_stroke
+                        .remove(&merge.stroke_session_id)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "merge requested for stroke {} without bound brush tile keys",
+                                merge.stroke_session_id
+                            )
+                        });
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
                 BrushRenderCommand::PushDabChunkF32(chunk) => {
@@ -663,7 +768,7 @@ impl Renderer {
                     if consumed_dabs.saturating_add(chunk_dabs) > target_dabs {
                         break;
                     }
-                    let stroke_program_key = self
+                    let _stroke_program_key = self
                         .brush_work_state
                         .executing_strokes
                         .get(&chunk.stroke_session_id)
@@ -674,11 +779,7 @@ impl Renderer {
                                 chunk.stroke_session_id
                             )
                         });
-                    self.dispatch_brush_chunk(
-                        &mut brush_encoder,
-                        stroke_program_key,
-                        chunk.dab_count(),
-                    );
+                    self.dispatch_brush_chunk(&mut brush_encoder, &chunk);
                     consumed_dabs = consumed_dabs
                         .checked_add(chunk_dabs)
                         .expect("consumed brush dabs overflow");
@@ -707,19 +808,55 @@ impl Renderer {
     fn dispatch_brush_chunk(
         &mut self,
         brush_encoder: &mut Option<wgpu::CommandEncoder>,
-        stroke_program_key: BrushProgramKey,
-        dab_count: usize,
+        chunk: &render_protocol::BrushDabChunkF32,
     ) {
-        let prepared_program = self
+        let _stroke_program_key = self
             .brush_work_state
-            .prepared_programs
-            .get(&stroke_program_key)
+            .executing_strokes
+            .get(&chunk.stroke_session_id)
+            .copied()
             .unwrap_or_else(|| {
                 panic!(
-                    "brush program missing at execute time: brush_id={} revision={}",
-                    stroke_program_key.brush_id, stroke_program_key.program_revision
+                    "brush stroke {} missing active execution state while dispatching chunk",
+                    chunk.stroke_session_id
                 )
             });
+        let bound_tile_keys = self
+            .brush_work_state
+            .bound_buffer_tile_keys_by_stroke
+            .get(&chunk.stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "brush stroke {} has no bound buffer tile keys before dab dispatch",
+                    chunk.stroke_session_id
+                )
+            });
+        let atlas_layout = self.gpu_state.brush_buffer_atlas.layout();
+        let mut mapped_dabs = Vec::with_capacity(chunk.dab_count());
+        for index in 0..chunk.dab_count() {
+            mapped_dabs.push(self.map_dab_to_brush_buffer_pixel(
+                chunk.canvas_x()[index],
+                chunk.canvas_y()[index],
+                chunk.pressure()[index],
+                bound_tile_keys,
+                atlas_layout,
+            ));
+        }
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.brush_dab_write_buffer,
+            0,
+            bytemuck::cast_slice(&mapped_dabs),
+        );
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.brush_dab_write_meta_buffer,
+            0,
+            bytemuck::bytes_of(&crate::BrushDabWriteMetaGpu {
+                dab_count: u32::try_from(chunk.dab_count()).expect("dab count exceeds u32"),
+                texture_width: atlas_layout.atlas_width,
+                texture_height: atlas_layout.atlas_height,
+                _padding0: 0,
+            }),
+        );
         if brush_encoder.is_none() {
             *brush_encoder = Some(self.gpu_state.device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor {
@@ -734,9 +871,10 @@ impl Renderer {
             label: Some("renderer.brush_execution.pass"),
             timestamp_writes: None,
         });
-        compute_pass.set_pipeline(&prepared_program.compute_pipeline);
+        compute_pass.set_pipeline(&self.gpu_state.brush_dab_write_pipeline);
+        compute_pass.set_bind_group(0, &self.gpu_state.brush_dab_write_bind_group, &[]);
         compute_pass.dispatch_workgroups(
-            u32::try_from(dab_count).expect("dab dispatch count exceeds u32"),
+            u32::try_from(chunk.dab_count()).expect("dab dispatch count exceeds u32"),
             1,
             1,
         );
@@ -750,6 +888,74 @@ impl Renderer {
                 },
             ));
         }
+    }
+
+    fn map_dab_to_brush_buffer_pixel(
+        &self,
+        canvas_x: f32,
+        canvas_y: f32,
+        pressure: f32,
+        bound_tile_keys: &HashMap<BufferTileCoordinate, tiles::TileKey>,
+        atlas_layout: TileAtlasLayout,
+    ) -> crate::BrushDabWriteGpu {
+        if !canvas_x.is_finite() || !canvas_y.is_finite() || !pressure.is_finite() {
+            panic!("dab values must be finite");
+        }
+        let tile_size_f32 = TILE_SIZE as f32;
+        let tile_x = Self::tile_index_for_canvas_value(canvas_x, tile_size_f32);
+        let tile_y = Self::tile_index_for_canvas_value(canvas_y, tile_size_f32);
+        let tile_coordinate = BufferTileCoordinate { tile_x, tile_y };
+        let tile_key = bound_tile_keys
+            .get(&tile_coordinate)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "dab mapped to unbound tile key for stroke buffer: tile=({}, {})",
+                    tile_x, tile_y
+                )
+            });
+        let tile_address = self
+            .gpu_state
+            .brush_buffer_store
+            .resolve(tile_key)
+            .unwrap_or_else(|| panic!("bound brush buffer tile key must resolve"));
+        let tile_origin_x = tile_x as f32 * tile_size_f32;
+        let tile_origin_y = tile_y as f32 * tile_size_f32;
+        let local_x = (canvas_x - tile_origin_x).floor() as i32;
+        let local_y = (canvas_y - tile_origin_y).floor() as i32;
+        if local_x < 0
+            || local_x >= i32::try_from(TILE_SIZE).expect("tile size i32")
+            || local_y < 0
+            || local_y >= i32::try_from(TILE_SIZE).expect("tile size i32")
+        {
+            panic!(
+                "dab local coordinate out of tile content bounds: local=({}, {})",
+                local_x, local_y
+            );
+        }
+
+        let (origin_x, origin_y) = tile_address.atlas_content_origin_pixels_in(atlas_layout);
+        let pixel_x = origin_x
+            .checked_add(u32::try_from(local_x).expect("local x negative"))
+            .expect("brush buffer pixel x overflow");
+        let pixel_y = origin_y
+            .checked_add(u32::try_from(local_y).expect("local y negative"))
+            .expect("brush buffer pixel y overflow");
+
+        crate::BrushDabWriteGpu {
+            pixel_x,
+            pixel_y,
+            atlas_layer: tile_address.atlas_layer,
+            pressure: pressure.clamp(0.0, 1.0),
+        }
+    }
+
+    fn tile_index_for_canvas_value(value: f32, tile_size: f32) -> i32 {
+        let tile_index = (value / tile_size).floor();
+        if tile_index < i32::MIN as f32 || tile_index > i32::MAX as f32 {
+            panic!("tile index out of i32 range");
+        }
+        tile_index as i32
     }
 
     fn snapshot_revision(&self) -> u64 {

@@ -137,6 +137,7 @@ pub struct BrushStrokeEnd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushBufferMerge {
     pub stroke_session_id: StrokeSessionId,
+    pub tx_token: TxToken,
     pub target_layer_id: LayerId,
 }
 

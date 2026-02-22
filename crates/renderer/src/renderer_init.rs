@@ -8,17 +8,18 @@ use std::sync::{Arc, mpsc};
 
 use render_protocol::TransformMatrix4x4;
 use tiles::{
-    GroupTileAtlasStore, TILE_STRIDE, TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat,
-    TileAtlasGpuArray, TileAtlasStore, TileAtlasUsage,
+    GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore, GroupTileAtlasStore,
+    TILE_STRIDE, TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat, TileAtlasGpuArray,
+    TileAtlasStore, TileAtlasUsage,
 };
 use wgpu::util::DeviceExt;
 
 use crate::{
-    BrushWorkState, CacheState, DataState, DirtyStateStore, FrameState, FrameSync,
-    GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState, GpuFrameTimingState, GpuState,
-    GroupTargetCacheEntry, IDENTITY_MATRIX, INITIAL_TILE_INSTANCE_CAPACITY, InputState,
-    RenderDataResolver, Renderer, TileInstanceGpu, TileTextureManagerGpu, ViewState,
-    create_composite_pipeline, multiply_blend_state,
+    BrushDabWriteGpu, BrushDabWriteMetaGpu, BrushWorkState, CacheState, DataState, DirtyStateStore,
+    FrameState, FrameSync, GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState,
+    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX,
+    INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer, TileInstanceGpu,
+    TileTextureManagerGpu, ViewState, create_composite_pipeline, multiply_blend_state,
 };
 
 impl Renderer {
@@ -68,6 +69,8 @@ impl Renderer {
         surface: wgpu::Surface<'static>,
         surface_config: wgpu::SurfaceConfiguration,
         tile_atlas: TileAtlasGpuArray,
+        brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+        brush_buffer_atlas: GenericR32FloatTileAtlasGpuArray,
         render_data_resolver: Box<dyn RenderDataResolver>,
     ) -> (Self, crate::ViewOpSender) {
         let (view_sender, view_receiver) = mpsc::channel();
@@ -79,6 +82,9 @@ impl Renderer {
 
         let (merge_uncaptured_error_sender, merge_uncaptured_error_receiver) = mpsc::channel();
         device.on_uncaptured_error(Arc::new(move |error| {
+            if crate::renderer_brush_trace_enabled() {
+                eprintln!("[brush_trace] uncaptured_gpu_error={error}");
+            }
             let _ = merge_uncaptured_error_sender.send(error.to_string());
         }));
 
@@ -281,6 +287,100 @@ impl Renderer {
                 bind_group_layouts: &[],
                 immediate_size: 0,
             });
+        let brush_dab_write_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("renderer.brush_dab_write.bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let brush_dab_write_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.brush_dab_write.buffer"),
+            size: (std::mem::size_of::<BrushDabWriteGpu>()
+                * render_protocol::BRUSH_DAB_CHUNK_CAPACITY) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let brush_dab_write_meta_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.brush_dab_write.meta"),
+            size: std::mem::size_of::<BrushDabWriteMetaGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let brush_dab_write_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("renderer.brush_dab_write.bind_group"),
+            layout: &brush_dab_write_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: brush_dab_write_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: brush_dab_write_meta_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(brush_buffer_atlas.view()),
+                },
+            ],
+        });
+        let brush_dab_write_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("renderer.brush_dab_write.pipeline_layout"),
+                bind_group_layouts: &[&brush_dab_write_bind_group_layout],
+                immediate_size: 0,
+            });
+        let brush_dab_write_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.brush_dab_write.shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("brush_dab_write.wgsl").into()),
+        });
+        let brush_dab_write_pipeline_error_scope =
+            device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let brush_dab_write_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("renderer.brush_dab_write.pipeline"),
+                layout: Some(&brush_dab_write_pipeline_layout),
+                module: &brush_dab_write_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+        if let Some(error) = pollster::block_on(brush_dab_write_pipeline_error_scope.pop()) {
+            panic!("create renderer.brush_dab_write.pipeline validation failed: {error}");
+        }
+        if crate::renderer_brush_trace_enabled() {
+            eprintln!("[brush_trace] renderer.brush_dab_write.pipeline validated successfully");
+        }
         let merge_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("renderer.merge.uniform"),
             size: std::mem::size_of::<crate::renderer_merge::MergeUniformGpu>() as u64,
@@ -291,6 +391,16 @@ impl Renderer {
             label: Some("renderer.merge.sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let merge_stroke_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("renderer.merge.stroke_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -319,6 +429,22 @@ impl Renderer {
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -342,6 +468,14 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(brush_buffer_atlas.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&merge_stroke_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: merge_uniform_buffer.as_entire_binding(),
                 },
             ],
@@ -427,6 +561,12 @@ impl Renderer {
                 tile_atlas,
                 gpu_timing,
                 brush_pipeline_layout,
+                brush_dab_write_pipeline,
+                brush_dab_write_bind_group,
+                brush_dab_write_buffer,
+                brush_dab_write_meta_buffer,
+                brush_buffer_store,
+                brush_buffer_atlas,
                 merge_bind_group,
                 merge_uniform_buffer,
                 merge_pipeline,
@@ -459,6 +599,7 @@ impl Renderer {
                 stroke_reference_set: HashMap::new(),
                 stroke_target_layer: HashMap::new(),
                 ended_strokes_pending_merge: HashMap::new(),
+                bound_buffer_tile_keys_by_stroke: HashMap::new(),
             },
             merge_orchestrator: crate::renderer_merge::MergeOrchestrator::default(),
             frame_state: FrameState {

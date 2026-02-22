@@ -188,6 +188,43 @@ impl ViewTransform {
             clip_tx, clip_ty, 0.0, 1.0,
         ])
     }
+
+    pub fn screen_to_canvas_point(
+        &self,
+        screen_x: f32,
+        screen_y: f32,
+    ) -> Result<(f32, f32), ViewTransformError> {
+        if !screen_x.is_finite() || !screen_y.is_finite() {
+            return Err(ViewTransformError::NonFiniteValue);
+        }
+
+        let matrix = self.to_matrix3x3();
+        let m00 = matrix[0][0];
+        let m01 = matrix[0][1];
+        let m10 = matrix[1][0];
+        let m11 = matrix[1][1];
+        let tx = matrix[0][2];
+        let ty = matrix[1][2];
+
+        let det = m00 * m11 - m01 * m10;
+        if !det.is_finite() || det.abs() <= f32::EPSILON {
+            return Err(ViewTransformError::NonFiniteValue);
+        }
+
+        let inv00 = m11 / det;
+        let inv01 = -m01 / det;
+        let inv10 = -m10 / det;
+        let inv11 = m00 / det;
+
+        let rhs_x = screen_x - tx;
+        let rhs_y = screen_y - ty;
+        let canvas_x = inv00 * rhs_x + inv01 * rhs_y;
+        let canvas_y = inv10 * rhs_x + inv11 * rhs_y;
+        if !canvas_x.is_finite() || !canvas_y.is_finite() {
+            return Err(ViewTransformError::NonFiniteValue);
+        }
+        Ok((canvas_x, canvas_y))
+    }
 }
 
 fn checked_add(current: f32, delta: f32) -> Result<f32, ViewTransformError> {

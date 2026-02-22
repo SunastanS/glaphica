@@ -10,8 +10,6 @@ use render_protocol::{
     ReferenceSetId,
 };
 
-pub mod dab_to_buffer;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrushExecutionQueueCreateError {
     ZeroCapacity,
@@ -293,6 +291,7 @@ fn brush_execution_loop(
                 );
                 emit_merge_for_stroke(
                     chunk.stroke_session_id,
+                    chunk.stroke_session_id,
                     config.target_layer_id,
                     &mut merge_feedback_pending_strokes,
                     &mut command_producer,
@@ -308,6 +307,7 @@ fn brush_execution_loop(
 
 fn emit_merge_for_stroke(
     stroke_session_id: u64,
+    tx_token: u64,
     target_layer_id: LayerId,
     merge_feedback_pending_strokes: &mut HashSet<u64>,
     command_producer: &mut rtrb::Producer<BrushRenderCommand>,
@@ -316,6 +316,7 @@ fn emit_merge_for_stroke(
         command_producer,
         BrushRenderCommand::MergeBuffer(BrushBufferMerge {
             stroke_session_id,
+            tx_token,
             target_layer_id,
         }),
         "merge buffer",
@@ -582,6 +583,7 @@ mod tests {
             commands[4],
             BrushRenderCommand::MergeBuffer(BrushBufferMerge {
                 stroke_session_id: 100,
+                tx_token: 100,
                 target_layer_id: 90
             })
         ));
@@ -650,6 +652,7 @@ mod tests {
                     command,
                     BrushRenderCommand::MergeBuffer(BrushBufferMerge {
                         stroke_session_id: 200,
+                        tx_token: 200,
                         target_layer_id: 90
                     })
                 ) {

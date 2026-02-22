@@ -867,13 +867,80 @@ pub struct BrushBufferTileRegistry {
     retained_retain_id_by_stroke: HashMap<u64, u64>,
 }
 
+#[cfg(feature = "atlas-gpu")]
+pub trait BrushBufferTileStore {
+    fn allocate(&self) -> Result<TileKey, TileAllocError>;
+    fn release(&self, key: TileKey) -> bool;
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64;
+}
+
+#[cfg(feature = "atlas-gpu")]
+impl BrushBufferTileStore for TileAtlasStore {
+    fn allocate(&self) -> Result<TileKey, TileAllocError> {
+        TileAtlasStore::allocate(self)
+    }
+
+    fn release(&self, key: TileKey) -> bool {
+        TileAtlasStore::release(self, key)
+    }
+
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        TileAtlasStore::retain_keys_new_batch(self, keys)
+    }
+}
+
+#[cfg(feature = "atlas-gpu")]
+impl BrushBufferTileStore for std::sync::Arc<TileAtlasStore> {
+    fn allocate(&self) -> Result<TileKey, TileAllocError> {
+        TileAtlasStore::allocate(self)
+    }
+
+    fn release(&self, key: TileKey) -> bool {
+        TileAtlasStore::release(self, key)
+    }
+
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        TileAtlasStore::retain_keys_new_batch(self, keys)
+    }
+}
+
+#[cfg(feature = "atlas-gpu")]
+impl BrushBufferTileStore for GenericR32FloatTileAtlasStore {
+    fn allocate(&self) -> Result<TileKey, TileAllocError> {
+        GenericR32FloatTileAtlasStore::allocate(self)
+    }
+
+    fn release(&self, key: TileKey) -> bool {
+        GenericR32FloatTileAtlasStore::release(self, key)
+    }
+
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        GenericR32FloatTileAtlasStore::retain_keys_new_batch(self, keys)
+    }
+}
+
+#[cfg(feature = "atlas-gpu")]
+impl BrushBufferTileStore for std::sync::Arc<GenericR32FloatTileAtlasStore> {
+    fn allocate(&self) -> Result<TileKey, TileAllocError> {
+        GenericR32FloatTileAtlasStore::allocate(self)
+    }
+
+    fn release(&self, key: TileKey) -> bool {
+        GenericR32FloatTileAtlasStore::release(self, key)
+    }
+
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        GenericR32FloatTileAtlasStore::retain_keys_new_batch(self, keys)
+    }
+}
+
 impl BrushBufferTileRegistry {
     #[cfg(feature = "atlas-gpu")]
-    pub fn allocate_tiles(
+    pub fn allocate_tiles<S: BrushBufferTileStore>(
         &mut self,
         stroke_session_id: u64,
         tiles: impl IntoIterator<Item = BufferTileCoordinate>,
-        atlas_store: &TileAtlasStore,
+        atlas_store: &S,
     ) -> Result<(), TileAllocError> {
         if self
             .retained_retain_id_by_stroke
@@ -896,11 +963,11 @@ impl BrushBufferTileRegistry {
     }
 
     #[cfg(feature = "atlas-gpu")]
-    pub fn release_tiles(
+    pub fn release_tiles<S: BrushBufferTileStore>(
         &mut self,
         stroke_session_id: u64,
         tiles: impl IntoIterator<Item = BufferTileCoordinate>,
-        atlas_store: &TileAtlasStore,
+        atlas_store: &S,
     ) {
         let stroke_tiles = self
             .tiles_by_stroke
@@ -930,10 +997,10 @@ impl BrushBufferTileRegistry {
     }
 
     #[cfg(feature = "atlas-gpu")]
-    pub fn retain_stroke_tiles(
+    pub fn retain_stroke_tiles<S: BrushBufferTileStore>(
         &mut self,
         stroke_session_id: u64,
-        atlas_store: &TileAtlasStore,
+        atlas_store: &S,
     ) -> u64 {
         let stroke_tiles = self
             .tiles_by_stroke
@@ -980,10 +1047,10 @@ impl BrushBufferTileRegistry {
     }
 
     #[cfg(feature = "atlas-gpu")]
-    pub fn release_stroke_on_merge_failed(
+    pub fn release_stroke_on_merge_failed<S: BrushBufferTileStore>(
         &mut self,
         stroke_session_id: u64,
-        atlas_store: &TileAtlasStore,
+        atlas_store: &S,
     ) {
         let stroke_tiles = self
             .tiles_by_stroke
@@ -1064,6 +1131,25 @@ impl BrushBufferTileRegistry {
         for (tile_coordinate, tile_key) in stroke_tiles.iter() {
             visit(tile_coordinate, *tile_key);
         }
+    }
+
+    pub fn tile_bindings_for_stroke(
+        &self,
+        stroke_session_id: u64,
+    ) -> Vec<(BufferTileCoordinate, TileKey)> {
+        let stroke_tiles = self
+            .tiles_by_stroke
+            .get(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "tile bindings requested for unknown stroke {}",
+                    stroke_session_id
+                )
+            });
+        stroke_tiles
+            .iter()
+            .map(|(coord, key)| (*coord, *key))
+            .collect()
     }
 }
 

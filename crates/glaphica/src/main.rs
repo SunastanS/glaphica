@@ -15,7 +15,7 @@ use glaphica::GpuState;
 use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
 use render_protocol::{
     BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramUpsert,
-    ReferenceLayerSelection, ReferenceSetUpsert,
+    BrushRenderCommand, ReferenceLayerSelection, ReferenceSetUpsert,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -317,6 +317,7 @@ struct App {
     frame_scheduler: FrameScheduler,
     input_trace_recorder: Option<InputTraceRecorder>,
     input_trace_replay: Option<InputTraceReplay>,
+    brush_trace_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -485,6 +486,20 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    fn push_draw_pointer_input(&mut self, phase: PointerEventPhase, screen_x: f32, screen_y: f32) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let (canvas_x, canvas_y) = gpu.screen_to_canvas_point(screen_x, screen_y);
+        self.driver_debug.push_input(phase, canvas_x, canvas_y);
+        if self.brush_trace_enabled {
+            eprintln!(
+                "[brush_trace] pointer_event phase={:?} screen=({:.2},{:.2}) canvas=({:.2},{:.2})",
+                phase, screen_x, screen_y, canvas_x, canvas_y
+            );
+        }
+    }
+
     fn handle_input_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } => {
@@ -544,7 +559,7 @@ impl App {
         if self.is_left_mouse_pressed {
             if self.interaction_mode == InteractionMode::Draw {
                 if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
-                    self.driver_debug.push_input(
+                    self.push_draw_pointer_input(
                         PointerEventPhase::Down,
                         cursor_x as f32,
                         cursor_y as f32,
@@ -554,7 +569,7 @@ impl App {
         } else {
             if self.driver_debug.has_active_stroke() {
                 if let Some((cursor_x, cursor_y)) = self.last_cursor_position {
-                    self.driver_debug.push_input(
+                    self.push_draw_pointer_input(
                         PointerEventPhase::Up,
                         cursor_x as f32,
                         cursor_y as f32,
@@ -584,7 +599,7 @@ impl App {
                             gpu.rotate_canvas(delta_x * ROTATION_RADIANS_PER_PIXEL);
                         }
                         InteractionMode::Draw => {
-                            self.driver_debug.push_input(
+                            self.push_draw_pointer_input(
                                 PointerEventPhase::Move,
                                 position.x as f32,
                                 position.y as f32,
@@ -656,6 +671,7 @@ impl App {
         brush_execution_receiver: &mut Option<BrushExecutionCommandReceiver>,
         frame_sequence_id: u64,
         gpu: &mut GpuState,
+        brush_trace_enabled: bool,
     ) -> FrameDrainStats {
         let (frame_stats, sample_chunks) = driver_debug.drain_debug_output(frame_sequence_id);
         if let Some(sender) = brush_execution_sender.as_mut() {
@@ -666,9 +682,27 @@ impl App {
             }
         }
         if let Some(receiver) = brush_execution_receiver.as_mut() {
+            let mut drained_command_count = 0u32;
             while let Some(command) = receiver.pop_command() {
+                if brush_trace_enabled {
+                    println!(
+                        "[brush_trace] frame={} recv_cmd={} stroke={}",
+                        frame_sequence_id,
+                        brush_command_kind(&command),
+                        brush_command_stroke_session_id(&command),
+                    );
+                }
                 gpu.enqueue_brush_render_command(command)
                     .expect("enqueue brush render command");
+                drained_command_count = drained_command_count
+                    .checked_add(1)
+                    .expect("drained brush command count overflow");
+            }
+            if brush_trace_enabled && drained_command_count > 0 {
+                println!(
+                    "[brush_trace] frame={} drained_commands={}",
+                    frame_sequence_id, drained_command_count
+                );
             }
         }
         frame_stats
@@ -689,12 +723,14 @@ impl App {
             &mut self.brush_execution_receiver,
             frame_sequence_id,
             gpu,
+            self.brush_trace_enabled,
         );
+        let pending_brush_commands =
+            u32::try_from(gpu.pending_brush_command_count()).unwrap_or(u32::MAX);
         let brush_hot_path_active = self.driver_debug.has_active_stroke()
             || frame_stats.input.total_events > 0
-            || frame_stats.output.chunk_count > 0;
-        let pending_brush_commands =
-            u32::try_from(gpu.pending_brush_dab_count()).unwrap_or(u32::MAX);
+            || frame_stats.output.chunk_count > 0
+            || pending_brush_commands > 0;
         let scheduler_decision = self.frame_scheduler.schedule_frame(FrameSchedulerInput {
             frame_sequence_id,
             brush_hot_path_active,
@@ -702,6 +738,7 @@ impl App {
             previous_frame_gpu_micros,
         });
         apply_frame_scheduler_decision(gpu, scheduler_decision);
+        let render_result = gpu.render();
         gpu.process_renderer_merge_completions(frame_sequence_id)
             .expect("process renderer merge completions");
         if let Some(feedback_sender) = self.brush_execution_feedback_sender.as_mut() {
@@ -722,7 +759,7 @@ impl App {
             .checked_add(1)
             .expect("driver frame sequence id overflow");
 
-        match gpu.render() {
+        match render_result {
             Ok(()) => {}
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
                 if let Some(window) = self.window.as_ref() {
@@ -761,7 +798,20 @@ impl App {
                 &mut self.brush_execution_receiver,
                 frame_sequence_id,
                 gpu,
+                self.brush_trace_enabled,
             );
+            let render_result = gpu.render();
+            if let Err(error) = render_result {
+                match error {
+                    wgpu::SurfaceError::OutOfMemory => {
+                        panic!("out of memory while flushing brush pipeline lifecycle")
+                    }
+                    wgpu::SurfaceError::Outdated
+                    | wgpu::SurfaceError::Lost
+                    | wgpu::SurfaceError::Timeout
+                    | wgpu::SurfaceError::Other => {}
+                }
+            }
             gpu.process_renderer_merge_completions(frame_sequence_id)
                 .expect("process renderer merge completions during lifecycle flush");
             let mut drained_merge_feedback_count = 0u32;
@@ -790,7 +840,7 @@ impl App {
             let has_activity = frame_stats.has_activity()
                 || drained_merge_feedback_count > 0
                 || drained_commands_after_feedback > 0
-                || gpu.pending_brush_dab_count() > 0;
+                || gpu.pending_brush_command_count() > 0;
 
             self.next_driver_frame_sequence_id = self
                 .next_driver_frame_sequence_id
@@ -890,6 +940,7 @@ fn main() {
         input_trace_replay: cli_options
             .input_replay_path
             .map(InputTraceReplay::from_path),
+        brush_trace_enabled: brush_trace_enabled(),
         ..App::default()
     };
     event_loop.run_app(&mut app).expect("run app");
@@ -904,6 +955,30 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
         "[frame_scheduler] frame={} active={} brush_commands={} reason={:?}",
         decision.frame_sequence_id, decision.scheduler_active, max_commands, decision.update_reason,
     );
+}
+
+fn brush_trace_enabled() -> bool {
+    std::env::var_os("GLAPHICA_BRUSH_TRACE").is_some_and(|value| value != "0")
+}
+
+fn brush_command_kind(command: &BrushRenderCommand) -> &'static str {
+    match command {
+        BrushRenderCommand::BeginStroke(_) => "BeginStroke",
+        BrushRenderCommand::AllocateBufferTiles(_) => "AllocateBufferTiles",
+        BrushRenderCommand::PushDabChunkF32(_) => "PushDabChunkF32",
+        BrushRenderCommand::EndStroke(_) => "EndStroke",
+        BrushRenderCommand::MergeBuffer(_) => "MergeBuffer",
+    }
+}
+
+fn brush_command_stroke_session_id(command: &BrushRenderCommand) -> u64 {
+    match command {
+        BrushRenderCommand::BeginStroke(command) => command.stroke_session_id,
+        BrushRenderCommand::AllocateBufferTiles(command) => command.stroke_session_id,
+        BrushRenderCommand::PushDabChunkF32(command) => command.stroke_session_id,
+        BrushRenderCommand::EndStroke(command) => command.stroke_session_id,
+        BrushRenderCommand::MergeBuffer(command) => command.stroke_session_id,
+    }
 }
 
 struct CliOptions {

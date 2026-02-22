@@ -1,8 +1,8 @@
 pub mod driver_bridge;
 
 use brush_execution::BrushExecutionMergeFeedback;
-use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
@@ -19,10 +19,11 @@ use renderer::{
     RenderDataResolver, Renderer, ViewOpSender,
 };
 use tiles::{
-    BrushBufferTileRegistry, DirtySinceResult, MergeAuditRecord, MergePlanRequest, MergePlanTileOp,
-    TileAddress, TileAtlasFormat, TileAtlasStore, TileImageApplyError, TileKey,
-    TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError, TilesBusinessResult,
-    apply_tile_key_mappings,
+    BrushBufferTileRegistry, DirtySinceResult, GenericR32FloatTileAtlasStore,
+    GenericTileAtlasConfig, MergeAuditRecord, MergePlanRequest, MergePlanTileOp, MergeTileStore,
+    TileAddress, TileAllocError, TileAtlasFormat, TileAtlasStore, TileAtlasUsage,
+    TileImageApplyError, TileKey, TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError,
+    TilesBusinessResult, apply_tile_key_mappings,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -58,7 +59,61 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             return;
         };
 
+        #[cfg(debug_assertions)]
+        let mut resolved_address_to_tile: HashMap<TileAddress, (TileKey, u32, u32)> =
+            HashMap::new();
+        #[cfg(debug_assertions)]
+        let mut tile_coord_by_key: HashMap<TileKey, (u32, u32)> = HashMap::new();
+
         for (tile_x, tile_y, tile_key) in image.iter_tiles() {
+            #[cfg(debug_assertions)]
+            {
+                if let Some((existing_tile_x, existing_tile_y)) =
+                    tile_coord_by_key.get(&tile_key).copied()
+                {
+                    if (existing_tile_x, existing_tile_y) != (tile_x, tile_y) {
+                        panic!(
+                            "image uses duplicated tile key across coordinates: image_handle={:?} key={:?} first_tile=({}, {}) duplicate_tile=({}, {})",
+                            image_handle,
+                            tile_key,
+                            existing_tile_x,
+                            existing_tile_y,
+                            tile_x,
+                            tile_y
+                        );
+                    }
+                } else {
+                    tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
+                }
+                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
+                    panic!(
+                        "image tile key unresolved in debug address uniqueness check: image_handle={:?} tile=({}, {}) key={:?}",
+                        image_handle,
+                        tile_x,
+                        tile_y,
+                        tile_key
+                    )
+                });
+                if let Some((existing_key, existing_tile_x, existing_tile_y)) =
+                    resolved_address_to_tile.get(&tile_address).copied()
+                {
+                    if existing_key != tile_key {
+                        panic!(
+                            "image tile keys resolved to duplicated atlas address: image_handle={:?} first_tile=({}, {}) first_key={:?} second_tile=({}, {}) second_key={:?} address={:?}",
+                            image_handle,
+                            existing_tile_x,
+                            existing_tile_y,
+                            existing_key,
+                            tile_x,
+                            tile_y,
+                            tile_key,
+                            tile_address
+                        );
+                    }
+                } else {
+                    resolved_address_to_tile.insert(tile_address, (tile_key, tile_x, tile_y));
+                }
+            }
             visitor(tile_x, tile_y, tile_key);
         }
     }
@@ -77,6 +132,12 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             return;
         };
 
+        #[cfg(debug_assertions)]
+        let mut resolved_address_to_tile: HashMap<TileAddress, (TileKey, u32, u32)> =
+            HashMap::new();
+        #[cfg(debug_assertions)]
+        let mut tile_coord_by_key: HashMap<TileKey, (u32, u32)> = HashMap::new();
+
         for (tile_x, tile_y) in tile_coords {
             let tile_key = image
                 .get_tile(*tile_x, *tile_y)
@@ -84,6 +145,54 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             let Some(tile_key) = tile_key else {
                 continue;
             };
+            #[cfg(debug_assertions)]
+            {
+                if let Some((existing_tile_x, existing_tile_y)) =
+                    tile_coord_by_key.get(&tile_key).copied()
+                {
+                    if (existing_tile_x, existing_tile_y) != (*tile_x, *tile_y) {
+                        panic!(
+                            "image uses duplicated tile key across coordinates for coords query: image_handle={:?} key={:?} first_tile=({}, {}) duplicate_tile=({}, {})",
+                            image_handle,
+                            tile_key,
+                            existing_tile_x,
+                            existing_tile_y,
+                            tile_x,
+                            tile_y
+                        );
+                    }
+                } else {
+                    tile_coord_by_key.insert(tile_key, (*tile_x, *tile_y));
+                }
+                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
+                    panic!(
+                        "image tile key unresolved in debug address uniqueness check for coords: image_handle={:?} tile=({}, {}) key={:?}",
+                        image_handle,
+                        tile_x,
+                        tile_y,
+                        tile_key
+                    )
+                });
+                if let Some((existing_key, existing_tile_x, existing_tile_y)) =
+                    resolved_address_to_tile.get(&tile_address).copied()
+                {
+                    if existing_key != tile_key {
+                        panic!(
+                            "image tile keys resolved to duplicated atlas address for coords: image_handle={:?} first_tile=({}, {}) first_key={:?} second_tile=({}, {}) second_key={:?} address={:?}",
+                            image_handle,
+                            existing_tile_x,
+                            existing_tile_y,
+                            existing_key,
+                            tile_x,
+                            tile_y,
+                            tile_key,
+                            tile_address
+                        );
+                    }
+                } else {
+                    resolved_address_to_tile.insert(tile_address, (tile_key, *tile_x, *tile_y));
+                }
+            }
             visitor(*tile_x, *tile_y, tile_key);
         }
     }
@@ -109,11 +218,44 @@ impl RenderDataResolver for DocumentRenderDataResolver {
     }
 }
 
+#[derive(Clone, Debug)]
+struct MergeStores {
+    layer_store: Arc<TileAtlasStore>,
+    stroke_store: Arc<GenericR32FloatTileAtlasStore>,
+}
+
+impl MergeTileStore for MergeStores {
+    fn allocate(&self) -> Result<TileKey, TileAllocError> {
+        self.layer_store.allocate()
+    }
+
+    fn release(&self, key: TileKey) -> bool {
+        self.layer_store.release(key)
+    }
+
+    fn resolve(&self, key: TileKey) -> Option<TileAddress> {
+        self.layer_store.resolve(key)
+    }
+
+    fn resolve_stroke(&self, key: TileKey) -> Option<TileAddress> {
+        self.stroke_store.resolve(key)
+    }
+
+    fn mark_keys_active(&self, keys: &[TileKey]) {
+        self.layer_store.mark_keys_active(keys);
+    }
+
+    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
+        self.layer_store.retain_keys_new_batch(keys)
+    }
+}
+
 pub struct GpuState {
     renderer: Renderer,
     view_sender: ViewOpSender,
     atlas_store: Arc<TileAtlasStore>,
-    tile_merge_engine: TileMergeEngine<Arc<TileAtlasStore>>,
+    brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+    tile_merge_engine: TileMergeEngine<MergeStores>,
     document: Arc<RwLock<Document>>,
     view_transform: ViewTransform,
     surface_size: PhysicalSize<u32>,
@@ -124,6 +266,12 @@ pub struct GpuState {
     gc_evicted_keys_total: u64,
     disable_merge_for_debug: bool,
     perf_log_enabled: bool,
+}
+
+#[derive(Debug)]
+struct StrokeTileMergePlan {
+    layer_id: u64,
+    tile_ops: Vec<MergePlanTileOp>,
 }
 
 #[derive(Debug)]
@@ -142,19 +290,52 @@ pub enum MergeBridgeError {
 }
 
 impl GpuState {
+    fn required_device_features() -> wgpu::Features {
+        wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+    }
+
     fn perf_log_enabled() -> bool {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED
             .get_or_init(|| std::env::var_os("GLAPHICA_PERF_LOG").is_some_and(|value| value != "0"))
     }
 
-    fn enqueue_stroke_merge_submission(&mut self, stroke_session_id: u64, layer_id: u64) {
+    fn brush_trace_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GLAPHICA_BRUSH_TRACE").is_some_and(|value| value != "0")
+        })
+    }
+
+    fn build_stroke_tile_merge_plan(
+        &self,
+        stroke_session_id: u64,
+        layer_id: u64,
+    ) -> Option<StrokeTileMergePlan> {
         let document = self
             .document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        let layer_image_handle = document
+            .leaf_image_handle(layer_id, stroke_session_id)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "resolve leaf image handle for merge plan failed: layer_id={} stroke_session_id={} error={error:?}",
+                    layer_id, stroke_session_id
+                )
+            });
+        let layer_image = document.image(layer_image_handle).unwrap_or_else(|| {
+            panic!(
+                "layer image handle missing while building merge plan: layer_id={} stroke_session_id={} image_handle={:?}",
+                layer_id, stroke_session_id, layer_image_handle
+            )
+        });
+        let layer_tiles_per_row = layer_image.tiles_per_row();
+        let layer_tiles_per_column = layer_image.tiles_per_column();
         let mut tile_ops = Vec::new();
         let mut op_trace_id = 0u64;
+        let mut seen_output_tiles = HashSet::new();
+        let mut stroke_tile_by_key = HashMap::new();
         self.brush_buffer_tile_keys.visit_tiles(
             stroke_session_id,
             |tile_coordinate, stroke_buffer_key| {
@@ -165,6 +346,31 @@ impl GpuState {
                     .expect("positive brush tile x must convert to u32");
                 let tile_y = u32::try_from(tile_coordinate.tile_y)
                     .expect("positive brush tile y must convert to u32");
+                if tile_x >= layer_tiles_per_row || tile_y >= layer_tiles_per_column {
+                    return;
+                }
+                if !seen_output_tiles.insert((tile_x, tile_y)) {
+                    panic!(
+                        "duplicate output tile in stroke merge plan: stroke_session_id={} layer_id={} tile=({}, {})",
+                        stroke_session_id, layer_id, tile_x, tile_y
+                    );
+                }
+                if let Some((previous_tile_x, previous_tile_y)) =
+                    stroke_tile_by_key.insert(stroke_buffer_key, (tile_x, tile_y))
+                {
+                    if (previous_tile_x, previous_tile_y) != (tile_x, tile_y) {
+                        panic!(
+                            "duplicate stroke buffer key in merge plan: stroke_session_id={} layer_id={} key={:?} first_tile=({}, {}) duplicate_tile=({}, {})",
+                            stroke_session_id,
+                            layer_id,
+                            stroke_buffer_key,
+                            previous_tile_x,
+                            previous_tile_y,
+                            tile_x,
+                            tile_y
+                        );
+                    }
+                }
                 let existing_layer_key = document.leaf_tile_key_at(layer_id, tile_x, tile_y);
                 tile_ops.push(MergePlanTileOp {
                     tile_x,
@@ -180,19 +386,43 @@ impl GpuState {
                     .expect("merge op index exceeds u64");
             },
         );
-        drop(document);
         if tile_ops.is_empty() {
+            return None;
+        }
+        Some(StrokeTileMergePlan { layer_id, tile_ops })
+    }
+
+    fn build_merge_plan_request_from_plan(
+        &self,
+        stroke_session_id: u64,
+        tx_token: u64,
+        merge_plan: StrokeTileMergePlan,
+    ) -> MergePlanRequest {
+        MergePlanRequest {
+            stroke_session_id,
+            tx_token,
+            program_revision: None,
+            layer_id: merge_plan.layer_id,
+            tile_ops: merge_plan.tile_ops,
+        }
+    }
+
+    fn enqueue_stroke_merge_submission(
+        &mut self,
+        stroke_session_id: u64,
+        tx_token: u64,
+        layer_id: u64,
+    ) {
+        let Some(merge_plan) = self.build_stroke_tile_merge_plan(stroke_session_id, layer_id)
+        else {
+            self.brush_buffer_tile_keys
+                .release_stroke_on_merge_failed(stroke_session_id, &self.brush_buffer_store);
             self.brush_execution_feedback_queue
                 .push_back(BrushExecutionMergeFeedback::MergeApplied { stroke_session_id });
             return;
-        }
-        let request = MergePlanRequest {
-            stroke_session_id,
-            tx_token: stroke_session_id,
-            program_revision: None,
-            layer_id,
-            tile_ops,
         };
+        let request =
+            self.build_merge_plan_request_from_plan(stroke_session_id, tx_token, merge_plan);
         let submission = self
             .tile_merge_engine
             .submit_merge_plan(request)
@@ -222,20 +452,82 @@ impl GpuState {
             .create_surface(window.clone())
             .expect("create wgpu surface");
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("request wgpu adapter");
+        let required_features = Self::required_device_features();
+        let brush_trace_enabled = Self::brush_trace_enabled();
+        let mut adapter = None;
+        let mut adapter_rejection_reasons = Vec::new();
+        for candidate in instance.enumerate_adapters(wgpu::Backends::all()).await {
+            let adapter_info = candidate.get_info();
+            if !candidate.is_surface_supported(&surface) {
+                if brush_trace_enabled {
+                    adapter_rejection_reasons.push(format!(
+                        "{} ({:?}): surface not supported",
+                        adapter_info.name, adapter_info.backend
+                    ));
+                }
+                continue;
+            }
+            if !candidate.features().contains(required_features) {
+                if brush_trace_enabled {
+                    adapter_rejection_reasons.push(format!(
+                        "{} ({:?}): missing required features {:?}",
+                        adapter_info.name, adapter_info.backend, required_features
+                    ));
+                }
+                continue;
+            }
+            let r32float_format_features =
+                candidate.get_texture_format_features(wgpu::TextureFormat::R32Float);
+            let has_storage_binding = r32float_format_features
+                .allowed_usages
+                .contains(wgpu::TextureUsages::STORAGE_BINDING);
+            let has_storage_write_only = r32float_format_features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY);
+            if !has_storage_binding || !has_storage_write_only {
+                if brush_trace_enabled {
+                    adapter_rejection_reasons.push(format!(
+                        "{} ({:?}): R32Float storage write unsupported: has_storage_binding={} has_storage_write_only={} allowed_usages={:?} flags={:?}",
+                        adapter_info.name,
+                        adapter_info.backend,
+                        has_storage_binding,
+                        has_storage_write_only,
+                        r32float_format_features.allowed_usages,
+                        r32float_format_features.flags
+                    ));
+                }
+                continue;
+            }
+            adapter = Some(candidate);
+            break;
+        }
+        if brush_trace_enabled && !adapter_rejection_reasons.is_empty() {
+            eprintln!(
+                "[brush_trace] adapter_rejections_for_r32float_storage:\n{}",
+                adapter_rejection_reasons.join("\n")
+            );
+        }
+        let adapter = adapter.expect(
+            "no compatible adapter supports R32Float storage binding + STORAGE_WRITE_ONLY for brush execution",
+        );
+        if brush_trace_enabled {
+            let r32float_features =
+                adapter.get_texture_format_features(wgpu::TextureFormat::R32Float);
+            let adapter_info = adapter.get_info();
+            eprintln!(
+                "[brush_trace] selected_adapter={} backend={:?} r32float.allowed_usages={:?} r32float.flags={:?}",
+                adapter_info.name,
+                adapter_info.backend,
+                r32float_features.allowed_usages,
+                r32float_features.flags
+            );
+        }
 
         let limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: limits,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::Performance,
@@ -311,7 +603,26 @@ impl GpuState {
             atlas_store: Arc::clone(&atlas_store),
         });
 
-        let tile_merge_engine = TileMergeEngine::new(Arc::clone(&atlas_store));
+        let (brush_buffer_store_raw, brush_buffer_atlas) =
+            GenericR32FloatTileAtlasStore::with_config(
+                &device,
+                GenericTileAtlasConfig {
+                    max_layers: GenericTileAtlasConfig::default().max_layers,
+                    tiles_per_row: GenericTileAtlasConfig::default().tiles_per_row,
+                    tiles_per_column: GenericTileAtlasConfig::default().tiles_per_column,
+                    usage: TileAtlasUsage::TEXTURE_BINDING
+                        | TileAtlasUsage::STORAGE_BINDING
+                        | TileAtlasUsage::COPY_DST
+                        | TileAtlasUsage::COPY_SRC,
+                },
+            )
+            .expect("create brush buffer atlas store");
+        let brush_buffer_store = Arc::new(brush_buffer_store_raw);
+
+        let tile_merge_engine = TileMergeEngine::new(MergeStores {
+            layer_store: Arc::clone(&atlas_store),
+            stroke_store: Arc::clone(&brush_buffer_store),
+        });
 
         let (renderer, view_sender) = Renderer::new(
             device,
@@ -319,6 +630,8 @@ impl GpuState {
             surface,
             config,
             tile_atlas,
+            Arc::clone(&brush_buffer_store),
+            brush_buffer_atlas,
             render_data_resolver,
         );
         eprintln!("[startup] renderer initialized");
@@ -344,6 +657,7 @@ impl GpuState {
             renderer,
             view_sender,
             atlas_store,
+            brush_buffer_store,
             tile_merge_engine,
             document,
             view_transform,
@@ -414,8 +728,8 @@ impl GpuState {
                 self.brush_buffer_tile_keys
                     .allocate_tiles(
                         allocate.stroke_session_id,
-                        allocate.tiles,
-                        &self.atlas_store,
+                        allocate.tiles.clone(),
+                        &self.brush_buffer_store,
                     )
                     .unwrap_or_else(|error| {
                         panic!(
@@ -423,13 +737,21 @@ impl GpuState {
                             allocate.stroke_session_id
                         )
                     });
+                let tile_bindings = self
+                    .brush_buffer_tile_keys
+                    .tile_bindings_for_stroke(allocate.stroke_session_id);
+                self.renderer
+                    .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
                 self.drain_tile_gc_evictions();
-                Ok(())
+                self.renderer
+                    .enqueue_brush_render_command(BrushRenderCommand::AllocateBufferTiles(allocate))
             }
             BrushRenderCommand::MergeBuffer(merge) => {
                 if self.disable_merge_for_debug {
-                    self.brush_buffer_tile_keys
-                        .release_stroke_on_merge_failed(merge.stroke_session_id, &self.atlas_store);
+                    self.brush_buffer_tile_keys.release_stroke_on_merge_failed(
+                        merge.stroke_session_id,
+                        &self.brush_buffer_store,
+                    );
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: merge.stroke_session_id,
@@ -438,6 +760,7 @@ impl GpuState {
                 } else {
                     self.enqueue_stroke_merge_submission(
                         merge.stroke_session_id,
+                        merge.tx_token,
                         merge.target_layer_id,
                     );
                 }
@@ -450,6 +773,10 @@ impl GpuState {
 
     pub fn pending_brush_dab_count(&self) -> u64 {
         self.renderer.pending_brush_dab_count()
+    }
+
+    pub fn pending_brush_command_count(&self) -> u64 {
+        self.renderer.pending_brush_command_count()
     }
 
     pub fn process_renderer_merge_completions(
@@ -616,6 +943,12 @@ impl GpuState {
         push_view_state(&self.view_sender, &self.view_transform, self.surface_size);
     }
 
+    pub fn screen_to_canvas_point(&self, screen_x: f32, screen_y: f32) -> (f32, f32) {
+        self.view_transform
+            .screen_to_canvas_point(screen_x, screen_y)
+            .unwrap_or_else(|error| panic!("screen to canvas conversion failed: {error:?}"))
+    }
+
     fn apply_tiles_business_results(
         &mut self,
         business_results: &[TilesBusinessResult],
@@ -631,6 +964,51 @@ impl GpuState {
                     ..
                 } => {
                     let apply_started = Instant::now();
+                    #[cfg(debug_assertions)]
+                    {
+                        let mut mapping_coords = HashSet::with_capacity(new_key_mappings.len());
+                        for mapping in new_key_mappings {
+                            if !mapping_coords.insert((mapping.tile_x, mapping.tile_y)) {
+                                panic!(
+                                    "duplicate tile coordinate in new_key_mappings: receipt_id={} stroke_session_id={} layer_id={} tile=({}, {})",
+                                    receipt_id.0,
+                                    stroke_session_id,
+                                    layer_id,
+                                    mapping.tile_x,
+                                    mapping.tile_y
+                                );
+                            }
+                        }
+                        let mut dirty_coords = HashSet::with_capacity(dirty_tiles.len());
+                        for (tile_x, tile_y) in dirty_tiles {
+                            if !dirty_coords.insert((*tile_x, *tile_y)) {
+                                panic!(
+                                    "duplicate tile coordinate in dirty_tiles: receipt_id={} stroke_session_id={} layer_id={} tile=({}, {})",
+                                    receipt_id.0, stroke_session_id, layer_id, tile_x, tile_y
+                                );
+                            }
+                        }
+                        if mapping_coords != dirty_coords {
+                            panic!(
+                                "dirty tile set does not match mapping tile set: receipt_id={} stroke_session_id={} layer_id={} mapping_count={} dirty_count={}",
+                                receipt_id.0,
+                                stroke_session_id,
+                                layer_id,
+                                mapping_coords.len(),
+                                dirty_coords.len()
+                            );
+                        }
+                    }
+                    if Self::brush_trace_enabled() {
+                        eprintln!(
+                            "[brush_trace] merge_finalize_prepare receipt_id={} stroke_session_id={} layer_id={} mappings={} dirty_tiles={}",
+                            receipt_id.0,
+                            stroke_session_id,
+                            layer_id,
+                            new_key_mappings.len(),
+                            dirty_tiles.len(),
+                        );
+                    }
                     let atlas_store = Arc::clone(&self.atlas_store);
                     let document_apply_result: Result<(), MergeBridgeError> = (|| {
                         let mut document = self
@@ -675,14 +1053,14 @@ impl GpuState {
                         let committed_image_handle = document
                             .leaf_image_handle(*layer_id, *stroke_session_id)
                             .map_err(MergeBridgeError::Document)?;
-                        let committed_image = document
-                            .image(committed_image_handle)
-                            .ok_or(MergeBridgeError::Document(
+                        let committed_image = document.image(committed_image_handle).ok_or(
+                            MergeBridgeError::Document(
                                 DocumentMergeError::LayerNotFoundInStrokeSession {
                                     layer_id: *layer_id,
                                     stroke_session_id: *stroke_session_id,
                                 },
-                            ))?;
+                            ),
+                        )?;
                         for (tile_x, tile_y, tile_key) in committed_image.iter_tiles() {
                             if atlas_store.resolve(tile_key).is_none() {
                                 panic!(
@@ -734,7 +1112,7 @@ impl GpuState {
                         return Err(error);
                     }
                     self.brush_buffer_tile_keys
-                        .retain_stroke_tiles(*stroke_session_id, &self.atlas_store);
+                        .retain_stroke_tiles(*stroke_session_id, &self.brush_buffer_store);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: *stroke_session_id,
@@ -745,6 +1123,7 @@ impl GpuState {
                     receipt_id,
                     stroke_session_id,
                     layer_id,
+                    message,
                     ..
                 } => {
                     let document_abort_result: Result<(), MergeBridgeError> = (|| {
@@ -778,12 +1157,14 @@ impl GpuState {
                         );
                         return Err(error);
                     }
-                    self.brush_buffer_tile_keys
-                        .release_stroke_on_merge_failed(*stroke_session_id, &self.atlas_store);
+                    self.brush_buffer_tile_keys.release_stroke_on_merge_failed(
+                        *stroke_session_id,
+                        &self.brush_buffer_store,
+                    );
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeFailed {
                             stroke_session_id: *stroke_session_id,
-                            message: "merge requires abort".to_owned(),
+                            message: format!("merge requires abort: {message}"),
                         },
                     );
                 }
@@ -793,7 +1174,7 @@ impl GpuState {
     }
 
     fn drain_tile_gc_evictions(&mut self) {
-        let evicted_batches = self.atlas_store.drain_evicted_retain_batches();
+        let evicted_batches = self.brush_buffer_store.drain_evicted_retain_batches();
         for evicted_batch in evicted_batches {
             self.brush_buffer_tile_keys
                 .apply_retained_eviction(evicted_batch.retain_id, &evicted_batch.keys);
@@ -937,6 +1318,15 @@ fn apply_gc_evicted_batch_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn required_device_features_include_brush_storage_texture_support() {
+        let required = GpuState::required_device_features();
+        assert!(
+            required.contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
+            "brush dab write uses R32Float storage texture; required device features must include TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES"
+        );
+    }
 
     #[test]
     fn surface_format_mapping_preserves_rgba_bgra_variants() {

@@ -173,6 +173,12 @@ pub trait MergeTileStore {
     fn allocate(&self) -> Result<TileKey, TileAllocError>;
     fn release(&self, key: TileKey) -> bool;
     fn resolve(&self, key: TileKey) -> Option<TileAddress>;
+    fn resolve_layer(&self, key: TileKey) -> Option<TileAddress> {
+        self.resolve(key)
+    }
+    fn resolve_stroke(&self, key: TileKey) -> Option<TileAddress> {
+        self.resolve(key)
+    }
     fn mark_keys_active(&self, keys: &[TileKey]);
     fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64;
 }
@@ -322,7 +328,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
 
         for tile_op in &request.tile_ops {
             dirty_tiles.push((tile_op.tile_x, tile_op.tile_y));
-            let stroke_tile = self.resolve_gpu_tile(
+            let stroke_tile = self.resolve_stroke_gpu_tile(
                 tile_op.stroke_buffer_key,
                 Some(receipt_id),
                 request.stroke_session_id,
@@ -331,7 +337,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
             )?;
 
             let base_tile = if let Some(existing_layer_key) = tile_op.existing_layer_key {
-                Some(self.resolve_gpu_tile(
+                Some(self.resolve_layer_gpu_tile(
                     existing_layer_key,
                     Some(receipt_id),
                     request.stroke_session_id,
@@ -360,7 +366,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
             };
             allocated_new_keys.push(new_key);
 
-            let output_tile = match self.store.resolve(new_key) {
+            let output_tile = match self.store.resolve_layer(new_key) {
                 Some(address) => to_gpu_tile_ref(address),
                 None => {
                     rollback_new_keys(
@@ -597,7 +603,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         }
 
         for old_key in &entry.drop_key_list {
-            if self.store.resolve(*old_key).is_none() {
+            if self.store.resolve_layer(*old_key).is_none() {
                 return Err(TileMergeError::UnknownTileKey {
                     receipt_id: Some(receipt_id),
                     stroke_session_id: entry.stroke_session_id,
@@ -634,7 +640,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         }
 
         for mapping in &entry.new_key_mappings {
-            if self.store.resolve(mapping.new_key).is_none() {
+            if self.store.resolve_layer(mapping.new_key).is_none() {
                 return Err(TileMergeError::UnknownTileKey {
                     receipt_id: Some(receipt_id),
                     stroke_session_id: entry.stroke_session_id,
@@ -661,7 +667,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         Ok(())
     }
 
-    fn resolve_gpu_tile(
+    fn resolve_layer_gpu_tile(
         &self,
         key: TileKey,
         receipt_id: Option<StrokeExecutionReceiptId>,
@@ -669,7 +675,27 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         layer_id: LayerId,
         stage: &'static str,
     ) -> Result<GpuTileRef, TileMergeError> {
-        let Some(address) = self.store.resolve(key) else {
+        let Some(address) = self.store.resolve_layer(key) else {
+            return Err(TileMergeError::UnknownTileKey {
+                receipt_id,
+                stroke_session_id,
+                layer_id,
+                key,
+                stage,
+            });
+        };
+        Ok(to_gpu_tile_ref(address))
+    }
+
+    fn resolve_stroke_gpu_tile(
+        &self,
+        key: TileKey,
+        receipt_id: Option<StrokeExecutionReceiptId>,
+        stroke_session_id: StrokeSessionId,
+        layer_id: LayerId,
+        stage: &'static str,
+    ) -> Result<GpuTileRef, TileMergeError> {
+        let Some(address) = self.store.resolve_stroke(key) else {
             return Err(TileMergeError::UnknownTileKey {
                 receipt_id,
                 stroke_session_id,
