@@ -326,8 +326,8 @@ impl Renderer {
             });
         let brush_dab_write_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("renderer.brush_dab_write.buffer"),
-            size: (std::mem::size_of::<BrushDabWriteGpu>()
-                * render_protocol::BRUSH_DAB_CHUNK_CAPACITY) as u64,
+            size: (std::mem::size_of::<BrushDabWriteGpu>() * crate::BRUSH_DAB_WRITE_MAX_COMMANDS)
+                as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

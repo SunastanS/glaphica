@@ -88,6 +88,8 @@ use geometry::{
     group_cache_slot_extent_from_document_size, group_tile_grid_from_document_size,
 };
 use render_tree::{RenderTreeNode, collect_node_dirty_rects};
+
+const BRUSH_DAB_WRITE_MAX_COMMANDS: usize = render_protocol::BRUSH_DAB_CHUNK_CAPACITY * 4;
 use renderer_draw_builders::{
     build_group_tile_draw_instances, build_leaf_tile_draw_instances,
     build_leaf_tile_draw_instances_for_tiles, leaf_should_rebuild, tile_coord_from_draw_instance,
@@ -379,8 +381,10 @@ struct GpuState {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BrushDabWriteGpu {
-    pixel_x: u32,
-    pixel_y: u32,
+    write_min_x: u32,
+    write_min_y: u32,
+    write_max_x: u32,
+    write_max_y: u32,
     atlas_layer: u32,
     pressure: f32,
 }
@@ -391,7 +395,7 @@ struct BrushDabWriteMetaGpu {
     dab_count: u32,
     texture_width: u32,
     texture_height: u32,
-    tile_stride: u32,
+    _padding0: u32,
 }
 
 struct DataState {

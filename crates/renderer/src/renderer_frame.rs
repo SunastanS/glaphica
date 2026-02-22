@@ -301,36 +301,30 @@ static FRAME_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 static EXECUTE_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 const DEFAULT_BRUSH_RADIUS_PIXELS: i32 = 3;
 
-fn assert_brush_dab_write_footprint_in_slot(
-    pixel_x: u32,
-    pixel_y: u32,
+fn assert_brush_dab_write_region_in_slot(
+    write_min_x: u32,
+    write_min_y: u32,
+    write_max_x: u32,
+    write_max_y: u32,
     tile_address: TileAddress,
     atlas_layout: TileAtlasLayout,
 ) {
-    let radius = i64::from(DEFAULT_BRUSH_RADIUS_PIXELS);
-    if radius < 0 {
-        panic!("brush radius must be non-negative");
-    }
     let (slot_origin_x, slot_origin_y) = tile_address.atlas_slot_origin_pixels_in(atlas_layout);
     let slot_min_x = i64::from(slot_origin_x);
     let slot_min_y = i64::from(slot_origin_y);
     let slot_max_x = slot_min_x + i64::from(TILE_STRIDE) - 1;
     let slot_max_y = slot_min_y + i64::from(TILE_STRIDE) - 1;
-    let write_min_x = i64::from(pixel_x) - radius;
-    let write_max_x = i64::from(pixel_x) + radius;
-    let write_min_y = i64::from(pixel_y) - radius;
-    let write_max_y = i64::from(pixel_y) + radius;
-    if (write_min_x < slot_min_x
+    let write_min_x = i64::from(write_min_x);
+    let write_min_y = i64::from(write_min_y);
+    let write_max_x = i64::from(write_max_x);
+    let write_max_y = i64::from(write_max_y);
+    if write_min_x < slot_min_x
         || write_max_x > slot_max_x
         || write_min_y < slot_min_y
-        || write_max_y > slot_max_y)
-        && crate::renderer_brush_trace_enabled()
+        || write_max_y > slot_max_y
     {
-        eprintln!(
-            "[brush_trace] brush_dab_footprint_clipped radius={} pixel=({}, {}) write_bounds=({}, {})-({}, {}) slot_bounds=({}, {})-({}, {}) tile_address={:?}",
-            DEFAULT_BRUSH_RADIUS_PIXELS,
-            pixel_x,
-            pixel_y,
+        panic!(
+            "brush dab write region crosses tile slot boundary: write_bounds=({}, {})-({}, {}) slot_bounds=({}, {})-({}, {}) tile_address={:?}",
             write_min_x,
             write_min_y,
             write_max_x,
@@ -876,31 +870,27 @@ impl Renderer {
                 )
             });
         let atlas_layout = self.gpu_state.brush_buffer_atlas.layout();
-        let mut mapped_dabs = Vec::with_capacity(chunk.dab_count());
+        let mut mapped_dabs = Vec::with_capacity(chunk.dab_count().saturating_mul(4));
         for index in 0..chunk.dab_count() {
-            mapped_dabs.push(self.map_dab_to_brush_buffer_pixel(
+            self.append_dab_write_commands(
                 chunk.canvas_x()[index],
                 chunk.canvas_y()[index],
                 chunk.pressure()[index],
                 bound_tile_keys,
                 atlas_layout,
-            ));
+                &mut mapped_dabs,
+            );
         }
-        self.gpu_state.queue.write_buffer(
-            &self.gpu_state.brush_dab_write_buffer,
-            0,
-            bytemuck::cast_slice(&mapped_dabs),
-        );
-        self.gpu_state.queue.write_buffer(
-            &self.gpu_state.brush_dab_write_meta_buffer,
-            0,
-            bytemuck::bytes_of(&crate::BrushDabWriteMetaGpu {
-                dab_count: u32::try_from(chunk.dab_count()).expect("dab count exceeds u32"),
-                texture_width: atlas_layout.atlas_width,
-                texture_height: atlas_layout.atlas_height,
-                tile_stride: TILE_STRIDE,
-            }),
-        );
+        if mapped_dabs.is_empty() {
+            return;
+        }
+        if mapped_dabs.len() > crate::BRUSH_DAB_WRITE_MAX_COMMANDS {
+            panic!(
+                "expanded brush dab command count {} exceeds brush write buffer capacity {}",
+                mapped_dabs.len(),
+                crate::BRUSH_DAB_WRITE_MAX_COMMANDS
+            );
+        }
         if brush_encoder.is_none() {
             *brush_encoder = Some(self.gpu_state.device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor {
@@ -911,6 +901,21 @@ impl Renderer {
         let encoder = brush_encoder
             .as_mut()
             .expect("brush command encoder must exist");
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.brush_dab_write_buffer,
+            0,
+            bytemuck::cast_slice(&mapped_dabs),
+        );
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.brush_dab_write_meta_buffer,
+            0,
+            bytemuck::bytes_of(&crate::BrushDabWriteMetaGpu {
+                dab_count: u32::try_from(mapped_dabs.len()).expect("dab command count exceeds u32"),
+                texture_width: atlas_layout.atlas_width,
+                texture_height: atlas_layout.atlas_height,
+                _padding0: 0,
+            }),
+        );
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("renderer.brush_execution.pass"),
             timestamp_writes: None,
@@ -918,7 +923,7 @@ impl Renderer {
         compute_pass.set_pipeline(&self.gpu_state.brush_dab_write_pipeline);
         compute_pass.set_bind_group(0, &self.gpu_state.brush_dab_write_bind_group, &[]);
         compute_pass.dispatch_workgroups(
-            u32::try_from(chunk.dab_count()).expect("dab dispatch count exceeds u32"),
+            u32::try_from(mapped_dabs.len()).expect("dab dispatch count exceeds u32"),
             1,
             1,
         );
@@ -934,64 +939,92 @@ impl Renderer {
         }
     }
 
-    fn map_dab_to_brush_buffer_pixel(
+    fn append_dab_write_commands(
         &self,
         canvas_x: f32,
         canvas_y: f32,
         pressure: f32,
         bound_tile_keys: &HashMap<BufferTileCoordinate, tiles::TileKey>,
         atlas_layout: TileAtlasLayout,
-    ) -> crate::BrushDabWriteGpu {
+        mapped_dabs: &mut Vec<crate::BrushDabWriteGpu>,
+    ) {
         if !canvas_x.is_finite() || !canvas_y.is_finite() || !pressure.is_finite() {
             panic!("dab values must be finite");
         }
-        let tile_size_f32 = TILE_SIZE as f32;
-        let tile_x = Self::tile_index_for_canvas_value(canvas_x, tile_size_f32);
-        let tile_y = Self::tile_index_for_canvas_value(canvas_y, tile_size_f32);
-        let tile_coordinate = BufferTileCoordinate { tile_x, tile_y };
-        let tile_key = bound_tile_keys
-            .get(&tile_coordinate)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!(
-                    "dab mapped to unbound tile key for stroke buffer: tile=({}, {})",
-                    tile_x, tile_y
-                )
-            });
-        let tile_address = self
-            .gpu_state
-            .brush_buffer_store
-            .resolve(tile_key)
-            .unwrap_or_else(|| panic!("bound brush buffer tile key must resolve"));
-        let tile_origin_x = tile_x as f32 * tile_size_f32;
-        let tile_origin_y = tile_y as f32 * tile_size_f32;
-        let local_x = (canvas_x - tile_origin_x).floor() as i32;
-        let local_y = (canvas_y - tile_origin_y).floor() as i32;
-        if local_x < 0
-            || local_x >= i32::try_from(TILE_SIZE).expect("tile size i32")
-            || local_y < 0
-            || local_y >= i32::try_from(TILE_SIZE).expect("tile size i32")
-        {
-            panic!(
-                "dab local coordinate out of tile content bounds: local=({}, {})",
-                local_x, local_y
-            );
+        if DEFAULT_BRUSH_RADIUS_PIXELS < 0 {
+            panic!("brush radius must be non-negative");
         }
-
-        let (origin_x, origin_y) = tile_address.atlas_content_origin_pixels_in(atlas_layout);
-        let pixel_x = origin_x
-            .checked_add(u32::try_from(local_x).expect("local x negative"))
-            .expect("brush buffer pixel x overflow");
-        let pixel_y = origin_y
-            .checked_add(u32::try_from(local_y).expect("local y negative"))
-            .expect("brush buffer pixel y overflow");
-        assert_brush_dab_write_footprint_in_slot(pixel_x, pixel_y, tile_address, atlas_layout);
-
-        crate::BrushDabWriteGpu {
-            pixel_x,
-            pixel_y,
-            atlas_layer: tile_address.atlas_layer,
-            pressure: pressure.clamp(0.0, 1.0),
+        let tile_size_f32 = TILE_SIZE as f32;
+        let radius = DEFAULT_BRUSH_RADIUS_PIXELS as f32;
+        let min_tile_x = Self::tile_index_for_canvas_value(canvas_x - radius, tile_size_f32);
+        let max_tile_x = Self::tile_index_for_canvas_value(canvas_x + radius, tile_size_f32);
+        let min_tile_y = Self::tile_index_for_canvas_value(canvas_y - radius, tile_size_f32);
+        let max_tile_y = Self::tile_index_for_canvas_value(canvas_y + radius, tile_size_f32);
+        for tile_y in min_tile_y..=max_tile_y {
+            for tile_x in min_tile_x..=max_tile_x {
+                let tile_coordinate = BufferTileCoordinate { tile_x, tile_y };
+                let tile_key = bound_tile_keys
+                    .get(&tile_coordinate)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "dab mapped to unbound tile key for stroke buffer: tile=({}, {})",
+                            tile_x, tile_y
+                        )
+                    });
+                let tile_address = self
+                    .gpu_state
+                    .brush_buffer_store
+                    .resolve(tile_key)
+                    .unwrap_or_else(|| panic!("bound brush buffer tile key must resolve"));
+                let tile_origin_x = tile_x as f32 * tile_size_f32;
+                let tile_origin_y = tile_y as f32 * tile_size_f32;
+                let local_center_x = (canvas_x - tile_origin_x).floor();
+                let local_center_y = (canvas_y - tile_origin_y).floor();
+                let (content_origin_x, content_origin_y) =
+                    tile_address.atlas_content_origin_pixels_in(atlas_layout);
+                let center_x = i64::from(content_origin_x) + local_center_x as i64;
+                let center_y = i64::from(content_origin_y) + local_center_y as i64;
+                let raw_min_x = center_x - i64::from(DEFAULT_BRUSH_RADIUS_PIXELS);
+                let raw_max_x = center_x + i64::from(DEFAULT_BRUSH_RADIUS_PIXELS);
+                let raw_min_y = center_y - i64::from(DEFAULT_BRUSH_RADIUS_PIXELS);
+                let raw_max_y = center_y + i64::from(DEFAULT_BRUSH_RADIUS_PIXELS);
+                let (slot_origin_x, slot_origin_y) =
+                    tile_address.atlas_slot_origin_pixels_in(atlas_layout);
+                let slot_min_x = i64::from(slot_origin_x);
+                let slot_min_y = i64::from(slot_origin_y);
+                let slot_max_x = slot_min_x + i64::from(TILE_STRIDE) - 1;
+                let slot_max_y = slot_min_y + i64::from(TILE_STRIDE) - 1;
+                let texture_max_x = i64::from(atlas_layout.atlas_width) - 1;
+                let texture_max_y = i64::from(atlas_layout.atlas_height) - 1;
+                let write_min_x = raw_min_x.max(slot_min_x).max(0);
+                let write_min_y = raw_min_y.max(slot_min_y).max(0);
+                let write_max_x = raw_max_x.min(slot_max_x).min(texture_max_x);
+                let write_max_y = raw_max_y.min(slot_max_y).min(texture_max_y);
+                if write_min_x > write_max_x || write_min_y > write_max_y {
+                    continue;
+                }
+                let write_min_x = u32::try_from(write_min_x).expect("write min x out of u32");
+                let write_min_y = u32::try_from(write_min_y).expect("write min y out of u32");
+                let write_max_x = u32::try_from(write_max_x).expect("write max x out of u32");
+                let write_max_y = u32::try_from(write_max_y).expect("write max y out of u32");
+                assert_brush_dab_write_region_in_slot(
+                    write_min_x,
+                    write_min_y,
+                    write_max_x,
+                    write_max_y,
+                    tile_address,
+                    atlas_layout,
+                );
+                mapped_dabs.push(crate::BrushDabWriteGpu {
+                    write_min_x,
+                    write_min_y,
+                    write_max_x,
+                    write_max_y,
+                    atlas_layer: tile_address.atlas_layer,
+                    pressure: pressure.clamp(0.0, 1.0),
+                });
+            }
         }
     }
 
@@ -1353,7 +1386,7 @@ mod tests {
         TILE_GUTTER, TILE_STRIDE, TileAddress, TileAtlasLayout, TileDirtyBitset, TileDirtyQuery,
     };
 
-    use super::{assert_brush_dab_write_footprint_in_slot, mark_dirty_from_tile_history};
+    use super::{assert_brush_dab_write_region_in_slot, mark_dirty_from_tile_history};
     use crate::{
         DirtyRectMask, DirtyStateStore, FrameState, FrameSync, LayerDirtyVersion,
         RenderDataResolver, TILE_SIZE,
@@ -1463,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn brush_dab_footprint_assert_allows_center_write_within_slot() {
+    fn brush_dab_region_assert_allows_write_within_slot() {
         let atlas_layout = TileAtlasLayout {
             tiles_per_row: 1,
             tiles_per_column: 1,
@@ -1474,12 +1507,11 @@ mod tests {
             atlas_layer: 0,
             tile_index: 0,
         };
-        let center = TILE_STRIDE / 2;
-        assert_brush_dab_write_footprint_in_slot(center, center, tile_address, atlas_layout);
+        assert_brush_dab_write_region_in_slot(20, 21, 30, 31, tile_address, atlas_layout);
     }
 
     #[test]
-    fn brush_dab_footprint_assert_allows_content_edge_for_clipped_write() {
+    fn brush_dab_region_assert_allows_content_edge_for_clipped_write() {
         let atlas_layout = TileAtlasLayout {
             tiles_per_row: 1,
             tiles_per_column: 1,
@@ -1490,9 +1522,34 @@ mod tests {
             atlas_layer: 0,
             tile_index: 0,
         };
-        assert_brush_dab_write_footprint_in_slot(
+        assert_brush_dab_write_region_in_slot(
             TILE_GUTTER,
             TILE_GUTTER,
+            TILE_GUTTER + 2,
+            TILE_GUTTER + 2,
+            tile_address,
+            atlas_layout,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "brush dab write region crosses tile slot boundary")]
+    fn brush_dab_region_assert_panics_when_crossing_slot() {
+        let atlas_layout = TileAtlasLayout {
+            tiles_per_row: 1,
+            tiles_per_column: 1,
+            atlas_width: TILE_STRIDE,
+            atlas_height: TILE_STRIDE,
+        };
+        let tile_address = TileAddress {
+            atlas_layer: 0,
+            tile_index: 0,
+        };
+        assert_brush_dab_write_region_in_slot(
+            0,
+            0,
+            TILE_STRIDE + 1,
+            TILE_GUTTER + 2,
             tile_address,
             atlas_layout,
         );
