@@ -6,11 +6,10 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use document::{Document, DocumentMergeError, TileCoordinate};
+use document::{Document, DocumentMergeError};
 use render_protocol::{
-    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, BufferTileCoordinate,
-    ImageHandle, ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId,
-    Viewport,
+    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle,
+    ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId, Viewport,
 };
 use renderer::{
     BrushControlError, BrushRenderEnqueueError, FrameGpuTimingReport, MergeAckError,
@@ -18,9 +17,10 @@ use renderer::{
     RenderDataResolver, Renderer, ViewOpSender,
 };
 use tiles::{
-    apply_tile_key_mappings, BrushBufferTileRegistry, MergeAuditRecord, MergePlanRequest,
-    MergePlanTileOp, TileAddress, TileAtlasStore, TileKey, TileMergeCompletionNoticeId,
-    TileImageApplyError, TileMergeEngine, TileMergeError, TilesBusinessResult,
+    apply_tile_key_mappings, BrushBufferTileRegistry, DirtySinceResult, MergeAuditRecord,
+    MergePlanRequest, MergePlanTileOp, TileAddress, TileAtlasStore, TileKey,
+    TileMergeCompletionNoticeId, TileImageApplyError, TileMergeEngine, TileMergeError,
+    TilesBusinessResult,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -90,33 +90,17 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         self.atlas_store.resolve(tile_key)
     }
 
-    fn image_tile_grid(&self, image_handle: ImageHandle) -> Option<(u32, u32)> {
-        let document = self
-            .document
-            .read()
-            .unwrap_or_else(|_| panic!("document read lock poisoned"));
-        let image = document.image(image_handle)?;
-        Some((image.tiles_per_row(), image.tiles_per_column()))
-    }
-
-    fn tile_version_at(
+    fn image_dirty_since(
         &self,
         image_handle: ImageHandle,
-        tile_x: u32,
-        tile_y: u32,
-    ) -> Option<u32> {
+        since_version: u64,
+    ) -> Option<DirtySinceResult> {
         let document = self
             .document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let image = document.image(image_handle)?;
-        let version = image.get_tile_version(tile_x, tile_y).unwrap_or_else(|error| {
-            panic!(
-                "tile version lookup failed for image {:?} at ({}, {}): {:?}",
-                image_handle, tile_x, tile_y, error
-            )
-        });
-        Some(version)
+        Some(image.dirty_since(since_version))
     }
 }
 
@@ -581,13 +565,6 @@ impl GpuState {
                                 *layer_id,
                                 *stroke_session_id,
                                 updated_image,
-                                dirty_tiles
-                                    .iter()
-                                    .map(|(tile_x, tile_y)| TileCoordinate {
-                                        tile_x: *tile_x,
-                                        tile_y: *tile_y,
-                                    })
-                                    .collect(),
                                 false,
                             )
                             .map_err(MergeBridgeError::Document)?;

@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use render_protocol::{
     BlendMode, ImageHandle, LayerId, RenderNodeSnapshot, RenderTreeSnapshot, StrokeSessionId,
 };
 use slotmap::SlotMap;
-use tiles::{TileImage, TileKey, VirtualImageError};
+use tiles::{DirtySinceResult, TileImage, TileKey};
 
 #[cfg(test)]
 use tiles::{TileKeyMapping, apply_tile_key_mappings};
@@ -26,7 +26,7 @@ pub struct Document {
     next_layer_id: u64,
     render_tree_cache_dirty: bool,
     dirty_layers: HashSet<LayerId>,
-    active_merge: Option<DocumentMergeContext>,
+    active_merge: Option<ActiveMerge>,
     consumed_stroke_sessions: HashSet<StrokeSessionId>,
 }
 
@@ -57,20 +57,6 @@ pub struct TileCoordinate {
     pub tile_y: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TileReplacement {
-    pub tile_x: u32,
-    pub tile_y: u32,
-    pub new_key: TileKey,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MergeDirtyHint {
-    None,
-    FullLayer,
-    Tiles(Vec<TileCoordinate>),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeCommitSummary {
     pub revision: u64,
@@ -78,12 +64,6 @@ pub struct MergeCommitSummary {
     pub stroke_session_id: StrokeSessionId,
     pub dirty_tiles: Vec<TileCoordinate>,
     pub full_layer_dirty: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TileCommitEntry {
-    pub new_key: TileKey,
-    pub previous_key: Option<TileKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,50 +102,16 @@ pub enum DocumentMergeError {
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
     },
-    TileOutOfBounds {
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        tile_x: u32,
-        tile_y: u32,
-    },
-    DuplicateTileReplacement {
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        tile_x: u32,
-        tile_y: u32,
-    },
-    NoTileReplacements {
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-    },
-    KeyConflict {
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        tile_x: u32,
-        tile_y: u32,
-        new_key: TileKey,
-        conflict_tile_x: u32,
-        conflict_tile_y: u32,
-    },
     RevisionOverflow {
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
     },
-    VirtualImage {
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        tile_x: u32,
-        tile_y: u32,
-        source: VirtualImageError,
-    },
 }
 
-#[derive(Debug)]
-struct DocumentMergeContext {
+#[derive(Debug, Clone, Copy)]
+struct ActiveMerge {
     layer_id: LayerId,
     stroke_session_id: StrokeSessionId,
-    replacements_by_tile: HashMap<TileCoordinate, TileCommitEntry>,
-    replacement_key_owner: HashMap<TileKey, TileCoordinate>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -271,11 +217,21 @@ impl Document {
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
         image: TileImage,
-        dirty_tiles: Vec<TileCoordinate>,
         full_layer_dirty: bool,
     ) -> Result<MergeCommitSummary, DocumentMergeError> {
         self.validate_active_merge(layer_id, stroke_session_id)?;
         let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
+        let dirty_tiles = match image.dirty_since(0) {
+            DirtySinceResult::UpToDate => Vec::new(),
+            DirtySinceResult::HasChanges(query) => query
+                .dirty_tiles
+                .iter_dirty_tiles()
+                .map(|(tile_x, tile_y)| TileCoordinate { tile_x, tile_y })
+                .collect(),
+            DirtySinceResult::HistoryTruncated => {
+                panic!("merge image dirty history is missing for layer {layer_id}");
+            }
+        };
         let new_image_handle = self.images.insert(Arc::new(image));
         let replaced = self
             .layer_tree
@@ -423,146 +379,13 @@ impl Document {
             });
         }
 
-        self.active_merge = Some(DocumentMergeContext {
+        self.active_merge = Some(ActiveMerge {
             layer_id,
             stroke_session_id,
-            replacements_by_tile: HashMap::new(),
-            replacement_key_owner: HashMap::new(),
         });
         Ok(())
     }
 
-    pub(crate) fn commit_tile_replacements(
-        &mut self,
-        layer_id: LayerId,
-        replacements: &[TileReplacement],
-    ) -> Result<(), DocumentMergeError> {
-        let (stroke_session_id, image_handle) = {
-            let active =
-                self.active_merge
-                    .as_ref()
-                    .ok_or(DocumentMergeError::MissingActiveMerge {
-                        layer_id,
-                        stroke_session_id: None,
-                    })?;
-            if active.layer_id != layer_id {
-                return Err(DocumentMergeError::MergeContextMismatch {
-                    expected_layer_id: active.layer_id,
-                    expected_stroke_session_id: active.stroke_session_id,
-                    actual_layer_id: layer_id,
-                    actual_stroke_session_id: active.stroke_session_id,
-                });
-            }
-            let layer_lookup = self.lookup_leaf_image_handle(layer_id, active.stroke_session_id)?;
-            if !layer_lookup.is_leaf {
-                return Err(DocumentMergeError::LayerIsNotLeaf {
-                    layer_id,
-                    stroke_session_id: active.stroke_session_id,
-                });
-            }
-            let image_handle =
-                layer_lookup
-                    .image_handle
-                    .ok_or(DocumentMergeError::LayerNotFound {
-                        layer_id,
-                        stroke_session_id: active.stroke_session_id,
-                    })?;
-            (active.stroke_session_id, image_handle)
-        };
-
-        let image =
-            self.images
-                .get(image_handle)
-                .cloned()
-                .ok_or(DocumentMergeError::LayerNotFound {
-                    layer_id,
-                    stroke_session_id,
-                })?;
-        let active = self
-            .active_merge
-            .as_ref()
-            .ok_or(DocumentMergeError::MissingActiveMerge {
-                layer_id,
-                stroke_session_id: Some(stroke_session_id),
-            })?;
-        let mut replacements_by_tile = active.replacements_by_tile.clone();
-        let mut replacement_key_owner = active.replacement_key_owner.clone();
-        for replacement in replacements {
-            self.validate_replacement(layer_id, stroke_session_id, &image, replacement)?;
-            self.validate_and_register_replacement(
-                layer_id,
-                stroke_session_id,
-                &image,
-                replacement,
-                &mut replacements_by_tile,
-                &mut replacement_key_owner,
-            )?;
-        }
-        if let Some(active_mut) = self.active_merge.as_mut() {
-            active_mut.replacements_by_tile = replacements_by_tile;
-            active_mut.replacement_key_owner = replacement_key_owner;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn finalize_merge(
-        &mut self,
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        dirty_hint: MergeDirtyHint,
-    ) -> Result<MergeCommitSummary, DocumentMergeError> {
-        self.validate_active_merge(layer_id, stroke_session_id)?;
-        let active = self
-            .active_merge
-            .as_ref()
-            .ok_or(DocumentMergeError::MissingActiveMerge {
-                layer_id,
-                stroke_session_id: Some(stroke_session_id),
-            })?;
-        if active.replacements_by_tile.is_empty() {
-            return Err(DocumentMergeError::NoTileReplacements {
-                layer_id,
-                stroke_session_id,
-            });
-        }
-        let staged_replacements = active.replacements_by_tile.clone();
-        let next_revision =
-            self.revision
-                .checked_add(1)
-                .ok_or(DocumentMergeError::RevisionOverflow {
-                    layer_id,
-                    stroke_session_id,
-                })?;
-        self.revision = next_revision;
-        self.active_merge = None;
-        self.consumed_stroke_sessions.insert(stroke_session_id);
-        self.dirty_layers.insert(layer_id);
-        self.mark_render_tree_dirty();
-
-        let mut dirty_tiles: Vec<TileCoordinate> = staged_replacements.keys().copied().collect();
-        let mut full_layer_dirty = false;
-        match dirty_hint {
-            MergeDirtyHint::None => {}
-            MergeDirtyHint::FullLayer => {
-                full_layer_dirty = true;
-            }
-            MergeDirtyHint::Tiles(tiles) => {
-                for tile in tiles {
-                    if !dirty_tiles.contains(&tile) {
-                        dirty_tiles.push(tile);
-                    }
-                }
-            }
-        }
-
-        Ok(MergeCommitSummary {
-            revision: self.revision,
-            layer_id,
-            stroke_session_id,
-            dirty_tiles,
-            full_layer_dirty,
-        })
-    }
 
     pub fn abort_merge(
         &mut self,
@@ -578,10 +401,9 @@ impl Document {
     pub fn has_active_merge(&self, layer_id: LayerId, stroke_session_id: StrokeSessionId) -> bool {
         matches!(
             self.active_merge,
-            Some(DocumentMergeContext {
+            Some(ActiveMerge {
                 layer_id: active_layer_id,
                 stroke_session_id: active_stroke_session_id,
-                ..
             }) if active_layer_id == layer_id && active_stroke_session_id == stroke_session_id
         )
     }
@@ -647,104 +469,6 @@ impl Document {
             });
         };
         Ok(layer_lookup)
-    }
-
-    fn validate_replacement(
-        &self,
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        image: &Arc<TileImage>,
-        replacement: &TileReplacement,
-    ) -> Result<(), DocumentMergeError> {
-        if replacement.tile_x >= image.tiles_per_row()
-            || replacement.tile_y >= image.tiles_per_column()
-        {
-            return Err(DocumentMergeError::TileOutOfBounds {
-                layer_id,
-                stroke_session_id,
-                tile_x: replacement.tile_x,
-                tile_y: replacement.tile_y,
-            });
-        }
-        Ok(())
-    }
-
-    fn validate_and_register_replacement(
-        &self,
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        image: &Arc<TileImage>,
-        replacement: &TileReplacement,
-        replacements_by_tile: &mut HashMap<TileCoordinate, TileCommitEntry>,
-        replacement_key_owner: &mut HashMap<TileKey, TileCoordinate>,
-    ) -> Result<(), DocumentMergeError> {
-        let tile_coordinate = TileCoordinate {
-            tile_x: replacement.tile_x,
-            tile_y: replacement.tile_y,
-        };
-        if replacements_by_tile.contains_key(&tile_coordinate) {
-            return Err(DocumentMergeError::DuplicateTileReplacement {
-                layer_id,
-                stroke_session_id,
-                tile_x: replacement.tile_x,
-                tile_y: replacement.tile_y,
-            });
-        }
-        if let Some(conflict_owner) = replacement_key_owner.get(&replacement.new_key) {
-            return Err(DocumentMergeError::KeyConflict {
-                layer_id,
-                stroke_session_id,
-                tile_x: replacement.tile_x,
-                tile_y: replacement.tile_y,
-                new_key: replacement.new_key,
-                conflict_tile_x: conflict_owner.tile_x,
-                conflict_tile_y: conflict_owner.tile_y,
-            });
-        }
-        for (existing_tile_x, existing_tile_y, existing_key) in image.iter_tiles() {
-            if existing_key != replacement.new_key {
-                continue;
-            }
-            let existing_tile_coordinate = TileCoordinate {
-                tile_x: existing_tile_x,
-                tile_y: existing_tile_y,
-            };
-            let is_same_tile = existing_tile_coordinate == tile_coordinate;
-            if is_same_tile {
-                break;
-            }
-            if replacements_by_tile.contains_key(&existing_tile_coordinate) {
-                break;
-            }
-            return Err(DocumentMergeError::KeyConflict {
-                layer_id,
-                stroke_session_id,
-                tile_x: replacement.tile_x,
-                tile_y: replacement.tile_y,
-                new_key: replacement.new_key,
-                conflict_tile_x: existing_tile_x,
-                conflict_tile_y: existing_tile_y,
-            });
-        }
-
-        let previous_key = image
-            .get_tile(replacement.tile_x, replacement.tile_y)
-            .map_err(|source| DocumentMergeError::VirtualImage {
-                layer_id,
-                stroke_session_id,
-                tile_x: replacement.tile_x,
-                tile_y: replacement.tile_y,
-                source,
-            })?;
-        replacement_key_owner.insert(replacement.new_key, tile_coordinate);
-        replacements_by_tile.insert(
-            tile_coordinate,
-            TileCommitEntry {
-                new_key: replacement.new_key,
-                previous_key,
-            },
-        );
-        Ok(())
     }
 
     fn validate_active_merge(
@@ -1307,22 +1031,12 @@ mod tests {
     }
 
     #[test]
-    fn merge_finalize_replaces_tile_key_and_advances_revision() {
+    fn merge_apply_replaces_tile_key_and_advances_revision() {
         let mut document = Document::new(128, 128);
         let layer_id = document.new_layer_root();
         document
             .begin_merge(layer_id.0, 77, document.revision())
             .expect("begin merge");
-        document
-            .commit_tile_replacements(
-                layer_id.0,
-                &[TileReplacement {
-                    tile_x: 0,
-                    tile_y: 0,
-                    new_key: test_tile_key(10),
-                }],
-            )
-            .expect("commit replacement");
         let image_handle = document
             .leaf_image_handle(layer_id.0, 77)
             .expect("leaf image handle should resolve");
@@ -1344,7 +1058,6 @@ mod tests {
                 layer_id.0,
                 77,
                 updated_image,
-                vec![TileCoordinate { tile_x: 0, tile_y: 0 }],
                 false,
             )
             .expect("apply merge image");
@@ -1369,106 +1082,16 @@ mod tests {
     }
 
     #[test]
-    fn merge_commit_batch_failure_keeps_context_unchanged() {
-        let mut document = Document::new(128, 128);
-        let layer_id = document.new_layer_root();
-        document
-            .begin_merge(layer_id.0, 88, document.revision())
-            .expect("begin merge");
-
-        let error = document
-            .commit_tile_replacements(
-                layer_id.0,
-                &[
-                    TileReplacement {
-                        tile_x: 0,
-                        tile_y: 0,
-                        new_key: test_tile_key(11),
-                    },
-                    TileReplacement {
-                        tile_x: 2,
-                        tile_y: 0,
-                        new_key: test_tile_key(12),
-                    },
-                ],
-            )
-            .expect_err("out of bounds should fail commit");
-        assert!(matches!(
-            error,
-            DocumentMergeError::TileOutOfBounds {
-                layer_id: id,
-                stroke_session_id: 88,
-                tile_x: 2,
-                tile_y: 0
-            } if id == layer_id.0
-        ));
-        let finalize_error = document
-            .finalize_merge(layer_id.0, 88, MergeDirtyHint::None)
-            .expect_err("empty staged set must not finalize");
-        assert!(matches!(
-            finalize_error,
-            DocumentMergeError::NoTileReplacements {
-                layer_id: id,
-                stroke_session_id: 88
-            } if id == layer_id.0
-        ));
-        assert_eq!(document.revision(), 0);
-    }
-
-    #[test]
-    fn finalize_failure_keeps_active_merge_for_explicit_abort() {
+    fn merge_abort_clears_active_merge() {
         let mut document = Document::new(128, 128);
         let layer_id = document.new_layer_root();
         document
             .begin_merge(layer_id.0, 120, document.revision())
             .expect("begin merge");
-        let finalize_error = document
-            .finalize_merge(layer_id.0, 120, MergeDirtyHint::None)
-            .expect_err("finalize without replacements must fail");
-        assert!(matches!(
-            finalize_error,
-            DocumentMergeError::NoTileReplacements {
-                layer_id: id,
-                stroke_session_id: 120
-            } if id == layer_id.0
-        ));
         assert!(document.has_active_merge(layer_id.0, 120));
         document
             .abort_merge(layer_id.0, 120)
-            .expect("explicit abort after finalize failure");
+            .expect("explicit abort after begin merge");
         assert!(!document.has_active_merge(layer_id.0, 120));
-    }
-
-    #[test]
-    fn merge_rejects_replayed_stroke_session_after_finalize() {
-        let mut document = Document::new(128, 128);
-        let layer_id = document.new_layer_root();
-        document
-            .begin_merge(layer_id.0, 99, document.revision())
-            .expect("begin merge");
-        document
-            .commit_tile_replacements(
-                layer_id.0,
-                &[TileReplacement {
-                    tile_x: 0,
-                    tile_y: 0,
-                    new_key: test_tile_key(21),
-                }],
-            )
-            .expect("commit replacement");
-        document
-            .finalize_merge(layer_id.0, 99, MergeDirtyHint::None)
-            .expect("finalize merge");
-
-        let replay_error = document
-            .begin_merge(layer_id.0, 99, document.revision())
-            .expect_err("replayed stroke session must fail");
-        assert!(matches!(
-            replay_error,
-            DocumentMergeError::DuplicateFinalizeOrAbort {
-                layer_id: id,
-                stroke_session_id: 99
-            } if id == layer_id.0
-        ));
     }
 }

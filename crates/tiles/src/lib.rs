@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use bitvec::prelude::{BitVec, Lsb0};
 use render_protocol::BufferTileCoordinate;
 
 pub const TILE_SIZE: u32 = 128;
@@ -13,6 +14,7 @@ pub const TILES_PER_ATLAS: u32 = TILES_PER_ROW * TILES_PER_ROW;
 pub const ATLAS_OCCUPANCY_WORDS: usize = (TILES_PER_ATLAS as usize).div_ceil(64);
 
 const INDEX_SHARDS: usize = 64;
+const DIRTY_HISTORY_CAPACITY: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey(u64);
@@ -379,6 +381,7 @@ pub enum VirtualImageError {
     TileBytesLengthMismatch,
     TileIndexOutOfBounds,
     OutputByteCountOverflow,
+    VersionOverflow,
 }
 
 impl<K> VirtualImage<K> {
@@ -517,10 +520,136 @@ impl<K> VirtualImage<K> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileDirtyBitset {
+    tiles_per_row: u32,
+    tiles_per_column: u32,
+    bits: BitVec<usize, Lsb0>,
+    dirty_count: usize,
+}
+
+impl TileDirtyBitset {
+    pub fn new(tiles_per_row: u32, tiles_per_column: u32) -> Result<Self, VirtualImageError> {
+        let tile_count = (tiles_per_row as usize)
+            .checked_mul(tiles_per_column as usize)
+            .ok_or(VirtualImageError::TileCountOverflow)?;
+        Ok(Self {
+            tiles_per_row,
+            tiles_per_column,
+            bits: BitVec::repeat(false, tile_count),
+            dirty_count: 0,
+        })
+    }
+
+    pub fn tiles_per_row(&self) -> u32 {
+        self.tiles_per_row
+    }
+
+    pub fn tiles_per_column(&self) -> u32 {
+        self.tiles_per_column
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dirty_count == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.dirty_count == self.bits.len() && !self.bits.is_empty()
+    }
+
+    pub fn set(&mut self, tile_x: u32, tile_y: u32) -> Result<(), VirtualImageError> {
+        let index = self.tile_index(tile_x, tile_y)?;
+        let Some(mut slot) = self.bits.get_mut(index) else {
+            return Err(VirtualImageError::TileIndexOutOfBounds);
+        };
+        if !*slot {
+            *slot = true;
+            self.dirty_count = self
+                .dirty_count
+                .checked_add(1)
+                .ok_or(VirtualImageError::TileCountOverflow)?;
+        }
+        Ok(())
+    }
+
+    pub fn merge_from(&mut self, other: &TileDirtyBitset) -> Result<(), VirtualImageError> {
+        if self.tiles_per_row != other.tiles_per_row
+            || self.tiles_per_column != other.tiles_per_column
+            || self.bits.len() != other.bits.len()
+        {
+            return Err(VirtualImageError::TileIndexOutOfBounds);
+        }
+        for (index, other_bit) in other.bits.iter().by_vals().enumerate() {
+            if other_bit {
+                let Some(mut slot) = self.bits.get_mut(index) else {
+                    return Err(VirtualImageError::TileIndexOutOfBounds);
+                };
+                if !*slot {
+                    *slot = true;
+                    self.dirty_count = self
+                        .dirty_count
+                        .checked_add(1)
+                        .ok_or(VirtualImageError::TileCountOverflow)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn iter_dirty_tiles(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let tiles_per_row = self.tiles_per_row as usize;
+        self.bits
+            .iter()
+            .by_vals()
+            .enumerate()
+            .filter_map(move |(index, is_dirty)| {
+                if is_dirty {
+                    let tile_x = (index % tiles_per_row) as u32;
+                    let tile_y = (index / tiles_per_row) as u32;
+                    Some((tile_x, tile_y))
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, VirtualImageError> {
+        if tile_x >= self.tiles_per_row || tile_y >= self.tiles_per_column {
+            return Err(VirtualImageError::TileIndexOutOfBounds);
+        }
+        let row = (tile_y as usize)
+            .checked_mul(self.tiles_per_row as usize)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
+        row.checked_add(tile_x as usize)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TileImage {
     image: VirtualImage<TileKey>,
     versions: Vec<u32>,
+    image_version: u64,
+    dirty_history: Vec<TileDirtyHistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileDirtyQuery {
+    pub latest_version: u64,
+    pub dirty_tiles: TileDirtyBitset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirtySinceResult {
+    UpToDate,
+    HistoryTruncated,
+    HasChanges(TileDirtyQuery),
+}
+
+#[derive(Debug, Clone)]
+struct TileDirtyHistoryEntry {
+    version: u64,
+    dirty_tiles: TileDirtyBitset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -581,6 +710,8 @@ impl TileImage {
         Ok(Self {
             image: VirtualImage::new(size_x, size_y)?,
             versions: vec![0; tile_count],
+            image_version: 0,
+            dirty_history: Vec::new(),
         })
     }
 
@@ -622,13 +753,9 @@ impl TileImage {
         tile_y: u32,
         key: TileKey,
     ) -> Result<(), VirtualImageError> {
-        self.image.set_tile(tile_x, tile_y, key)?;
-        let index = self.tile_index(tile_x, tile_y)?;
-        let slot = self
-            .versions
-            .get_mut(index)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
-        *slot = slot.wrapping_add(1);
+        let mut dirty_tiles = TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column())?;
+        self.set_tile_recording(tile_x, tile_y, key, &mut dirty_tiles)?;
+        self.record_dirty(dirty_tiles)?;
         Ok(())
     }
 
@@ -645,6 +772,44 @@ impl TileImage {
         self.image.export_rgba8(|key| load_tile(*key))
     }
 
+    pub fn image_version(&self) -> u64 {
+        self.image_version
+    }
+
+    pub fn dirty_since(&self, since_version: u64) -> DirtySinceResult {
+        if since_version >= self.image_version {
+            return DirtySinceResult::UpToDate;
+        }
+        if let Some(oldest) = self.dirty_history.first() {
+            if since_version < oldest.version {
+                return DirtySinceResult::HistoryTruncated;
+            }
+        }
+        let mut dirty_tiles =
+            TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column()).unwrap_or_else(
+                |error| panic!("dirty bitset init failed for tile image: {error:?}"),
+            );
+        let mut found = false;
+        for entry in self
+            .dirty_history
+            .iter()
+            .filter(|entry| entry.version > since_version)
+        {
+            dirty_tiles.merge_from(&entry.dirty_tiles).unwrap_or_else(|error| {
+                panic!("dirty bitset merge failed for tile image: {error:?}")
+            });
+            found = true;
+        }
+        if found {
+            DirtySinceResult::HasChanges(TileDirtyQuery {
+                latest_version: self.image_version,
+                dirty_tiles,
+            })
+        } else {
+            DirtySinceResult::HistoryTruncated
+        }
+    }
+
     pub(crate) fn from_virtual(image: VirtualImage<TileKey>) -> Self {
         let tiles_per_row = image.tiles_per_row();
         let tiles_per_column = image.tiles_per_column();
@@ -654,6 +819,8 @@ impl TileImage {
         let mut tile_image = Self {
             image,
             versions: vec![0; tile_count],
+            image_version: 0,
+            dirty_history: Vec::new(),
         };
         for (tile_x, tile_y, _key) in tile_image.image.iter_tiles() {
             let index = tile_image
@@ -668,6 +835,46 @@ impl TileImage {
             }
         }
         tile_image
+    }
+
+    fn record_dirty(&mut self, dirty_tiles: TileDirtyBitset) -> Result<(), VirtualImageError> {
+        if dirty_tiles.is_empty() {
+            return Ok(());
+        }
+        let next_version = self
+            .image_version
+            .checked_add(1)
+            .ok_or(VirtualImageError::VersionOverflow)?;
+        self.image_version = next_version;
+        self.dirty_history.push(TileDirtyHistoryEntry {
+            version: next_version,
+            dirty_tiles,
+        });
+        if self.dirty_history.len() > DIRTY_HISTORY_CAPACITY {
+            let remove_count = self.dirty_history.len() - DIRTY_HISTORY_CAPACITY;
+            self.dirty_history.drain(0..remove_count);
+        }
+        Ok(())
+    }
+
+    fn set_tile_recording(
+        &mut self,
+        tile_x: u32,
+        tile_y: u32,
+        key: TileKey,
+        dirty_tiles: &mut TileDirtyBitset,
+    ) -> Result<(), VirtualImageError> {
+        self.image.set_tile(tile_x, tile_y, key)?;
+        let index = self.tile_index(tile_x, tile_y)?;
+        let slot = self
+            .versions
+            .get_mut(index)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
+        *slot = slot
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("tile version overflow at ({tile_x}, {tile_y})"));
+        dirty_tiles.set(tile_x, tile_y)?;
+        Ok(())
     }
 
     fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, VirtualImageError> {
@@ -710,14 +917,21 @@ pub fn apply_tile_key_mappings(
             });
         }
     }
+    let mut dirty_tiles =
+        TileDirtyBitset::new(image.tiles_per_row(), image.tiles_per_column()).unwrap_or_else(
+            |error| panic!("dirty bitset init failed for tile image: {error:?}"),
+        );
     for mapping in mappings {
         image
-            .set_tile(mapping.tile_x, mapping.tile_y, mapping.new_key)
+            .set_tile_recording(mapping.tile_x, mapping.tile_y, mapping.new_key, &mut dirty_tiles)
             .map_err(|_| TileImageApplyError::TileOutOfBounds {
                 tile_x: mapping.tile_x,
                 tile_y: mapping.tile_y,
             })?;
     }
+    image
+        .record_dirty(dirty_tiles)
+        .unwrap_or_else(|error| panic!("dirty record failed for tile image: {error:?}"));
     Ok(())
 }
 

@@ -279,6 +279,14 @@ impl RenderDataResolver for DirtyPropagationResolver {
     fn resolve_tile_address(&self, _tile_key: TileKey) -> Option<TileAddress> {
         None
     }
+
+    fn image_dirty_since(
+        &self,
+        _image_handle: ImageHandle,
+        _since_version: u64,
+    ) -> Option<tiles::DirtySinceResult> {
+        None
+    }
 }
 
 #[test]
@@ -390,6 +398,14 @@ impl RenderDataResolver for FakeResolver {
         } else {
             None
         }
+    }
+
+    fn image_dirty_since(
+        &self,
+        _image_handle: ImageHandle,
+        _since_version: u64,
+    ) -> Option<tiles::DirtySinceResult> {
+        None
     }
 }
 

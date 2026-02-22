@@ -3,15 +3,15 @@
 //! This module builds `FramePlan`, executes composite/view passes, and commits
 //! frame results after synchronization checks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 use render_protocol::{
-    BRUSH_DAB_CHUNK_CAPACITY, BrushControlAck, BrushControlCommand, BrushProgramActivation,
-    BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ImageHandle,
-    ReferenceSetUpsert,
+    BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramKey,
+    BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ImageHandle, ReferenceSetUpsert,
+    BRUSH_DAB_CHUNK_CAPACITY,
 };
-use tiles::TILE_SIZE;
+use tiles::{DirtySinceResult, TILE_SIZE};
 
 use crate::{
     BrushControlError, BrushRenderEnqueueError, CompositeEmission, CompositePassContext,
@@ -44,13 +44,15 @@ fn collect_full_leaf_dirty_tiles(
     dirty_leaf_tiles
 }
 
-fn collect_leaf_images(node: &RenderTreeNode, output: &mut Vec<(u64, ImageHandle)>) {
+fn collect_leaf_images(node: &RenderTreeNode, output: &mut HashMap<u64, ImageHandle>) {
     match node {
         RenderTreeNode::Leaf {
             layer_id,
             image_handle,
             ..
-        } => output.push((*layer_id, *image_handle)),
+        } => {
+            output.insert(*layer_id, *image_handle);
+        }
         RenderTreeNode::Group { children, .. } => {
             for child in children.iter() {
                 collect_leaf_images(child, output);
@@ -59,7 +61,7 @@ fn collect_leaf_images(node: &RenderTreeNode, output: &mut Vec<(u64, ImageHandle
     }
 }
 
-fn mark_dirty_from_tile_versions(
+fn mark_dirty_from_tile_history(
     frame_state: &mut FrameState,
     resolver: &dyn RenderDataResolver,
     render_tree: Option<&RenderTreeNode>,
@@ -67,61 +69,48 @@ fn mark_dirty_from_tile_versions(
     let Some(render_tree) = render_tree else {
         return;
     };
-    let mut leaf_images = Vec::new();
+    let mut leaf_images = HashMap::new();
     collect_leaf_images(render_tree, &mut leaf_images);
-    let mut live_layers = HashSet::new();
 
-    for (layer_id, image_handle) in leaf_images {
-        live_layers.insert(layer_id);
-        let Some((tiles_per_row, tiles_per_column)) = resolver.image_tile_grid(image_handle) else {
+    for (layer_id, image_handle) in leaf_images.iter() {
+        let entry =
+            frame_state
+                .layer_dirty_versions
+                .entry(*layer_id)
+                .or_insert(crate::LayerDirtyVersion {
+                    image_handle: *image_handle,
+                    last_version: 0,
+                });
+        if entry.image_handle != *image_handle {
+            entry.image_handle = *image_handle;
+            entry.last_version = 0;
+            frame_state.dirty_state_store.mark_layer_full(*layer_id);
+        }
+        let Some(result) = resolver.image_dirty_since(*image_handle, entry.last_version) else {
             continue;
         };
-        let tile_count = (tiles_per_row as usize)
-            .checked_mul(tiles_per_column as usize)
-            .unwrap_or_else(|| panic!("tile count overflow for layer {layer_id}"));
-        let entry = frame_state
-            .layer_tile_versions
-            .entry(layer_id)
-            .or_insert_with(|| crate::LayerTileVersions {
-                tiles_per_row,
-                tiles_per_column,
-                versions: vec![0; tile_count],
-            });
-        if entry.tiles_per_row != tiles_per_row
-            || entry.tiles_per_column != tiles_per_column
-            || entry.versions.len() != tile_count
-        {
-            entry.tiles_per_row = tiles_per_row;
-            entry.tiles_per_column = tiles_per_column;
-            entry.versions = vec![0; tile_count];
-            frame_state.dirty_state_store.mark_layer_full(layer_id);
-        }
-
-        for tile_y in 0..tiles_per_column {
-            for tile_x in 0..tiles_per_row {
-                let Some(version) = resolver.tile_version_at(image_handle, tile_x, tile_y) else {
+        match result {
+            DirtySinceResult::UpToDate => continue,
+            DirtySinceResult::HistoryTruncated => {
+                frame_state.dirty_state_store.mark_layer_full(*layer_id);
+                continue;
+            }
+            DirtySinceResult::HasChanges(query) => {
+                entry.last_version = query.latest_version;
+                if query.dirty_tiles.is_empty() {
                     continue;
-                };
-                let index = (tile_y as usize)
-                    .checked_mul(tiles_per_row as usize)
-                    .and_then(|row| row.checked_add(tile_x as usize))
-                    .unwrap_or_else(|| panic!("tile index overflow for layer {layer_id}"));
-                let stored = entry
-                    .versions
-                    .get_mut(index)
-                    .unwrap_or_else(|| panic!("tile version slot missing for layer {layer_id}"));
-                if *stored != version {
-                    *stored = version;
+                }
+                if query.dirty_tiles.is_full() {
+                    frame_state.dirty_state_store.mark_layer_full(*layer_id);
+                    continue;
+                }
+                for (tile_x, tile_y) in query.dirty_tiles.iter_dirty_tiles() {
                     let min_x = tile_x.saturating_mul(TILE_SIZE) as i32;
                     let min_y = tile_y.saturating_mul(TILE_SIZE) as i32;
-                    let max_x = tile_x
-                        .saturating_add(1)
-                        .saturating_mul(TILE_SIZE) as i32;
-                    let max_y = tile_y
-                        .saturating_add(1)
-                        .saturating_mul(TILE_SIZE) as i32;
+                    let max_x = tile_x.saturating_add(1).saturating_mul(TILE_SIZE) as i32;
+                    let max_y = tile_y.saturating_add(1).saturating_mul(TILE_SIZE) as i32;
                     frame_state.dirty_state_store.mark_layer_rect(
-                        layer_id,
+                        *layer_id,
                         crate::DirtyRect {
                             min_x,
                             min_y,
@@ -135,8 +124,8 @@ fn mark_dirty_from_tile_versions(
     }
 
     frame_state
-        .layer_tile_versions
-        .retain(|layer_id, _| live_layers.contains(layer_id));
+        .layer_dirty_versions
+        .retain(|layer_id, _| leaf_images.contains_key(layer_id));
 }
 
 fn split_node_dirty_tiles(
@@ -664,7 +653,7 @@ impl Renderer {
     fn build_frame_plan(&mut self, frame_id: u64) -> FramePlan {
         refresh_cached_render_tree_if_dirty(&mut self.frame_state);
         let render_tree = self.frame_state.cached_render_tree.clone();
-        mark_dirty_from_tile_versions(
+        mark_dirty_from_tile_history(
             &mut self.frame_state,
             self.data_state.render_data_resolver.as_ref(),
             render_tree.as_ref(),
