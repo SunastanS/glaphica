@@ -317,7 +317,23 @@ This document tracks architecture and implementation decisions for the `brush_ex
 - Consequences:
   - Brush buffer tiling can start from a shared allocator/op-queue base without re-implementing atlas lifecycle logic.
   - Existing document image ingest/rendering remains stable during migration.
-  - Unsupported hardware/format combinations surface as explicit creation failures instead of silent fallback.
+- Unsupported hardware/format combinations surface as explicit creation failures instead of silent fallback.
+
+### 2026-02-22 - Brush Buffer Key Lifecycle Ownership in `tiles`
+
+- Status: accepted
+- Context: Previous brush buffer flow left lifecycle responsibility split across layers, with `brush_execution` and upper layers attempting to participate in key release timing. This caused ownership ambiguity and made retained-window behavior fragile.
+- Decision:
+  - `tiles` is the single owner of brush buffer tile key lifecycle after allocation.
+  - After merge success, brush buffer keys are transitioned to retained state through `tiles` APIs.
+  - Key release is on-demand only (for example, atlas retention eviction pressure), not time-based.
+  - `brush_execution` does not manage pending/retained/release state for keys and does not emit key release commands.
+  - Upper layers (including `glaphica`) only forward merge success/failure and eviction events to `tiles`; they do not maintain independent key lifecycle truth.
+- Consequences:
+  - Lifecycle authority is centralized, reducing double-release and state divergence risk.
+  - Command protocol and execution layering become clearer: `brush_execution` handles stroke/dab/merge sequencing only.
+  - Retained behavior is deterministic and pressure-driven, avoiding timer-driven policy complexity.
+  - Future lifecycle policy changes can be implemented inside `tiles` without widening cross-crate lifecycle coupling.
 
 ## Open Questions
 
