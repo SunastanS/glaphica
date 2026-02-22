@@ -7,9 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
 use render_protocol::{
-    BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramKey,
-    BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ReferenceSetUpsert,
-    BRUSH_DAB_CHUNK_CAPACITY,
+    BRUSH_DAB_CHUNK_CAPACITY, BrushControlAck, BrushControlCommand, BrushProgramActivation,
+    BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ReferenceSetUpsert,
 };
 use tiles::{DirtySinceResult, TILE_SIZE};
 
@@ -46,10 +45,7 @@ fn collect_full_leaf_dirty_tiles(
 
 fn collect_leaf_layers(node: &RenderTreeNode, output: &mut HashSet<u64>) {
     match node {
-        RenderTreeNode::Leaf {
-            layer_id,
-            ..
-        } => {
+        RenderTreeNode::Leaf { layer_id, .. } => {
             output.insert(*layer_id);
         }
         RenderTreeNode::Group { children, .. } => {
@@ -72,11 +68,10 @@ fn mark_dirty_from_tile_history(
     collect_leaf_layers(render_tree, &mut live_layers);
 
     for layer_id in live_layers.iter() {
-        let entry =
-            frame_state
-                .layer_dirty_versions
-                .entry(*layer_id)
-                .or_insert(crate::LayerDirtyVersion { last_version: 0 });
+        let entry = frame_state
+            .layer_dirty_versions
+            .entry(*layer_id)
+            .or_insert(crate::LayerDirtyVersion { last_version: 0 });
         let Some(result) = resolver.layer_dirty_since(*layer_id, entry.last_version) else {
             continue;
         };

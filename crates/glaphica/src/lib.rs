@@ -17,10 +17,9 @@ use renderer::{
     RenderDataResolver, Renderer, ViewOpSender,
 };
 use tiles::{
-    apply_tile_key_mappings, BrushBufferTileRegistry, DirtySinceResult, MergeAuditRecord,
-    MergePlanRequest, MergePlanTileOp, TileAddress, TileAtlasStore, TileKey,
-    TileMergeCompletionNoticeId, TileImageApplyError, TileMergeEngine, TileMergeError,
-    TilesBusinessResult,
+    BrushBufferTileRegistry, DirtySinceResult, MergeAuditRecord, MergePlanRequest, MergePlanTileOp,
+    TileAddress, TileAtlasStore, TileImageApplyError, TileKey, TileMergeCompletionNoticeId,
+    TileMergeEngine, TileMergeError, TilesBusinessResult, apply_tile_key_mappings,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -145,8 +144,9 @@ impl GpuState {
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let mut tile_ops = Vec::new();
         let mut op_trace_id = 0u64;
-        self.brush_buffer_tile_keys
-            .visit_tiles(stroke_session_id, |tile_coordinate, stroke_buffer_key| {
+        self.brush_buffer_tile_keys.visit_tiles(
+            stroke_session_id,
+            |tile_coordinate, stroke_buffer_key| {
                 if tile_coordinate.tile_x < 0 || tile_coordinate.tile_y < 0 {
                     return;
                 }
@@ -167,7 +167,8 @@ impl GpuState {
                 op_trace_id = op_trace_id
                     .checked_add(1)
                     .expect("merge op index exceeds u64");
-            });
+            },
+        );
         drop(document);
         if tile_ops.is_empty() {
             self.brush_execution_feedback_queue
@@ -536,24 +537,20 @@ impl GpuState {
                         let image_handle = document
                             .leaf_image_handle(*layer_id, *stroke_session_id)
                             .map_err(MergeBridgeError::Document)?;
-                        let existing_image = document
-                            .image(image_handle)
-                            .ok_or(MergeBridgeError::Document(
-                                DocumentMergeError::LayerNotFound {
-                                    layer_id: *layer_id,
-                                    stroke_session_id: *stroke_session_id,
-                                },
-                            ))?;
+                        let existing_image =
+                            document
+                                .image(image_handle)
+                                .ok_or(MergeBridgeError::Document(
+                                    DocumentMergeError::LayerNotFound {
+                                        layer_id: *layer_id,
+                                        stroke_session_id: *stroke_session_id,
+                                    },
+                                ))?;
                         let mut updated_image = (*existing_image).clone();
                         apply_tile_key_mappings(&mut updated_image, new_key_mappings)
                             .map_err(MergeBridgeError::TileImageApply)?;
                         document
-                            .apply_merge_image(
-                                *layer_id,
-                                *stroke_session_id,
-                                updated_image,
-                                false,
-                            )
+                            .apply_merge_image(*layer_id, *stroke_session_id, updated_image, false)
                             .map_err(MergeBridgeError::Document)?;
                         if document.take_render_tree_cache_dirty() {
                             let render_tree = document.render_tree_snapshot(document.revision());

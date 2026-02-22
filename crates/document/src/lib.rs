@@ -310,14 +310,12 @@ impl Document {
         if tile_x >= image.tiles_per_row() || tile_y >= image.tiles_per_column() {
             return None;
         }
-        image
-            .get_tile(tile_x, tile_y)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "virtual image query failed for layer {} at ({}, {}): {:?}",
-                    layer_id, tile_x, tile_y, error
-                )
-            })
+        image.get_tile(tile_x, tile_y).unwrap_or_else(|error| {
+            panic!(
+                "virtual image query failed for layer {} at ({}, {}): {:?}",
+                layer_id, tile_x, tile_y, error
+            )
+        })
     }
 
     pub fn layer_dirty_since(
@@ -357,11 +355,7 @@ impl Document {
         id
     }
 
-    pub fn new_layer_root_with_image(
-        &mut self,
-        image: TileImage,
-        blend: BlendMode,
-    ) -> LayerNodeId {
+    pub fn new_layer_root_with_image(&mut self, image: TileImage, blend: BlendMode) -> LayerNodeId {
         let id = self.alloc_layer_id();
         self.layer_versions.insert(id.0, image.image_version());
         let image_handle = self.images.insert(Arc::new(image));
@@ -443,7 +437,6 @@ impl Document {
         });
         Ok(())
     }
-
 
     pub fn abort_merge(
         &mut self,
@@ -1113,12 +1106,7 @@ mod tests {
         )
         .expect("apply tile key mappings");
         let summary = document
-            .apply_merge_image(
-                layer_id.0,
-                77,
-                updated_image,
-                false,
-            )
+            .apply_merge_image(layer_id.0, 77, updated_image, false)
             .expect("apply merge image");
 
         assert_eq!(summary.revision, 1);

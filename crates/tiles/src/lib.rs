@@ -681,7 +681,10 @@ impl fmt::Display for TileImageApplyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TileImageApplyError::TileOutOfBounds { tile_x, tile_y } => {
-                write!(formatter, "tile coordinate out of bounds at ({tile_x}, {tile_y})")
+                write!(
+                    formatter,
+                    "tile coordinate out of bounds at ({tile_x}, {tile_y})"
+                )
             }
             TileImageApplyError::DuplicateTileCoordinate { tile_x, tile_y } => {
                 write!(
@@ -742,11 +745,7 @@ impl TileImage {
         Ok(self.image.get_tile(tile_x, tile_y)?.copied())
     }
 
-    pub fn get_tile_version(
-        &self,
-        tile_x: u32,
-        tile_y: u32,
-    ) -> Result<u32, VirtualImageError> {
+    pub fn get_tile_version(&self, tile_x: u32, tile_y: u32) -> Result<u32, VirtualImageError> {
         let index = self.tile_index(tile_x, tile_y)?;
         Ok(*self
             .versions
@@ -793,19 +792,19 @@ impl TileImage {
                 return DirtySinceResult::HistoryTruncated;
             }
         }
-        let mut dirty_tiles =
-            TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column()).unwrap_or_else(
-                |error| panic!("dirty bitset init failed for tile image: {error:?}"),
-            );
+        let mut dirty_tiles = TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column())
+            .unwrap_or_else(|error| panic!("dirty bitset init failed for tile image: {error:?}"));
         let mut found = false;
         for entry in self
             .dirty_history
             .iter()
             .filter(|entry| entry.version > since_version)
         {
-            dirty_tiles.merge_from(&entry.dirty_tiles).unwrap_or_else(|error| {
-                panic!("dirty bitset merge failed for tile image: {error:?}")
-            });
+            dirty_tiles
+                .merge_from(&entry.dirty_tiles)
+                .unwrap_or_else(|error| {
+                    panic!("dirty bitset merge failed for tile image: {error:?}")
+                });
             found = true;
         }
         if found {
@@ -925,13 +924,16 @@ pub fn apply_tile_key_mappings(
             });
         }
     }
-    let mut dirty_tiles =
-        TileDirtyBitset::new(image.tiles_per_row(), image.tiles_per_column()).unwrap_or_else(
-            |error| panic!("dirty bitset init failed for tile image: {error:?}"),
-        );
+    let mut dirty_tiles = TileDirtyBitset::new(image.tiles_per_row(), image.tiles_per_column())
+        .unwrap_or_else(|error| panic!("dirty bitset init failed for tile image: {error:?}"));
     for mapping in mappings {
         image
-            .set_tile_recording(mapping.tile_x, mapping.tile_y, mapping.new_key, &mut dirty_tiles)
+            .set_tile_recording(
+                mapping.tile_x,
+                mapping.tile_y,
+                mapping.new_key,
+                &mut dirty_tiles,
+            )
             .map_err(|_| TileImageApplyError::TileOutOfBounds {
                 tile_x: mapping.tile_x,
                 tile_y: mapping.tile_y,
@@ -986,18 +988,14 @@ impl BrushBufferTileRegistry {
         let stroke_tiles = self
             .tiles_by_stroke
             .get_mut(&stroke_session_id)
-            .unwrap_or_else(|| {
-                panic!("release requested for unknown stroke {stroke_session_id}")
-            });
+            .unwrap_or_else(|| panic!("release requested for unknown stroke {stroke_session_id}"));
         for tile_coordinate in tiles {
-            let tile_key = stroke_tiles
-                .remove(&tile_coordinate)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "release requested for missing tile mapping: stroke {} at ({}, {})",
-                        stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
-                    )
-                });
+            let tile_key = stroke_tiles.remove(&tile_coordinate).unwrap_or_else(|| {
+                panic!(
+                    "release requested for missing tile mapping: stroke {} at ({}, {})",
+                    stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
+                )
+            });
             let released = atlas_store.release(tile_key);
             if !released {
                 panic!(
@@ -1008,10 +1006,7 @@ impl BrushBufferTileRegistry {
         }
         if stroke_tiles.is_empty() {
             self.tiles_by_stroke.remove(&stroke_session_id);
-            if let Some(retain_id) = self
-                .retained_retain_id_by_stroke
-                .remove(&stroke_session_id)
-            {
+            if let Some(retain_id) = self.retained_retain_id_by_stroke.remove(&stroke_session_id) {
                 self.retained_stroke_by_retain_id.remove(&retain_id);
             }
         }
@@ -1025,12 +1020,7 @@ impl BrushBufferTileRegistry {
         let stroke_tiles = self
             .tiles_by_stroke
             .get(&stroke_session_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "retain requested for unknown stroke {}",
-                    stroke_session_id
-                )
-            });
+            .unwrap_or_else(|| panic!("retain requested for unknown stroke {}", stroke_session_id));
         if self
             .retained_retain_id_by_stroke
             .contains_key(&stroke_session_id)
@@ -1085,10 +1075,7 @@ impl BrushBufferTileRegistry {
                     stroke_session_id
                 )
             });
-        if let Some(retain_id) = self
-            .retained_retain_id_by_stroke
-            .remove(&stroke_session_id)
-        {
+        if let Some(retain_id) = self.retained_retain_id_by_stroke.remove(&stroke_session_id) {
             self.retained_stroke_by_retain_id.remove(&retain_id);
         }
         for (tile_coordinate, tile_key) in stroke_tiles {
