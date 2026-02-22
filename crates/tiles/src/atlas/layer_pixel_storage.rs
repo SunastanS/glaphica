@@ -7,8 +7,8 @@ use crate::{
 };
 
 use super::brush_buffer_storage;
-use super::format::{Rgba8Spec, Rgba8SrgbSpec, TileUploadFormatSpec, rgba8_tile_len};
-use super::{GenericTileAtlasConfig, TileAtlasConfig};
+use super::format::{Rgba8Spec, Rgba8SrgbSpec, rgba8_tile_len};
+use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
 
 #[derive(Debug)]
 pub struct TileAtlasStore {
@@ -35,8 +35,8 @@ enum LayerGpuBackend {
 impl TileAtlasStore {
     pub fn new(
         device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        usage: wgpu::TextureUsages,
+        format: TileAtlasFormat,
+        usage: TileAtlasUsage,
     ) -> Result<(Self, TileAtlasGpuArray), TileAtlasCreateError> {
         Self::with_config(
             device,
@@ -53,7 +53,7 @@ impl TileAtlasStore {
         config: TileAtlasConfig,
     ) -> Result<(Self, TileAtlasGpuArray), TileAtlasCreateError> {
         match config.format {
-            wgpu::TextureFormat::Rgba8Unorm => {
+            TileAtlasFormat::Rgba8Unorm => {
                 let (store, gpu) =
                     brush_buffer_storage::GenericTileAtlasStore::<Rgba8Spec>::with_config(
                         device,
@@ -68,7 +68,7 @@ impl TileAtlasStore {
                     },
                 ))
             }
-            wgpu::TextureFormat::Rgba8UnormSrgb => {
+            TileAtlasFormat::Rgba8UnormSrgb => {
                 let (store, gpu) =
                     brush_buffer_storage::GenericTileAtlasStore::<Rgba8SrgbSpec>::with_config(
                         device,
@@ -197,7 +197,9 @@ impl TileAtlasStore {
         if bytes.is_empty() {
             return Ok(None);
         }
-        Rgba8Spec::validate_ingest_contract(self.usage())?;
+        if !self.usage().contains_copy_dst() {
+            return Err(TileIngestError::MissingCopyDstUsage);
+        }
 
         if bytes.len() != rgba8_tile_len() {
             return Err(TileIngestError::BufferLengthMismatch);
@@ -223,7 +225,9 @@ impl TileAtlasStore {
         if bytes.is_empty() {
             return Ok(None);
         }
-        Rgba8Spec::validate_ingest_contract(self.usage())?;
+        if !self.usage().contains_copy_dst() {
+            return Err(TileIngestError::MissingCopyDstUsage);
+        }
 
         let bytes_per_pixel = 4u32;
         let row_bytes = width
@@ -282,7 +286,9 @@ impl TileAtlasStore {
         bytes_per_row: u32,
     ) -> Result<TileImage, ImageIngestError> {
         let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
-        Rgba8Spec::validate_ingest_contract(self.usage()).map_err(ImageIngestError::from)?;
+        if !self.usage().contains_copy_dst() {
+            return Err(ImageIngestError::from(TileIngestError::MissingCopyDstUsage));
+        }
         let bytes_per_row_usize: usize = bytes_per_row
             .try_into()
             .map_err(|_| ImageIngestError::SizeOverflow)?;
@@ -399,7 +405,7 @@ impl TileAtlasStore {
             .map_err(ImageIngestError::from)
     }
 
-    fn usage(&self) -> wgpu::TextureUsages {
+    fn usage(&self) -> super::core::AtlasUsage {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.usage(),
             LayerStoreBackend::Srgb(store) => store.usage(),
@@ -436,10 +442,10 @@ impl TileAtlasGpuArray {
         }
     }
 
-    pub fn format(&self) -> wgpu::TextureFormat {
+    pub fn format(&self) -> TileAtlasFormat {
         match &self.generic {
-            LayerGpuBackend::Unorm(_) => wgpu::TextureFormat::Rgba8Unorm,
-            LayerGpuBackend::Srgb(_) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            LayerGpuBackend::Unorm(_) => TileAtlasFormat::Rgba8Unorm,
+            LayerGpuBackend::Srgb(_) => TileAtlasFormat::Rgba8UnormSrgb,
         }
     }
 

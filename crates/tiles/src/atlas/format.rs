@@ -4,21 +4,26 @@ use std::sync::{Arc, OnceLock};
 use crate::{
     TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAtlasCreateError, TileGpuDrainError, TileIngestError,
 };
+use super::{TileAtlasFormat, TileAtlasUsage, gpu_runtime};
 
 pub trait TileFormatSpec {
     const PAYLOAD_KIND: super::TilePayloadKind;
-    const FORMAT: wgpu::TextureFormat;
+    const FORMAT: TileAtlasFormat;
+}
 
-    fn validate_create(
+pub trait TilePayloadSpec {
+    type UploadPayload;
+}
+
+pub trait TileGpuCreateValidator {
+    fn validate_gpu_create(
         device: &wgpu::Device,
-        usage: wgpu::TextureUsages,
+        usage: TileAtlasUsage,
     ) -> Result<(), TileAtlasCreateError>;
 }
 
-pub trait TileGpuOpAdapter {
-    type UploadPayload;
-
-    fn validate_gpu_drain_usage(usage: wgpu::TextureUsages) -> Result<(), TileGpuDrainError>;
+pub trait TileGpuOpAdapter: TilePayloadSpec {
+    fn validate_gpu_drain_usage(usage: TileAtlasUsage) -> Result<(), TileGpuDrainError>;
 
     fn execute_clear_slot(
         queue: &wgpu::Queue,
@@ -35,9 +40,9 @@ pub trait TileGpuOpAdapter {
 }
 
 pub trait TileUploadFormatSpec:
-    TileFormatSpec + TileGpuOpAdapter<UploadPayload = Arc<[u8]>>
+    TileFormatSpec + TileGpuOpAdapter + TilePayloadSpec<UploadPayload = Arc<[u8]>>
 {
-    fn validate_ingest_contract(usage: wgpu::TextureUsages) -> Result<(), TileIngestError>;
+    fn validate_ingest_contract(usage: TileAtlasUsage) -> Result<(), TileIngestError>;
 
     fn validate_upload_bytes(bytes: &[u8]) -> Result<(), TileIngestError>;
 }
@@ -53,20 +58,24 @@ pub struct R8UintSpec;
 
 impl TileFormatSpec for Rgba8Spec {
     const PAYLOAD_KIND: super::TilePayloadKind = super::TilePayloadKind::Rgba8;
-    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    const FORMAT: TileAtlasFormat = TileAtlasFormat::Rgba8Unorm;
+}
 
-    fn validate_create(
+impl TileGpuCreateValidator for Rgba8Spec {
+    fn validate_gpu_create(
         _device: &wgpu::Device,
-        usage: wgpu::TextureUsages,
+        usage: TileAtlasUsage,
     ) -> Result<(), TileAtlasCreateError> {
         validate_copy_dst_create_usage(usage)
     }
 }
 
-impl TileGpuOpAdapter for Rgba8Spec {
+impl TilePayloadSpec for Rgba8Spec {
     type UploadPayload = Arc<[u8]>;
+}
 
-    fn validate_gpu_drain_usage(usage: wgpu::TextureUsages) -> Result<(), TileGpuDrainError> {
+impl TileGpuOpAdapter for Rgba8Spec {
+    fn validate_gpu_drain_usage(usage: TileAtlasUsage) -> Result<(), TileGpuDrainError> {
         validate_copy_dst_drain_usage(usage)
     }
 
@@ -119,8 +128,8 @@ impl TileGpuOpAdapter for Rgba8Spec {
 }
 
 impl TileUploadFormatSpec for Rgba8Spec {
-    fn validate_ingest_contract(usage: wgpu::TextureUsages) -> Result<(), TileIngestError> {
-        if !usage.contains(wgpu::TextureUsages::COPY_DST) {
+    fn validate_ingest_contract(usage: TileAtlasUsage) -> Result<(), TileIngestError> {
+        if !usage.contains_copy_dst() {
             return Err(TileIngestError::MissingCopyDstUsage);
         }
         Ok(())
@@ -136,20 +145,24 @@ impl TileUploadFormatSpec for Rgba8Spec {
 
 impl TileFormatSpec for Rgba8SrgbSpec {
     const PAYLOAD_KIND: super::TilePayloadKind = super::TilePayloadKind::Rgba8;
-    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    const FORMAT: TileAtlasFormat = TileAtlasFormat::Rgba8UnormSrgb;
+}
 
-    fn validate_create(
+impl TileGpuCreateValidator for Rgba8SrgbSpec {
+    fn validate_gpu_create(
         _device: &wgpu::Device,
-        usage: wgpu::TextureUsages,
+        usage: TileAtlasUsage,
     ) -> Result<(), TileAtlasCreateError> {
         validate_copy_dst_create_usage(usage)
     }
 }
 
-impl TileGpuOpAdapter for Rgba8SrgbSpec {
+impl TilePayloadSpec for Rgba8SrgbSpec {
     type UploadPayload = Arc<[u8]>;
+}
 
-    fn validate_gpu_drain_usage(usage: wgpu::TextureUsages) -> Result<(), TileGpuDrainError> {
+impl TileGpuOpAdapter for Rgba8SrgbSpec {
+    fn validate_gpu_drain_usage(usage: TileAtlasUsage) -> Result<(), TileGpuDrainError> {
         Rgba8Spec::validate_gpu_drain_usage(usage)
     }
 
@@ -172,7 +185,7 @@ impl TileGpuOpAdapter for Rgba8SrgbSpec {
 }
 
 impl TileUploadFormatSpec for Rgba8SrgbSpec {
-    fn validate_ingest_contract(usage: wgpu::TextureUsages) -> Result<(), TileIngestError> {
+    fn validate_ingest_contract(usage: TileAtlasUsage) -> Result<(), TileIngestError> {
         Rgba8Spec::validate_ingest_contract(usage)
     }
 
@@ -183,20 +196,24 @@ impl TileUploadFormatSpec for Rgba8SrgbSpec {
 
 impl TileFormatSpec for R32FloatSpec {
     const PAYLOAD_KIND: super::TilePayloadKind = super::TilePayloadKind::R32Float;
-    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+    const FORMAT: TileAtlasFormat = TileAtlasFormat::R32Float;
+}
 
-    fn validate_create(
+impl TileGpuCreateValidator for R32FloatSpec {
+    fn validate_gpu_create(
         device: &wgpu::Device,
-        usage: wgpu::TextureUsages,
+        usage: TileAtlasUsage,
     ) -> Result<(), TileAtlasCreateError> {
         validate_storage_binding_create(device, usage, Self::FORMAT)
     }
 }
 
-impl TileGpuOpAdapter for R32FloatSpec {
+impl TilePayloadSpec for R32FloatSpec {
     type UploadPayload = Infallible;
+}
 
-    fn validate_gpu_drain_usage(usage: wgpu::TextureUsages) -> Result<(), TileGpuDrainError> {
+impl TileGpuOpAdapter for R32FloatSpec {
+    fn validate_gpu_drain_usage(usage: TileAtlasUsage) -> Result<(), TileGpuDrainError> {
         validate_copy_dst_drain_usage(usage)
     }
 
@@ -226,10 +243,10 @@ impl TileGpuOpAdapter for R32FloatSpec {
 
 fn validate_storage_binding_create(
     device: &wgpu::Device,
-    usage: wgpu::TextureUsages,
-    format: wgpu::TextureFormat,
+    usage: TileAtlasUsage,
+    format: TileAtlasFormat,
 ) -> Result<(), TileAtlasCreateError> {
-    if !usage.contains(wgpu::TextureUsages::STORAGE_BINDING) {
+    if !usage.contains_storage_binding() {
         return Err(TileAtlasCreateError::MissingStorageBindingUsage);
     }
     if !supports_storage_binding_usage_for_format(device, format) {
@@ -240,7 +257,7 @@ fn validate_storage_binding_create(
 
 fn supports_storage_binding_usage_for_format(
     device: &wgpu::Device,
-    format: wgpu::TextureFormat,
+    format: TileAtlasFormat,
 ) -> bool {
     let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let _probe_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -253,7 +270,7 @@ fn supports_storage_binding_usage_for_format(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format,
+        format: gpu_runtime::atlas_format_to_wgpu(format),
         usage: wgpu::TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     });
@@ -262,20 +279,24 @@ fn supports_storage_binding_usage_for_format(
 
 impl TileFormatSpec for R8UintSpec {
     const PAYLOAD_KIND: super::TilePayloadKind = super::TilePayloadKind::R8Uint;
-    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Uint;
+    const FORMAT: TileAtlasFormat = TileAtlasFormat::R8Uint;
+}
 
-    fn validate_create(
+impl TileGpuCreateValidator for R8UintSpec {
+    fn validate_gpu_create(
         _device: &wgpu::Device,
-        _usage: wgpu::TextureUsages,
+        _usage: TileAtlasUsage,
     ) -> Result<(), TileAtlasCreateError> {
         Ok(())
     }
 }
 
-impl TileGpuOpAdapter for R8UintSpec {
+impl TilePayloadSpec for R8UintSpec {
     type UploadPayload = Infallible;
+}
 
-    fn validate_gpu_drain_usage(usage: wgpu::TextureUsages) -> Result<(), TileGpuDrainError> {
+impl TileGpuOpAdapter for R8UintSpec {
+    fn validate_gpu_drain_usage(usage: TileAtlasUsage) -> Result<(), TileGpuDrainError> {
         validate_copy_dst_drain_usage(usage)
     }
 
@@ -307,15 +328,15 @@ pub(crate) fn rgba8_tile_len() -> usize {
     (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4
 }
 
-fn validate_copy_dst_create_usage(usage: wgpu::TextureUsages) -> Result<(), TileAtlasCreateError> {
-    if !usage.contains(wgpu::TextureUsages::COPY_DST) {
+fn validate_copy_dst_create_usage(usage: TileAtlasUsage) -> Result<(), TileAtlasCreateError> {
+    if !usage.contains_copy_dst() {
         return Err(TileAtlasCreateError::MissingCopyDstUsage);
     }
     Ok(())
 }
 
-fn validate_copy_dst_drain_usage(usage: wgpu::TextureUsages) -> Result<(), TileGpuDrainError> {
-    if !usage.contains(wgpu::TextureUsages::COPY_DST) {
+fn validate_copy_dst_drain_usage(usage: TileAtlasUsage) -> Result<(), TileGpuDrainError> {
+    if !usage.contains_copy_dst() {
         return Err(TileGpuDrainError::MissingCopyDstUsage);
     }
     Ok(())

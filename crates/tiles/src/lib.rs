@@ -1160,7 +1160,8 @@ pub use atlas::{
     GenericR32FloatTileAtlasStore, GenericTileAtlasConfig, GenericTileAtlasGpuArray,
     GenericTileAtlasStore, GroupTileAtlasGpuArray, GroupTileAtlasStore,
     RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray, RuntimeGenericTileAtlasStore,
-    TileAtlasConfig, TileAtlasGpuArray, TileAtlasStore, TilePayloadKind,
+    TileAtlasConfig, TileAtlasFormat, TileAtlasGpuArray, TileAtlasStore, TileAtlasUsage,
+    TilePayloadKind,
 };
 pub use merge_callback::{
     TileMergeAckFailure, TileMergeBatchAck, TileMergeCompletionCallback, TileMergeCompletionNotice,

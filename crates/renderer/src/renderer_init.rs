@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 
 use render_protocol::TransformMatrix4x4;
-use tiles::{GroupTileAtlasStore, TILE_SIZE, TileAtlasConfig, TileAtlasGpuArray};
+use tiles::{
+    GroupTileAtlasStore, TILE_SIZE, TileAtlasConfig, TileAtlasCreateError, TileAtlasGpuArray,
+    TileAtlasStore,
+};
 use wgpu::util::DeviceExt;
 
 use crate::{
@@ -19,6 +22,20 @@ use crate::{
 };
 
 impl Renderer {
+    pub fn create_default_tile_atlas(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Result<(Arc<TileAtlasStore>, TileAtlasGpuArray), TileAtlasCreateError> {
+        let (atlas_store, tile_atlas) = TileAtlasStore::new(
+            device,
+            format,
+            wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
+        )?;
+        Ok((Arc::new(atlas_store), tile_atlas))
+    }
+
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,

@@ -1,7 +1,9 @@
 use super::DEFAULT_MAX_LAYERS;
+use std::ops::{BitOr, BitOrAssign};
 
 mod core; // mod core
 mod format;
+mod gpu_runtime;
 
 mod brush_buffer_storage;
 mod group_preview;
@@ -12,8 +14,77 @@ pub struct TileAtlasConfig {
     pub max_layers: u32,
     pub tiles_per_row: u32,
     pub tiles_per_column: u32,
-    pub format: wgpu::TextureFormat,
-    pub usage: wgpu::TextureUsages,
+    pub format: TileAtlasFormat,
+    pub usage: TileAtlasUsage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileAtlasFormat {
+    Rgba8Unorm,
+    Rgba8UnormSrgb,
+    R32Float,
+    R8Uint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileAtlasUsage {
+    bits: u8,
+}
+
+impl TileAtlasUsage {
+    const COPY_DST_BIT: u8 = 1 << 0;
+    const TEXTURE_BINDING_BIT: u8 = 1 << 1;
+    const COPY_SRC_BIT: u8 = 1 << 2;
+    const STORAGE_BINDING_BIT: u8 = 1 << 3;
+
+    pub const COPY_DST: Self = Self {
+        bits: Self::COPY_DST_BIT,
+    };
+    pub const TEXTURE_BINDING: Self = Self {
+        bits: Self::TEXTURE_BINDING_BIT,
+    };
+    pub const COPY_SRC: Self = Self {
+        bits: Self::COPY_SRC_BIT,
+    };
+    pub const STORAGE_BINDING: Self = Self {
+        bits: Self::STORAGE_BINDING_BIT,
+    };
+
+    pub const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    pub const fn contains_copy_dst(self) -> bool {
+        (self.bits & Self::COPY_DST_BIT) != 0
+    }
+
+    pub const fn contains_texture_binding(self) -> bool {
+        (self.bits & Self::TEXTURE_BINDING_BIT) != 0
+    }
+
+    pub const fn contains_copy_src(self) -> bool {
+        (self.bits & Self::COPY_SRC_BIT) != 0
+    }
+
+    pub const fn contains_storage_binding(self) -> bool {
+        (self.bits & Self::STORAGE_BINDING_BIT) != 0
+    }
+}
+
+impl BitOr for TileAtlasUsage {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            bits: self.bits | rhs.bits,
+        }
+    }
+}
+
+impl BitOrAssign for TileAtlasUsage {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.bits |= rhs.bits;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +99,7 @@ pub struct GenericTileAtlasConfig {
     pub max_layers: u32,
     pub tiles_per_row: u32,
     pub tiles_per_column: u32,
-    pub usage: wgpu::TextureUsages,
+    pub usage: TileAtlasUsage,
 }
 
 impl Default for GenericTileAtlasConfig {
@@ -37,9 +108,9 @@ impl Default for GenericTileAtlasConfig {
             max_layers: DEFAULT_MAX_LAYERS,
             tiles_per_row: crate::TILES_PER_ROW,
             tiles_per_column: crate::TILES_PER_ROW,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
         }
     }
 }
@@ -61,10 +132,10 @@ impl Default for TileAtlasConfig {
             max_layers: DEFAULT_MAX_LAYERS,
             tiles_per_row: crate::TILES_PER_ROW,
             tiles_per_column: crate::TILES_PER_ROW,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            format: TileAtlasFormat::Rgba8Unorm,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
         }
     }
 }
@@ -78,6 +149,6 @@ pub use group_preview::{GroupTileAtlasGpuArray, GroupTileAtlasStore};
 pub use layer_pixel_storage::{TileAtlasGpuArray, TileAtlasStore};
 
 #[cfg(test)]
-pub(crate) use core::tile_origin;
+pub(crate) use gpu_runtime::tile_origin;
 #[cfg(test)]
 pub(crate) use format::rgba8_tile_len;

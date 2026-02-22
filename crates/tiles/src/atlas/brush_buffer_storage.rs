@@ -9,18 +9,20 @@ use crate::{
 use super::core;
 pub use super::core::EvictedRetainBatch;
 use super::format::{
-    R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec, TileGpuOpAdapter,
+    R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec, TileGpuCreateValidator,
+    TileGpuOpAdapter, TilePayloadSpec,
     TileUploadFormatSpec,
 };
-use super::{GenericTileAtlasConfig, TilePayloadKind};
+use super::gpu_runtime;
+use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeGenericTileAtlasConfig {
     pub max_layers: u32,
     pub tiles_per_row: u32,
     pub tiles_per_column: u32,
-    pub format: wgpu::TextureFormat,
-    pub usage: wgpu::TextureUsages,
+    pub format: TileAtlasFormat,
+    pub usage: TileAtlasUsage,
     pub payload_kind: TilePayloadKind,
 }
 
@@ -87,10 +89,10 @@ macro_rules! dispatch_runtime_gpu {
 }
 
 #[derive(Debug)]
-pub struct GenericTileAtlasStore<F: TileFormatSpec + TileGpuOpAdapter = Rgba8Spec> {
+pub struct GenericTileAtlasStore<F: TilePayloadSpec = Rgba8Spec> {
     cpu: Arc<core::TileAtlasCpu>,
     op_sender: core::TileOpSender<F::UploadPayload>,
-    usage: wgpu::TextureUsages,
+    usage: core::AtlasUsage,
     _format: PhantomData<F>,
 }
 
@@ -100,7 +102,7 @@ pub struct GenericTileAtlasGpuArray<F: TileFormatSpec + TileGpuOpAdapter = Rgba8
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     op_queue: core::TileOpQueue<F::UploadPayload>,
-    usage: wgpu::TextureUsages,
+    usage: core::AtlasUsage,
     layout: core::AtlasLayout,
     _format: PhantomData<F>,
 }
@@ -111,7 +113,7 @@ impl RuntimeGenericTileAtlasStore {
         config: RuntimeGenericTileAtlasConfig,
     ) -> Result<(Self, RuntimeGenericTileAtlasGpuArray), TileAtlasCreateError> {
         match (config.payload_kind, config.format) {
-            (TilePayloadKind::Rgba8, wgpu::TextureFormat::Rgba8Unorm) => {
+            (TilePayloadKind::Rgba8, TileAtlasFormat::Rgba8Unorm) => {
                 let (store, gpu) = GenericTileAtlasStore::<Rgba8Spec>::with_config(
                     device,
                     GenericTileAtlasConfig::from(config),
@@ -121,7 +123,7 @@ impl RuntimeGenericTileAtlasStore {
                     RuntimeGenericTileAtlasGpuArray::Rgba8Unorm(gpu),
                 ))
             }
-            (TilePayloadKind::Rgba8, wgpu::TextureFormat::Rgba8UnormSrgb) => {
+            (TilePayloadKind::Rgba8, TileAtlasFormat::Rgba8UnormSrgb) => {
                 let (store, gpu) = GenericTileAtlasStore::<Rgba8SrgbSpec>::with_config(
                     device,
                     GenericTileAtlasConfig::from(config),
@@ -131,7 +133,7 @@ impl RuntimeGenericTileAtlasStore {
                     RuntimeGenericTileAtlasGpuArray::Rgba8UnormSrgb(gpu),
                 ))
             }
-            (TilePayloadKind::R32Float, wgpu::TextureFormat::R32Float) => {
+            (TilePayloadKind::R32Float, TileAtlasFormat::R32Float) => {
                 let (store, gpu) = GenericTileAtlasStore::<R32FloatSpec>::with_config(
                     device,
                     GenericTileAtlasConfig::from(config),
@@ -141,7 +143,7 @@ impl RuntimeGenericTileAtlasStore {
                     RuntimeGenericTileAtlasGpuArray::R32Float(gpu),
                 ))
             }
-            (TilePayloadKind::R8Uint, wgpu::TextureFormat::R8Uint) => {
+            (TilePayloadKind::R8Uint, TileAtlasFormat::R8Uint) => {
                 let (store, gpu) = GenericTileAtlasStore::<R8UintSpec>::with_config(
                     device,
                     GenericTileAtlasConfig::from(config),
@@ -237,10 +239,10 @@ impl RuntimeGenericTileAtlasGpuArray {
     }
 }
 
-impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
+impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileAtlasStore<F> {
     pub fn new(
         device: &wgpu::Device,
-        usage: wgpu::TextureUsages,
+        usage: TileAtlasUsage,
     ) -> Result<(Self, GenericTileAtlasGpuArray<F>), TileAtlasCreateError> {
         Self::with_config(
             device,
@@ -257,22 +259,23 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
         device: &wgpu::Device,
         config: GenericTileAtlasConfig,
     ) -> Result<(Self, GenericTileAtlasGpuArray<F>), TileAtlasCreateError> {
-        core::validate_generic_atlas_config(device, config)?;
-        let layout = core::AtlasLayout::from_config(config)?;
-        F::validate_create(device, config.usage)?;
+        gpu_runtime::validate_generic_atlas_config(device, config)?;
+        let layout = core::AtlasLayout::from_config(gpu_runtime::core_config_from_generic(config))?;
+        F::validate_gpu_create(device, config.usage)?;
 
         let (op_sender, op_queue) = core::TileOpQueue::new();
         let cpu = Arc::new(
             core::TileAtlasCpu::new(config.max_layers, layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
+        let atlas_usage = gpu_runtime::core_usage_from_public(config.usage);
 
-        let (texture, view) = core::create_atlas_texture_and_array_view(
+        let (texture, view) = gpu_runtime::create_atlas_texture_and_array_view(
             device,
             layout,
             config.max_layers,
-            F::FORMAT,
-            config.usage,
+            gpu_runtime::atlas_format_to_wgpu(F::FORMAT),
+            gpu_runtime::atlas_usage_to_wgpu(config.usage),
             "tiles.atlas.array",
             "tiles.atlas.array.view",
         );
@@ -281,7 +284,7 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
             Self {
                 cpu: Arc::clone(&cpu),
                 op_sender,
-                usage: config.usage,
+                usage: atlas_usage,
                 _format: PhantomData,
             },
             GenericTileAtlasGpuArray {
@@ -289,13 +292,15 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
                 texture,
                 view,
                 op_queue,
-                usage: config.usage,
+                usage: atlas_usage,
                 layout,
                 _format: PhantomData,
             },
         ))
     }
+}
 
+impl<F: TilePayloadSpec> GenericTileAtlasStore<F> {
     pub fn is_allocated(&self, key: TileKey) -> bool {
         self.cpu.is_allocated(key)
     }
@@ -384,7 +389,7 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasStore<F> {
         core::resolve_tile_set(&self.cpu, set)
     }
 
-    pub(in crate::atlas) fn usage(&self) -> wgpu::TextureUsages {
+    pub(in crate::atlas) fn usage(&self) -> core::AtlasUsage {
         self.usage
     }
 }
@@ -429,7 +434,7 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasGpuArray<F> {
     }
 
     pub fn drain_and_execute(&self, queue: &wgpu::Queue) -> Result<usize, TileGpuDrainError> {
-        F::validate_gpu_drain_usage(self.usage)?;
+        F::validate_gpu_drain_usage(gpu_runtime::public_usage_from_core(self.usage))?;
 
         let operations = self.op_queue.drain();
         let mut executed_tile_count = 0usize;
@@ -440,7 +445,10 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasGpuArray<F> {
                         continue;
                     }
                     let slot_origin =
-                        core::tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
+                        gpu_runtime::tile_slot_origin_with_row(
+                            target.address,
+                            self.layout.tiles_per_row,
+                        );
                     F::execute_clear_slot(queue, &self.texture, slot_origin)?;
                     executed_tile_count = executed_tile_count
                         .checked_add(1)
@@ -451,7 +459,7 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasGpuArray<F> {
                         if !self.cpu.should_execute_target(target) {
                             continue;
                         }
-                        let slot_origin = core::tile_slot_origin_with_row(
+                        let slot_origin = gpu_runtime::tile_slot_origin_with_row(
                             target.address,
                             self.layout.tiles_per_row,
                         );
@@ -466,7 +474,10 @@ impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasGpuArray<F> {
                         continue;
                     }
                     let slot_origin =
-                        core::tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
+                        gpu_runtime::tile_slot_origin_with_row(
+                            target.address,
+                            self.layout.tiles_per_row,
+                        );
                     F::execute_upload_payload(queue, &self.texture, slot_origin, payload)?;
                     executed_tile_count = executed_tile_count
                         .checked_add(1)

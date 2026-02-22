@@ -250,15 +250,9 @@ impl GpuState {
             desired_maximum_frame_latency: 2,
         };
 
-        let (atlas_store, tile_atlas) = TileAtlasStore::new(
-            &device,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-        )
-        .expect("create tile atlas store");
-        let atlas_store = Arc::new(atlas_store);
+        let (atlas_store, tile_atlas) =
+            Renderer::create_default_tile_atlas(&device, wgpu::TextureFormat::Rgba8UnormSrgb)
+                .expect("create tile atlas store");
 
         let document = create_startup_document(&atlas_store, startup_image_path.as_deref());
         let initial_snapshot = document.render_tree_snapshot(document.revision());
@@ -857,14 +851,9 @@ mod tests {
         let source_bytes = decoded.into_raw();
 
         let (device, queue) = create_device_queue();
-        let (atlas_store, atlas_gpu) = tiles::TileAtlasStore::new(
-            &device,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-        )
-        .expect("create tile atlas store");
+        let (atlas_store, atlas_gpu) =
+            Renderer::create_default_tile_atlas(&device, wgpu::TextureFormat::Rgba8Unorm)
+                .expect("create tile atlas store");
 
         let virtual_image = atlas_store
             .ingest_image_rgba8_strided(size_x, size_y, &source_bytes, size_x * 4)

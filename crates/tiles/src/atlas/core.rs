@@ -2,14 +2,59 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, mpsc};
 
-use super::GenericTileAtlasConfig;
 use crate::{INDEX_SHARDS, TILE_STRIDE};
-#[cfg(test)]
-use crate::{TILE_GUTTER, TILES_PER_ROW};
 use crate::{
-    TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle,
-    TileSetId,
+    TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle, TileSetId,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::atlas) struct AtlasUsage {
+    bits: u8,
+}
+
+impl AtlasUsage {
+    const COPY_DST_BIT: u8 = 1 << 0;
+    const TEXTURE_BINDING_BIT: u8 = 1 << 1;
+    const STORAGE_BINDING_BIT: u8 = 1 << 2;
+
+    pub(in crate::atlas) const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    pub(in crate::atlas) const fn with_copy_dst(mut self) -> Self {
+        self.bits |= Self::COPY_DST_BIT;
+        self
+    }
+
+    pub(in crate::atlas) const fn with_texture_binding(mut self) -> Self {
+        self.bits |= Self::TEXTURE_BINDING_BIT;
+        self
+    }
+
+    pub(in crate::atlas) const fn with_storage_binding(mut self) -> Self {
+        self.bits |= Self::STORAGE_BINDING_BIT;
+        self
+    }
+
+    pub(in crate::atlas) const fn contains_copy_dst(self) -> bool {
+        (self.bits & Self::COPY_DST_BIT) != 0
+    }
+
+    pub(in crate::atlas) const fn contains_texture_binding(self) -> bool {
+        (self.bits & Self::TEXTURE_BINDING_BIT) != 0
+    }
+
+    pub(in crate::atlas) const fn contains_storage_binding(self) -> bool {
+        (self.bits & Self::STORAGE_BINDING_BIT) != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(in crate::atlas) struct AtlasCoreConfig {
+    pub max_layers: u32,
+    pub tiles_per_row: u32,
+    pub tiles_per_column: u32,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::atlas) struct AtlasLayout {
@@ -23,7 +68,7 @@ pub(in crate::atlas) struct AtlasLayout {
 
 impl AtlasLayout {
     pub(in crate::atlas) fn from_config(
-        config: GenericTileAtlasConfig,
+        config: AtlasCoreConfig,
     ) -> Result<Self, TileAtlasCreateError> {
         if config.tiles_per_row == 0 || config.tiles_per_column == 0 {
             return Err(TileAtlasCreateError::AtlasTileGridZero);
@@ -815,28 +860,6 @@ impl TileAtlasCpu {
     }
 }
 
-pub(in crate::atlas) fn validate_generic_atlas_config(
-    device: &wgpu::Device,
-    config: GenericTileAtlasConfig,
-) -> Result<(), TileAtlasCreateError> {
-    if config.max_layers == 0 {
-        return Err(TileAtlasCreateError::MaxLayersZero);
-    }
-    let layout = AtlasLayout::from_config(config)?;
-
-    let limits = device.limits();
-    if config.max_layers > limits.max_texture_array_layers {
-        return Err(TileAtlasCreateError::MaxLayersExceedsDeviceLimit);
-    }
-    if layout.atlas_width > limits.max_texture_dimension_2d
-        || layout.atlas_height > limits.max_texture_dimension_2d
-    {
-        return Err(TileAtlasCreateError::AtlasSizeExceedsDeviceLimit);
-    }
-
-    Ok(())
-}
-
 pub(in crate::atlas) fn validate_tile_set_ownership(
     cpu: &TileAtlasCpu,
     set: &TileSetHandle,
@@ -915,67 +938,6 @@ pub(in crate::atlas) fn resolve_tile_set(
     Ok(resolved)
 }
 
-pub(in crate::atlas) fn create_atlas_texture_and_array_view(
-    device: &wgpu::Device,
-    layout: AtlasLayout,
-    max_layers: u32,
-    format: wgpu::TextureFormat,
-    usage: wgpu::TextureUsages,
-    texture_label: &'static str,
-    view_label: &'static str,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(texture_label),
-        size: wgpu::Extent3d {
-            width: layout.atlas_width,
-            height: layout.atlas_height,
-            depth_or_array_layers: max_layers,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        label: Some(view_label),
-        format: Some(format),
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
-        usage: None,
-        aspect: wgpu::TextureAspect::All,
-        base_mip_level: 0,
-        mip_level_count: Some(1),
-        base_array_layer: 0,
-        array_layer_count: Some(max_layers),
-    });
-
-    (texture, view)
-}
-
-pub(in crate::atlas) fn supports_texture_usage_for_format(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    usage: wgpu::TextureUsages,
-) -> bool {
-    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let _probe_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("tiles.format_usage_probe"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage,
-        view_formats: &[],
-    });
-    pollster::block_on(error_scope.pop()).is_none()
-}
-
 fn tile_bit(
     tile_index: u16,
     tiles_per_atlas: u32,
@@ -1007,28 +969,6 @@ pub(in crate::atlas) fn tile_coords_from_index_with_row(
 ) -> (u32, u32) {
     let tile_index: u32 = tile_index.into();
     (tile_index % tiles_per_row, tile_index / tiles_per_row)
-}
-
-#[cfg(test)]
-pub(crate) fn tile_origin(address: TileAddress) -> wgpu::Origin3d {
-    let slot_origin = tile_slot_origin_with_row(address, TILES_PER_ROW);
-    wgpu::Origin3d {
-        x: slot_origin.x + TILE_GUTTER,
-        y: slot_origin.y + TILE_GUTTER,
-        z: slot_origin.z,
-    }
-}
-
-pub(in crate::atlas) fn tile_slot_origin_with_row(
-    address: TileAddress,
-    tiles_per_row: u32,
-) -> wgpu::Origin3d {
-    let (tile_x, tile_y) = tile_coords_from_index_with_row(address.tile_index, tiles_per_row);
-    wgpu::Origin3d {
-        x: tile_x * TILE_STRIDE,
-        y: tile_y * TILE_STRIDE,
-        z: address.atlas_layer,
-    }
 }
 
 #[cfg(test)]
