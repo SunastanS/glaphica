@@ -8,12 +8,12 @@ use crate::{
 
 use super::core;
 pub use super::core::EvictedRetainBatch;
+use super::gpu;
 use super::format::{
     R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec, TileGpuCreateValidator,
     TileGpuOpAdapter, TilePayloadSpec,
     TileUploadFormatSpec,
 };
-use super::gpu_runtime;
 use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -60,10 +60,10 @@ pub enum RuntimeGenericTileAtlasStore {
 
 #[derive(Debug)]
 pub enum RuntimeGenericTileAtlasGpuArray {
-    Rgba8Unorm(GenericTileAtlasGpuArray<Rgba8Spec>),
-    Rgba8UnormSrgb(GenericTileAtlasGpuArray<Rgba8SrgbSpec>),
-    R32Float(GenericTileAtlasGpuArray<R32FloatSpec>),
-    R8Uint(GenericTileAtlasGpuArray<R8UintSpec>),
+    Rgba8Unorm(gpu::GenericTileAtlasGpuArray<Rgba8Spec>),
+    Rgba8UnormSrgb(gpu::GenericTileAtlasGpuArray<Rgba8SrgbSpec>),
+    R32Float(gpu::GenericTileAtlasGpuArray<R32FloatSpec>),
+    R8Uint(gpu::GenericTileAtlasGpuArray<R8UintSpec>),
 }
 
 macro_rules! dispatch_runtime_store {
@@ -96,16 +96,7 @@ pub struct GenericTileAtlasStore<F: TilePayloadSpec = Rgba8Spec> {
     _format: PhantomData<F>,
 }
 
-#[derive(Debug)]
-pub struct GenericTileAtlasGpuArray<F: TileFormatSpec + TileGpuOpAdapter = Rgba8Spec> {
-    cpu: Arc<core::TileAtlasCpu>,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    op_queue: core::TileOpQueue<F::UploadPayload>,
-    usage: core::AtlasUsage,
-    layout: core::AtlasLayout,
-    _format: PhantomData<F>,
-}
+pub type GenericTileAtlasGpuArray<F = Rgba8Spec> = gpu::GenericTileAtlasGpuArray<F>;
 
 impl RuntimeGenericTileAtlasStore {
     pub fn with_config(
@@ -259,8 +250,8 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
         device: &wgpu::Device,
         config: GenericTileAtlasConfig,
     ) -> Result<(Self, GenericTileAtlasGpuArray<F>), TileAtlasCreateError> {
-        gpu_runtime::validate_generic_atlas_config(device, config)?;
-        let layout = core::AtlasLayout::from_config(gpu_runtime::core_config_from_generic(config))?;
+        gpu::validate_generic_atlas_config(device, config)?;
+        let layout = core::AtlasLayout::from_config(gpu::core_config_from_generic(config))?;
         F::validate_gpu_create(device, config.usage)?;
 
         let (op_sender, op_queue) = core::TileOpQueue::new();
@@ -268,14 +259,14 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
             core::TileAtlasCpu::new(config.max_layers, layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
-        let atlas_usage = gpu_runtime::core_usage_from_public(config.usage);
+        let atlas_usage = gpu::core_usage_from_public(config.usage);
 
-        let (texture, view) = gpu_runtime::create_atlas_texture_and_array_view(
+        let (texture, view) = gpu::create_atlas_texture_and_array_view(
             device,
             layout,
             config.max_layers,
-            gpu_runtime::atlas_format_to_wgpu(F::FORMAT),
-            gpu_runtime::atlas_usage_to_wgpu(config.usage),
+            gpu::atlas_format_to_wgpu(F::FORMAT),
+            gpu::atlas_usage_to_wgpu(config.usage),
             "tiles.atlas.array",
             "tiles.atlas.array.view",
         );
@@ -287,15 +278,14 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
                 usage: atlas_usage,
                 _format: PhantomData,
             },
-            GenericTileAtlasGpuArray {
-                cpu: Arc::clone(&cpu),
+            gpu::GenericTileAtlasGpuArray::new(
+                Arc::clone(&cpu),
                 texture,
                 view,
                 op_queue,
-                usage: atlas_usage,
+                atlas_usage,
                 layout,
-                _format: PhantomData,
-            },
+            ),
         ))
     }
 }
@@ -412,81 +402,6 @@ impl<F: TileUploadFormatSpec> GenericTileAtlasStore<F> {
             return Err(error.into());
         }
         Ok(key)
-    }
-}
-
-impl<F: TileFormatSpec + TileGpuOpAdapter> GenericTileAtlasGpuArray<F> {
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
-    }
-
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.texture
-    }
-
-    pub fn layout(&self) -> TileAtlasLayout {
-        TileAtlasLayout {
-            tiles_per_row: self.layout.tiles_per_row,
-            tiles_per_column: self.layout.tiles_per_column,
-            atlas_width: self.layout.atlas_width,
-            atlas_height: self.layout.atlas_height,
-        }
-    }
-
-    pub fn drain_and_execute(&self, queue: &wgpu::Queue) -> Result<usize, TileGpuDrainError> {
-        F::validate_gpu_drain_usage(gpu_runtime::public_usage_from_core(self.usage))?;
-
-        let operations = self.op_queue.drain();
-        let mut executed_tile_count = 0usize;
-        for operation in operations {
-            match operation {
-                core::TileOp::Clear { target } => {
-                    if !self.cpu.should_execute_target(target) {
-                        continue;
-                    }
-                    let slot_origin =
-                        gpu_runtime::tile_slot_origin_with_row(
-                            target.address,
-                            self.layout.tiles_per_row,
-                        );
-                    F::execute_clear_slot(queue, &self.texture, slot_origin)?;
-                    executed_tile_count = executed_tile_count
-                        .checked_add(1)
-                        .expect("tile execute count overflow");
-                }
-                core::TileOp::ClearBatch { targets } => {
-                    for target in targets {
-                        if !self.cpu.should_execute_target(target) {
-                            continue;
-                        }
-                        let slot_origin = gpu_runtime::tile_slot_origin_with_row(
-                            target.address,
-                            self.layout.tiles_per_row,
-                        );
-                        F::execute_clear_slot(queue, &self.texture, slot_origin)?;
-                        executed_tile_count = executed_tile_count
-                            .checked_add(1)
-                            .expect("tile execute count overflow");
-                    }
-                }
-                core::TileOp::Upload { target, payload } => {
-                    if !self.cpu.should_execute_target(target) {
-                        continue;
-                    }
-                    let slot_origin =
-                        gpu_runtime::tile_slot_origin_with_row(
-                            target.address,
-                            self.layout.tiles_per_row,
-                        );
-                    F::execute_upload_payload(queue, &self.texture, slot_origin, payload)?;
-                    executed_tile_count = executed_tile_count
-                        .checked_add(1)
-                        .expect("tile execute count overflow");
-                }
-            }
-        }
-
-        Ok(executed_tile_count)
     }
 }
 

@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["atlas-gpu"]
 test-helpers = []
+atlas-gpu = []
 
 [dependencies]
 render_protocol = { path = "../render_protocol" }

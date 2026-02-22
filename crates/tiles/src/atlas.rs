@@ -3,10 +3,14 @@ use std::ops::{BitOr, BitOrAssign};
 
 mod core; // mod core
 mod format;
-mod gpu_runtime;
+#[cfg(feature = "atlas-gpu")]
+mod gpu;
 
+#[cfg(feature = "atlas-gpu")]
 mod brush_buffer_storage;
+#[cfg(feature = "atlas-gpu")]
 mod group_preview;
+#[cfg(feature = "atlas-gpu")]
 mod layer_pixel_storage;
 
 #[derive(Debug, Clone, Copy)]
@@ -140,15 +144,18 @@ impl Default for TileAtlasConfig {
     }
 }
 
+#[cfg(feature = "atlas-gpu")]
 pub use brush_buffer_storage::{
     GenericR8UintTileAtlasGpuArray, GenericR8UintTileAtlasStore, GenericR32FloatTileAtlasGpuArray,
     GenericR32FloatTileAtlasStore, GenericTileAtlasGpuArray, GenericTileAtlasStore,
     RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray, RuntimeGenericTileAtlasStore,
 };
+#[cfg(feature = "atlas-gpu")]
 pub use group_preview::{GroupTileAtlasGpuArray, GroupTileAtlasStore};
+#[cfg(feature = "atlas-gpu")]
 pub use layer_pixel_storage::{TileAtlasGpuArray, TileAtlasStore};
 
-#[cfg(test)]
-pub(crate) use gpu_runtime::tile_origin;
+#[cfg(all(test, feature = "atlas-gpu"))]
+pub(crate) use gpu::tile_origin;
 #[cfg(test)]
 pub(crate) use format::rgba8_tile_len;

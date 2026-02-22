@@ -1,8 +1,12 @@
-use super::{GenericTileAtlasConfig, core};
-use crate::{TILE_STRIDE, TileAddress, TileAtlasCreateError};
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use super::core;
+use super::format::{TileFormatSpec, TileGpuOpAdapter, TilePayloadSpec};
+use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
+use crate::{TILE_STRIDE, TileAddress, TileAtlasCreateError, TileAtlasLayout, TileGpuDrainError};
 #[cfg(test)]
 use crate::{TILE_GUTTER, TILES_PER_ROW};
-use super::{TileAtlasFormat, TileAtlasUsage};
 
 pub(in crate::atlas) fn validate_generic_atlas_config(
     device: &wgpu::Device,
@@ -171,5 +175,102 @@ pub(in crate::atlas) fn tile_slot_origin_with_row(
         x: tile_x * TILE_STRIDE,
         y: tile_y * TILE_STRIDE,
         z: address.atlas_layer,
+    }
+}
+
+#[derive(Debug)]
+pub struct GenericTileAtlasGpuArray<F: TileFormatSpec + TileGpuOpAdapter + TilePayloadSpec> {
+    cpu: Arc<core::TileAtlasCpu>,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    op_queue: core::TileOpQueue<F::UploadPayload>,
+    usage: core::AtlasUsage,
+    layout: core::AtlasLayout,
+    _format: PhantomData<F>,
+}
+
+impl<F: TileFormatSpec + TileGpuOpAdapter + TilePayloadSpec> GenericTileAtlasGpuArray<F> {
+    pub(in crate::atlas) fn new(
+        cpu: Arc<core::TileAtlasCpu>,
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+        op_queue: core::TileOpQueue<F::UploadPayload>,
+        usage: core::AtlasUsage,
+        layout: core::AtlasLayout,
+    ) -> Self {
+        Self {
+            cpu,
+            texture,
+            view,
+            op_queue,
+            usage,
+            layout,
+            _format: PhantomData,
+        }
+    }
+
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn layout(&self) -> TileAtlasLayout {
+        TileAtlasLayout {
+            tiles_per_row: self.layout.tiles_per_row,
+            tiles_per_column: self.layout.tiles_per_column,
+            atlas_width: self.layout.atlas_width,
+            atlas_height: self.layout.atlas_height,
+        }
+    }
+
+    pub fn drain_and_execute(&self, queue: &wgpu::Queue) -> Result<usize, TileGpuDrainError> {
+        F::validate_gpu_drain_usage(public_usage_from_core(self.usage))?;
+
+        let operations = self.op_queue.drain();
+        let mut executed_tile_count = 0usize;
+        for operation in operations {
+            match operation {
+                core::TileOp::Clear { target } => {
+                    if !self.cpu.should_execute_target(target) {
+                        continue;
+                    }
+                    let slot_origin =
+                        tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
+                    F::execute_clear_slot(queue, &self.texture, slot_origin)?;
+                    executed_tile_count = executed_tile_count
+                        .checked_add(1)
+                        .expect("tile execute count overflow");
+                }
+                core::TileOp::ClearBatch { targets } => {
+                    for target in targets {
+                        if !self.cpu.should_execute_target(target) {
+                            continue;
+                        }
+                        let slot_origin =
+                            tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
+                        F::execute_clear_slot(queue, &self.texture, slot_origin)?;
+                        executed_tile_count = executed_tile_count
+                            .checked_add(1)
+                            .expect("tile execute count overflow");
+                    }
+                }
+                core::TileOp::Upload { target, payload } => {
+                    if !self.cpu.should_execute_target(target) {
+                        continue;
+                    }
+                    let slot_origin =
+                        tile_slot_origin_with_row(target.address, self.layout.tiles_per_row);
+                    F::execute_upload_payload(queue, &self.texture, slot_origin, payload)?;
+                    executed_tile_count = executed_tile_count
+                        .checked_add(1)
+                        .expect("tile execute count overflow");
+                }
+            }
+        }
+
+        Ok(executed_tile_count)
     }
 }

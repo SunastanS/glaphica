@@ -5,7 +5,7 @@ use crate::{
     TileSetHandle,
 };
 
-use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage, core, gpu_runtime};
+use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage, core, gpu};
 
 #[derive(Debug)]
 pub struct GroupTileAtlasStore {
@@ -42,9 +42,9 @@ impl GroupTileAtlasStore {
         device: &wgpu::Device,
         config: TileAtlasConfig,
     ) -> Result<(Self, GroupTileAtlasGpuArray), TileAtlasCreateError> {
-        gpu_runtime::validate_generic_atlas_config(device, GenericTileAtlasConfig::from(config))?;
+        gpu::validate_generic_atlas_config(device, GenericTileAtlasConfig::from(config))?;
         validate_group_atlas_config(device, config)?;
-        let layout = core::AtlasLayout::from_config(gpu_runtime::core_config_from_generic(
+        let layout = core::AtlasLayout::from_config(gpu::core_config_from_generic(
             GenericTileAtlasConfig::from(config),
         ))?;
 
@@ -52,12 +52,12 @@ impl GroupTileAtlasStore {
             core::TileAtlasCpu::new(config.max_layers, layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
-        let (texture, view) = gpu_runtime::create_atlas_texture_and_array_view(
+        let (texture, view) = gpu::create_atlas_texture_and_array_view(
             device,
             layout,
             config.max_layers,
-            gpu_runtime::atlas_format_to_wgpu(config.format),
-            gpu_runtime::atlas_usage_to_wgpu(config.usage),
+            gpu::atlas_format_to_wgpu(config.format),
+            gpu::atlas_usage_to_wgpu(config.usage),
             "tiles.group_atlas.array",
             "tiles.group_atlas.array.view",
         );
@@ -138,10 +138,10 @@ fn validate_group_atlas_config(
     if !config.usage.contains_texture_binding() {
         return Err(TileAtlasCreateError::MissingTextureBindingUsage);
     }
-    if !gpu_runtime::supports_texture_usage_for_format(
+    if !gpu::supports_texture_usage_for_format(
         device,
-        gpu_runtime::atlas_format_to_wgpu(config.format),
-        gpu_runtime::atlas_usage_to_wgpu(config.usage),
+        gpu::atlas_format_to_wgpu(config.format),
+        gpu::atlas_usage_to_wgpu(config.usage),
     ) {
         return Err(TileAtlasCreateError::UnsupportedFormatUsage);
     }
@@ -169,7 +169,7 @@ impl GroupTileAtlasGpuArray {
         );
         self.texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("tiles.group_atlas.layer.view"),
-            format: Some(gpu_runtime::atlas_format_to_wgpu(self.format)),
+            format: Some(gpu::atlas_format_to_wgpu(self.format)),
             dimension: Some(wgpu::TextureViewDimension::D2),
             usage: None,
             aspect: wgpu::TextureAspect::All,

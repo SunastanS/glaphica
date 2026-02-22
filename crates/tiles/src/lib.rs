@@ -896,6 +896,7 @@ impl TileImage {
     }
 }
 
+#[cfg(feature = "atlas-gpu")]
 pub fn apply_tile_key_mappings(
     image: &mut TileImage,
     mappings: &[TileKeyMapping],
@@ -953,6 +954,7 @@ pub struct BrushBufferTileRegistry {
 }
 
 impl BrushBufferTileRegistry {
+    #[cfg(feature = "atlas-gpu")]
     pub fn allocate_tiles(
         &mut self,
         stroke_session_id: u64,
@@ -979,6 +981,7 @@ impl BrushBufferTileRegistry {
         Ok(())
     }
 
+    #[cfg(feature = "atlas-gpu")]
     pub fn release_tiles(
         &mut self,
         stroke_session_id: u64,
@@ -1012,6 +1015,7 @@ impl BrushBufferTileRegistry {
         }
     }
 
+    #[cfg(feature = "atlas-gpu")]
     pub fn retain_stroke_tiles(
         &mut self,
         stroke_session_id: u64,
@@ -1061,6 +1065,7 @@ impl BrushBufferTileRegistry {
         retain_id
     }
 
+    #[cfg(feature = "atlas-gpu")]
     pub fn release_stroke_on_merge_failed(
         &mut self,
         stroke_session_id: u64,
@@ -1153,8 +1158,10 @@ pub(crate) use atlas::{rgba8_tile_len, tile_origin};
 
 mod atlas;
 mod merge_callback;
+#[cfg(feature = "atlas-gpu")]
 mod merge_submission;
 
+#[cfg(feature = "atlas-gpu")]
 pub use atlas::{
     GenericR8UintTileAtlasGpuArray, GenericR8UintTileAtlasStore, GenericR32FloatTileAtlasGpuArray,
     GenericR32FloatTileAtlasStore, GenericTileAtlasConfig, GenericTileAtlasGpuArray,
@@ -1167,6 +1174,7 @@ pub use merge_callback::{
     TileMergeAckFailure, TileMergeBatchAck, TileMergeCompletionCallback, TileMergeCompletionNotice,
     TileMergeCompletionNoticeId, TileMergeTerminalUpdate,
 };
+#[cfg(feature = "atlas-gpu")]
 pub use merge_submission::{
     AckOutcome, MergeAuditRecord, MergeCompletionAuditRecord, MergePlanRequest, MergePlanTileOp,
     MergeSubmission, MergeTileStore, ReceiptState, RendererSubmitPayload, TileKeyMapping,
