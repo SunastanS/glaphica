@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use document::{Document, DocumentMergeError, MergeDirtyHint, TileCoordinate, TileReplacement};
+use document::{Document, DocumentMergeError, TileCoordinate};
 use render_protocol::{
     BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, BufferTileCoordinate,
     ImageHandle, ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId,
@@ -18,8 +18,9 @@ use renderer::{
     RenderDataResolver, Renderer, ViewOpSender,
 };
 use tiles::{
-    MergeAuditRecord, MergePlanRequest, MergePlanTileOp, TileAddress, TileAtlasStore, TileKey,
-    TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError, TilesBusinessResult,
+    apply_tile_key_mappings, BrushBufferTileRegistry, MergeAuditRecord, MergePlanRequest,
+    MergePlanTileOp, TileAddress, TileAtlasStore, TileKey, TileMergeCompletionNoticeId,
+    TileImageApplyError, TileMergeEngine, TileMergeError, TilesBusinessResult,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -56,7 +57,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         };
 
         for (tile_x, tile_y, tile_key) in image.iter_tiles() {
-            visitor(tile_x, tile_y, *tile_key);
+            visitor(tile_x, tile_y, tile_key);
         }
     }
 
@@ -81,12 +82,41 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             let Some(tile_key) = tile_key else {
                 continue;
             };
-            visitor(*tile_x, *tile_y, *tile_key);
+            visitor(*tile_x, *tile_y, tile_key);
         }
     }
 
     fn resolve_tile_address(&self, tile_key: TileKey) -> Option<TileAddress> {
         self.atlas_store.resolve(tile_key)
+    }
+
+    fn image_tile_grid(&self, image_handle: ImageHandle) -> Option<(u32, u32)> {
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        let image = document.image(image_handle)?;
+        Some((image.tiles_per_row(), image.tiles_per_column()))
+    }
+
+    fn tile_version_at(
+        &self,
+        image_handle: ImageHandle,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Option<u32> {
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        let image = document.image(image_handle)?;
+        let version = image.get_tile_version(tile_x, tile_y).unwrap_or_else(|error| {
+            panic!(
+                "tile version lookup failed for image {:?} at ({}, {}): {:?}",
+                image_handle, tile_x, tile_y, error
+            )
+        });
+        Some(version)
     }
 }
 
@@ -100,7 +130,7 @@ pub struct GpuState {
     surface_size: PhysicalSize<u32>,
     next_frame_id: u64,
     brush_execution_feedback_queue: VecDeque<BrushExecutionMergeFeedback>,
-    brush_buffer_tile_keys: HashMap<u64, HashMap<BufferTileCoordinate, TileKey>>,
+    brush_buffer_tile_keys: BrushBufferTileRegistry,
     gc_evicted_batches_total: u64,
     gc_evicted_keys_total: u64,
     stroke_gc_capability: HashMap<u64, StrokeGcCapability>,
@@ -120,6 +150,7 @@ pub enum MergeBridgeError {
     RendererFinalize(MergeFinalizeError),
     Tiles(TileMergeError),
     Document(DocumentMergeError),
+    TileImageApply(TileImageApplyError),
     MissingRendererNotice {
         receipt_id: StrokeExecutionReceiptId,
         notice_id: TileMergeCompletionNoticeId,
@@ -128,39 +159,35 @@ pub enum MergeBridgeError {
 
 impl GpuState {
     fn enqueue_stroke_merge_submission(&mut self, stroke_session_id: u64, layer_id: u64) {
-        let stroke_tile_keys = self
-            .brush_buffer_tile_keys
-            .get(&stroke_session_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "merge requested for stroke {} without buffer tile mapping",
-                    stroke_session_id
-                )
-            });
         let document = self
             .document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
-        let mut tile_ops = Vec::with_capacity(stroke_tile_keys.len());
-        for (index, (tile_coordinate, stroke_buffer_key)) in stroke_tile_keys.iter().enumerate() {
-            if tile_coordinate.tile_x < 0 || tile_coordinate.tile_y < 0 {
-                continue;
-            }
-            let tile_x = u32::try_from(tile_coordinate.tile_x)
-                .expect("positive brush tile x must convert to u32");
-            let tile_y = u32::try_from(tile_coordinate.tile_y)
-                .expect("positive brush tile y must convert to u32");
-            let existing_layer_key = document.leaf_tile_key_at(layer_id, tile_x, tile_y);
-            tile_ops.push(MergePlanTileOp {
-                tile_x,
-                tile_y,
-                existing_layer_key,
-                stroke_buffer_key: *stroke_buffer_key,
-                blend_mode: BlendMode::Normal,
-                opacity: 1.0,
-                op_trace_id: u64::try_from(index).expect("merge op index exceeds u64"),
+        let mut tile_ops = Vec::new();
+        let mut op_trace_id = 0u64;
+        self.brush_buffer_tile_keys
+            .visit_tiles(stroke_session_id, |tile_coordinate, stroke_buffer_key| {
+                if tile_coordinate.tile_x < 0 || tile_coordinate.tile_y < 0 {
+                    return;
+                }
+                let tile_x = u32::try_from(tile_coordinate.tile_x)
+                    .expect("positive brush tile x must convert to u32");
+                let tile_y = u32::try_from(tile_coordinate.tile_y)
+                    .expect("positive brush tile y must convert to u32");
+                let existing_layer_key = document.leaf_tile_key_at(layer_id, tile_x, tile_y);
+                tile_ops.push(MergePlanTileOp {
+                    tile_x,
+                    tile_y,
+                    existing_layer_key,
+                    stroke_buffer_key,
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    op_trace_id,
+                });
+                op_trace_id = op_trace_id
+                    .checked_add(1)
+                    .expect("merge op index exceeds u64");
             });
-        }
         drop(document);
         if tile_ops.is_empty() {
             self.brush_execution_feedback_queue
@@ -296,7 +323,7 @@ impl GpuState {
             surface_size: size,
             next_frame_id: 0,
             brush_execution_feedback_queue: VecDeque::new(),
-            brush_buffer_tile_keys: HashMap::new(),
+            brush_buffer_tile_keys: BrushBufferTileRegistry::default(),
             gc_evicted_batches_total: 0,
             gc_evicted_keys_total: 0,
             stroke_gc_capability: HashMap::new(),
@@ -356,60 +383,27 @@ impl GpuState {
     ) -> Result<(), BrushRenderEnqueueError> {
         match command {
             BrushRenderCommand::AllocateBufferTiles(allocate) => {
-                let stroke_tile_keys = self
-                    .brush_buffer_tile_keys
-                    .entry(allocate.stroke_session_id)
-                    .or_default();
-                for tile_coordinate in allocate.tiles {
-                    if stroke_tile_keys.contains_key(&tile_coordinate) {
-                        continue;
-                    }
-                    let tile_key = self.atlas_store.allocate().unwrap_or_else(|error| {
+                self.brush_buffer_tile_keys
+                    .allocate_tiles(
+                        allocate.stroke_session_id,
+                        allocate.tiles,
+                        &self.atlas_store,
+                    )
+                    .unwrap_or_else(|error| {
                         panic!(
-                            "failed to allocate brush buffer tile for stroke {} at ({}, {}): {error}",
-                            allocate.stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
+                            "failed to allocate brush buffer tiles for stroke {}: {error}",
+                            allocate.stroke_session_id
                         )
                     });
-                    stroke_tile_keys.insert(tile_coordinate, tile_key);
-                }
                 self.drain_tile_gc_evictions();
                 Ok(())
             }
             BrushRenderCommand::ReleaseBufferTiles(release) => {
-                let stroke_tile_keys = self
-                    .brush_buffer_tile_keys
-                    .get_mut(&release.stroke_session_id)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "release requested for unknown stroke {}",
-                            release.stroke_session_id
-                        )
-                    });
-                for tile_coordinate in release.tiles {
-                    let tile_key = stroke_tile_keys
-                        .remove(&tile_coordinate)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "release requested for missing tile mapping: stroke {} at ({}, {})",
-                                release.stroke_session_id,
-                                tile_coordinate.tile_x,
-                                tile_coordinate.tile_y
-                            )
-                        });
-                    let released = self.atlas_store.release(tile_key);
-                    if !released {
-                        panic!(
-                            "failed to release brush buffer tile for stroke {} at ({}, {})",
-                            release.stroke_session_id,
-                            tile_coordinate.tile_x,
-                            tile_coordinate.tile_y
-                        );
-                    }
-                }
-                if stroke_tile_keys.is_empty() {
-                    self.brush_buffer_tile_keys
-                        .remove(&release.stroke_session_id);
-                }
+                self.brush_buffer_tile_keys.release_tiles(
+                    release.stroke_session_id,
+                    release.tiles,
+                    &self.atlas_store,
+                );
                 Ok(())
             }
             BrushRenderCommand::MergeBuffer(merge) => {
@@ -556,6 +550,7 @@ impl GpuState {
                     stroke_session_id,
                     layer_id,
                     new_key_mappings,
+                    dirty_tiles,
                     ..
                 } => {
                     let document_apply_result: Result<(), MergeBridgeError> = (|| {
@@ -567,33 +562,37 @@ impl GpuState {
                         document
                             .begin_merge(*layer_id, *stroke_session_id, expected_revision)
                             .map_err(MergeBridgeError::Document)?;
-                        let replacements: Vec<TileReplacement> = new_key_mappings
-                            .iter()
-                            .map(|mapping| TileReplacement {
-                                tile_x: mapping.tile_x,
-                                tile_y: mapping.tile_y,
-                                new_key: mapping.new_key,
-                            })
-                            .collect();
-                        let dirty_tiles: Vec<TileCoordinate> = replacements
-                            .iter()
-                            .map(|replacement| TileCoordinate {
-                                tile_x: replacement.tile_x,
-                                tile_y: replacement.tile_y,
-                            })
-                            .collect();
-                        document
-                            .commit_tile_replacements(*layer_id, &replacements)
+                        let image_handle = document
+                            .leaf_image_handle(*layer_id, *stroke_session_id)
                             .map_err(MergeBridgeError::Document)?;
-                        let summary = document
-                            .finalize_merge(
+                        let existing_image = document
+                            .image(image_handle)
+                            .ok_or(MergeBridgeError::Document(
+                                DocumentMergeError::LayerNotFound {
+                                    layer_id: *layer_id,
+                                    stroke_session_id: *stroke_session_id,
+                                },
+                            ))?;
+                        let mut updated_image = (*existing_image).clone();
+                        apply_tile_key_mappings(&mut updated_image, new_key_mappings)
+                            .map_err(MergeBridgeError::TileImageApply)?;
+                        document
+                            .apply_merge_image(
                                 *layer_id,
                                 *stroke_session_id,
-                                MergeDirtyHint::Tiles(dirty_tiles),
+                                updated_image,
+                                dirty_tiles
+                                    .iter()
+                                    .map(|(tile_x, tile_y)| TileCoordinate {
+                                        tile_x: *tile_x,
+                                        tile_y: *tile_y,
+                                    })
+                                    .collect(),
+                                false,
                             )
                             .map_err(MergeBridgeError::Document)?;
                         if document.take_render_tree_cache_dirty() {
-                            let render_tree = document.render_tree_snapshot(summary.revision);
+                            let render_tree = document.render_tree_snapshot(document.revision());
                             self.view_sender
                                 .send(RenderOp::BindRenderTree(render_tree))
                                 .expect("send updated render tree after merge");
@@ -928,7 +927,7 @@ mod tests {
 
         let rendered_bytes = document_image
             .export_rgba8(|tile_key| {
-                let address = atlas_store.resolve(*tile_key)?;
+                let address = atlas_store.resolve(tile_key)?;
                 Some(read_tile_rgba8(
                     &device,
                     &queue,

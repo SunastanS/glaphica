@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     ImageIngestError, TILE_SIZE, TileAddress, TileAllocError, TileAtlasCreateError,
-    TileAtlasLayout, TileGpuDrainError, TileIngestError, TileKey, TileSetError, TileSetHandle,
-    VirtualImage,
+    TileAtlasLayout, TileGpuDrainError, TileImage, TileIngestError, TileKey, TileSetError,
+    TileSetHandle, VirtualImage,
 };
 
 use super::brush_buffer_storage;
@@ -280,7 +280,7 @@ impl TileAtlasStore {
         size_y: u32,
         bytes: &[u8],
         bytes_per_row: u32,
-    ) -> Result<VirtualImage<TileKey>, ImageIngestError> {
+    ) -> Result<TileImage, ImageIngestError> {
         let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
         Rgba8Spec::validate_ingest_contract(self.usage()).map_err(ImageIngestError::from)?;
         let bytes_per_row_usize: usize = bytes_per_row
@@ -320,7 +320,7 @@ impl TileAtlasStore {
             }
         }
 
-        Ok(image)
+        Ok(TileImage::from_virtual(image))
     }
 
     fn ingest_subrect_rgba8_as_full_tile(

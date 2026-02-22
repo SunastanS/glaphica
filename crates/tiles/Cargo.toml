@@ -3,6 +3,9 @@ name = "tiles"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+test-helpers = []
+
 [dependencies]
 render_protocol = { path = "../render_protocol" }
 wgpu = "28.0.0"

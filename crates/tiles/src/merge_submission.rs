@@ -80,6 +80,7 @@ pub enum TilesBusinessResult {
         layer_id: LayerId,
         new_key_mappings: Vec<TileKeyMapping>,
         drop_key_list: Vec<TileKey>,
+        dirty_tiles: Vec<(u32, u32)>,
     },
     RequiresAbort {
         receipt_id: StrokeExecutionReceiptId,
@@ -230,6 +231,7 @@ struct ReceiptEntry {
     completion: Option<MergeCompletionAuditRecord>,
     new_key_mappings: Vec<TileKeyMapping>,
     drop_key_list: Vec<TileKey>,
+    dirty_tiles: Vec<(u32, u32)>,
 }
 
 #[derive(Debug)]
@@ -316,8 +318,10 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         let mut allocated_new_keys = Vec::with_capacity(request.tile_ops.len());
         let mut new_key_mappings = Vec::with_capacity(request.tile_ops.len());
         let mut gpu_merge_ops = Vec::with_capacity(request.tile_ops.len());
+        let mut dirty_tiles = Vec::with_capacity(request.tile_ops.len());
 
         for tile_op in &request.tile_ops {
+            dirty_tiles.push((tile_op.tile_x, tile_op.tile_y));
             let stroke_tile = self.resolve_gpu_tile(
                 tile_op.stroke_buffer_key,
                 Some(receipt_id),
@@ -405,6 +409,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
                 completion: None,
                 new_key_mappings: new_key_mappings.clone(),
                 drop_key_list: drop_key_list.clone(),
+                dirty_tiles,
             },
         );
         self.submitted_tokens.insert(submission_key, receipt_id);
@@ -516,6 +521,7 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
                         layer_id: entry.layer_id,
                         new_key_mappings: entry.new_key_mappings.clone(),
                         drop_key_list: entry.drop_key_list.clone(),
+                        dirty_tiles: entry.dirty_tiles.clone(),
                     });
                 Ok(AckOutcome::Succeeded)
             }

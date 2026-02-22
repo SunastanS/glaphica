@@ -5,7 +5,10 @@ use render_protocol::{
     BlendMode, ImageHandle, LayerId, RenderNodeSnapshot, RenderTreeSnapshot, StrokeSessionId,
 };
 use slotmap::SlotMap;
-use tiles::{TileKey, VirtualImage, VirtualImageError};
+use tiles::{TileImage, TileKey, VirtualImageError};
+
+#[cfg(test)]
+use tiles::{TileKeyMapping, apply_tile_key_mappings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayerNodeId(u64);
@@ -16,7 +19,7 @@ impl LayerNodeId {
 
 pub struct Document {
     layer_tree: LayerTreeNode,
-    images: SlotMap<ImageHandle, Arc<VirtualImage<TileKey>>>,
+    images: SlotMap<ImageHandle, Arc<TileImage>>,
     size_x: u32,
     size_y: u32,
     revision: u64,
@@ -55,7 +58,7 @@ pub struct TileCoordinate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TileReplacement {
+pub(crate) struct TileReplacement {
     pub tile_x: u32,
     pub tile_y: u32,
     pub new_key: TileKey,
@@ -75,11 +78,10 @@ pub struct MergeCommitSummary {
     pub stroke_session_id: StrokeSessionId,
     pub dirty_tiles: Vec<TileCoordinate>,
     pub full_layer_dirty: bool,
-    pub tile_commits: HashMap<TileCoordinate, TileCommitEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TileCommitEntry {
+pub(crate) struct TileCommitEntry {
     pub new_key: TileKey,
     pub previous_key: Option<TileKey>,
 }
@@ -162,7 +164,7 @@ pub enum DocumentMergeError {
 struct DocumentMergeContext {
     layer_id: LayerId,
     stroke_session_id: StrokeSessionId,
-    replacements_by_tile: HashMap<TileCoordinate, TileKey>,
+    replacements_by_tile: HashMap<TileCoordinate, TileCommitEntry>,
     replacement_key_owner: HashMap<TileKey, TileCoordinate>,
 }
 
@@ -223,8 +225,87 @@ impl Document {
         }
     }
 
-    pub fn image(&self, image_handle: ImageHandle) -> Option<Arc<VirtualImage<TileKey>>> {
+    pub fn image(&self, image_handle: ImageHandle) -> Option<Arc<TileImage>> {
         self.images.get(image_handle).cloned()
+    }
+
+    pub fn leaf_image_handle(
+        &self,
+        layer_id: LayerId,
+        stroke_session_id: StrokeSessionId,
+    ) -> Result<ImageHandle, DocumentMergeError> {
+        let layer_lookup = self.lookup_leaf_image_handle(layer_id, stroke_session_id)?;
+        if !layer_lookup.is_leaf {
+            return Err(DocumentMergeError::LayerIsNotLeaf {
+                layer_id,
+                stroke_session_id,
+            });
+        }
+        layer_lookup
+            .image_handle
+            .ok_or(DocumentMergeError::LayerNotFound {
+                layer_id,
+                stroke_session_id,
+            })
+    }
+
+    pub(crate) fn replace_leaf_image(
+        &mut self,
+        layer_id: LayerId,
+        stroke_session_id: StrokeSessionId,
+        image: TileImage,
+    ) -> Result<(), DocumentMergeError> {
+        let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
+        if let Some(image_entry) = self.images.get_mut(image_handle) {
+            *image_entry = Arc::new(image);
+            return Ok(());
+        }
+        Err(DocumentMergeError::LayerNotFound {
+            layer_id,
+            stroke_session_id,
+        })
+    }
+
+    pub fn apply_merge_image(
+        &mut self,
+        layer_id: LayerId,
+        stroke_session_id: StrokeSessionId,
+        image: TileImage,
+        dirty_tiles: Vec<TileCoordinate>,
+        full_layer_dirty: bool,
+    ) -> Result<MergeCommitSummary, DocumentMergeError> {
+        self.validate_active_merge(layer_id, stroke_session_id)?;
+        let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
+        let new_image_handle = self.images.insert(Arc::new(image));
+        let replaced = self
+            .layer_tree
+            .replace_leaf_image_handle(layer_id, new_image_handle);
+        if !replaced {
+            return Err(DocumentMergeError::LayerNotFound {
+                layer_id,
+                stroke_session_id,
+            });
+        }
+        self.images.remove(image_handle);
+        let next_revision =
+            self.revision
+                .checked_add(1)
+                .ok_or(DocumentMergeError::RevisionOverflow {
+                    layer_id,
+                    stroke_session_id,
+                })?;
+        self.revision = next_revision;
+        self.active_merge = None;
+        self.consumed_stroke_sessions.insert(stroke_session_id);
+        self.dirty_layers.insert(layer_id);
+        self.mark_render_tree_dirty();
+        Ok(MergeCommitSummary {
+            revision: next_revision,
+            layer_id,
+            stroke_session_id,
+            dirty_tiles,
+            full_layer_dirty,
+        })
     }
 
     pub fn leaf_tile_key_at(&self, layer_id: LayerId, tile_x: u32, tile_y: u32) -> Option<TileKey> {
@@ -254,7 +335,6 @@ impl Document {
                     layer_id, tile_x, tile_y, error
                 )
             })
-            .copied()
     }
 
     pub fn new_layer_root(&mut self) -> LayerNodeId {
@@ -266,7 +346,7 @@ impl Document {
 
     pub fn new_layer_root_with_image(
         &mut self,
-        image: VirtualImage<TileKey>,
+        image: TileImage,
         blend: BlendMode,
     ) -> LayerNodeId {
         let id = self.alloc_layer_id();
@@ -352,7 +432,7 @@ impl Document {
         Ok(())
     }
 
-    pub fn commit_tile_replacements(
+    pub(crate) fn commit_tile_replacements(
         &mut self,
         layer_id: LayerId,
         replacements: &[TileReplacement],
@@ -425,20 +505,13 @@ impl Document {
         Ok(())
     }
 
-    pub fn finalize_merge(
+    pub(crate) fn finalize_merge(
         &mut self,
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
         dirty_hint: MergeDirtyHint,
     ) -> Result<MergeCommitSummary, DocumentMergeError> {
         self.validate_active_merge(layer_id, stroke_session_id)?;
-        let layer_lookup = self.lookup_leaf_image_handle(layer_id, stroke_session_id)?;
-        let image_handle = layer_lookup
-            .image_handle
-            .ok_or(DocumentMergeError::LayerNotFound {
-                layer_id,
-                stroke_session_id,
-            })?;
         let active = self
             .active_merge
             .as_ref()
@@ -453,43 +526,6 @@ impl Document {
             });
         }
         let staged_replacements = active.replacements_by_tile.clone();
-        let existing_image =
-            self.images
-                .get(image_handle)
-                .ok_or(DocumentMergeError::LayerNotFound {
-                    layer_id,
-                    stroke_session_id,
-                })?;
-        let mut updated_image = (**existing_image).clone();
-        let mut tile_commits = HashMap::with_capacity(staged_replacements.len());
-        for (tile_coordinate, new_key) in &staged_replacements {
-            let old_key = updated_image
-                .get_tile(tile_coordinate.tile_x, tile_coordinate.tile_y)
-                .map_err(|source| DocumentMergeError::VirtualImage {
-                    layer_id,
-                    stroke_session_id,
-                    tile_x: tile_coordinate.tile_x,
-                    tile_y: tile_coordinate.tile_y,
-                    source,
-                })?
-                .copied();
-            updated_image
-                .set_tile(tile_coordinate.tile_x, tile_coordinate.tile_y, *new_key)
-                .map_err(|source| DocumentMergeError::VirtualImage {
-                    layer_id,
-                    stroke_session_id,
-                    tile_x: tile_coordinate.tile_x,
-                    tile_y: tile_coordinate.tile_y,
-                    source,
-                })?;
-            tile_commits.insert(
-                *tile_coordinate,
-                TileCommitEntry {
-                    new_key: *new_key,
-                    previous_key: old_key,
-                },
-            );
-        }
         let next_revision =
             self.revision
                 .checked_add(1)
@@ -497,15 +533,6 @@ impl Document {
                     layer_id,
                     stroke_session_id,
                 })?;
-        if let Some(image_entry) = self.images.get_mut(image_handle) {
-            *image_entry = Arc::new(updated_image);
-        } else {
-            return Err(DocumentMergeError::LayerNotFound {
-                layer_id,
-                stroke_session_id,
-            });
-        }
-
         self.revision = next_revision;
         self.active_merge = None;
         self.consumed_stroke_sessions.insert(stroke_session_id);
@@ -534,7 +561,6 @@ impl Document {
             stroke_session_id,
             dirty_tiles,
             full_layer_dirty,
-            tile_commits,
         })
     }
 
@@ -585,7 +611,7 @@ impl Document {
 
     fn new_empty_leaf(&mut self) -> (LayerNodeId, LayerTreeNode) {
         let id = self.alloc_layer_id();
-        let image = VirtualImage::new(self.size_x, self.size_y)
+        let image = TileImage::new(self.size_x, self.size_y)
             .unwrap_or_else(|error| panic!("failed to create empty layer image: {error:?}"));
         let image_handle = self.images.insert(Arc::new(image));
         (
@@ -627,7 +653,7 @@ impl Document {
         &self,
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
-        image: &Arc<VirtualImage<TileKey>>,
+        image: &Arc<TileImage>,
         replacement: &TileReplacement,
     ) -> Result<(), DocumentMergeError> {
         if replacement.tile_x >= image.tiles_per_row()
@@ -647,9 +673,9 @@ impl Document {
         &self,
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
-        image: &Arc<VirtualImage<TileKey>>,
+        image: &Arc<TileImage>,
         replacement: &TileReplacement,
-        replacements_by_tile: &mut HashMap<TileCoordinate, TileKey>,
+        replacements_by_tile: &mut HashMap<TileCoordinate, TileCommitEntry>,
         replacement_key_owner: &mut HashMap<TileKey, TileCoordinate>,
     ) -> Result<(), DocumentMergeError> {
         let tile_coordinate = TileCoordinate {
@@ -676,7 +702,7 @@ impl Document {
             });
         }
         for (existing_tile_x, existing_tile_y, existing_key) in image.iter_tiles() {
-            if *existing_key != replacement.new_key {
+            if existing_key != replacement.new_key {
                 continue;
             }
             let existing_tile_coordinate = TileCoordinate {
@@ -701,8 +727,23 @@ impl Document {
             });
         }
 
+        let previous_key = image
+            .get_tile(replacement.tile_x, replacement.tile_y)
+            .map_err(|source| DocumentMergeError::VirtualImage {
+                layer_id,
+                stroke_session_id,
+                tile_x: replacement.tile_x,
+                tile_y: replacement.tile_y,
+                source,
+            })?;
         replacement_key_owner.insert(replacement.new_key, tile_coordinate);
-        replacements_by_tile.insert(tile_coordinate, replacement.new_key);
+        replacements_by_tile.insert(
+            tile_coordinate,
+            TileCommitEntry {
+                new_key: replacement.new_key,
+                previous_key,
+            },
+        );
         Ok(())
     }
 
@@ -731,6 +772,24 @@ impl Document {
 }
 
 impl LayerTreeNode {
+    fn replace_leaf_image_handle(&mut self, layer_id: LayerId, new_handle: ImageHandle) -> bool {
+        match self {
+            LayerTreeNode::Root { children } | LayerTreeNode::Branch { children, .. } => children
+                .iter_mut()
+                .any(|child| child.replace_leaf_image_handle(layer_id, new_handle)),
+            LayerTreeNode::Leaf {
+                id, image_handle, ..
+            } => {
+                if id.0 == layer_id {
+                    *image_handle = new_handle;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     fn lookup_layer(&self, layer_id: LayerId) -> Option<LayerLookupResult> {
         match self {
             LayerTreeNode::Root { children } => {
@@ -1037,7 +1096,7 @@ mod tests {
     #[test]
     fn new_layer_root_with_image_uses_provided_image_and_blend() {
         let mut document = Document::new(17, 23);
-        let image = VirtualImage::<TileKey>::new(9, 11).expect("new image");
+        let image = TileImage::new(9, 11).expect("new image");
         let id = document.new_layer_root_with_image(image, BlendMode::Multiply);
 
         let node = &document.root()[0];
@@ -1237,9 +1296,7 @@ mod tests {
     }
 
     fn test_tile_key(raw: u64) -> TileKey {
-        assert_eq!(std::mem::size_of::<TileKey>(), std::mem::size_of::<u64>());
-        // Test-only helper to build deterministic keys without atlas allocation.
-        unsafe { std::mem::transmute::<u64, TileKey>(raw) }
+        tiles::test_tile_key(raw)
     }
 
     fn first_leaf_image_handle(document: &Document) -> ImageHandle {
@@ -1266,9 +1323,31 @@ mod tests {
                 }],
             )
             .expect("commit replacement");
+        let image_handle = document
+            .leaf_image_handle(layer_id.0, 77)
+            .expect("leaf image handle should resolve");
+        let existing_image = document.image(image_handle).expect("resolve image");
+        let mut updated_image = (*existing_image).clone();
+        apply_tile_key_mappings(
+            &mut updated_image,
+            &[TileKeyMapping {
+                tile_x: 0,
+                tile_y: 0,
+                layer_id: layer_id.0,
+                previous_key: None,
+                new_key: test_tile_key(10),
+            }],
+        )
+        .expect("apply tile key mappings");
         let summary = document
-            .finalize_merge(layer_id.0, 77, MergeDirtyHint::None)
-            .expect("finalize merge");
+            .apply_merge_image(
+                layer_id.0,
+                77,
+                updated_image,
+                vec![TileCoordinate { tile_x: 0, tile_y: 0 }],
+                false,
+            )
+            .expect("apply merge image");
 
         assert_eq!(summary.revision, 1);
         assert_eq!(summary.layer_id, layer_id.0);
@@ -1279,15 +1358,6 @@ mod tests {
                 tile_y: 0
             }]
         );
-        let commit_entry = summary
-            .tile_commits
-            .get(&TileCoordinate {
-                tile_x: 0,
-                tile_y: 0,
-            })
-            .expect("tile commit entry should exist");
-        assert_eq!(commit_entry.new_key, test_tile_key(10));
-        assert_eq!(commit_entry.previous_key, None);
         let image = document
             .image(first_leaf_image_handle(&document))
             .expect("resolve image");
@@ -1295,7 +1365,7 @@ mod tests {
             .get_tile(0, 0)
             .expect("read tile")
             .expect("tile should be assigned");
-        assert_eq!(*key, test_tile_key(10));
+        assert_eq!(key, test_tile_key(10));
     }
 
     #[test]

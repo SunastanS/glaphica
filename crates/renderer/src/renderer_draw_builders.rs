@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use render_protocol::{BlendMode, ImageHandle};
-use tiles::{GroupTileAtlasStore, TILE_SIZE, TileKey, VirtualImage};
+use tiles::{GroupTileAtlasStore, TILE_SIZE, TileImage, TileKey};
 
 use crate::{
     CachedLeafDraw, DirtyTileMask, RenderDataResolver, TileCoord, TileDrawInstance, TileInstanceGpu,
@@ -90,7 +90,7 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
 }
 
 pub(crate) fn build_group_tile_draw_instances(
-    image: &VirtualImage<TileKey>,
+    image: &TileImage,
     blend: BlendMode,
     tile_store: &GroupTileAtlasStore,
 ) -> Vec<TileDrawInstance> {
@@ -98,7 +98,7 @@ pub(crate) fn build_group_tile_draw_instances(
         .iter_tiles()
         .map(|(tile_x, tile_y, tile_key)| {
             let tile_address = tile_store
-                .resolve(*tile_key)
+                .resolve(tile_key)
                 .expect("group tile key must resolve to atlas address");
             let document_x = tile_x
                 .checked_mul(TILE_SIZE)

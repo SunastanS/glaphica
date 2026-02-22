@@ -21,7 +21,7 @@ use render_protocol::{
 };
 use tiles::{
     GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAddress,
-    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey, VirtualImage,
+    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImage, TileKey,
 };
 
 #[repr(C)]
@@ -158,7 +158,7 @@ impl CachedLeafDraw {
 
 #[derive(Debug)]
 struct GroupTargetCacheEntry {
-    image: VirtualImage<TileKey>,
+    image: TileImage,
     draw_instances: Vec<TileDrawInstance>,
     blend: BlendMode,
 }
@@ -210,6 +210,19 @@ pub trait RenderDataResolver {
     }
 
     fn resolve_tile_address(&self, tile_key: TileKey) -> Option<TileAddress>;
+
+    fn image_tile_grid(&self, _image_handle: ImageHandle) -> Option<(u32, u32)> {
+        None
+    }
+
+    fn tile_version_at(
+        &self,
+        _image_handle: ImageHandle,
+        _tile_x: u32,
+        _tile_y: u32,
+    ) -> Option<u32> {
+        None
+    }
 }
 
 pub struct ViewOpSender(mpsc::Sender<RenderOp>);
@@ -235,11 +248,19 @@ struct FrameState {
     render_tree_dirty: bool,
     dirty_state_store: DirtyStateStore,
     frame_sync: FrameSync,
+    layer_tile_versions: HashMap<u64, LayerTileVersions>,
 }
 
 struct CacheState {
     group_target_cache: HashMap<u64, GroupTargetCacheEntry>,
     leaf_draw_cache: HashMap<u64, CachedLeafDraw>,
+}
+
+#[derive(Debug, Clone)]
+struct LayerTileVersions {
+    tiles_per_row: u32,
+    tiles_per_column: u32,
+    versions: Vec<u32>,
 }
 
 struct BrushWorkState {

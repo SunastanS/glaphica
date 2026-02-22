@@ -422,6 +422,7 @@ impl Renderer {
                 render_tree_dirty: false,
                 dirty_state_store: DirtyStateStore::with_document_dirty(true),
                 frame_sync: FrameSync::default(),
+                layer_tile_versions: HashMap::new(),
             },
         };
 

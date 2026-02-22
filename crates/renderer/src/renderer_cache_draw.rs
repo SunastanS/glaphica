@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_STRIDE, TileKey, VirtualImage};
+use tiles::{TILE_STRIDE, TileImage, TileKey};
 
 use crate::{
     BlendMode, DrawPassContext, GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord,
@@ -131,14 +131,14 @@ impl Renderer {
     }
 
     pub(super) fn release_group_cache_entry(&self, entry: GroupTargetCacheEntry) {
-        let mut tile_key_iterator = entry.image.iter_tiles().map(|(_, _, tile_key)| *tile_key);
+        let mut tile_key_iterator = entry.image.iter_tiles().map(|(_, _, tile_key)| tile_key);
         if tile_key_iterator.next().is_none() {
             return;
         }
         let set = self
             .gpu_state
             .group_tile_store
-            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| *tile_key))
+            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| tile_key))
             .unwrap_or_else(|error| panic!("adopt group cache tile set for release: {error}"));
         self.gpu_state
             .group_tile_store
@@ -194,7 +194,7 @@ impl Renderer {
         &self,
         cache_extent: wgpu::Extent3d,
     ) -> GroupTargetCacheEntry {
-        let image = VirtualImage::new(cache_extent.width, cache_extent.height)
+        let image = TileImage::new(cache_extent.width, cache_extent.height)
             .unwrap_or_else(|error| panic!("create group virtual image: {error:?}"));
         GroupTargetCacheEntry {
             image,
@@ -215,7 +215,7 @@ impl Renderer {
         self.release_group_cache_entry(entry);
         (
             GroupTargetCacheEntry {
-                image: VirtualImage::new(cache_extent.width, cache_extent.height)
+                image: TileImage::new(cache_extent.width, cache_extent.height)
                     .unwrap_or_else(|error| panic!("resize group virtual image: {error:?}")),
                 draw_instances: Vec::new(),
                 blend: BlendMode::Normal,
@@ -322,7 +322,7 @@ impl Renderer {
             .get_tile(tile_coord.tile_x, tile_coord.tile_y)
             .unwrap_or_else(|error| panic!("get group tile key: {error:?}"))
         {
-            *existing_key
+            existing_key
         } else {
             let allocated_key = self
                 .gpu_state

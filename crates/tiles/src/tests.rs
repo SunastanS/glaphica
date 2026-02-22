@@ -524,7 +524,7 @@ fn ingest_image_rgba8_strided_keeps_sparse_tiles() {
     assert_eq!(image.get_tile(0, 0), Ok(None));
     assert_eq!(image.get_tile(1, 0), Ok(None));
     assert_eq!(image.get_tile(0, 1), Ok(None));
-    assert!(image.get_tile(1, 1).expect("get tile").copied().is_some());
+    assert!(image.get_tile(1, 1).expect("get tile").is_some());
 
     let tile_count = gpu.drain_and_execute(&queue).expect("drain");
     assert_eq!(tile_count, 1);

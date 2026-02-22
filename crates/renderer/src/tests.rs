@@ -959,6 +959,7 @@ fn allocate_tile_keys(count: usize) -> Vec<TileKey> {
         atlas_store
             .reserve_tile_set(u32::try_from(count).expect("test tile key count exceeds u32"))
             .expect("reserve test tile set")
-            .into_keys()
+            .iter_keys()
+            .collect()
     })
 }

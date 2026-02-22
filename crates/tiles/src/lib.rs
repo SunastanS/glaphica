@@ -1,4 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+
+use render_protocol::BufferTileCoordinate;
 
 pub const TILE_SIZE: u32 = 128;
 pub const TILE_GUTTER: u32 = 1;
@@ -134,12 +137,8 @@ impl TileSetHandle {
         self.keys.is_empty()
     }
 
-    pub fn keys(&self) -> &[TileKey] {
-        &self.keys
-    }
-
-    pub fn into_keys(self) -> Vec<TileKey> {
-        self.keys
+    pub fn iter_keys(&self) -> impl Iterator<Item = TileKey> + '_ {
+        self.keys.iter().copied()
     }
 
     pub(crate) fn new(id: TileSetId, owner_tag: u64, keys: Vec<TileKey>) -> Self {
@@ -150,9 +149,22 @@ impl TileSetHandle {
         }
     }
 
+    pub(crate) fn keys(&self) -> &[TileKey] {
+        &self.keys
+    }
+
+    pub(crate) fn into_keys(self) -> Vec<TileKey> {
+        self.keys
+    }
+
     pub(crate) fn owner_tag(&self) -> u64 {
         self.owner_tag
     }
+}
+
+#[cfg(feature = "test-helpers")]
+pub fn test_tile_key(raw: u64) -> TileKey {
+    TileKey(raw)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,7 +435,12 @@ impl<K> VirtualImage<K> {
         Ok(self.tiles.get(index).and_then(|value| value.as_ref()))
     }
 
-    pub fn set_tile(&mut self, tile_x: u32, tile_y: u32, key: K) -> Result<(), VirtualImageError> {
+    pub(crate) fn set_tile(
+        &mut self,
+        tile_x: u32,
+        tile_y: u32,
+        key: K,
+    ) -> Result<(), VirtualImageError> {
         let index = self.tile_index(tile_x, tile_y)?;
         let slot = self
             .tiles
@@ -497,6 +514,287 @@ impl<K> VirtualImage<K> {
         }
 
         Ok(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TileImage {
+    image: VirtualImage<TileKey>,
+    versions: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileImageApplyError {
+    TileOutOfBounds {
+        tile_x: u32,
+        tile_y: u32,
+    },
+    DuplicateTileCoordinate {
+        tile_x: u32,
+        tile_y: u32,
+    },
+    PreviousKeyMismatch {
+        tile_x: u32,
+        tile_y: u32,
+        expected: Option<TileKey>,
+        actual: Option<TileKey>,
+    },
+}
+
+impl fmt::Display for TileImageApplyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TileImageApplyError::TileOutOfBounds { tile_x, tile_y } => {
+                write!(formatter, "tile coordinate out of bounds at ({tile_x}, {tile_y})")
+            }
+            TileImageApplyError::DuplicateTileCoordinate { tile_x, tile_y } => {
+                write!(
+                    formatter,
+                    "duplicate tile coordinate in apply batch at ({tile_x}, {tile_y})"
+                )
+            }
+            TileImageApplyError::PreviousKeyMismatch {
+                tile_x,
+                tile_y,
+                expected,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "tile key mismatch at ({tile_x}, {tile_y}): expected {:?}, got {:?}",
+                    expected, actual
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TileImageApplyError {}
+
+impl TileImage {
+    pub fn new(size_x: u32, size_y: u32) -> Result<Self, VirtualImageError> {
+        let tiles_per_row = size_x.div_ceil(TILE_SIZE);
+        let tiles_per_column = size_y.div_ceil(TILE_SIZE);
+        let tile_count = (tiles_per_row as usize)
+            .checked_mul(tiles_per_column as usize)
+            .ok_or(VirtualImageError::TileCountOverflow)?;
+        Ok(Self {
+            image: VirtualImage::new(size_x, size_y)?,
+            versions: vec![0; tile_count],
+        })
+    }
+
+    pub fn size_x(&self) -> u32 {
+        self.image.size_x()
+    }
+
+    pub fn size_y(&self) -> u32 {
+        self.image.size_y()
+    }
+
+    pub fn tiles_per_row(&self) -> u32 {
+        self.image.tiles_per_row()
+    }
+
+    pub fn tiles_per_column(&self) -> u32 {
+        self.image.tiles_per_column()
+    }
+
+    pub fn get_tile(&self, tile_x: u32, tile_y: u32) -> Result<Option<TileKey>, VirtualImageError> {
+        Ok(self.image.get_tile(tile_x, tile_y)?.copied())
+    }
+
+    pub fn get_tile_version(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+    ) -> Result<u32, VirtualImageError> {
+        let index = self.tile_index(tile_x, tile_y)?;
+        Ok(*self
+            .versions
+            .get(index)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)?)
+    }
+
+    pub fn set_tile(
+        &mut self,
+        tile_x: u32,
+        tile_y: u32,
+        key: TileKey,
+    ) -> Result<(), VirtualImageError> {
+        self.image.set_tile(tile_x, tile_y, key)?;
+        let index = self.tile_index(tile_x, tile_y)?;
+        let slot = self
+            .versions
+            .get_mut(index)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
+        *slot = slot.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn iter_tiles(&self) -> impl Iterator<Item = (u32, u32, TileKey)> + '_ {
+        self.image
+            .iter_tiles()
+            .map(|(tile_x, tile_y, key)| (tile_x, tile_y, *key))
+    }
+
+    pub fn export_rgba8(
+        &self,
+        mut load_tile: impl FnMut(TileKey) -> Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, VirtualImageError> {
+        self.image.export_rgba8(|key| load_tile(*key))
+    }
+
+    pub(crate) fn from_virtual(image: VirtualImage<TileKey>) -> Self {
+        let tiles_per_row = image.tiles_per_row();
+        let tiles_per_column = image.tiles_per_column();
+        let tile_count = (tiles_per_row as usize)
+            .checked_mul(tiles_per_column as usize)
+            .unwrap_or_else(|| panic!("tile count overflow for tile image"));
+        let mut tile_image = Self {
+            image,
+            versions: vec![0; tile_count],
+        };
+        for (tile_x, tile_y, _key) in tile_image.image.iter_tiles() {
+            let index = tile_image
+                .tile_index(tile_x, tile_y)
+                .unwrap_or_else(|error| {
+                    panic!("tile index resolution failed for tile image: {error:?}")
+                });
+            if let Some(slot) = tile_image.versions.get_mut(index) {
+                *slot = 1;
+            } else {
+                panic!("tile version slot missing for ({tile_x}, {tile_y})");
+            }
+        }
+        tile_image
+    }
+
+    fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, VirtualImageError> {
+        if tile_x >= self.tiles_per_row() || tile_y >= self.tiles_per_column() {
+            return Err(VirtualImageError::TileIndexOutOfBounds);
+        }
+        let row = (tile_y as usize)
+            .checked_mul(self.tiles_per_row() as usize)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
+        row.checked_add(tile_x as usize)
+            .ok_or(VirtualImageError::TileIndexOutOfBounds)
+    }
+}
+
+pub fn apply_tile_key_mappings(
+    image: &mut TileImage,
+    mappings: &[TileKeyMapping],
+) -> Result<(), TileImageApplyError> {
+    let mut seen = HashSet::with_capacity(mappings.len());
+    for mapping in mappings {
+        let coordinate = (mapping.tile_x, mapping.tile_y);
+        if !seen.insert(coordinate) {
+            return Err(TileImageApplyError::DuplicateTileCoordinate {
+                tile_x: mapping.tile_x,
+                tile_y: mapping.tile_y,
+            });
+        }
+        let current = image
+            .get_tile(mapping.tile_x, mapping.tile_y)
+            .map_err(|_| TileImageApplyError::TileOutOfBounds {
+                tile_x: mapping.tile_x,
+                tile_y: mapping.tile_y,
+            })?;
+        if current != mapping.previous_key {
+            return Err(TileImageApplyError::PreviousKeyMismatch {
+                tile_x: mapping.tile_x,
+                tile_y: mapping.tile_y,
+                expected: mapping.previous_key,
+                actual: current,
+            });
+        }
+    }
+    for mapping in mappings {
+        image
+            .set_tile(mapping.tile_x, mapping.tile_y, mapping.new_key)
+            .map_err(|_| TileImageApplyError::TileOutOfBounds {
+                tile_x: mapping.tile_x,
+                tile_y: mapping.tile_y,
+            })?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+pub struct BrushBufferTileRegistry {
+    tiles_by_stroke: HashMap<u64, HashMap<BufferTileCoordinate, TileKey>>,
+}
+
+impl BrushBufferTileRegistry {
+    pub fn allocate_tiles(
+        &mut self,
+        stroke_session_id: u64,
+        tiles: impl IntoIterator<Item = BufferTileCoordinate>,
+        atlas_store: &TileAtlasStore,
+    ) -> Result<(), TileAllocError> {
+        let stroke_tiles = self.tiles_by_stroke.entry(stroke_session_id).or_default();
+        for tile_coordinate in tiles {
+            if stroke_tiles.contains_key(&tile_coordinate) {
+                continue;
+            }
+            let tile_key = atlas_store.allocate()?;
+            stroke_tiles.insert(tile_coordinate, tile_key);
+        }
+        Ok(())
+    }
+
+    pub fn release_tiles(
+        &mut self,
+        stroke_session_id: u64,
+        tiles: impl IntoIterator<Item = BufferTileCoordinate>,
+        atlas_store: &TileAtlasStore,
+    ) {
+        let stroke_tiles = self
+            .tiles_by_stroke
+            .get_mut(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!("release requested for unknown stroke {stroke_session_id}")
+            });
+        for tile_coordinate in tiles {
+            let tile_key = stroke_tiles
+                .remove(&tile_coordinate)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "release requested for missing tile mapping: stroke {} at ({}, {})",
+                        stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
+                    )
+                });
+            let released = atlas_store.release(tile_key);
+            if !released {
+                panic!(
+                    "failed to release brush buffer tile for stroke {} at ({}, {})",
+                    stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
+                );
+            }
+        }
+        if stroke_tiles.is_empty() {
+            self.tiles_by_stroke.remove(&stroke_session_id);
+        }
+    }
+
+    pub fn visit_tiles(
+        &self,
+        stroke_session_id: u64,
+        mut visit: impl FnMut(&BufferTileCoordinate, TileKey),
+    ) {
+        let stroke_tiles = self
+            .tiles_by_stroke
+            .get(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "merge requested for stroke {} without buffer tile mapping",
+                    stroke_session_id
+                )
+            });
+        for (tile_coordinate, tile_key) in stroke_tiles.iter() {
+            visit(tile_coordinate, *tile_key);
+        }
     }
 }
 

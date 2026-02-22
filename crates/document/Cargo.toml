@@ -7,3 +7,6 @@ edition = "2024"
 render_protocol = { path = "../render_protocol" }
 slotmap = "1.0.7"
 tiles = { path = "../tiles" }
+
+[dev-dependencies]
+tiles = { path = "../tiles", features = ["test-helpers"] }
