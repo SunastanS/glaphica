@@ -178,7 +178,6 @@ impl TileKeyLifecycleGcState {
                 continue;
             };
             if batch.keys.is_empty() {
-                let retain_id = batch.retain_id;
                 self.retained_batches.remove(&batch_id);
                 let _ = self.retained_order.pop_front();
                 continue;

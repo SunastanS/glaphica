@@ -541,7 +541,7 @@ impl GpuState {
                             document
                                 .image(image_handle)
                                 .ok_or(MergeBridgeError::Document(
-                                    DocumentMergeError::LayerNotFound {
+                                    DocumentMergeError::LayerNotFoundInStrokeSession {
                                         layer_id: *layer_id,
                                         stroke_session_id: *stroke_session_id,
                                     },

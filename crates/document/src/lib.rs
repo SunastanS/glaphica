@@ -71,6 +71,9 @@ pub struct MergeCommitSummary {
 pub enum DocumentMergeError {
     LayerNotFound {
         layer_id: LayerId,
+    },
+    LayerNotFoundInStrokeSession {
+        layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
     },
     LayerIsNotLeaf {
@@ -107,6 +110,18 @@ pub enum DocumentMergeError {
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
     },
+}
+
+impl DocumentMergeError {
+    fn with_stroke_session(self, stroke_session_id: StrokeSessionId) -> Self {
+        match self {
+            Self::LayerNotFound { layer_id } => Self::LayerNotFoundInStrokeSession {
+                layer_id,
+                stroke_session_id,
+            },
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -182,19 +197,21 @@ impl Document {
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
     ) -> Result<ImageHandle, DocumentMergeError> {
-        let layer_lookup = self.lookup_leaf_image_handle(layer_id, stroke_session_id)?;
+        let layer_lookup = self
+            .lookup_leaf_image_handle(layer_id)
+            .map_err(|error| error.with_stroke_session(stroke_session_id))?;
         if !layer_lookup.is_leaf {
             return Err(DocumentMergeError::LayerIsNotLeaf {
                 layer_id,
                 stroke_session_id,
             });
         }
-        layer_lookup
-            .image_handle
-            .ok_or(DocumentMergeError::LayerNotFound {
+        layer_lookup.image_handle.ok_or(
+            DocumentMergeError::LayerNotFoundInStrokeSession {
                 layer_id,
                 stroke_session_id,
-            })
+            },
+        )
     }
 
     pub(crate) fn replace_leaf_image(
@@ -220,7 +237,7 @@ impl Document {
             *image_entry = Arc::new(image);
             return Ok(());
         }
-        Err(DocumentMergeError::LayerNotFound {
+        Err(DocumentMergeError::LayerNotFoundInStrokeSession {
             layer_id,
             stroke_session_id,
         })
@@ -263,7 +280,7 @@ impl Document {
             .layer_tree
             .replace_leaf_image_handle(layer_id, new_image_handle);
         if !replaced {
-            return Err(DocumentMergeError::LayerNotFound {
+            return Err(DocumentMergeError::LayerNotFoundInStrokeSession {
                 layer_id,
                 stroke_session_id,
             });
@@ -423,7 +440,9 @@ impl Document {
                 stroke_session_id,
             });
         }
-        let layer_lookup = self.lookup_leaf_image_handle(layer_id, stroke_session_id)?;
+        let layer_lookup = self
+            .lookup_leaf_image_handle(layer_id)
+            .map_err(|error| error.with_stroke_session(stroke_session_id))?;
         if !layer_lookup.is_leaf {
             return Err(DocumentMergeError::LayerIsNotLeaf {
                 layer_id,
@@ -512,13 +531,9 @@ impl Document {
     fn lookup_leaf_image_handle(
         &self,
         layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
     ) -> Result<LayerLookupResult, DocumentMergeError> {
         let Some(layer_lookup) = self.layer_tree.lookup_layer(layer_id) else {
-            return Err(DocumentMergeError::LayerNotFound {
-                layer_id,
-                stroke_session_id,
-            });
+            return Err(DocumentMergeError::LayerNotFound { layer_id });
         };
         Ok(layer_lookup)
     }
