@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use render_protocol::{
@@ -26,6 +26,7 @@ pub struct Document {
     next_layer_id: u64,
     render_tree_cache_dirty: bool,
     dirty_layers: HashSet<LayerId>,
+    layer_versions: HashMap<LayerId, u64>,
     active_merge: Option<ActiveMerge>,
     consumed_stroke_sessions: HashSet<StrokeSessionId>,
 }
@@ -133,6 +134,7 @@ impl Document {
             next_layer_id: 1,
             render_tree_cache_dirty: true,
             dirty_layers: HashSet::new(),
+            layer_versions: HashMap::new(),
             active_merge: None,
             consumed_stroke_sessions: HashSet::new(),
         }
@@ -202,6 +204,18 @@ impl Document {
         image: TileImage,
     ) -> Result<(), DocumentMergeError> {
         let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
+        let next_layer_version = image.image_version();
+        let layer_version = self
+            .layer_versions
+            .get_mut(&layer_id)
+            .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
+        if next_layer_version < *layer_version {
+            panic!(
+                "layer {layer_id} version regressed from {} to {}",
+                *layer_version, next_layer_version
+            );
+        }
+        *layer_version = next_layer_version;
         if let Some(image_entry) = self.images.get_mut(image_handle) {
             *image_entry = Arc::new(image);
             return Ok(());
@@ -221,7 +235,12 @@ impl Document {
     ) -> Result<MergeCommitSummary, DocumentMergeError> {
         self.validate_active_merge(layer_id, stroke_session_id)?;
         let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
-        let dirty_tiles = match image.dirty_since(0) {
+        let previous_version = self
+            .layer_versions
+            .get(&layer_id)
+            .copied()
+            .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
+        let dirty_tiles = match image.dirty_since(previous_version) {
             DirtySinceResult::UpToDate => Vec::new(),
             DirtySinceResult::HasChanges(query) => query
                 .dirty_tiles
@@ -232,6 +251,13 @@ impl Document {
                 panic!("merge image dirty history is missing for layer {layer_id}");
             }
         };
+        let next_version = image.image_version();
+        if next_version < previous_version {
+            panic!(
+                "layer {layer_id} version regressed from {} to {}",
+                previous_version, next_version
+            );
+        }
         let new_image_handle = self.images.insert(Arc::new(image));
         let replaced = self
             .layer_tree
@@ -242,6 +268,7 @@ impl Document {
                 stroke_session_id,
             });
         }
+        self.layer_versions.insert(layer_id, next_version);
         self.images.remove(image_handle);
         let next_revision =
             self.revision
@@ -293,6 +320,36 @@ impl Document {
             })
     }
 
+    pub fn layer_dirty_since(
+        &self,
+        layer_id: LayerId,
+        since_version: u64,
+    ) -> Option<DirtySinceResult> {
+        let layer_lookup = self.layer_tree.lookup_layer(layer_id)?;
+        if !layer_lookup.is_leaf {
+            return None;
+        }
+        let image_handle = layer_lookup.image_handle?;
+        let image = self.images.get(image_handle)?;
+        let tracked_version = self
+            .layer_versions
+            .get(&layer_id)
+            .copied()
+            .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
+        if tracked_version != image.image_version() {
+            panic!(
+                "layer {layer_id} tracked version {} mismatches image version {}",
+                tracked_version,
+                image.image_version()
+            );
+        }
+        Some(image.dirty_since(since_version))
+    }
+
+    pub fn layer_version(&self, layer_id: LayerId) -> Option<u64> {
+        self.layer_versions.get(&layer_id).copied()
+    }
+
     pub fn new_layer_root(&mut self) -> LayerNodeId {
         let (id, layer) = self.new_empty_leaf();
         self.root_mut().push(layer);
@@ -306,6 +363,7 @@ impl Document {
         blend: BlendMode,
     ) -> LayerNodeId {
         let id = self.alloc_layer_id();
+        self.layer_versions.insert(id.0, image.image_version());
         let image_handle = self.images.insert(Arc::new(image));
         self.root_mut().push(LayerTreeNode::Leaf {
             id,
@@ -435,6 +493,7 @@ impl Document {
         let id = self.alloc_layer_id();
         let image = TileImage::new(self.size_x, self.size_y)
             .unwrap_or_else(|error| panic!("failed to create empty layer image: {error:?}"));
+        self.layer_versions.insert(id.0, image.image_version());
         let image_handle = self.images.insert(Arc::new(image));
         (
             id,
@@ -1079,6 +1138,36 @@ mod tests {
             .expect("read tile")
             .expect("tile should be assigned");
         assert_eq!(key, test_tile_key(10));
+    }
+
+    #[test]
+    fn merge_apply_succeeds_when_querying_dirty_since_previous_layer_version() {
+        let mut document = Document::new(128, 128);
+        let layer_id = document.new_layer_root();
+        document
+            .begin_merge(layer_id.0, 121, document.revision())
+            .expect("begin merge");
+        let image_handle = document
+            .leaf_image_handle(layer_id.0, 121)
+            .expect("leaf image handle should resolve");
+        let existing_image = document.image(image_handle).expect("resolve image");
+        let mut updated_image = (*existing_image).clone();
+        apply_tile_key_mappings(
+            &mut updated_image,
+            &[TileKeyMapping {
+                tile_x: 0,
+                tile_y: 0,
+                layer_id: layer_id.0,
+                previous_key: None,
+                new_key: test_tile_key(11),
+            }],
+        )
+        .expect("apply tile key mappings");
+
+        let summary = document
+            .apply_merge_image(layer_id.0, 121, updated_image, false)
+            .expect("merge apply should not panic or fail");
+        assert_eq!(summary.layer_id, layer_id.0);
     }
 
     #[test]

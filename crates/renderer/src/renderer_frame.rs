@@ -3,12 +3,12 @@
 //! This module builds `FramePlan`, executes composite/view passes, and commits
 //! frame results after synchronization checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
 use render_protocol::{
     BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramKey,
-    BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ImageHandle, ReferenceSetUpsert,
+    BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, ReferenceSetUpsert,
     BRUSH_DAB_CHUNK_CAPACITY,
 };
 use tiles::{DirtySinceResult, TILE_SIZE};
@@ -44,18 +44,17 @@ fn collect_full_leaf_dirty_tiles(
     dirty_leaf_tiles
 }
 
-fn collect_leaf_images(node: &RenderTreeNode, output: &mut HashMap<u64, ImageHandle>) {
+fn collect_leaf_layers(node: &RenderTreeNode, output: &mut HashSet<u64>) {
     match node {
         RenderTreeNode::Leaf {
             layer_id,
-            image_handle,
             ..
         } => {
-            output.insert(*layer_id, *image_handle);
+            output.insert(*layer_id);
         }
         RenderTreeNode::Group { children, .. } => {
             for child in children.iter() {
-                collect_leaf_images(child, output);
+                collect_leaf_layers(child, output);
             }
         }
     }
@@ -69,30 +68,25 @@ fn mark_dirty_from_tile_history(
     let Some(render_tree) = render_tree else {
         return;
     };
-    let mut leaf_images = HashMap::new();
-    collect_leaf_images(render_tree, &mut leaf_images);
+    let mut live_layers = HashSet::new();
+    collect_leaf_layers(render_tree, &mut live_layers);
 
-    for (layer_id, image_handle) in leaf_images.iter() {
+    for layer_id in live_layers.iter() {
         let entry =
             frame_state
                 .layer_dirty_versions
                 .entry(*layer_id)
-                .or_insert(crate::LayerDirtyVersion {
-                    image_handle: *image_handle,
-                    last_version: 0,
-                });
-        if entry.image_handle != *image_handle {
-            entry.image_handle = *image_handle;
-            entry.last_version = 0;
-            frame_state.dirty_state_store.mark_layer_full(*layer_id);
-        }
-        let Some(result) = resolver.image_dirty_since(*image_handle, entry.last_version) else {
+                .or_insert(crate::LayerDirtyVersion { last_version: 0 });
+        let Some(result) = resolver.layer_dirty_since(*layer_id, entry.last_version) else {
             continue;
         };
         match result {
             DirtySinceResult::UpToDate => continue,
             DirtySinceResult::HistoryTruncated => {
                 frame_state.dirty_state_store.mark_layer_full(*layer_id);
+                if let Some(layer_version) = resolver.layer_version(*layer_id) {
+                    entry.last_version = layer_version;
+                }
                 continue;
             }
             DirtySinceResult::HasChanges(query) => {
@@ -125,7 +119,7 @@ fn mark_dirty_from_tile_history(
 
     frame_state
         .layer_dirty_versions
-        .retain(|layer_id, _| leaf_images.contains_key(layer_id));
+        .retain(|layer_id, _| live_layers.contains(layer_id));
 }
 
 fn split_node_dirty_tiles(
@@ -900,5 +894,123 @@ impl Renderer {
         if latest_report.is_some() {
             self.gpu_state.gpu_timing.latest_report = latest_report;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use render_protocol::{BlendMode, ImageHandle, RenderNodeSnapshot};
+    use slotmap::KeyData;
+    use tiles::{TileDirtyBitset, TileDirtyQuery};
+
+    use super::mark_dirty_from_tile_history;
+    use crate::{
+        DirtyRectMask, DirtyStateStore, FrameState, FrameSync, LayerDirtyVersion,
+        RenderDataResolver, TILE_SIZE,
+    };
+
+    #[derive(Default)]
+    struct HistoryResolver {
+        dirty_by_layer: HashMap<u64, tiles::DirtySinceResult>,
+        layer_versions: HashMap<u64, u64>,
+    }
+
+    impl RenderDataResolver for HistoryResolver {
+        fn document_size(&self) -> (u32, u32) {
+            (TILE_SIZE * 4, TILE_SIZE * 4)
+        }
+
+        fn visit_image_tiles(
+            &self,
+            _image_handle: ImageHandle,
+            _visitor: &mut dyn FnMut(u32, u32, tiles::TileKey),
+        ) {
+        }
+
+        fn resolve_tile_address(&self, _tile_key: tiles::TileKey) -> Option<tiles::TileAddress> {
+            None
+        }
+
+        fn layer_dirty_since(
+            &self,
+            layer_id: u64,
+            _since_version: u64,
+        ) -> Option<tiles::DirtySinceResult> {
+            self.dirty_by_layer.get(&layer_id).cloned()
+        }
+
+        fn layer_version(&self, layer_id: u64) -> Option<u64> {
+            self.layer_versions.get(&layer_id).copied()
+        }
+    }
+
+    #[test]
+    fn merge_handle_swap_should_keep_incremental_dirty_from_history() {
+        let layer_id = 7u64;
+        let render_tree = RenderNodeSnapshot::Group {
+            group_id: 0,
+            blend: BlendMode::Normal,
+            children: vec![RenderNodeSnapshot::Leaf {
+                layer_id,
+                blend: BlendMode::Normal,
+                image_handle: ImageHandle::from(KeyData::from_ffi(12)),
+            }]
+            .into_boxed_slice()
+            .into(),
+        };
+
+        let mut dirty_tiles = TileDirtyBitset::new(4, 4).expect("create dirty bitset");
+        dirty_tiles.set(1, 0).expect("set dirty tile");
+        dirty_tiles.set(2, 1).expect("set dirty tile");
+        let resolver = HistoryResolver {
+            dirty_by_layer: HashMap::from([(
+                layer_id,
+                tiles::DirtySinceResult::HasChanges(TileDirtyQuery {
+                    latest_version: 99,
+                    dirty_tiles,
+                }),
+            )]),
+            layer_versions: HashMap::from([(layer_id, 99)]),
+        };
+
+        let mut frame_state = FrameState {
+            bound_tree: None,
+            cached_render_tree: None,
+            render_tree_dirty: false,
+            dirty_state_store: DirtyStateStore::default(),
+            frame_sync: FrameSync::default(),
+            layer_dirty_versions: HashMap::from([(
+                layer_id,
+                LayerDirtyVersion { last_version: 98 },
+            )]),
+        };
+
+        mark_dirty_from_tile_history(&mut frame_state, &resolver, Some(&render_tree));
+        let masks = frame_state
+            .dirty_state_store
+            .resolve_layer_dirty_rect_masks(&resolver);
+        let Some(mask) = masks.get(&layer_id) else {
+            panic!("expected layer dirty mask after merge");
+        };
+
+        let DirtyRectMask::Rects(rects) = mask else {
+            panic!("expected partial dirty from merge buffer tiles, got {mask:?}");
+        };
+        let tiles = rects
+            .iter()
+            .map(|rect| {
+                (
+                    u32::try_from(rect.min_x).expect("min x non-negative") / TILE_SIZE,
+                    u32::try_from(rect.min_y).expect("min y non-negative") / TILE_SIZE,
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(tiles, HashSet::from([(1, 0), (2, 1)]));
+        assert!(matches!(
+            frame_state.layer_dirty_versions.get(&layer_id),
+            Some(entry) if entry.last_version == 99
+        ));
     }
 }

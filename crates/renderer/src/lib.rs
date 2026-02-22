@@ -212,11 +212,9 @@ pub trait RenderDataResolver {
 
     fn resolve_tile_address(&self, tile_key: TileKey) -> Option<TileAddress>;
 
-    fn image_dirty_since(
-        &self,
-        image_handle: ImageHandle,
-        since_version: u64,
-    ) -> Option<DirtySinceResult>;
+    fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult>;
+
+    fn layer_version(&self, layer_id: u64) -> Option<u64>;
 }
 
 pub struct ViewOpSender(mpsc::Sender<RenderOp>);
@@ -252,7 +250,6 @@ struct CacheState {
 
 #[derive(Debug, Clone)]
 struct LayerDirtyVersion {
-    image_handle: ImageHandle,
     last_version: u64,
 }
 

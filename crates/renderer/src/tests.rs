@@ -280,11 +280,15 @@ impl RenderDataResolver for DirtyPropagationResolver {
         None
     }
 
-    fn image_dirty_since(
+    fn layer_dirty_since(
         &self,
-        _image_handle: ImageHandle,
+        _layer_id: u64,
         _since_version: u64,
     ) -> Option<tiles::DirtySinceResult> {
+        None
+    }
+
+    fn layer_version(&self, _layer_id: u64) -> Option<u64> {
         None
     }
 }
@@ -400,11 +404,15 @@ impl RenderDataResolver for FakeResolver {
         }
     }
 
-    fn image_dirty_since(
+    fn layer_dirty_since(
         &self,
-        _image_handle: ImageHandle,
+        _layer_id: u64,
         _since_version: u64,
     ) -> Option<tiles::DirtySinceResult> {
+        None
+    }
+
+    fn layer_version(&self, _layer_id: u64) -> Option<u64> {
         None
     }
 }

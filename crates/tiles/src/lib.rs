@@ -781,7 +781,8 @@ impl TileImage {
             return DirtySinceResult::UpToDate;
         }
         if let Some(oldest) = self.dirty_history.first() {
-            if since_version < oldest.version {
+            let oldest_queryable = oldest.version.saturating_sub(1);
+            if since_version < oldest_queryable {
                 return DirtySinceResult::HistoryTruncated;
             }
         }

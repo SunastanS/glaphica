@@ -90,17 +90,20 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         self.atlas_store.resolve(tile_key)
     }
 
-    fn image_dirty_since(
-        &self,
-        image_handle: ImageHandle,
-        since_version: u64,
-    ) -> Option<DirtySinceResult> {
+    fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult> {
         let document = self
             .document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
-        let image = document.image(image_handle)?;
-        Some(image.dirty_since(since_version))
+        document.layer_dirty_since(layer_id, since_version)
+    }
+
+    fn layer_version(&self, layer_id: u64) -> Option<u64> {
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        document.layer_version(layer_id)
     }
 }
 
@@ -534,7 +537,7 @@ impl GpuState {
                     stroke_session_id,
                     layer_id,
                     new_key_mappings,
-                    dirty_tiles,
+                    dirty_tiles: _,
                     ..
                 } => {
                     let document_apply_result: Result<(), MergeBridgeError> = (|| {
