@@ -12,7 +12,7 @@ use render_protocol::{
     BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin,
     BufferTileCoordinate, ReferenceSetUpsert,
 };
-use tiles::{DirtySinceResult, TILE_SIZE, TileAtlasLayout, TileKey};
+use tiles::{DirtySinceResult, TILE_SIZE, TILE_STRIDE, TileAddress, TileAtlasLayout, TileKey};
 
 use crate::{
     BrushControlError, BrushRenderEnqueueError, CompositeEmission, CompositeNodePlan,
@@ -299,6 +299,50 @@ fn collect_composite_plan_perf_stats(node: &CompositeNodePlan, stats: &mut Compo
 
 static FRAME_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 static EXECUTE_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+const DEFAULT_BRUSH_RADIUS_PIXELS: i32 = 3;
+
+fn assert_brush_dab_write_footprint_in_slot(
+    pixel_x: u32,
+    pixel_y: u32,
+    tile_address: TileAddress,
+    atlas_layout: TileAtlasLayout,
+) {
+    let radius = i64::from(DEFAULT_BRUSH_RADIUS_PIXELS);
+    if radius < 0 {
+        panic!("brush radius must be non-negative");
+    }
+    let (slot_origin_x, slot_origin_y) = tile_address.atlas_slot_origin_pixels_in(atlas_layout);
+    let slot_min_x = i64::from(slot_origin_x);
+    let slot_min_y = i64::from(slot_origin_y);
+    let slot_max_x = slot_min_x + i64::from(TILE_STRIDE) - 1;
+    let slot_max_y = slot_min_y + i64::from(TILE_STRIDE) - 1;
+    let write_min_x = i64::from(pixel_x) - radius;
+    let write_max_x = i64::from(pixel_x) + radius;
+    let write_min_y = i64::from(pixel_y) - radius;
+    let write_max_y = i64::from(pixel_y) + radius;
+    if (write_min_x < slot_min_x
+        || write_max_x > slot_max_x
+        || write_min_y < slot_min_y
+        || write_max_y > slot_max_y)
+        && crate::renderer_brush_trace_enabled()
+    {
+        eprintln!(
+            "[brush_trace] brush_dab_footprint_clipped radius={} pixel=({}, {}) write_bounds=({}, {})-({}, {}) slot_bounds=({}, {})-({}, {}) tile_address={:?}",
+            DEFAULT_BRUSH_RADIUS_PIXELS,
+            pixel_x,
+            pixel_y,
+            write_min_x,
+            write_min_y,
+            write_max_x,
+            write_max_y,
+            slot_min_x,
+            slot_min_y,
+            slot_max_x,
+            slot_max_y,
+            tile_address
+        );
+    }
+}
 
 impl Renderer {
     pub fn bind_brush_buffer_tiles(
@@ -854,7 +898,7 @@ impl Renderer {
                 dab_count: u32::try_from(chunk.dab_count()).expect("dab count exceeds u32"),
                 texture_width: atlas_layout.atlas_width,
                 texture_height: atlas_layout.atlas_height,
-                _padding0: 0,
+                tile_stride: TILE_STRIDE,
             }),
         );
         if brush_encoder.is_none() {
@@ -941,6 +985,7 @@ impl Renderer {
         let pixel_y = origin_y
             .checked_add(u32::try_from(local_y).expect("local y negative"))
             .expect("brush buffer pixel y overflow");
+        assert_brush_dab_write_footprint_in_slot(pixel_x, pixel_y, tile_address, atlas_layout);
 
         crate::BrushDabWriteGpu {
             pixel_x,
@@ -1304,9 +1349,11 @@ mod tests {
 
     use render_protocol::{BlendMode, ImageHandle, RenderNodeSnapshot};
     use slotmap::KeyData;
-    use tiles::{TileDirtyBitset, TileDirtyQuery};
+    use tiles::{
+        TILE_GUTTER, TILE_STRIDE, TileAddress, TileAtlasLayout, TileDirtyBitset, TileDirtyQuery,
+    };
 
-    use super::mark_dirty_from_tile_history;
+    use super::{assert_brush_dab_write_footprint_in_slot, mark_dirty_from_tile_history};
     use crate::{
         DirtyRectMask, DirtyStateStore, FrameState, FrameSync, LayerDirtyVersion,
         RenderDataResolver, TILE_SIZE,
@@ -1413,5 +1460,41 @@ mod tests {
             frame_state.layer_dirty_versions.get(&layer_id),
             Some(entry) if entry.last_version == 99
         ));
+    }
+
+    #[test]
+    fn brush_dab_footprint_assert_allows_center_write_within_slot() {
+        let atlas_layout = TileAtlasLayout {
+            tiles_per_row: 1,
+            tiles_per_column: 1,
+            atlas_width: TILE_STRIDE,
+            atlas_height: TILE_STRIDE,
+        };
+        let tile_address = TileAddress {
+            atlas_layer: 0,
+            tile_index: 0,
+        };
+        let center = TILE_STRIDE / 2;
+        assert_brush_dab_write_footprint_in_slot(center, center, tile_address, atlas_layout);
+    }
+
+    #[test]
+    fn brush_dab_footprint_assert_allows_content_edge_for_clipped_write() {
+        let atlas_layout = TileAtlasLayout {
+            tiles_per_row: 1,
+            tiles_per_column: 1,
+            atlas_width: TILE_STRIDE,
+            atlas_height: TILE_STRIDE,
+        };
+        let tile_address = TileAddress {
+            atlas_layer: 0,
+            tile_index: 0,
+        };
+        assert_brush_dab_write_footprint_in_slot(
+            TILE_GUTTER,
+            TILE_GUTTER,
+            tile_address,
+            atlas_layout,
+        );
     }
 }

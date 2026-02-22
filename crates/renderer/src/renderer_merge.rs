@@ -978,6 +978,20 @@ impl Renderer {
             TILE_STRIDE as f32 / layer_atlas_layout.atlas_width as f32,
             TILE_STRIDE as f32 / layer_atlas_layout.atlas_height as f32,
         ];
+        if gpu_merge_ops.len() > self.gpu_state.merge_uniform_capacity {
+            panic!(
+                "merge op count {} exceeds uniform capacity {}",
+                gpu_merge_ops.len(),
+                self.gpu_state.merge_uniform_capacity
+            );
+        }
+        let merge_uniform_size = std::mem::size_of::<MergeUniformGpu>() as u64;
+        let merge_uniform_stride = self.gpu_state.merge_uniform_stride;
+        let merge_uniform_bytes_len = merge_uniform_stride
+            .checked_mul(gpu_merge_ops.len() as u64)
+            .expect("merge uniform upload size overflow");
+        let mut merge_uniform_bytes = vec![0u8; merge_uniform_bytes_len as usize];
+
         for (op_index, submission_gpu_op) in gpu_merge_ops.iter().enumerate() {
             let receipt_id = submission_gpu_op.receipt_id;
             let gpu_merge_op = submission_gpu_op.gpu_merge_op;
@@ -1064,11 +1078,15 @@ impl Renderer {
                 blend_mode: blend_mode_to_u32(gpu_merge_op.blend_mode),
                 _padding0: [0, 0, 0],
             };
-            self.gpu_state.queue.write_buffer(
-                &self.gpu_state.merge_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&merge_uniform),
-            );
+            let uniform_offset = merge_uniform_stride
+                .checked_mul(op_index as u64)
+                .expect("merge uniform offset overflow");
+            let uniform_bytes = bytemuck::bytes_of(&merge_uniform);
+            let start = uniform_offset as usize;
+            let end = start
+                .checked_add(merge_uniform_size as usize)
+                .expect("merge uniform byte range overflow");
+            merge_uniform_bytes[start..end].copy_from_slice(uniform_bytes);
             if crate::renderer_brush_trace_enabled() && op_index < 6 {
                 eprintln!(
                     "[brush_trace] merge_encode_op submission_id={} op_index={} op_trace_id={} base={:?} stroke={:?} output={:?}",
@@ -1080,14 +1098,26 @@ impl Renderer {
                     gpu_merge_op.output_tile,
                 );
             }
+        }
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.merge_uniform_buffer,
+            0,
+            &merge_uniform_bytes,
+        );
+        let mut encoder =
+            self.gpu_state
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("renderer.merge_submission"),
+                });
 
-            let mut encoder =
-                self.gpu_state
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("renderer.merge_submission.op"),
-                    });
-
+        for (op_index, submission_gpu_op) in gpu_merge_ops.iter().enumerate() {
+            let gpu_merge_op = submission_gpu_op.gpu_merge_op;
+            let uniform_offset = merge_uniform_stride
+                .checked_mul(op_index as u64)
+                .expect("merge uniform offset overflow");
+            let uniform_offset_u32 = u32::try_from(uniform_offset)
+                .expect("merge uniform offset exceeds u32 dynamic offset range");
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("renderer.merge_submission.pass"),
@@ -1106,7 +1136,11 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 render_pass.set_pipeline(&self.gpu_state.merge_pipeline);
-                render_pass.set_bind_group(0, &self.gpu_state.merge_bind_group, &[]);
+                render_pass.set_bind_group(
+                    0,
+                    &self.gpu_state.merge_bind_group,
+                    &[uniform_offset_u32],
+                );
                 render_pass.draw(0..3, 0..1);
             }
 
@@ -1125,8 +1159,8 @@ impl Renderer {
                 },
                 merge_output_copy_extent(),
             );
-            self.gpu_state.queue.submit(Some(encoder.finish()));
         }
+        self.gpu_state.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 }

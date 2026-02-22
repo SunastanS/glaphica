@@ -367,6 +367,8 @@ struct GpuState {
     brush_buffer_atlas: GenericR32FloatTileAtlasGpuArray,
     merge_bind_group: wgpu::BindGroup,
     merge_uniform_buffer: wgpu::Buffer,
+    merge_uniform_stride: u64,
+    merge_uniform_capacity: usize,
     merge_pipeline: wgpu::RenderPipeline,
     _merge_scratch_texture: wgpu::Texture,
     merge_scratch_view: wgpu::TextureView,
@@ -389,7 +391,7 @@ struct BrushDabWriteMetaGpu {
     dab_count: u32,
     texture_width: u32,
     texture_height: u32,
-    _padding0: u32,
+    tile_stride: u32,
 }
 
 struct DataState {

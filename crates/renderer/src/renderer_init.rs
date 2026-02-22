@@ -4,6 +4,7 @@
 //! bind groups, and per-frame buffers.
 
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::sync::{Arc, mpsc};
 
 use render_protocol::TransformMatrix4x4;
@@ -381,9 +382,16 @@ impl Renderer {
         if crate::renderer_brush_trace_enabled() {
             eprintln!("[brush_trace] renderer.brush_dab_write.pipeline validated successfully");
         }
+        let merge_uniform_size =
+            std::mem::size_of::<crate::renderer_merge::MergeUniformGpu>() as u64;
+        let merge_uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let merge_uniform_stride = merge_uniform_size.next_multiple_of(merge_uniform_alignment);
+        const MERGE_UNIFORM_CAPACITY: usize = 65_535;
         let merge_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("renderer.merge.uniform"),
-            size: std::mem::size_of::<crate::renderer_merge::MergeUniformGpu>() as u64,
+            size: merge_uniform_stride
+                .checked_mul(MERGE_UNIFORM_CAPACITY as u64)
+                .expect("merge uniform buffer size overflow"),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -447,8 +455,11 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                            has_dynamic_offset: true,
+                            min_binding_size: Some(
+                                NonZeroU64::new(merge_uniform_size)
+                                    .expect("merge uniform size must be non-zero"),
+                            ),
                         },
                         count: None,
                     },
@@ -476,7 +487,14 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: merge_uniform_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &merge_uniform_buffer,
+                        offset: 0,
+                        size: Some(
+                            NonZeroU64::new(merge_uniform_size)
+                                .expect("merge uniform size must be non-zero"),
+                        ),
+                    }),
                 },
             ],
         });
@@ -569,6 +587,8 @@ impl Renderer {
                 brush_buffer_atlas,
                 merge_bind_group,
                 merge_uniform_buffer,
+                merge_uniform_stride,
+                merge_uniform_capacity: MERGE_UNIFORM_CAPACITY,
                 merge_pipeline,
                 _merge_scratch_texture: merge_scratch_texture,
                 merge_scratch_view,
