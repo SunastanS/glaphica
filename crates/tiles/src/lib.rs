@@ -280,6 +280,7 @@ pub enum TileAtlasCreateError {
     MissingStorageBindingUsage,
     MaxLayersZero,
     AtlasTileGridZero,
+    AtlasTileGridNotSquare,
     AtlasTileGridTooLarge,
     MaxLayersExceedsDeviceLimit,
     AtlasSizeExceedsDeviceLimit,
@@ -307,6 +308,12 @@ impl fmt::Display for TileAtlasCreateError {
                 write!(
                     formatter,
                     "tile atlas tiles_per_row/tiles_per_column must be at least 1"
+                )
+            }
+            TileAtlasCreateError::AtlasTileGridNotSquare => {
+                write!(
+                    formatter,
+                    "tile atlas tiles_per_row must match tiles_per_column"
                 )
             }
             TileAtlasCreateError::AtlasTileGridTooLarge => {
@@ -939,6 +946,8 @@ pub fn apply_tile_key_mappings(
 #[derive(Debug, Default)]
 pub struct BrushBufferTileRegistry {
     tiles_by_stroke: HashMap<u64, HashMap<BufferTileCoordinate, TileKey>>,
+    retained_stroke_by_retain_id: HashMap<u64, u64>,
+    retained_retain_id_by_stroke: HashMap<u64, u64>,
 }
 
 impl BrushBufferTileRegistry {
@@ -948,6 +957,15 @@ impl BrushBufferTileRegistry {
         tiles: impl IntoIterator<Item = BufferTileCoordinate>,
         atlas_store: &TileAtlasStore,
     ) -> Result<(), TileAllocError> {
+        if self
+            .retained_retain_id_by_stroke
+            .contains_key(&stroke_session_id)
+        {
+            panic!(
+                "cannot allocate brush buffer tiles for retained stroke {}",
+                stroke_session_id
+            );
+        }
         let stroke_tiles = self.tiles_by_stroke.entry(stroke_session_id).or_default();
         for tile_coordinate in tiles {
             if stroke_tiles.contains_key(&tile_coordinate) {
@@ -990,7 +1008,137 @@ impl BrushBufferTileRegistry {
         }
         if stroke_tiles.is_empty() {
             self.tiles_by_stroke.remove(&stroke_session_id);
+            if let Some(retain_id) = self
+                .retained_retain_id_by_stroke
+                .remove(&stroke_session_id)
+            {
+                self.retained_stroke_by_retain_id.remove(&retain_id);
+            }
         }
+    }
+
+    pub fn retain_stroke_tiles(
+        &mut self,
+        stroke_session_id: u64,
+        atlas_store: &TileAtlasStore,
+    ) -> u64 {
+        let stroke_tiles = self
+            .tiles_by_stroke
+            .get(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "retain requested for unknown stroke {}",
+                    stroke_session_id
+                )
+            });
+        if self
+            .retained_retain_id_by_stroke
+            .contains_key(&stroke_session_id)
+        {
+            panic!(
+                "retain requested for stroke {} with existing retained batch",
+                stroke_session_id
+            );
+        }
+        if stroke_tiles.is_empty() {
+            panic!(
+                "retain requested for stroke {} without allocated tiles",
+                stroke_session_id
+            );
+        }
+
+        let keys = stroke_tiles.values().copied().collect::<Vec<_>>();
+        let retain_id = atlas_store.retain_keys_new_batch(&keys);
+        if self
+            .retained_stroke_by_retain_id
+            .insert(retain_id, stroke_session_id)
+            .is_some()
+        {
+            panic!(
+                "retain batch id {} duplicated while retaining stroke {}",
+                retain_id, stroke_session_id
+            );
+        }
+        let previous = self
+            .retained_retain_id_by_stroke
+            .insert(stroke_session_id, retain_id);
+        if previous.is_some() {
+            panic!(
+                "retain id mapping duplicated for stroke {}",
+                stroke_session_id
+            );
+        }
+        retain_id
+    }
+
+    pub fn release_stroke_on_merge_failed(
+        &mut self,
+        stroke_session_id: u64,
+        atlas_store: &TileAtlasStore,
+    ) {
+        let stroke_tiles = self
+            .tiles_by_stroke
+            .remove(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "merge-failed release requested for unknown stroke {}",
+                    stroke_session_id
+                )
+            });
+        if let Some(retain_id) = self
+            .retained_retain_id_by_stroke
+            .remove(&stroke_session_id)
+        {
+            self.retained_stroke_by_retain_id.remove(&retain_id);
+        }
+        for (tile_coordinate, tile_key) in stroke_tiles {
+            let released = atlas_store.release(tile_key);
+            if !released {
+                panic!(
+                    "failed to release merge-failed brush tile for stroke {} at ({}, {})",
+                    stroke_session_id, tile_coordinate.tile_x, tile_coordinate.tile_y
+                );
+            }
+        }
+    }
+
+    pub fn apply_retained_eviction(
+        &mut self,
+        retain_id: u64,
+        evicted_keys: &[TileKey],
+    ) -> Option<u64> {
+        let stroke_session_id = self.retained_stroke_by_retain_id.remove(&retain_id)?;
+        let removed_retain_id = self
+            .retained_retain_id_by_stroke
+            .remove(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing reverse retained mapping for stroke {} and retain batch {}",
+                    stroke_session_id, retain_id
+                )
+            });
+        if removed_retain_id != retain_id {
+            panic!(
+                "retained mapping mismatch for stroke {}: expected retain {}, got {}",
+                stroke_session_id, retain_id, removed_retain_id
+            );
+        }
+
+        let evicted = evicted_keys.iter().copied().collect::<HashSet<_>>();
+        let stroke_tiles = self
+            .tiles_by_stroke
+            .get_mut(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing stroke mapping while applying retained eviction: stroke {} retain {}",
+                    stroke_session_id, retain_id
+                )
+            });
+        stroke_tiles.retain(|_, tile_key| !evicted.contains(tile_key));
+        if stroke_tiles.is_empty() {
+            self.tiles_by_stroke.remove(&stroke_session_id);
+        }
+        Some(stroke_session_id)
     }
 
     pub fn visit_tiles(
@@ -1017,7 +1165,6 @@ impl BrushBufferTileRegistry {
 pub(crate) use atlas::{rgba8_tile_len, tile_origin};
 
 mod atlas;
-mod lifecycle;
 mod merge_callback;
 mod merge_submission;
 
@@ -1028,7 +1175,6 @@ pub use atlas::{
     RuntimeGenericTileAtlasConfig, RuntimeGenericTileAtlasGpuArray, RuntimeGenericTileAtlasStore,
     TileAtlasConfig, TileAtlasGpuArray, TileAtlasStore, TilePayloadKind,
 };
-pub use lifecycle::{BufferTileLifecycle, TileLifecycleManager, TileReleaseBatch};
 pub use merge_callback::{
     TileMergeAckFailure, TileMergeBatchAck, TileMergeCompletionCallback, TileMergeCompletionNotice,
     TileMergeCompletionNoticeId, TileMergeTerminalUpdate,

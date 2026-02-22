@@ -1,15 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use driver::FramedSampleChunk;
 use render_protocol::{
-    BrushBufferMerge, BrushBufferTileAllocate, BrushBufferTileRelease, BrushDabChunkF32, BrushId,
-    BrushRenderCommand, BrushStrokeBegin, BrushStrokeEnd, BufferTileCoordinate, LayerId,
-    ProgramRevision, ReferenceSetId,
+    BrushBufferMerge, BrushBufferTileAllocate, BrushDabChunkF32, BrushId, BrushRenderCommand,
+    BrushStrokeBegin, BrushStrokeEnd, BufferTileCoordinate, LayerId, ProgramRevision,
+    ReferenceSetId,
 };
-use tiles::{BufferTileLifecycle, TileLifecycleManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrushExecutionQueueCreateError {
@@ -191,9 +190,8 @@ fn brush_execution_loop(
     mut command_producer: rtrb::Producer<BrushRenderCommand>,
 ) {
     const IDLE_SLEEP_DURATION: Duration = Duration::from_millis(1);
-    const MERGE_APPLIED_RELEASE_RETAIN_DURATION: Duration = Duration::from_millis(250);
 
-    let mut buffer_tile_lifecycle = BufferTileLifecycle::<u64, BufferTileCoordinate>::new();
+    let mut allocated_tiles_by_stroke = HashMap::<u64, HashSet<BufferTileCoordinate>>::new();
     let mut merge_feedback_pending_strokes = HashSet::<u64>::new();
     while !stop_requested.load(Ordering::Acquire) {
         while let Ok(feedback) = feedback_consumer.pop() {
@@ -211,7 +209,7 @@ fn brush_execution_loop(
                     stroke_session_id
                 );
             }
-            buffer_tile_lifecycle.forget_owner(stroke_session_id);
+            allocated_tiles_by_stroke.remove(&stroke_session_id);
             match feedback {
                 BrushExecutionMergeFeedback::MergeApplied { .. } => {
                     continue;
@@ -254,8 +252,11 @@ fn brush_execution_loop(
                 config.max_affected_radius,
                 config.buffer_tile_size,
             );
-            let newly_affected_tiles = buffer_tile_lifecycle
-                .record_allocated_batch(chunk.stroke_session_id, affected_tiles);
+            let newly_affected_tiles = collect_newly_affected_tiles(
+                &mut allocated_tiles_by_stroke,
+                chunk.stroke_session_id,
+                affected_tiles,
+            );
             if !newly_affected_tiles.is_empty() {
                 push_command(
                     &mut command_producer,
@@ -301,11 +302,6 @@ fn brush_execution_loop(
             std::thread::sleep(IDLE_SLEEP_DURATION);
         }
     }
-
-    buffer_tile_lifecycle.begin_shutdown();
-    for batch in buffer_tile_lifecycle.force_release_all() {
-        push_release_command(&mut command_producer, batch.owner, batch.tiles);
-    }
 }
 
 fn emit_merge_for_stroke(
@@ -328,21 +324,6 @@ fn emit_merge_for_stroke(
     }
 }
 
-fn push_release_command(
-    command_producer: &mut rtrb::Producer<BrushRenderCommand>,
-    stroke_session_id: u64,
-    tiles: Vec<BufferTileCoordinate>,
-) {
-    push_command(
-        command_producer,
-        BrushRenderCommand::ReleaseBufferTiles(BrushBufferTileRelease {
-            stroke_session_id,
-            tiles,
-        }),
-        "release tiles",
-    );
-}
-
 fn push_command(
     command_producer: &mut rtrb::Producer<BrushRenderCommand>,
     command: BrushRenderCommand,
@@ -359,6 +340,10 @@ fn collect_affected_tiles(
     radius: f32,
     tile_size: u32,
 ) -> Vec<BufferTileCoordinate> {
+    debug_assert!(
+        radius.is_finite() && radius >= 0.0,
+        "radius must be finite and non-negative"
+    );
     let mut affected_tiles = Vec::new();
     let mut seen_tiles = HashSet::new();
     let tile_size_f32 = tile_size as f32;
@@ -390,6 +375,23 @@ fn tile_index_for_canvas(value: f32, tile_size: f32) -> i32 {
         panic!("tile index out of i32 range");
     }
     tile_index as i32
+}
+
+fn collect_newly_affected_tiles(
+    allocated_tiles_by_stroke: &mut HashMap<u64, HashSet<BufferTileCoordinate>>,
+    stroke_session_id: u64,
+    affected_tiles: Vec<BufferTileCoordinate>,
+) -> Vec<BufferTileCoordinate> {
+    let allocated_tiles = allocated_tiles_by_stroke
+        .entry(stroke_session_id)
+        .or_default();
+    let mut newly_affected_tiles = Vec::new();
+    for tile in affected_tiles {
+        if allocated_tiles.insert(tile) {
+            newly_affected_tiles.push(tile);
+        }
+    }
+    newly_affected_tiles
 }
 
 #[cfg(test)]
@@ -663,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_drop_releases_tiles_for_unfinished_stroke() {
+    fn runtime_drop_does_not_emit_extra_commands_for_unfinished_stroke() {
         let (runtime, mut sender, mut _feedback_sender, mut receiver) =
             BrushExecutionRuntime::start(
                 BrushExecutionConfig {
@@ -689,44 +691,39 @@ mod tests {
             .expect("push sample chunk");
 
         let start = std::time::Instant::now();
-        let mut observed_allocate = false;
+        let mut observed_push_dab = false;
         while start.elapsed() < std::time::Duration::from_secs(1) {
             if let Some(command) = receiver.pop_command() {
                 if matches!(
                     command,
-                    BrushRenderCommand::AllocateBufferTiles(BrushBufferTileAllocate {
+                    BrushRenderCommand::PushDabChunkF32(BrushDabChunkF32 {
                         stroke_session_id: 300,
                         ..
                     })
                 ) {
-                    observed_allocate = true;
-                    break;
-                }
-            }
-        }
-        assert!(observed_allocate, "must allocate tiles before runtime drop");
-
-        drop(runtime);
-
-        let release_wait_start = std::time::Instant::now();
-        let mut observed_release = false;
-        while release_wait_start.elapsed() < std::time::Duration::from_secs(1) {
-            if let Some(command) = receiver.pop_command() {
-                if matches!(
-                    command,
-                    BrushRenderCommand::ReleaseBufferTiles(BrushBufferTileRelease {
-                        stroke_session_id: 300,
-                        ..
-                    })
-                ) {
-                    observed_release = true;
+                    observed_push_dab = true;
                     break;
                 }
             }
         }
         assert!(
-            observed_release,
-            "runtime drop must force release unfinished stroke tiles"
+            observed_push_dab,
+            "must observe stroke commands before runtime drop"
+        );
+
+        drop(runtime);
+
+        let release_wait_start = std::time::Instant::now();
+        let mut observed_post_drop_command = false;
+        while release_wait_start.elapsed() < std::time::Duration::from_secs(1) {
+            if receiver.pop_command().is_some() {
+                observed_post_drop_command = true;
+                break;
+            }
+        }
+        assert!(
+            !observed_post_drop_command,
+            "runtime drop must not emit any extra commands for unfinished stroke"
         );
     }
 }

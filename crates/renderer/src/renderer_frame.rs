@@ -287,7 +287,6 @@ impl Renderer {
                     });
                 }
             }
-            BrushRenderCommand::ReleaseBufferTiles(_release) => {}
             BrushRenderCommand::PushDabChunkF32(chunk) => {
                 if !self
                     .brush_work_state
@@ -527,9 +526,6 @@ impl Renderer {
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
                 BrushRenderCommand::AllocateBufferTiles(_allocate) => {
-                    let _ = self.brush_work_state.pending_commands.pop_front();
-                }
-                BrushRenderCommand::ReleaseBufferTiles(_release) => {
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
                 BrushRenderCommand::EndStroke(end) => {

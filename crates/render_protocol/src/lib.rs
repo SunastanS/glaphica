@@ -152,12 +152,6 @@ pub struct BrushBufferTileAllocate {
     pub tiles: Vec<BufferTileCoordinate>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BrushBufferTileRelease {
-    pub stroke_session_id: StrokeSessionId,
-    pub tiles: Vec<BufferTileCoordinate>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrokeExecutionReceiptId(pub u64);
 
@@ -275,7 +269,6 @@ pub enum BrushControlAck {
 pub enum BrushRenderCommand {
     BeginStroke(BrushStrokeBegin),
     AllocateBufferTiles(BrushBufferTileAllocate),
-    ReleaseBufferTiles(BrushBufferTileRelease),
     PushDabChunkF32(BrushDabChunkF32),
     MergeBuffer(BrushBufferMerge),
     EndStroke(BrushStrokeEnd),

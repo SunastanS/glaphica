@@ -1185,12 +1185,12 @@ fn tile_address_helpers_match_tile_origin_math() {
 }
 
 #[test]
-fn tile_address_layout_aware_helpers_support_rectangular_atlas() {
+fn tile_address_layout_aware_helpers_support_square_atlas() {
     let layout = TileAtlasLayout {
         tiles_per_row: 8,
-        tiles_per_column: 4,
+        tiles_per_column: 8,
         atlas_width: 8 * TILE_STRIDE,
-        atlas_height: 4 * TILE_STRIDE,
+        atlas_height: 8 * TILE_STRIDE,
     };
     let address = TileAddress {
         atlas_layer: 0,
@@ -1273,7 +1273,7 @@ fn gc_eviction_batches_are_reported_via_store_drain() {
         TileAtlasConfig {
             max_layers: 1,
             tiles_per_row: 2,
-            tiles_per_column: 1,
+            tiles_per_column: 2,
             ..TileAtlasConfig::default()
         },
     );
@@ -1283,6 +1283,11 @@ fn gc_eviction_batches_are_reported_via_store_drain() {
     let retain_id = store.retain_keys_new_batch(&[key0, key1]);
 
     assert!(store.drain_evicted_retain_batches().is_empty());
+
+    let fill0 = store.allocate().expect("allocate fill0");
+    let fill1 = store.allocate().expect("allocate fill1");
+    assert!(store.is_allocated(fill0));
+    assert!(store.is_allocated(fill1));
 
     let replacement = store.allocate().expect("allocate with gc retain eviction");
     assert!(store.is_allocated(replacement));
@@ -1296,4 +1301,82 @@ fn gc_eviction_batches_are_reported_via_store_drain() {
     assert!(evicted[0].keys.contains(&key0));
     assert!(evicted[0].keys.contains(&key1));
     assert!(store.drain_evicted_retain_batches().is_empty());
+}
+
+#[test]
+fn brush_buffer_registry_releases_tiles_on_merge_failed() {
+    let (device, _queue) = create_device_queue();
+    let (store, _gpu) = create_store(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            ..TileAtlasConfig::default()
+        },
+    );
+    let mut registry = BrushBufferTileRegistry::default();
+
+    registry
+        .allocate_tiles(
+            700,
+            [BufferTileCoordinate {
+                tile_x: 0,
+                tile_y: 0,
+            }],
+            &store,
+        )
+        .expect("allocate brush buffer tile");
+
+    let mut retained_keys = Vec::new();
+    registry.visit_tiles(700, |_, tile_key| retained_keys.push(tile_key));
+    assert_eq!(retained_keys.len(), 1);
+    assert!(store.is_allocated(retained_keys[0]));
+
+    registry.release_stroke_on_merge_failed(700, &store);
+    assert!(!store.is_allocated(retained_keys[0]));
+}
+
+#[test]
+fn brush_buffer_registry_applies_retained_eviction() {
+    let (device, _queue) = create_device_queue();
+    let (store, _gpu) = create_store(
+        &device,
+        TileAtlasConfig {
+            max_layers: 1,
+            ..TileAtlasConfig::default()
+        },
+    );
+    let mut registry = BrushBufferTileRegistry::default();
+
+    registry
+        .allocate_tiles(
+            701,
+            [
+                BufferTileCoordinate {
+                    tile_x: 0,
+                    tile_y: 0,
+                },
+                BufferTileCoordinate {
+                    tile_x: 1,
+                    tile_y: 0,
+                },
+            ],
+            &store,
+        )
+        .expect("allocate brush buffer tiles");
+    let retain_id = registry.retain_stroke_tiles(701, &store);
+
+    let mut retained_keys = Vec::new();
+    registry.visit_tiles(701, |_, tile_key| retained_keys.push(tile_key));
+    assert_eq!(retained_keys.len(), 2);
+
+    let evicted_stroke = registry.apply_retained_eviction(retain_id, &retained_keys);
+    assert_eq!(evicted_stroke, Some(701));
+
+    let visit_after_eviction = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.visit_tiles(701, |_, _| {});
+    }));
+    assert!(
+        visit_after_eviction.is_err(),
+        "stroke mapping must be dropped after full retained eviction"
+    );
 }

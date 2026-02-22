@@ -120,13 +120,6 @@ pub struct GpuState {
     brush_buffer_tile_keys: BrushBufferTileRegistry,
     gc_evicted_batches_total: u64,
     gc_evicted_keys_total: u64,
-    stroke_gc_capability: HashMap<u64, StrokeGcCapability>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StrokeGcCapability {
-    Retained,
-    Evicted,
 }
 
 #[derive(Debug)]
@@ -313,7 +306,6 @@ impl GpuState {
             brush_buffer_tile_keys: BrushBufferTileRegistry::default(),
             gc_evicted_batches_total: 0,
             gc_evicted_keys_total: 0,
-            stroke_gc_capability: HashMap::new(),
         }
     }
 
@@ -383,14 +375,6 @@ impl GpuState {
                         )
                     });
                 self.drain_tile_gc_evictions();
-                Ok(())
-            }
-            BrushRenderCommand::ReleaseBufferTiles(release) => {
-                self.brush_buffer_tile_keys.release_tiles(
-                    release.stroke_session_id,
-                    release.tiles,
-                    &self.atlas_store,
-                );
                 Ok(())
             }
             BrushRenderCommand::MergeBuffer(merge) => {
@@ -599,7 +583,8 @@ impl GpuState {
                         );
                         return Err(error);
                     }
-                    self.mark_stroke_gc_retained(*stroke_session_id);
+                    self.brush_buffer_tile_keys
+                        .retain_stroke_tiles(*stroke_session_id, &self.atlas_store);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: *stroke_session_id,
@@ -643,6 +628,8 @@ impl GpuState {
                         );
                         return Err(error);
                     }
+                    self.brush_buffer_tile_keys
+                        .release_stroke_on_merge_failed(*stroke_session_id, &self.atlas_store);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeFailed {
                             stroke_session_id: *stroke_session_id,
@@ -658,20 +645,16 @@ impl GpuState {
     fn drain_tile_gc_evictions(&mut self) {
         let evicted_batches = self.atlas_store.drain_evicted_retain_batches();
         for evicted_batch in evicted_batches {
+            self.brush_buffer_tile_keys
+                .apply_retained_eviction(evicted_batch.retain_id, &evicted_batch.keys);
             self.apply_gc_evicted_batch(evicted_batch.retain_id, evicted_batch.keys.len());
         }
-    }
-
-    fn mark_stroke_gc_retained(&mut self, stroke_session_id: u64) {
-        self.stroke_gc_capability
-            .insert(stroke_session_id, StrokeGcCapability::Retained);
     }
 
     fn apply_gc_evicted_batch(&mut self, retain_id: u64, key_count: usize) {
         apply_gc_evicted_batch_state(
             &mut self.gc_evicted_batches_total,
             &mut self.gc_evicted_keys_total,
-            &mut self.stroke_gc_capability,
             retain_id,
             key_count,
         );
@@ -757,8 +740,7 @@ fn notice_id_from_renderer(notice: &MergeCompletionNotice) -> TileMergeCompletio
 fn apply_gc_evicted_batch_state(
     gc_evicted_batches_total: &mut u64,
     gc_evicted_keys_total: &mut u64,
-    stroke_gc_capability: &mut HashMap<u64, StrokeGcCapability>,
-    retain_id: u64,
+    _retain_id: u64,
     key_count: usize,
 ) {
     *gc_evicted_batches_total = gc_evicted_batches_total
@@ -767,7 +749,6 @@ fn apply_gc_evicted_batch_state(
     *gc_evicted_keys_total = gc_evicted_keys_total
         .checked_add(u64::try_from(key_count).expect("gc key count exceeds u64"))
         .expect("gc evicted key counter overflow");
-    stroke_gc_capability.insert(retain_id, StrokeGcCapability::Evicted);
 }
 
 #[cfg(test)]
@@ -922,55 +903,41 @@ mod tests {
     }
 
     #[test]
-    fn apply_gc_evicted_batch_state_updates_counters_and_marks_evicted() {
+    fn apply_gc_evicted_batch_state_updates_counters() {
         let mut gc_evicted_batches_total = 0u64;
         let mut gc_evicted_keys_total = 0u64;
-        let mut stroke_gc_capability = HashMap::new();
-        stroke_gc_capability.insert(42, StrokeGcCapability::Retained);
 
         apply_gc_evicted_batch_state(
             &mut gc_evicted_batches_total,
             &mut gc_evicted_keys_total,
-            &mut stroke_gc_capability,
             42,
             3,
         );
         apply_gc_evicted_batch_state(
             &mut gc_evicted_batches_total,
             &mut gc_evicted_keys_total,
-            &mut stroke_gc_capability,
             42,
             2,
         );
 
         assert_eq!(gc_evicted_batches_total, 2);
         assert_eq!(gc_evicted_keys_total, 5);
-        assert_eq!(
-            stroke_gc_capability.get(&42),
-            Some(&StrokeGcCapability::Evicted)
-        );
     }
 
     #[test]
-    fn apply_gc_evicted_batch_state_keeps_empty_batch_accounting() {
+    fn apply_gc_evicted_batch_state_keeps_empty_batch_accounting_only() {
         let mut gc_evicted_batches_total = 0u64;
         let mut gc_evicted_keys_total = 0u64;
-        let mut stroke_gc_capability = HashMap::new();
 
         apply_gc_evicted_batch_state(
             &mut gc_evicted_batches_total,
             &mut gc_evicted_keys_total,
-            &mut stroke_gc_capability,
             100,
             0,
         );
 
         assert_eq!(gc_evicted_batches_total, 1);
         assert_eq!(gc_evicted_keys_total, 0);
-        assert_eq!(
-            stroke_gc_capability.get(&100),
-            Some(&StrokeGcCapability::Evicted)
-        );
     }
 
     fn find_first_leaf_image_handle(

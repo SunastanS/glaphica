@@ -28,6 +28,9 @@ impl AtlasLayout {
         if config.tiles_per_row == 0 || config.tiles_per_column == 0 {
             return Err(TileAtlasCreateError::AtlasTileGridZero);
         }
+        if config.tiles_per_row != config.tiles_per_column {
+            return Err(TileAtlasCreateError::AtlasTileGridNotSquare);
+        }
         let tiles_per_atlas = config
             .tiles_per_row
             .checked_mul(config.tiles_per_column)
