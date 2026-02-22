@@ -973,10 +973,10 @@ fn allocate_tile_keys(count: usize) -> Vec<TileKey> {
 
         let (atlas_store, _gpu) = tiles::TileAtlasStore::new(
             &device,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            tiles::TileAtlasFormat::Rgba8Unorm,
+            tiles::TileAtlasUsage::TEXTURE_BINDING
+                | tiles::TileAtlasUsage::COPY_DST
+                | tiles::TileAtlasUsage::COPY_SRC,
         )
         .expect("create test tile atlas");
 

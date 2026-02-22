@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
+use std::time::Instant;
 
 use render_protocol::{
     BlendMode, ExecutionStatus, GpuMergeOp, GpuTileRef, MergeAuditMeta, MergeErrorContext,
@@ -9,7 +10,7 @@ use render_protocol::{
     RendererSubmissionId, StrokeExecutionFailure, StrokeExecutionReceipt, StrokeExecutionReceiptId,
     SubmissionReport,
 };
-use tiles::{TILE_GUTTER, TILE_SIZE, TILE_STRIDE};
+use tiles::TILE_STRIDE;
 
 use crate::Renderer;
 
@@ -208,9 +209,9 @@ struct CompletedSubmission {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct MergeUniformGpu {
-    base_origin_uv: [f32; 2],
-    stroke_origin_uv: [f32; 2],
-    tile_uv_size: [f32; 2],
+    base_slot_origin_uv: [f32; 2],
+    stroke_slot_origin_uv: [f32; 2],
+    slot_uv_size: [f32; 2],
     base_layer: f32,
     stroke_layer: f32,
     has_base: f32,
@@ -219,7 +220,7 @@ pub(crate) struct MergeUniformGpu {
     _padding0: [u32; 3],
 }
 
-fn tile_ref_origin_uv(tile_ref: GpuTileRef, atlas_layout: tiles::TileAtlasLayout) -> [f32; 2] {
+fn tile_ref_slot_origin_uv(tile_ref: GpuTileRef, atlas_layout: tiles::TileAtlasLayout) -> [f32; 2] {
     let tiles_per_row = atlas_layout.tiles_per_row;
     let tiles_per_column = atlas_layout.tiles_per_column;
     assert!(tiles_per_row > 0, "tiles_per_row must be positive");
@@ -233,19 +234,13 @@ fn tile_ref_origin_uv(tile_ref: GpuTileRef, atlas_layout: tiles::TileAtlasLayout
     let slot_y = tile_y
         .checked_mul(TILE_STRIDE)
         .expect("tile slot y overflow");
-    let content_x = slot_x
-        .checked_add(TILE_GUTTER)
-        .expect("tile content x overflow");
-    let content_y = slot_y
-        .checked_add(TILE_GUTTER)
-        .expect("tile content y overflow");
     [
-        content_x as f32 / atlas_layout.atlas_width as f32,
-        content_y as f32 / atlas_layout.atlas_height as f32,
+        slot_x as f32 / atlas_layout.atlas_width as f32,
+        slot_y as f32 / atlas_layout.atlas_height as f32,
     ]
 }
 
-fn tile_ref_content_origin(
+fn tile_ref_slot_origin(
     tile_ref: GpuTileRef,
     atlas_layout: tiles::TileAtlasLayout,
 ) -> wgpu::Origin3d {
@@ -258,15 +253,19 @@ fn tile_ref_content_origin(
     wgpu::Origin3d {
         x: tile_x
             .checked_mul(TILE_STRIDE)
-            .expect("tile slot x overflow")
-            .checked_add(TILE_GUTTER)
-            .expect("tile content x overflow"),
+            .expect("tile slot x overflow"),
         y: tile_y
             .checked_mul(TILE_STRIDE)
-            .expect("tile slot y overflow")
-            .checked_add(TILE_GUTTER)
-            .expect("tile content y overflow"),
+            .expect("tile slot y overflow"),
         z: tile_ref.atlas_layer,
+    }
+}
+
+fn merge_output_copy_extent() -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: TILE_STRIDE,
+        height: TILE_STRIDE,
+        depth_or_array_layers: 1,
     }
 }
 
@@ -810,6 +809,9 @@ impl Renderer {
         let Some(renderer_submission_id) = prepared.report.renderer_submission_id else {
             return Ok(prepared.report);
         };
+        let submission_receipt_count = prepared.report.receipt_ids.len();
+        let submission_op_count = prepared.submission_gpu_ops.len();
+        let submit_started = Instant::now();
 
         let mut encoder =
             self.gpu_state
@@ -830,6 +832,16 @@ impl Renderer {
                 eprintln!("merge completion callback channel send failed: {error}");
             }
         });
+        if crate::renderer_perf_log_enabled() {
+            eprintln!(
+                "[renderer_perf] merge_submit frame_id={} submission_id={} receipts={} ops={} cpu_submit_ms={:.3}",
+                frame_id,
+                renderer_submission_id.0,
+                submission_receipt_count,
+                submission_op_count,
+                submit_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
         Ok(self
             .merge_orchestrator
             .commit_submitted_submission(prepared, done_receiver))
@@ -839,6 +851,7 @@ impl Renderer {
         &mut self,
         frame_id: u64,
     ) -> Result<Vec<MergeCompletionNotice>, MergePollError> {
+        let poll_started = Instant::now();
         let mut completed_submissions = Vec::new();
         if let Err(error) = self.gpu_state.device.poll(wgpu::PollType::Poll) {
             completed_submissions.extend(self.merge_orchestrator.fail_all_in_flight_submissions(
@@ -873,8 +886,25 @@ impl Renderer {
 
         completed_submissions.extend(self.merge_orchestrator.drain_completed_submissions());
 
-        self.merge_orchestrator
-            .collect_completion_notices(completed_submissions)
+        let notices = self
+            .merge_orchestrator
+            .collect_completion_notices(completed_submissions)?;
+        if crate::renderer_perf_log_enabled() && !notices.is_empty() {
+            let success_count = notices
+                .iter()
+                .filter(|notice| matches!(notice.result, MergeExecutionResult::Succeeded))
+                .count();
+            let failure_count = notices.len().saturating_sub(success_count);
+            eprintln!(
+                "[renderer_perf] merge_poll frame_id={} notices={} success={} failure={} cpu_poll_ms={:.3}",
+                frame_id,
+                notices.len(),
+                success_count,
+                failure_count,
+                poll_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
+        Ok(notices)
     }
 
     pub fn ack_merge_result(&mut self, notice: MergeCompletionNotice) -> Result<(), MergeAckError> {
@@ -926,9 +956,9 @@ impl Renderer {
             .texture()
             .size()
             .depth_or_array_layers;
-        let tile_uv_size = [
-            TILE_SIZE as f32 / atlas_layout.atlas_width as f32,
-            TILE_SIZE as f32 / atlas_layout.atlas_height as f32,
+        let slot_uv_size = [
+            TILE_STRIDE as f32 / atlas_layout.atlas_width as f32,
+            TILE_STRIDE as f32 / atlas_layout.atlas_height as f32,
         ];
         for submission_gpu_op in gpu_merge_ops {
             let receipt_id = submission_gpu_op.receipt_id;
@@ -987,11 +1017,14 @@ impl Renderer {
                 });
             }
             let merge_uniform = MergeUniformGpu {
-                base_origin_uv: gpu_merge_op.base_tile.map_or([0.0, 0.0], |base_tile| {
-                    tile_ref_origin_uv(base_tile, atlas_layout)
+                base_slot_origin_uv: gpu_merge_op.base_tile.map_or([0.0, 0.0], |base_tile| {
+                    tile_ref_slot_origin_uv(base_tile, atlas_layout)
                 }),
-                stroke_origin_uv: tile_ref_origin_uv(gpu_merge_op.stroke_tile, atlas_layout),
-                tile_uv_size,
+                stroke_slot_origin_uv: tile_ref_slot_origin_uv(
+                    gpu_merge_op.stroke_tile,
+                    atlas_layout,
+                ),
+                slot_uv_size,
                 base_layer: gpu_merge_op
                     .base_tile
                     .map_or(0.0, |tile| tile.atlas_layer as f32),
@@ -1043,14 +1076,10 @@ impl Renderer {
                 wgpu::TexelCopyTextureInfo {
                     texture: self.gpu_state.tile_atlas.texture(),
                     mip_level: 0,
-                    origin: tile_ref_content_origin(gpu_merge_op.output_tile, atlas_layout),
+                    origin: tile_ref_slot_origin(gpu_merge_op.output_tile, atlas_layout),
                     aspect: wgpu::TextureAspect::All,
                 },
-                wgpu::Extent3d {
-                    width: TILE_SIZE,
-                    height: TILE_SIZE,
-                    depth_or_array_layers: 1,
-                },
+                merge_output_copy_extent(),
             );
         }
         Ok(())
@@ -1085,6 +1114,20 @@ mod tests {
             opacity: 1.0,
             op_trace_id: 1,
         }]
+    }
+
+    #[test]
+    fn merge_output_copy_extent_must_cover_tile_stride_to_refresh_gutter() {
+        let extent = merge_output_copy_extent();
+        assert_eq!(
+            extent.width, TILE_STRIDE,
+            "merge writeback must copy full tile slot width including gutter"
+        );
+        assert_eq!(
+            extent.height, TILE_STRIDE,
+            "merge writeback must copy full tile slot height including gutter"
+        );
+        assert_eq!(extent.depth_or_array_layers, 1);
     }
 
     fn commit_submission_for_test(

@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use crate::{TILE_SIZE, TileIngestError};
 use crate::atlas::{TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
+use crate::{TILE_SIZE, TileIngestError};
 
 pub trait TileFormatSpec {
     const PAYLOAD_KIND: TilePayloadKind;
@@ -13,7 +13,9 @@ pub trait TilePayloadSpec {
     type UploadPayload;
 }
 
-pub trait TileUploadFormatSpec: TileFormatSpec + TilePayloadSpec<UploadPayload = Arc<[u8]>> {
+pub trait TileUploadFormatSpec:
+    TileFormatSpec + TilePayloadSpec<UploadPayload = Arc<[u8]>>
+{
     fn validate_ingest_contract(usage: TileAtlasUsage) -> Result<(), TileIngestError>;
 
     fn validate_upload_bytes(bytes: &[u8]) -> Result<(), TileIngestError>;
@@ -23,6 +25,10 @@ pub trait TileUploadFormatSpec: TileFormatSpec + TilePayloadSpec<UploadPayload =
 pub struct Rgba8Spec;
 #[derive(Debug)]
 pub struct Rgba8SrgbSpec;
+#[derive(Debug)]
+pub struct Bgra8Spec;
+#[derive(Debug)]
+pub struct Bgra8SrgbSpec;
 #[derive(Debug)]
 pub struct R32FloatSpec;
 #[derive(Debug)]
@@ -75,6 +81,44 @@ impl TileUploadFormatSpec for Rgba8SrgbSpec {
 impl TileFormatSpec for R32FloatSpec {
     const PAYLOAD_KIND: TilePayloadKind = TilePayloadKind::R32Float;
     const FORMAT: TileAtlasFormat = TileAtlasFormat::R32Float;
+}
+
+impl TileFormatSpec for Bgra8Spec {
+    const PAYLOAD_KIND: TilePayloadKind = TilePayloadKind::Rgba8;
+    const FORMAT: TileAtlasFormat = TileAtlasFormat::Bgra8Unorm;
+}
+
+impl TilePayloadSpec for Bgra8Spec {
+    type UploadPayload = Arc<[u8]>;
+}
+
+impl TileUploadFormatSpec for Bgra8Spec {
+    fn validate_ingest_contract(usage: TileAtlasUsage) -> Result<(), TileIngestError> {
+        Rgba8Spec::validate_ingest_contract(usage)
+    }
+
+    fn validate_upload_bytes(bytes: &[u8]) -> Result<(), TileIngestError> {
+        Rgba8Spec::validate_upload_bytes(bytes)
+    }
+}
+
+impl TileFormatSpec for Bgra8SrgbSpec {
+    const PAYLOAD_KIND: TilePayloadKind = TilePayloadKind::Rgba8;
+    const FORMAT: TileAtlasFormat = TileAtlasFormat::Bgra8UnormSrgb;
+}
+
+impl TilePayloadSpec for Bgra8SrgbSpec {
+    type UploadPayload = Arc<[u8]>;
+}
+
+impl TileUploadFormatSpec for Bgra8SrgbSpec {
+    fn validate_ingest_contract(usage: TileAtlasUsage) -> Result<(), TileIngestError> {
+        Rgba8Spec::validate_ingest_contract(usage)
+    }
+
+    fn validate_upload_bytes(bytes: &[u8]) -> Result<(), TileIngestError> {
+        Rgba8Spec::validate_upload_bytes(bytes)
+    }
 }
 
 impl TilePayloadSpec for R32FloatSpec {

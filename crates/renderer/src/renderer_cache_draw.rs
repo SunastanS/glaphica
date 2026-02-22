@@ -4,6 +4,7 @@
 //! and submission of tile-instance runs during composite/view pass execution.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
@@ -14,6 +15,8 @@ use crate::{
     BlendMode, DrawPassContext, GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord,
     TileDrawInstance, ViewportMode, build_group_tile_draw_instances, tile_coord_from_draw_instance,
 };
+
+static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 impl Renderer {
     fn collect_live_node_ids(
@@ -58,6 +61,13 @@ impl Renderer {
             .group_target_cache
             .remove(&ROOT_GROUP_ID)
             .expect("root group cache must exist before view pass");
+        if ROOT_DRAW_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
+            eprintln!(
+                "[renderer] draw_root_group_to_surface draw_instances={} group_cache_entries={}",
+                group_target.draw_instances.len(),
+                self.cache_state.group_target_cache.len() + 1
+            );
+        }
         let group_atlas_bind_group = if self.should_use_nearest_sampling_for_view() {
             self.gpu_state.group_atlas_bind_group_nearest.clone()
         } else {
@@ -291,6 +301,22 @@ impl Renderer {
         } else {
             dirty_tiles
         };
+        let copied_tile_count = match dirty_tiles {
+            Some(dirty_tiles) => dirty_tiles.len(),
+            None => usize::try_from(
+                entry
+                    .image
+                    .tiles_per_row()
+                    .checked_mul(entry.image.tiles_per_column())
+                    .expect("group cache tile count overflow"),
+            )
+            .expect("group cache tile count exceeds usize"),
+        };
+        let cache_mode = if dirty_tiles.is_some() {
+            "partial"
+        } else {
+            "full"
+        };
 
         match dirty_tiles {
             Some(dirty_tiles) => {
@@ -308,6 +334,26 @@ impl Renderer {
                 entry.blend,
                 &self.gpu_state.group_tile_store,
             );
+        }
+        if crate::renderer_perf_log_enabled() {
+            eprintln!(
+                "[renderer_perf] group_cache_update group_id={} mode={} copied_tiles={} draw_instances={} rebuild_draw_instances={}",
+                group_id,
+                cache_mode,
+                copied_tile_count,
+                entry.draw_instances.len(),
+                rebuild_draw_instances,
+            );
+        }
+        if crate::renderer_perf_jsonl_enabled() {
+            crate::renderer_perf_jsonl_write(&format!(
+                "{{\"event\":\"group_cache_update\",\"group_id\":{},\"mode\":\"{}\",\"copied_tiles\":{},\"draw_instances\":{},\"rebuild_draw_instances\":{}}}",
+                group_id,
+                cache_mode,
+                copied_tile_count,
+                entry.draw_instances.len(),
+                rebuild_draw_instances,
+            ));
         }
         self.cache_state.group_target_cache.insert(group_id, entry);
     }

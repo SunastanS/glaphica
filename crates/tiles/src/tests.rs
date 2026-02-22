@@ -317,10 +317,10 @@ fn supports_r32float_storage(device: &wgpu::Device) -> bool {
         device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::STORAGE_BINDING,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC
+                | TileAtlasUsage::STORAGE_BINDING,
             ..GenericTileAtlasConfig::default()
         },
     )
@@ -451,9 +451,9 @@ fn release_is_cpu_only_and_dirty_triggers_clear_on_reuse() {
         &device,
         TileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC
+                | TileAtlasUsage::TEXTURE_BINDING,
             ..TileAtlasConfig::default()
         },
     );
@@ -554,9 +554,9 @@ fn generic_allocator_keys_are_unique() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -573,9 +573,9 @@ fn generic_allocator_release_reuses_address() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -596,9 +596,9 @@ fn generic_allocator_capacity_is_bounded_by_layers() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -616,9 +616,9 @@ fn generic_tile_set_reserve_resolve_release_lifecycle() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -644,9 +644,9 @@ fn generic_tile_set_rejects_duplicate_adopt_keys() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -663,9 +663,9 @@ fn generic_tile_set_enforces_store_ownership() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -673,9 +673,9 @@ fn generic_tile_set_enforces_store_ownership() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -694,9 +694,9 @@ fn clear_tile_set_fails_without_partial_clear_enqueue() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -748,9 +748,9 @@ fn clear_tile_set_skips_stale_targets_after_release_and_reuse() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -803,9 +803,9 @@ fn clear_tile_set_reports_total_executed_tile_count() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -857,9 +857,9 @@ fn release_tile_set_fails_without_partial_release() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -886,11 +886,11 @@ fn runtime_factory_rejects_payload_format_mismatch() {
         RuntimeGenericTileAtlasConfig {
             max_layers: 1,
             payload_kind: TilePayloadKind::R32Float,
-            format: wgpu::TextureFormat::R8Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::STORAGE_BINDING,
+            format: TileAtlasFormat::R8Uint,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC
+                | TileAtlasUsage::STORAGE_BINDING,
             ..RuntimeGenericTileAtlasConfig::default()
         },
     );
@@ -908,10 +908,10 @@ fn runtime_factory_r8uint_allocate_clear_and_drain() {
         RuntimeGenericTileAtlasConfig {
             max_layers: 1,
             payload_kind: TilePayloadKind::R8Uint,
-            format: wgpu::TextureFormat::R8Uint,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            format: TileAtlasFormat::R8Uint,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..RuntimeGenericTileAtlasConfig::default()
         },
     )
@@ -934,9 +934,9 @@ fn r32float_config_validation_catches_invalid_format_and_usage() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -953,7 +953,7 @@ fn r32float_storage_only_usage_is_allowed() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::STORAGE_BINDING,
+            usage: TileAtlasUsage::STORAGE_BINDING,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -979,7 +979,7 @@ fn r32float_storage_only_clear_fails_fast_at_drain() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::STORAGE_BINDING,
+            usage: TileAtlasUsage::STORAGE_BINDING,
             ..GenericTileAtlasConfig::default()
         },
     )
@@ -1001,7 +1001,7 @@ fn group_atlas_requires_copy_dst_and_texture_binding_usage() {
         &device,
         TileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: TileAtlasUsage::TEXTURE_BINDING,
             ..TileAtlasConfig::default()
         },
     );
@@ -1014,7 +1014,7 @@ fn group_atlas_requires_copy_dst_and_texture_binding_usage() {
         &device,
         TileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::COPY_DST,
+            usage: TileAtlasUsage::COPY_DST,
             ..TileAtlasConfig::default()
         },
     );
@@ -1032,10 +1032,10 @@ fn r32float_allocate_resolve_release_lifecycle() {
             &device,
             GenericTileAtlasConfig {
                 max_layers: 1,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::STORAGE_BINDING,
+                usage: TileAtlasUsage::TEXTURE_BINDING
+                    | TileAtlasUsage::COPY_DST
+                    | TileAtlasUsage::COPY_SRC
+                    | TileAtlasUsage::STORAGE_BINDING,
                 ..GenericTileAtlasConfig::default()
             },
         );
@@ -1050,10 +1050,10 @@ fn r32float_allocate_resolve_release_lifecycle() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::STORAGE_BINDING,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC
+                | TileAtlasUsage::STORAGE_BINDING,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -1074,10 +1074,10 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
             &device,
             GenericTileAtlasConfig {
                 max_layers: 1,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::STORAGE_BINDING,
+                usage: TileAtlasUsage::TEXTURE_BINDING
+                    | TileAtlasUsage::COPY_DST
+                    | TileAtlasUsage::COPY_SRC
+                    | TileAtlasUsage::STORAGE_BINDING,
                 ..GenericTileAtlasConfig::default()
             },
         );
@@ -1092,10 +1092,10 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::STORAGE_BINDING,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC
+                | TileAtlasUsage::STORAGE_BINDING,
             ..GenericTileAtlasConfig::default()
         },
     );
@@ -1138,9 +1138,9 @@ fn r8uint_create_and_allocate_release_path() {
         &device,
         GenericTileAtlasConfig {
             max_layers: 1,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: TileAtlasUsage::TEXTURE_BINDING
+                | TileAtlasUsage::COPY_DST
+                | TileAtlasUsage::COPY_SRC,
             ..GenericTileAtlasConfig::default()
         },
     );

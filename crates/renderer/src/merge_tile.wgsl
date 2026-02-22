@@ -1,7 +1,7 @@
 struct MergeUniform {
-    base_origin_uv: vec2<f32>,
-    stroke_origin_uv: vec2<f32>,
-    tile_uv_size: vec2<f32>,
+    base_slot_origin_uv: vec2<f32>,
+    stroke_slot_origin_uv: vec2<f32>,
+    slot_uv_size: vec2<f32>,
     base_layer: f32,
     stroke_layer: f32,
     has_base: f32,
@@ -51,8 +51,8 @@ fn blend_multiply(base: vec4<f32>, stroke: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
-    let base_uv = merge_uniform.base_origin_uv + input.uv * merge_uniform.tile_uv_size;
-    let stroke_uv = merge_uniform.stroke_origin_uv + input.uv * merge_uniform.tile_uv_size;
+    let base_uv = merge_uniform.base_slot_origin_uv + input.uv * merge_uniform.slot_uv_size;
+    let stroke_uv = merge_uniform.stroke_slot_origin_uv + input.uv * merge_uniform.slot_uv_size;
     let base = select(
         vec4<f32>(0.0, 0.0, 0.0, 0.0),
         textureSampleLevel(

@@ -17,6 +17,61 @@ struct DropStaleWorkResult {
     clear_group_target_cache: bool,
 }
 
+fn render_node_semantics_equal_ignoring_image_handle(
+    left: &RenderNodeSnapshot,
+    right: &RenderNodeSnapshot,
+) -> bool {
+    match (left, right) {
+        (
+            RenderNodeSnapshot::Leaf {
+                layer_id: left_layer_id,
+                blend: left_blend,
+                ..
+            },
+            RenderNodeSnapshot::Leaf {
+                layer_id: right_layer_id,
+                blend: right_blend,
+                ..
+            },
+        ) => left_layer_id == right_layer_id && left_blend == right_blend,
+        (
+            RenderNodeSnapshot::Group {
+                group_id: left_group_id,
+                blend: left_blend,
+                children: left_children,
+            },
+            RenderNodeSnapshot::Group {
+                group_id: right_group_id,
+                blend: right_blend,
+                children: right_children,
+            },
+        ) => {
+            left_group_id == right_group_id
+                && left_blend == right_blend
+                && left_children.len() == right_children.len()
+                && left_children.iter().zip(right_children.iter()).all(
+                    |(left_child, right_child)| {
+                        render_node_semantics_equal_ignoring_image_handle(left_child, right_child)
+                    },
+                )
+        }
+        _ => false,
+    }
+}
+
+fn should_force_document_composite_dirty(
+    current_snapshot: Option<&RenderTreeSnapshot>,
+    incoming_snapshot: &RenderTreeSnapshot,
+) -> bool {
+    let Some(current_snapshot) = current_snapshot else {
+        return true;
+    };
+    !render_node_semantics_equal_ignoring_image_handle(
+        current_snapshot.root.as_ref(),
+        incoming_snapshot.root.as_ref(),
+    )
+}
+
 fn should_accept_bound_snapshot(view_state: &ViewState, snapshot: &RenderTreeSnapshot) -> bool {
     snapshot.revision >= view_state.drop_before_revision
 }
@@ -36,10 +91,6 @@ fn apply_viewport(view_state: &mut ViewState, viewport: Viewport) -> bool {
     }
     view_state.viewport = Some(viewport);
     true
-}
-
-fn apply_mark_layer_dirty(frame_state: &mut FrameState, layer_id: u64) {
-    frame_state.dirty_state_store.mark_layer_full(layer_id);
 }
 
 fn apply_brush_command_quota(view_state: &mut ViewState, max_commands: u32) -> bool {
@@ -62,11 +113,15 @@ fn apply_bound_snapshot(frame_state: &mut FrameState, snapshot: RenderTreeSnapsh
         ),
         "render tree root must be group 0"
     );
+    let force_document_composite_dirty =
+        should_force_document_composite_dirty(frame_state.bound_tree.as_ref(), &snapshot);
     frame_state.bound_tree = Some(snapshot);
     frame_state.render_tree_dirty = true;
-    frame_state
-        .dirty_state_store
-        .mark_document_composite_dirty();
+    if force_document_composite_dirty {
+        frame_state
+            .dirty_state_store
+            .mark_document_composite_dirty();
+    }
 }
 
 fn drop_stale_work_before_revision(
@@ -122,6 +177,10 @@ impl Renderer {
             }
             RenderOp::BindRenderTree(snapshot) => {
                 if should_accept_bound_snapshot(&self.view_state, &snapshot) {
+                    eprintln!(
+                        "[renderer] bind render tree: revision={} accepted=true",
+                        snapshot.revision
+                    );
                     snapshot
                         .validate_executable(
                             &RenderStepSupportMatrix::current_executable_semantics(),
@@ -136,11 +195,9 @@ impl Renderer {
                     self.retain_live_group_targets(&snapshot);
                     apply_bound_snapshot(&mut self.frame_state, snapshot);
                     state_changed = true;
+                } else {
+                    eprintln!("[renderer] bind render tree: accepted=false");
                 }
-            }
-            RenderOp::MarkLayerDirty { layer_id } => {
-                apply_mark_layer_dirty(&mut self.frame_state, layer_id);
-                state_changed = true;
             }
             RenderOp::SetBrushCommandQuota { max_commands } => {
                 state_changed |= apply_brush_command_quota(&mut self.view_state, max_commands);

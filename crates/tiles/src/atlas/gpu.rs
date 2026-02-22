@@ -4,9 +4,9 @@ use std::sync::Arc;
 use super::core;
 use super::format::{TileFormatSpec, TileGpuOpAdapter, TilePayloadSpec};
 use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
-use crate::{TILE_STRIDE, TileAddress, TileAtlasCreateError, TileAtlasLayout, TileGpuDrainError};
 #[cfg(test)]
 use crate::{TILE_GUTTER, TILES_PER_ROW};
+use crate::{TILE_STRIDE, TileAddress, TileAtlasCreateError, TileAtlasLayout, TileGpuDrainError};
 
 pub(in crate::atlas) fn validate_generic_atlas_config(
     device: &wgpu::Device,
@@ -90,6 +90,8 @@ pub(in crate::atlas) fn atlas_format_to_wgpu(format: TileAtlasFormat) -> wgpu::T
     match format {
         TileAtlasFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
         TileAtlasFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+        TileAtlasFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+        TileAtlasFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
         TileAtlasFormat::R32Float => wgpu::TextureFormat::R32Float,
         TileAtlasFormat::R8Uint => wgpu::TextureFormat::R8Uint,
     }

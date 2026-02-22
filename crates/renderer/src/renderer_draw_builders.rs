@@ -19,9 +19,17 @@ pub(crate) fn build_leaf_tile_draw_instances(
 ) -> Vec<TileDrawInstance> {
     let mut draw_instances = Vec::new();
     let mut collect_tile = |tile_x: u32, tile_y: u32, tile_key: TileKey| {
-        let Some(address) = render_data_resolver.resolve_tile_address(tile_key) else {
-            return;
-        };
+        let address = render_data_resolver
+            .resolve_tile_address(tile_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "layer tile key unresolved while building full leaf draw instances: image_handle={:?} tile=({}, {}) key={:?}",
+                    image_handle,
+                    tile_x,
+                    tile_y,
+                    tile_key
+                )
+            });
         let document_x = tile_x
             .checked_mul(TILE_SIZE)
             .expect("tile x position overflow") as f32;
@@ -60,9 +68,17 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
         .collect();
     let mut draw_instances = Vec::new();
     let mut collect_tile = |tile_x: u32, tile_y: u32, tile_key: TileKey| {
-        let Some(address) = render_data_resolver.resolve_tile_address(tile_key) else {
-            return;
-        };
+        let address = render_data_resolver
+            .resolve_tile_address(tile_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "layer tile key unresolved while building partial leaf draw instances: image_handle={:?} tile=({}, {}) key={:?}",
+                    image_handle,
+                    tile_x,
+                    tile_y,
+                    tile_key
+                )
+            });
         let document_x = tile_x
             .checked_mul(TILE_SIZE)
             .expect("tile x position overflow") as f32;

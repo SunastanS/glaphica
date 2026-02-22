@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use render_protocol::{
     BlendMode, ImageHandle, LayerId, RenderNodeSnapshot, RenderTreeSnapshot, StrokeSessionId,
 };
 use slotmap::SlotMap;
-use tiles::{DirtySinceResult, TileImage, TileKey};
+use tiles::{DirtySinceResult, TILE_SIZE, TileDirtyBitset, TileDirtyQuery, TileImage, TileKey};
 
 #[cfg(test)]
 use tiles::{TileKeyMapping, apply_tile_key_mappings};
@@ -25,8 +26,8 @@ pub struct Document {
     revision: u64,
     next_layer_id: u64,
     render_tree_cache_dirty: bool,
-    dirty_layers: HashSet<LayerId>,
     layer_versions: HashMap<LayerId, u64>,
+    layer_dirty_history: HashMap<LayerId, LayerDirtyHistory>,
     active_merge: Option<ActiveMerge>,
     consumed_stroke_sessions: HashSet<StrokeSessionId>,
 }
@@ -136,6 +137,133 @@ struct LayerLookupResult {
     image_handle: Option<ImageHandle>,
 }
 
+const LAYER_DIRTY_HISTORY_CAPACITY: usize = 200;
+
+#[derive(Debug, Clone)]
+struct LayerDirtyHistoryEntry {
+    version: u64,
+    dirty_tiles: TileDirtyBitset,
+}
+
+#[derive(Debug, Clone)]
+struct LayerDirtyHistory {
+    tiles_per_row: u32,
+    tiles_per_column: u32,
+    entries: Vec<LayerDirtyHistoryEntry>,
+}
+
+impl LayerDirtyHistory {
+    fn new(tiles_per_row: u32, tiles_per_column: u32) -> Self {
+        Self {
+            tiles_per_row,
+            tiles_per_column,
+            entries: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, version: u64, dirty_tiles: TileDirtyBitset) {
+        if dirty_tiles.is_empty() {
+            return;
+        }
+        if let Some(last) = self.entries.last_mut() {
+            if last.version == version {
+                last.dirty_tiles
+                    .merge_from(&dirty_tiles)
+                    .unwrap_or_else(|error| panic!("layer dirty history merge failed: {error:?}"));
+                return;
+            }
+        }
+        self.entries.push(LayerDirtyHistoryEntry {
+            version,
+            dirty_tiles,
+        });
+        if self.entries.len() > LAYER_DIRTY_HISTORY_CAPACITY {
+            let remove_count = self.entries.len() - LAYER_DIRTY_HISTORY_CAPACITY;
+            self.entries.drain(0..remove_count);
+        }
+    }
+
+    fn query(&self, since_version: u64, latest_version: u64) -> DirtySinceResult {
+        if document_perf_log_enabled() {
+            eprintln!(
+                "[document_perf] layer_dirty_query begin since_version={} latest_version={} history_entries={}",
+                since_version,
+                latest_version,
+                self.entries.len(),
+            );
+        }
+        if since_version >= latest_version {
+            if document_perf_log_enabled() {
+                eprintln!("[document_perf] layer_dirty_query result=up_to_date");
+            }
+            return DirtySinceResult::UpToDate;
+        }
+        if self.entries.is_empty() {
+            let dirty_tiles = TileDirtyBitset::new(self.tiles_per_row, self.tiles_per_column)
+                .unwrap_or_else(|error| panic!("layer dirty bitset init failed: {error:?}"));
+            if document_perf_log_enabled() {
+                eprintln!(
+                    "[document_perf] layer_dirty_query result=has_changes_empty reason=version_advanced_without_recorded_tiles"
+                );
+            }
+            return DirtySinceResult::HasChanges(TileDirtyQuery {
+                latest_version,
+                dirty_tiles,
+            });
+        }
+        if let Some(oldest) = self.entries.first() {
+            let oldest_queryable = oldest.version.saturating_sub(1);
+            if since_version < oldest_queryable {
+                if document_perf_log_enabled() {
+                    eprintln!(
+                        "[document_perf] layer_dirty_query result=history_truncated oldest_entry_version={} oldest_queryable={}",
+                        oldest.version, oldest_queryable,
+                    );
+                }
+                return DirtySinceResult::HistoryTruncated;
+            }
+        }
+        let mut dirty_tiles = TileDirtyBitset::new(self.tiles_per_row, self.tiles_per_column)
+            .unwrap_or_else(|error| panic!("layer dirty bitset init failed: {error:?}"));
+        let mut found = false;
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| entry.version > since_version)
+        {
+            dirty_tiles
+                .merge_from(&entry.dirty_tiles)
+                .unwrap_or_else(|error| panic!("layer dirty bitset merge failed: {error:?}"));
+            found = true;
+        }
+        if found {
+            if document_perf_log_enabled() {
+                eprintln!(
+                    "[document_perf] layer_dirty_query result=has_changes dirty_full={} dirty_count={}",
+                    dirty_tiles.is_full(),
+                    dirty_tiles.iter_dirty_tiles().count(),
+                );
+            }
+            DirtySinceResult::HasChanges(TileDirtyQuery {
+                latest_version,
+                dirty_tiles,
+            })
+        } else {
+            if document_perf_log_enabled() {
+                eprintln!(
+                    "[document_perf] layer_dirty_query result=history_truncated reason=no_entries_newer_than_since"
+                );
+            }
+            DirtySinceResult::HistoryTruncated
+        }
+    }
+}
+
+fn document_perf_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GLAPHICA_PERF_LOG").is_some_and(|value| value != "0"))
+}
+
 impl Document {
     pub fn new(size_x: u32, size_y: u32) -> Self {
         Self {
@@ -148,8 +276,8 @@ impl Document {
             revision: 0,
             next_layer_id: 1,
             render_tree_cache_dirty: true,
-            dirty_layers: HashSet::new(),
             layer_versions: HashMap::new(),
+            layer_dirty_history: HashMap::new(),
             active_merge: None,
             consumed_stroke_sessions: HashSet::new(),
         }
@@ -206,12 +334,12 @@ impl Document {
                 stroke_session_id,
             });
         }
-        layer_lookup.image_handle.ok_or(
-            DocumentMergeError::LayerNotFoundInStrokeSession {
+        layer_lookup
+            .image_handle
+            .ok_or(DocumentMergeError::LayerNotFoundInStrokeSession {
                 layer_id,
                 stroke_session_id,
-            },
-        )
+            })
     }
 
     pub(crate) fn replace_leaf_image(
@@ -221,18 +349,17 @@ impl Document {
         image: TileImage,
     ) -> Result<(), DocumentMergeError> {
         let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
-        let next_layer_version = image.image_version();
-        let layer_version = self
+        let next_layer_version = self
             .layer_versions
-            .get_mut(&layer_id)
+            .get(&layer_id)
+            .copied()
             .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
-        if next_layer_version < *layer_version {
-            panic!(
-                "layer {layer_id} version regressed from {} to {}",
-                *layer_version, next_layer_version
-            );
-        }
-        *layer_version = next_layer_version;
+        let next_layer_version = next_layer_version
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("layer version overflow for {layer_id}"));
+        self.layer_versions.insert(layer_id, next_layer_version);
+        let dirty_tiles = self.full_layer_dirty_tiles();
+        self.record_layer_dirty_history(layer_id, next_layer_version, dirty_tiles);
         if let Some(image_entry) = self.images.get_mut(image_handle) {
             *image_entry = Arc::new(image);
             return Ok(());
@@ -248,6 +375,7 @@ impl Document {
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
         image: TileImage,
+        dirty_tiles: &[TileCoordinate],
         full_layer_dirty: bool,
     ) -> Result<MergeCommitSummary, DocumentMergeError> {
         self.validate_active_merge(layer_id, stroke_session_id)?;
@@ -257,24 +385,9 @@ impl Document {
             .get(&layer_id)
             .copied()
             .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
-        let dirty_tiles = match image.dirty_since(previous_version) {
-            DirtySinceResult::UpToDate => Vec::new(),
-            DirtySinceResult::HasChanges(query) => query
-                .dirty_tiles
-                .iter_dirty_tiles()
-                .map(|(tile_x, tile_y)| TileCoordinate { tile_x, tile_y })
-                .collect(),
-            DirtySinceResult::HistoryTruncated => {
-                panic!("merge image dirty history is missing for layer {layer_id}");
-            }
-        };
-        let next_version = image.image_version();
-        if next_version < previous_version {
-            panic!(
-                "layer {layer_id} version regressed from {} to {}",
-                previous_version, next_version
-            );
-        }
+        let next_version = previous_version
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("layer version overflow for {layer_id}"));
         let new_image_handle = self.images.insert(Arc::new(image));
         let replaced = self
             .layer_tree
@@ -286,6 +399,8 @@ impl Document {
             });
         }
         self.layer_versions.insert(layer_id, next_version);
+        let dirty_tile_mask = self.build_dirty_tile_mask(dirty_tiles, full_layer_dirty);
+        self.record_layer_dirty_history(layer_id, next_version, dirty_tile_mask);
         self.images.remove(image_handle);
         let next_revision =
             self.revision
@@ -297,13 +412,12 @@ impl Document {
         self.revision = next_revision;
         self.active_merge = None;
         self.consumed_stroke_sessions.insert(stroke_session_id);
-        self.dirty_layers.insert(layer_id);
         self.mark_render_tree_dirty();
         Ok(MergeCommitSummary {
             revision: next_revision,
             layer_id,
             stroke_session_id,
-            dirty_tiles,
+            dirty_tiles: dirty_tiles.to_vec(),
             full_layer_dirty,
         })
     }
@@ -344,21 +458,49 @@ impl Document {
         if !layer_lookup.is_leaf {
             return None;
         }
-        let image_handle = layer_lookup.image_handle?;
-        let image = self.images.get(image_handle)?;
+        let _image_handle = layer_lookup.image_handle?;
         let tracked_version = self
             .layer_versions
             .get(&layer_id)
             .copied()
             .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
-        if tracked_version != image.image_version() {
-            panic!(
-                "layer {layer_id} tracked version {} mismatches image version {}",
-                tracked_version,
-                image.image_version()
+        if document_perf_log_enabled() {
+            eprintln!(
+                "[document_perf] layer_dirty_since layer_id={} since_version={} tracked_version={}",
+                layer_id, since_version, tracked_version
             );
         }
-        Some(image.dirty_since(since_version))
+        let history = self
+            .layer_dirty_history
+            .get(&layer_id)
+            .unwrap_or_else(|| panic!("layer dirty history for {layer_id} is missing"));
+        let result = history.query(since_version, tracked_version);
+        if document_perf_log_enabled() {
+            match &result {
+                DirtySinceResult::UpToDate => {
+                    eprintln!(
+                        "[document_perf] layer_dirty_since layer_id={} result=up_to_date",
+                        layer_id
+                    );
+                }
+                DirtySinceResult::HistoryTruncated => {
+                    eprintln!(
+                        "[document_perf] layer_dirty_since layer_id={} result=history_truncated",
+                        layer_id
+                    );
+                }
+                DirtySinceResult::HasChanges(query) => {
+                    eprintln!(
+                        "[document_perf] layer_dirty_since layer_id={} result=has_changes latest_version={} dirty_full={} dirty_count={}",
+                        layer_id,
+                        query.latest_version,
+                        query.dirty_tiles.is_full(),
+                        query.dirty_tiles.iter_dirty_tiles().count(),
+                    );
+                }
+            }
+        }
+        Some(result)
     }
 
     pub fn layer_version(&self, layer_id: LayerId) -> Option<u64> {
@@ -374,7 +516,11 @@ impl Document {
 
     pub fn new_layer_root_with_image(&mut self, image: TileImage, blend: BlendMode) -> LayerNodeId {
         let id = self.alloc_layer_id();
-        self.layer_versions.insert(id.0, image.image_version());
+        self.layer_versions.insert(id.0, 0);
+        self.layer_dirty_history.insert(
+            id.0,
+            LayerDirtyHistory::new(self.tiles_per_row(), self.tiles_per_column()),
+        );
         let image_handle = self.images.insert(Arc::new(image));
         self.root_mut().push(LayerTreeNode::Leaf {
             id,
@@ -478,10 +624,6 @@ impl Document {
         )
     }
 
-    pub fn take_dirty_layers(&mut self) -> Vec<LayerId> {
-        self.dirty_layers.drain().collect()
-    }
-
     pub fn take_render_tree_cache_dirty(&mut self) -> bool {
         let dirty = self.render_tree_cache_dirty;
         self.render_tree_cache_dirty = false;
@@ -505,7 +647,11 @@ impl Document {
         let id = self.alloc_layer_id();
         let image = TileImage::new(self.size_x, self.size_y)
             .unwrap_or_else(|error| panic!("failed to create empty layer image: {error:?}"));
-        self.layer_versions.insert(id.0, image.image_version());
+        self.layer_versions.insert(id.0, 0);
+        self.layer_dirty_history.insert(
+            id.0,
+            LayerDirtyHistory::new(self.tiles_per_row(), self.tiles_per_column()),
+        );
         let image_handle = self.images.insert(Arc::new(image));
         (
             id,
@@ -526,6 +672,59 @@ impl Document {
             active_layer_id
         );
         id
+    }
+
+    fn tiles_per_row(&self) -> u32 {
+        self.size_x.div_ceil(TILE_SIZE)
+    }
+
+    fn tiles_per_column(&self) -> u32 {
+        self.size_y.div_ceil(TILE_SIZE)
+    }
+
+    fn full_layer_dirty_tiles(&self) -> TileDirtyBitset {
+        let mut dirty_tiles = TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column())
+            .unwrap_or_else(|error| panic!("create full layer dirty bitset failed: {error:?}"));
+        for tile_y in 0..self.tiles_per_column() {
+            for tile_x in 0..self.tiles_per_row() {
+                dirty_tiles
+                    .set(tile_x, tile_y)
+                    .unwrap_or_else(|error| panic!("set full dirty tile failed: {error:?}"));
+            }
+        }
+        dirty_tiles
+    }
+
+    fn build_dirty_tile_mask(
+        &self,
+        dirty_tiles: &[TileCoordinate],
+        full_layer_dirty: bool,
+    ) -> TileDirtyBitset {
+        if full_layer_dirty {
+            return self.full_layer_dirty_tiles();
+        }
+        let mut dirty_tile_mask =
+            TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column())
+                .unwrap_or_else(|error| panic!("create layer dirty bitset failed: {error:?}"));
+        for tile in dirty_tiles {
+            dirty_tile_mask
+                .set(tile.tile_x, tile.tile_y)
+                .unwrap_or_else(|error| panic!("set layer dirty tile failed: {error:?}"));
+        }
+        dirty_tile_mask
+    }
+
+    fn record_layer_dirty_history(
+        &mut self,
+        layer_id: LayerId,
+        version: u64,
+        dirty_tiles: TileDirtyBitset,
+    ) {
+        let history = self
+            .layer_dirty_history
+            .get_mut(&layer_id)
+            .unwrap_or_else(|| panic!("layer dirty history for {layer_id} is missing"));
+        history.record(version, dirty_tiles);
     }
 
     fn lookup_leaf_image_handle(
@@ -1121,7 +1320,16 @@ mod tests {
         )
         .expect("apply tile key mappings");
         let summary = document
-            .apply_merge_image(layer_id.0, 77, updated_image, false)
+            .apply_merge_image(
+                layer_id.0,
+                77,
+                updated_image,
+                &[TileCoordinate {
+                    tile_x: 0,
+                    tile_y: 0,
+                }],
+                false,
+            )
             .expect("apply merge image");
 
         assert_eq!(summary.revision, 1);
@@ -1168,9 +1376,149 @@ mod tests {
         .expect("apply tile key mappings");
 
         let summary = document
-            .apply_merge_image(layer_id.0, 121, updated_image, false)
+            .apply_merge_image(
+                layer_id.0,
+                121,
+                updated_image,
+                &[TileCoordinate {
+                    tile_x: 0,
+                    tile_y: 0,
+                }],
+                false,
+            )
             .expect("merge apply should not panic or fail");
         assert_eq!(summary.layer_id, layer_id.0);
+    }
+
+    #[test]
+    fn layer_dirty_since_uses_layer_history_after_image_handle_swap() {
+        let mut document = Document::new(512, 256);
+        let layer_id = document.new_layer_root();
+        document
+            .begin_merge(layer_id.0, 122, document.revision())
+            .expect("begin merge");
+        let image_handle = document
+            .leaf_image_handle(layer_id.0, 122)
+            .expect("leaf image handle should resolve");
+        let existing_image = document.image(image_handle).expect("resolve image");
+        let mut updated_image = (*existing_image).clone();
+        apply_tile_key_mappings(
+            &mut updated_image,
+            &[TileKeyMapping {
+                tile_x: 0,
+                tile_y: 0,
+                layer_id: layer_id.0,
+                previous_key: None,
+                new_key: test_tile_key(12),
+            }],
+        )
+        .expect("apply tile key mappings");
+        document
+            .apply_merge_image(
+                layer_id.0,
+                122,
+                updated_image,
+                &[TileCoordinate {
+                    tile_x: 3,
+                    tile_y: 1,
+                }],
+                false,
+            )
+            .expect("merge apply should succeed");
+
+        let result = document
+            .layer_dirty_since(layer_id.0, 0)
+            .expect("layer dirty query should resolve");
+        let DirtySinceResult::HasChanges(query) = result else {
+            panic!("expected dirty query result");
+        };
+        let dirty_tiles = query.dirty_tiles.iter_dirty_tiles().collect::<Vec<_>>();
+        assert_eq!(dirty_tiles, vec![(3, 1)]);
+    }
+
+    #[test]
+    fn layer_version_advances_once_per_merge_commit() {
+        let mut document = Document::new(512, 256);
+        let layer_id = document.new_layer_root();
+        assert_eq!(document.layer_version(layer_id.0), Some(0));
+
+        for stroke_session_id in [201u64, 202u64] {
+            document
+                .begin_merge(layer_id.0, stroke_session_id, document.revision())
+                .expect("begin merge");
+            let image_handle = document
+                .leaf_image_handle(layer_id.0, stroke_session_id)
+                .expect("leaf image handle should resolve");
+            let existing_image = document.image(image_handle).expect("resolve image");
+            let mut updated_image = (*existing_image).clone();
+            apply_tile_key_mappings(
+                &mut updated_image,
+                &[
+                    TileKeyMapping {
+                        tile_x: 0,
+                        tile_y: 0,
+                        layer_id: layer_id.0,
+                        previous_key: existing_image.get_tile(0, 0).expect("read tile"),
+                        new_key: test_tile_key(stroke_session_id + 1),
+                    },
+                    TileKeyMapping {
+                        tile_x: 1,
+                        tile_y: 0,
+                        layer_id: layer_id.0,
+                        previous_key: existing_image.get_tile(1, 0).expect("read tile"),
+                        new_key: test_tile_key(stroke_session_id + 2),
+                    },
+                ],
+            )
+            .expect("apply tile key mappings");
+            document
+                .apply_merge_image(
+                    layer_id.0,
+                    stroke_session_id,
+                    updated_image,
+                    &[
+                        TileCoordinate {
+                            tile_x: 0,
+                            tile_y: 0,
+                        },
+                        TileCoordinate {
+                            tile_x: 1,
+                            tile_y: 0,
+                        },
+                    ],
+                    false,
+                )
+                .expect("apply merge image");
+        }
+
+        assert_eq!(document.layer_version(layer_id.0), Some(2));
+    }
+
+    #[test]
+    fn layer_dirty_since_returns_empty_changes_when_version_advanced_without_dirty_tiles() {
+        let mut document = Document::new(512, 256);
+        let layer_id = document.new_layer_root();
+
+        document
+            .begin_merge(layer_id.0, 301, document.revision())
+            .expect("begin merge");
+        let image_handle = document
+            .leaf_image_handle(layer_id.0, 301)
+            .expect("leaf image handle should resolve");
+        let existing_image = document.image(image_handle).expect("resolve image");
+        let updated_image = (*existing_image).clone();
+        document
+            .apply_merge_image(layer_id.0, 301, updated_image, &[], false)
+            .expect("apply merge image with empty dirty tiles");
+
+        let result = document
+            .layer_dirty_since(layer_id.0, 0)
+            .expect("layer dirty query should resolve");
+        let DirtySinceResult::HasChanges(query) = result else {
+            panic!("expected HasChanges with empty dirty tiles");
+        };
+        assert_eq!(query.latest_version, 1);
+        assert!(query.dirty_tiles.is_empty());
     }
 
     #[test]

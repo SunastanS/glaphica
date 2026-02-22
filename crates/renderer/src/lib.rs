@@ -13,6 +13,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
+use std::{fs::OpenOptions, io::Write};
 
 use render_protocol::{
     BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, ImageHandle, LayerId, ProgramRevision,
@@ -215,6 +217,42 @@ pub trait RenderDataResolver {
     fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult>;
 
     fn layer_version(&self, layer_id: u64) -> Option<u64>;
+}
+
+pub(crate) fn renderer_perf_log_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GLAPHICA_PERF_LOG").is_some_and(|value| value != "0"))
+}
+
+pub(crate) fn renderer_perf_jsonl_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("GLAPHICA_PERF_JSONL").is_some_and(|value| value != "0"))
+}
+
+fn renderer_perf_jsonl_file() -> Option<&'static Mutex<std::fs::File>> {
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let path = std::env::var("GLAPHICA_PERF_JSONL").ok()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("open renderer perf jsonl file '{}': {error}", path));
+        Some(Mutex::new(file))
+    })
+    .as_ref()
+}
+
+pub(crate) fn renderer_perf_jsonl_write(line: &str) {
+    let Some(file) = renderer_perf_jsonl_file() else {
+        return;
+    };
+    let mut guard = file
+        .lock()
+        .unwrap_or_else(|_| panic!("renderer perf jsonl file lock poisoned"));
+    writeln!(guard, "{line}")
+        .unwrap_or_else(|error| panic!("write renderer perf jsonl entry failed: {error}"));
 }
 
 pub struct ViewOpSender(mpsc::Sender<RenderOp>);

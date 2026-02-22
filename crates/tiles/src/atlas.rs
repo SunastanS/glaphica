@@ -26,6 +26,8 @@ pub struct TileAtlasConfig {
 pub enum TileAtlasFormat {
     Rgba8Unorm,
     Rgba8UnormSrgb,
+    Bgra8Unorm,
+    Bgra8UnormSrgb,
     R32Float,
     R8Uint,
 }
@@ -155,7 +157,7 @@ pub use group_preview::{GroupTileAtlasGpuArray, GroupTileAtlasStore};
 #[cfg(feature = "atlas-gpu")]
 pub use layer_pixel_storage::{TileAtlasGpuArray, TileAtlasStore};
 
-#[cfg(all(test, feature = "atlas-gpu"))]
-pub(crate) use gpu::tile_origin;
 #[cfg(test)]
 pub(crate) use format::rgba8_tile_len;
+#[cfg(all(test, feature = "atlas-gpu"))]
+pub(crate) use gpu::tile_origin;

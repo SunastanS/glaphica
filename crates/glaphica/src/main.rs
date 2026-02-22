@@ -1,5 +1,9 @@
+use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use brush_execution::{
     BrushExecutionCommandReceiver, BrushExecutionConfig, BrushExecutionFeedbackSender,
@@ -40,6 +44,186 @@ const DEFAULT_PROGRAM_WGSL: &str = r#"
 fn main() {
 }
 "#;
+
+#[derive(Debug, Clone)]
+enum RecordedInputEventKind {
+    MouseInput { pressed: bool },
+    CursorMoved { x: f64, y: f64 },
+    MouseWheelLine { vertical_lines: f32 },
+    MouseWheelPixel { delta_y: f64 },
+}
+
+#[derive(Debug, Clone)]
+struct RecordedInputEvent {
+    elapsed_micros: u64,
+    kind: RecordedInputEventKind,
+}
+
+struct InputTraceRecorder {
+    started_at: Instant,
+    writer: BufWriter<File>,
+}
+
+impl InputTraceRecorder {
+    fn from_path(path: PathBuf) -> Self {
+        let file = File::create(&path).unwrap_or_else(|error| {
+            panic!("create input trace file '{}': {error}", path.display())
+        });
+        Self {
+            started_at: Instant::now(),
+            writer: BufWriter::new(file),
+        }
+    }
+
+    fn record(&mut self, kind: RecordedInputEventKind) {
+        let elapsed_micros = self.started_at.elapsed().as_micros();
+        let elapsed_micros = u64::try_from(elapsed_micros)
+            .unwrap_or_else(|_| panic!("input trace timestamp overflow"));
+        let line = match kind {
+            RecordedInputEventKind::MouseInput { pressed } => {
+                format!(
+                    "{elapsed_micros}\tmouse_input\t{}",
+                    if pressed { "1" } else { "0" }
+                )
+            }
+            RecordedInputEventKind::CursorMoved { x, y } => {
+                format!("{elapsed_micros}\tcursor_moved\t{x}\t{y}")
+            }
+            RecordedInputEventKind::MouseWheelLine { vertical_lines } => {
+                format!("{elapsed_micros}\tmouse_wheel_line\t{vertical_lines}")
+            }
+            RecordedInputEventKind::MouseWheelPixel { delta_y } => {
+                format!("{elapsed_micros}\tmouse_wheel_pixel\t{delta_y}")
+            }
+        };
+        writeln!(self.writer, "{line}")
+            .unwrap_or_else(|error| panic!("write input trace event failed: {error}"));
+        self.writer
+            .flush()
+            .unwrap_or_else(|error| panic!("flush input trace event failed: {error}"));
+    }
+}
+
+struct InputTraceReplay {
+    started_at: Instant,
+    events: Vec<RecordedInputEvent>,
+    next_event_index: usize,
+    completion_logged: bool,
+}
+
+impl InputTraceReplay {
+    fn from_path(path: PathBuf) -> Self {
+        let file = File::open(&path)
+            .unwrap_or_else(|error| panic!("open input trace file '{}': {error}", path.display()));
+        let reader = BufReader::new(file);
+        let mut events = Vec::new();
+        for (line_index, line_result) in reader.lines().enumerate() {
+            let line_number = line_index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("input trace line number overflow"));
+            let line = line_result
+                .unwrap_or_else(|error| panic!("read input trace line {line_number}: {error}"));
+            if line.trim().is_empty() {
+                continue;
+            }
+            events.push(parse_recorded_input_event(&line, line_number));
+        }
+        Self {
+            started_at: Instant::now(),
+            events,
+            next_event_index: 0,
+            completion_logged: false,
+        }
+    }
+
+    fn take_ready_events(&mut self) -> Vec<RecordedInputEventKind> {
+        let elapsed_micros = self.started_at.elapsed().as_micros();
+        let elapsed_micros = u64::try_from(elapsed_micros)
+            .unwrap_or_else(|_| panic!("input replay timestamp overflow"));
+        let mut ready = Vec::new();
+        while self.next_event_index < self.events.len()
+            && self.events[self.next_event_index].elapsed_micros <= elapsed_micros
+        {
+            ready.push(self.events[self.next_event_index].kind.clone());
+            self.next_event_index = self
+                .next_event_index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("input replay index overflow"));
+        }
+        ready
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.next_event_index >= self.events.len()
+    }
+
+    fn restart_clock(&mut self) {
+        self.started_at = Instant::now();
+    }
+}
+
+fn parse_recorded_input_event(line: &str, line_number: usize) -> RecordedInputEvent {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    assert!(
+        fields.len() >= 3,
+        "invalid input trace format at line {line_number}: expected at least 3 fields"
+    );
+    let elapsed_micros = fields[0].parse::<u64>().unwrap_or_else(|error| {
+        panic!("invalid input trace timestamp at line {line_number}: {error}")
+    });
+    let kind = match fields[1] {
+        "mouse_input" => {
+            assert!(
+                fields.len() == 3,
+                "invalid mouse_input trace format at line {line_number}"
+            );
+            let pressed = match fields[2] {
+                "1" => true,
+                "0" => false,
+                value => panic!("invalid mouse_input value '{value}' at line {line_number}"),
+            };
+            RecordedInputEventKind::MouseInput { pressed }
+        }
+        "cursor_moved" => {
+            assert!(
+                fields.len() == 4,
+                "invalid cursor_moved trace format at line {line_number}"
+            );
+            let x = fields[2]
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("invalid cursor x at line {line_number}: {error}"));
+            let y = fields[3]
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("invalid cursor y at line {line_number}: {error}"));
+            RecordedInputEventKind::CursorMoved { x, y }
+        }
+        "mouse_wheel_line" => {
+            assert!(
+                fields.len() == 3,
+                "invalid mouse_wheel_line trace format at line {line_number}"
+            );
+            let vertical_lines = fields[2].parse::<f32>().unwrap_or_else(|error| {
+                panic!("invalid mouse wheel line delta at line {line_number}: {error}")
+            });
+            RecordedInputEventKind::MouseWheelLine { vertical_lines }
+        }
+        "mouse_wheel_pixel" => {
+            assert!(
+                fields.len() == 3,
+                "invalid mouse_wheel_pixel trace format at line {line_number}"
+            );
+            let delta_y = fields[2].parse::<f64>().unwrap_or_else(|error| {
+                panic!("invalid mouse wheel pixel delta at line {line_number}: {error}")
+            });
+            RecordedInputEventKind::MouseWheelPixel { delta_y }
+        }
+        kind => panic!("unknown input trace event kind '{kind}' at line {line_number}"),
+    };
+    RecordedInputEvent {
+        elapsed_micros,
+        kind,
+    }
+}
 
 struct DriverDebugState {
     bridge: DriverUiBridge,
@@ -131,6 +315,8 @@ struct App {
     brush_execution_receiver: Option<BrushExecutionCommandReceiver>,
     next_driver_frame_sequence_id: u64,
     frame_scheduler: FrameScheduler,
+    input_trace_recorder: Option<InputTraceRecorder>,
+    input_trace_replay: Option<InputTraceReplay>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -167,6 +353,63 @@ impl App {
     fn update_interaction_mode(&mut self) {
         self.interaction_mode = self.input_modifiers.interaction_mode();
     }
+
+    fn maybe_record_input(&mut self, kind: RecordedInputEventKind) {
+        if let Some(recorder) = self.input_trace_recorder.as_mut() {
+            recorder.record(kind);
+        }
+    }
+
+    fn pump_input_replay_events(&mut self) {
+        let Some(_) = self.input_trace_replay.as_ref() else {
+            return;
+        };
+        let replay_events = {
+            let replay = self
+                .input_trace_replay
+                .as_mut()
+                .unwrap_or_else(|| panic!("input replay state missing"));
+            replay.take_ready_events()
+        };
+        for replay_event in replay_events {
+            match replay_event {
+                RecordedInputEventKind::MouseInput { pressed } => {
+                    let state = if pressed {
+                        ElementState::Pressed
+                    } else {
+                        ElementState::Released
+                    };
+                    self.handle_mouse_input(state, MouseButton::Left);
+                }
+                RecordedInputEventKind::CursorMoved { x, y } => {
+                    self.handle_cursor_moved(PhysicalPosition::new(x, y));
+                }
+                RecordedInputEventKind::MouseWheelLine { vertical_lines } => {
+                    self.apply_mouse_wheel_delta(MouseScrollDelta::LineDelta(0.0, vertical_lines));
+                }
+                RecordedInputEventKind::MouseWheelPixel { delta_y } => {
+                    self.apply_mouse_wheel_delta(MouseScrollDelta::PixelDelta(
+                        PhysicalPosition::new(0.0, delta_y),
+                    ));
+                }
+            }
+        }
+        let should_log_completion = {
+            let replay = self
+                .input_trace_replay
+                .as_mut()
+                .unwrap_or_else(|| panic!("input replay state missing"));
+            if replay.is_exhausted() && !replay.completion_logged {
+                replay.completion_logged = true;
+                true
+            } else {
+                false
+            }
+        };
+        if should_log_completion {
+            println!("[input_replay] all recorded events have been replayed");
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -195,6 +438,16 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.gpu = Some(gpu);
+        if let Some(replay) = self.input_trace_replay.as_mut() {
+            replay.restart_clock();
+            println!(
+                "[input_replay] replay started with {} events",
+                replay.events.len()
+            );
+        }
+        if self.input_trace_recorder.is_some() {
+            println!("[input_record] recording input trace events");
+        }
         self.initialize_brush_execution();
     }
 
@@ -224,6 +477,7 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.pump_input_replay_events();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
@@ -282,6 +536,9 @@ impl App {
         if button != MouseButton::Left {
             return;
         }
+        self.maybe_record_input(RecordedInputEventKind::MouseInput {
+            pressed: state == ElementState::Pressed,
+        });
 
         self.is_left_mouse_pressed = state == ElementState::Pressed;
         if self.is_left_mouse_pressed {
@@ -309,6 +566,10 @@ impl App {
     }
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        self.maybe_record_input(RecordedInputEventKind::CursorMoved {
+            x: position.x,
+            y: position.y,
+        });
         if self.is_left_mouse_pressed {
             if let Some((last_x, last_y)) = self.last_cursor_position {
                 let delta_x = (position.x - last_x) as f32;
@@ -341,8 +602,24 @@ impl App {
     }
 
     fn handle_mouse_wheel(&mut self, delta: &MouseScrollDelta) {
+        match delta {
+            MouseScrollDelta::LineDelta(_, vertical_lines) => {
+                self.maybe_record_input(RecordedInputEventKind::MouseWheelLine {
+                    vertical_lines: *vertical_lines,
+                });
+            }
+            MouseScrollDelta::PixelDelta(physical_position) => {
+                self.maybe_record_input(RecordedInputEventKind::MouseWheelPixel {
+                    delta_y: physical_position.y,
+                });
+            }
+        }
+        self.apply_mouse_wheel_delta(*delta);
+    }
+
+    fn apply_mouse_wheel_delta(&mut self, delta: MouseScrollDelta) {
         let scroll_lines = match delta {
-            MouseScrollDelta::LineDelta(_, vertical_lines) => *vertical_lines,
+            MouseScrollDelta::LineDelta(_, vertical_lines) => vertical_lines,
             MouseScrollDelta::PixelDelta(physical_position) => {
                 (physical_position.y as f32) / PIXELS_PER_SCROLL_LINE
             }
@@ -601,11 +878,18 @@ fn fxhash(input: &str) -> u64 {
 }
 
 fn main() {
+    let cli_options = parse_cli_options();
     let event_loop = EventLoop::new().expect("create event loop");
     let mut app = App {
-        startup_image_path: parse_startup_image_path(),
+        startup_image_path: cli_options.startup_image_path,
         driver_debug: DriverDebugState::new(),
         frame_scheduler: FrameScheduler::default(),
+        input_trace_recorder: cli_options
+            .input_record_path
+            .map(InputTraceRecorder::from_path),
+        input_trace_replay: cli_options
+            .input_replay_path
+            .map(InputTraceReplay::from_path),
         ..App::default()
     };
     event_loop.run_app(&mut app).expect("run app");
@@ -622,28 +906,77 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
     );
 }
 
-fn parse_startup_image_path() -> Option<PathBuf> {
-    let mut args = std::env::args_os();
-    let _program = args.next();
+struct CliOptions {
+    startup_image_path: Option<PathBuf>,
+    input_record_path: Option<PathBuf>,
+    input_replay_path: Option<PathBuf>,
+}
 
-    let Some(first_arg) = args.next() else {
-        return None;
-    };
+fn parse_cli_options() -> CliOptions {
+    let usage = "usage: glaphica [--image <path>] [--record-input <path>] [--replay-input <path>] | [<path>]";
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
 
-    if first_arg == "--image" {
-        let image_path = args.next().unwrap_or_else(|| {
-            panic!("missing image path after --image; usage: glaphica [--image <path>] | [<path>]")
-        });
-        assert!(
-            args.next().is_none(),
-            "too many arguments; usage: glaphica [--image <path>] | [<path>]"
-        );
-        return Some(PathBuf::from(image_path));
+    let mut startup_image_path = None;
+    let mut positional_image_path = None;
+    let mut input_record_path = None;
+    let mut input_replay_path = None;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let current = &args[index];
+        if current == OsStr::new("--image") {
+            index = index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("argument index overflow"));
+            assert!(
+                index < args.len(),
+                "missing image path after --image; {usage}"
+            );
+            startup_image_path = Some(PathBuf::from(&args[index]));
+        } else if current == OsStr::new("--record-input") {
+            index = index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("argument index overflow"));
+            assert!(
+                index < args.len(),
+                "missing path after --record-input; {usage}"
+            );
+            input_record_path = Some(PathBuf::from(&args[index]));
+        } else if current == OsStr::new("--replay-input") {
+            index = index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("argument index overflow"));
+            assert!(
+                index < args.len(),
+                "missing path after --replay-input; {usage}"
+            );
+            input_replay_path = Some(PathBuf::from(&args[index]));
+        } else if current.to_string_lossy().starts_with("--") {
+            panic!("unknown option '{}'; {usage}", current.to_string_lossy());
+        } else {
+            assert!(
+                positional_image_path.is_none(),
+                "too many positional arguments; {usage}"
+            );
+            positional_image_path = Some(PathBuf::from(current));
+        }
+        index = index
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("argument index overflow"));
     }
 
     assert!(
-        args.next().is_none(),
-        "too many arguments; usage: glaphica [--image <path>] | [<path>]"
+        startup_image_path.is_none() || positional_image_path.is_none(),
+        "cannot use positional image path together with --image; {usage}"
     );
-    Some(PathBuf::from(first_arg))
+    assert!(
+        !(input_record_path.is_some() && input_replay_path.is_some()),
+        "cannot use --record-input and --replay-input together; choose one mode"
+    );
+
+    CliOptions {
+        startup_image_path: startup_image_path.or(positional_image_path),
+        input_record_path,
+        input_replay_path,
+    }
 }

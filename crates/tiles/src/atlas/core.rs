@@ -4,7 +4,8 @@ use std::sync::{Mutex, mpsc};
 
 use crate::{INDEX_SHARDS, TILE_STRIDE};
 use crate::{
-    TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle, TileSetId,
+    TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle,
+    TileSetId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

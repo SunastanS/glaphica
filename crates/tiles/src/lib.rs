@@ -14,7 +14,6 @@ pub const TILES_PER_ATLAS: u32 = TILES_PER_ROW * TILES_PER_ROW;
 pub const ATLAS_OCCUPANCY_WORDS: usize = (TILES_PER_ATLAS as usize).div_ceil(64);
 
 const INDEX_SHARDS: usize = 64;
-const DIRTY_HISTORY_CAPACITY: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey(u64);
@@ -636,8 +635,6 @@ impl TileDirtyBitset {
 pub struct TileImage {
     image: VirtualImage<TileKey>,
     versions: Vec<u32>,
-    image_version: u64,
-    dirty_history: Vec<TileDirtyHistoryEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,12 +648,6 @@ pub enum DirtySinceResult {
     UpToDate,
     HistoryTruncated,
     HasChanges(TileDirtyQuery),
-}
-
-#[derive(Debug, Clone)]
-struct TileDirtyHistoryEntry {
-    version: u64,
-    dirty_tiles: TileDirtyBitset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -720,8 +711,6 @@ impl TileImage {
         Ok(Self {
             image: VirtualImage::new(size_x, size_y)?,
             versions: vec![0; tile_count],
-            image_version: 0,
-            dirty_history: Vec::new(),
         })
     }
 
@@ -759,9 +748,7 @@ impl TileImage {
         tile_y: u32,
         key: TileKey,
     ) -> Result<(), VirtualImageError> {
-        let mut dirty_tiles = TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column())?;
-        self.set_tile_recording(tile_x, tile_y, key, &mut dirty_tiles)?;
-        self.record_dirty(dirty_tiles)?;
+        self.set_tile_recording(tile_x, tile_y, key)?;
         Ok(())
     }
 
@@ -778,45 +765,6 @@ impl TileImage {
         self.image.export_rgba8(|key| load_tile(*key))
     }
 
-    pub fn image_version(&self) -> u64 {
-        self.image_version
-    }
-
-    pub fn dirty_since(&self, since_version: u64) -> DirtySinceResult {
-        if since_version >= self.image_version {
-            return DirtySinceResult::UpToDate;
-        }
-        if let Some(oldest) = self.dirty_history.first() {
-            let oldest_queryable = oldest.version.saturating_sub(1);
-            if since_version < oldest_queryable {
-                return DirtySinceResult::HistoryTruncated;
-            }
-        }
-        let mut dirty_tiles = TileDirtyBitset::new(self.tiles_per_row(), self.tiles_per_column())
-            .unwrap_or_else(|error| panic!("dirty bitset init failed for tile image: {error:?}"));
-        let mut found = false;
-        for entry in self
-            .dirty_history
-            .iter()
-            .filter(|entry| entry.version > since_version)
-        {
-            dirty_tiles
-                .merge_from(&entry.dirty_tiles)
-                .unwrap_or_else(|error| {
-                    panic!("dirty bitset merge failed for tile image: {error:?}")
-                });
-            found = true;
-        }
-        if found {
-            DirtySinceResult::HasChanges(TileDirtyQuery {
-                latest_version: self.image_version,
-                dirty_tiles,
-            })
-        } else {
-            DirtySinceResult::HistoryTruncated
-        }
-    }
-
     pub(crate) fn from_virtual(image: VirtualImage<TileKey>) -> Self {
         let tiles_per_row = image.tiles_per_row();
         let tiles_per_column = image.tiles_per_column();
@@ -826,8 +774,6 @@ impl TileImage {
         let mut tile_image = Self {
             image,
             versions: vec![0; tile_count],
-            image_version: 0,
-            dirty_history: Vec::new(),
         };
         for (tile_x, tile_y, _key) in tile_image.image.iter_tiles() {
             let index = tile_image
@@ -844,32 +790,11 @@ impl TileImage {
         tile_image
     }
 
-    fn record_dirty(&mut self, dirty_tiles: TileDirtyBitset) -> Result<(), VirtualImageError> {
-        if dirty_tiles.is_empty() {
-            return Ok(());
-        }
-        let next_version = self
-            .image_version
-            .checked_add(1)
-            .ok_or(VirtualImageError::VersionOverflow)?;
-        self.image_version = next_version;
-        self.dirty_history.push(TileDirtyHistoryEntry {
-            version: next_version,
-            dirty_tiles,
-        });
-        if self.dirty_history.len() > DIRTY_HISTORY_CAPACITY {
-            let remove_count = self.dirty_history.len() - DIRTY_HISTORY_CAPACITY;
-            self.dirty_history.drain(0..remove_count);
-        }
-        Ok(())
-    }
-
     fn set_tile_recording(
         &mut self,
         tile_x: u32,
         tile_y: u32,
         key: TileKey,
-        dirty_tiles: &mut TileDirtyBitset,
     ) -> Result<(), VirtualImageError> {
         self.image.set_tile(tile_x, tile_y, key)?;
         let index = self.tile_index(tile_x, tile_y)?;
@@ -880,7 +805,6 @@ impl TileImage {
         *slot = slot
             .checked_add(1)
             .unwrap_or_else(|| panic!("tile version overflow at ({tile_x}, {tile_y})"));
-        dirty_tiles.set(tile_x, tile_y)?;
         Ok(())
     }
 
@@ -925,24 +849,14 @@ pub fn apply_tile_key_mappings(
             });
         }
     }
-    let mut dirty_tiles = TileDirtyBitset::new(image.tiles_per_row(), image.tiles_per_column())
-        .unwrap_or_else(|error| panic!("dirty bitset init failed for tile image: {error:?}"));
     for mapping in mappings {
         image
-            .set_tile_recording(
-                mapping.tile_x,
-                mapping.tile_y,
-                mapping.new_key,
-                &mut dirty_tiles,
-            )
+            .set_tile_recording(mapping.tile_x, mapping.tile_y, mapping.new_key)
             .map_err(|_| TileImageApplyError::TileOutOfBounds {
                 tile_x: mapping.tile_x,
                 tile_y: mapping.tile_y,
             })?;
     }
-    image
-        .record_dirty(dirty_tiles)
-        .unwrap_or_else(|error| panic!("dirty record failed for tile image: {error:?}"));
     Ok(())
 }
 

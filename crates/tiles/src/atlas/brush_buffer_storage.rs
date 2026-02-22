@@ -8,12 +8,11 @@ use crate::{
 
 use super::core;
 pub use super::core::EvictedRetainBatch;
-use super::gpu;
 use super::format::{
-    R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec, TileGpuCreateValidator,
-    TileGpuOpAdapter, TilePayloadSpec,
-    TileUploadFormatSpec,
+    Bgra8Spec, Bgra8SrgbSpec, R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec,
+    TileGpuCreateValidator, TileGpuOpAdapter, TilePayloadSpec, TileUploadFormatSpec,
 };
+use super::gpu;
 use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +53,8 @@ impl From<RuntimeGenericTileAtlasConfig> for GenericTileAtlasConfig {
 pub enum RuntimeGenericTileAtlasStore {
     Rgba8Unorm(GenericTileAtlasStore<Rgba8Spec>),
     Rgba8UnormSrgb(GenericTileAtlasStore<Rgba8SrgbSpec>),
+    Bgra8Unorm(GenericTileAtlasStore<Bgra8Spec>),
+    Bgra8UnormSrgb(GenericTileAtlasStore<Bgra8SrgbSpec>),
     R32Float(GenericTileAtlasStore<R32FloatSpec>),
     R8Uint(GenericTileAtlasStore<R8UintSpec>),
 }
@@ -62,6 +63,8 @@ pub enum RuntimeGenericTileAtlasStore {
 pub enum RuntimeGenericTileAtlasGpuArray {
     Rgba8Unorm(gpu::GenericTileAtlasGpuArray<Rgba8Spec>),
     Rgba8UnormSrgb(gpu::GenericTileAtlasGpuArray<Rgba8SrgbSpec>),
+    Bgra8Unorm(gpu::GenericTileAtlasGpuArray<Bgra8Spec>),
+    Bgra8UnormSrgb(gpu::GenericTileAtlasGpuArray<Bgra8SrgbSpec>),
     R32Float(gpu::GenericTileAtlasGpuArray<R32FloatSpec>),
     R8Uint(gpu::GenericTileAtlasGpuArray<R8UintSpec>),
 }
@@ -71,6 +74,8 @@ macro_rules! dispatch_runtime_store {
         match $self {
             RuntimeGenericTileAtlasStore::Rgba8Unorm($store) => $expr,
             RuntimeGenericTileAtlasStore::Rgba8UnormSrgb($store) => $expr,
+            RuntimeGenericTileAtlasStore::Bgra8Unorm($store) => $expr,
+            RuntimeGenericTileAtlasStore::Bgra8UnormSrgb($store) => $expr,
             RuntimeGenericTileAtlasStore::R32Float($store) => $expr,
             RuntimeGenericTileAtlasStore::R8Uint($store) => $expr,
         }
@@ -82,6 +87,8 @@ macro_rules! dispatch_runtime_gpu {
         match $self {
             RuntimeGenericTileAtlasGpuArray::Rgba8Unorm($gpu) => $expr,
             RuntimeGenericTileAtlasGpuArray::Rgba8UnormSrgb($gpu) => $expr,
+            RuntimeGenericTileAtlasGpuArray::Bgra8Unorm($gpu) => $expr,
+            RuntimeGenericTileAtlasGpuArray::Bgra8UnormSrgb($gpu) => $expr,
             RuntimeGenericTileAtlasGpuArray::R32Float($gpu) => $expr,
             RuntimeGenericTileAtlasGpuArray::R8Uint($gpu) => $expr,
         }
@@ -122,6 +129,26 @@ impl RuntimeGenericTileAtlasStore {
                 Ok((
                     RuntimeGenericTileAtlasStore::Rgba8UnormSrgb(store),
                     RuntimeGenericTileAtlasGpuArray::Rgba8UnormSrgb(gpu),
+                ))
+            }
+            (TilePayloadKind::Rgba8, TileAtlasFormat::Bgra8Unorm) => {
+                let (store, gpu) = GenericTileAtlasStore::<Bgra8Spec>::with_config(
+                    device,
+                    GenericTileAtlasConfig::from(config),
+                )?;
+                Ok((
+                    RuntimeGenericTileAtlasStore::Bgra8Unorm(store),
+                    RuntimeGenericTileAtlasGpuArray::Bgra8Unorm(gpu),
+                ))
+            }
+            (TilePayloadKind::Rgba8, TileAtlasFormat::Bgra8UnormSrgb) => {
+                let (store, gpu) = GenericTileAtlasStore::<Bgra8SrgbSpec>::with_config(
+                    device,
+                    GenericTileAtlasConfig::from(config),
+                )?;
+                Ok((
+                    RuntimeGenericTileAtlasStore::Bgra8UnormSrgb(store),
+                    RuntimeGenericTileAtlasGpuArray::Bgra8UnormSrgb(gpu),
                 ))
             }
             (TilePayloadKind::R32Float, TileAtlasFormat::R32Float) => {

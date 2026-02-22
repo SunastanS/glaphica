@@ -8,8 +8,8 @@ use std::sync::{Arc, mpsc};
 
 use render_protocol::TransformMatrix4x4;
 use tiles::{
-    GroupTileAtlasStore, TILE_SIZE, TileAtlasConfig, TileAtlasCreateError, TileAtlasGpuArray,
-    TileAtlasStore,
+    GroupTileAtlasStore, TILE_STRIDE, TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat,
+    TileAtlasGpuArray, TileAtlasStore, TileAtlasUsage,
 };
 use wgpu::util::DeviceExt;
 
@@ -22,17 +22,43 @@ use crate::{
 };
 
 impl Renderer {
+    fn tile_atlas_format_to_wgpu(format: TileAtlasFormat) -> wgpu::TextureFormat {
+        match format {
+            TileAtlasFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            TileAtlasFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+            TileAtlasFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+            TileAtlasFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+            TileAtlasFormat::R32Float => wgpu::TextureFormat::R32Float,
+            TileAtlasFormat::R8Uint => wgpu::TextureFormat::R8Uint,
+        }
+    }
+
+    fn tile_atlas_usage_from_wgpu(usage: wgpu::TextureUsages) -> TileAtlasUsage {
+        let mut atlas_usage = TileAtlasUsage::empty();
+        if usage.contains(wgpu::TextureUsages::COPY_DST) {
+            atlas_usage |= TileAtlasUsage::COPY_DST;
+        }
+        if usage.contains(wgpu::TextureUsages::TEXTURE_BINDING) {
+            atlas_usage |= TileAtlasUsage::TEXTURE_BINDING;
+        }
+        if usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            atlas_usage |= TileAtlasUsage::COPY_SRC;
+        }
+        if usage.contains(wgpu::TextureUsages::STORAGE_BINDING) {
+            atlas_usage |= TileAtlasUsage::STORAGE_BINDING;
+        }
+        atlas_usage
+    }
+
     pub fn create_default_tile_atlas(
         device: &wgpu::Device,
-        format: wgpu::TextureFormat,
+        format: TileAtlasFormat,
     ) -> Result<(Arc<TileAtlasStore>, TileAtlasGpuArray), TileAtlasCreateError> {
-        let (atlas_store, tile_atlas) = TileAtlasStore::new(
-            device,
-            format,
-            wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
-        )?;
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC;
+        let (atlas_store, tile_atlas) =
+            TileAtlasStore::new(device, format, Self::tile_atlas_usage_from_wgpu(usage))?;
         Ok((Arc::new(atlas_store), tile_atlas))
     }
 
@@ -208,10 +234,12 @@ impl Renderer {
             &device,
             TileAtlasConfig {
                 max_layers: 2,
-                format: surface_config.format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC,
+                format: tile_atlas.format(),
+                usage: Self::tile_atlas_usage_from_wgpu(
+                    wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC,
+                ),
                 ..TileAtlasConfig::default()
             },
         )
@@ -342,7 +370,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: tile_atlas.format(),
+                    format: Self::tile_atlas_format_to_wgpu(tile_atlas.format()),
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -356,14 +384,14 @@ impl Renderer {
         let merge_scratch_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("renderer.merge.scratch"),
             size: wgpu::Extent3d {
-                width: TILE_SIZE,
-                height: TILE_SIZE,
+                width: TILE_STRIDE,
+                height: TILE_STRIDE,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: tile_atlas.format(),
+            format: Self::tile_atlas_format_to_wgpu(tile_atlas.format()),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });

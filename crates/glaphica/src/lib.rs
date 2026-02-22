@@ -4,9 +4,11 @@ use brush_execution::BrushExecutionMergeFeedback;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
-use document::{Document, DocumentMergeError};
+use document::{Document, DocumentMergeError, TileCoordinate};
 use render_protocol::{
     BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle,
     ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId, Viewport,
@@ -18,8 +20,9 @@ use renderer::{
 };
 use tiles::{
     BrushBufferTileRegistry, DirtySinceResult, MergeAuditRecord, MergePlanRequest, MergePlanTileOp,
-    TileAddress, TileAtlasStore, TileImageApplyError, TileKey, TileMergeCompletionNoticeId,
-    TileMergeEngine, TileMergeError, TilesBusinessResult, apply_tile_key_mappings,
+    TileAddress, TileAtlasFormat, TileAtlasStore, TileImageApplyError, TileKey,
+    TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError, TilesBusinessResult,
+    apply_tile_key_mappings,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
@@ -119,6 +122,8 @@ pub struct GpuState {
     brush_buffer_tile_keys: BrushBufferTileRegistry,
     gc_evicted_batches_total: u64,
     gc_evicted_keys_total: u64,
+    disable_merge_for_debug: bool,
+    perf_log_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -137,6 +142,12 @@ pub enum MergeBridgeError {
 }
 
 impl GpuState {
+    fn perf_log_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED
+            .get_or_init(|| std::env::var_os("GLAPHICA_PERF_LOG").is_some_and(|value| value != "0"))
+    }
+
     fn enqueue_stroke_merge_submission(&mut self, stroke_session_id: u64, layer_id: u64) {
         let document = self
             .document
@@ -196,6 +207,12 @@ impl GpuState {
     }
 
     pub async fn new(window: Arc<Window>, startup_image_path: Option<PathBuf>) -> Self {
+        eprintln!(
+            "[startup] begin app init: startup_image_path={}",
+            startup_image_path
+                .as_deref()
+                .map_or("<none>".to_string(), |path| path.display().to_string())
+        );
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -234,10 +251,18 @@ impl GpuState {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        eprintln!(
+            "[startup] surface capabilities: selected_format={:?} present_modes={:?} alpha_modes={:?}",
+            surface_format, caps.present_modes, caps.alpha_modes
+        );
 
         let mut size = window.inner_size();
         size.width = size.width.max(1);
         size.height = size.height.max(1);
+        eprintln!(
+            "[startup] window size for surface config: {}x{}",
+            size.width, size.height
+        );
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -250,11 +275,26 @@ impl GpuState {
             desired_maximum_frame_latency: 2,
         };
 
-        let (atlas_store, tile_atlas) =
-            Renderer::create_default_tile_atlas(&device, wgpu::TextureFormat::Rgba8UnormSrgb)
-                .expect("create tile atlas store");
+        let atlas_format = surface_format_to_default_atlas_format(surface_format);
+        eprintln!(
+            "[startup] selected default atlas format from surface: surface={:?} atlas={:?}",
+            surface_format, atlas_format
+        );
+        let (atlas_store, tile_atlas) = Renderer::create_default_tile_atlas(&device, atlas_format)
+            .expect("create tile atlas store");
+        eprintln!(
+            "[startup] tile atlas created: format={:?} layout={:?}",
+            tile_atlas.format(),
+            tile_atlas.layout()
+        );
 
         let document = create_startup_document(&atlas_store, startup_image_path.as_deref());
+        eprintln!(
+            "[startup] document created: size={}x{} revision={}",
+            document.size_x(),
+            document.size_y(),
+            document.revision()
+        );
         let initial_snapshot = document.render_tree_snapshot(document.revision());
         initial_snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
@@ -281,12 +321,24 @@ impl GpuState {
             tile_atlas,
             render_data_resolver,
         );
+        eprintln!("[startup] renderer initialized");
+        let disable_merge_for_debug =
+            std::env::var_os("GLAPHICA_DISABLE_MERGE").is_some_and(|value| value != "0");
+        if disable_merge_for_debug {
+            eprintln!("[startup] GLAPHICA_DISABLE_MERGE enabled: skipping merge submission");
+        }
+        let perf_log_enabled = Self::perf_log_enabled();
+        if perf_log_enabled {
+            eprintln!("[startup] GLAPHICA_PERF_LOG enabled: verbose merge/render perf logs");
+        }
 
         let view_transform = ViewTransform::default();
         push_view_state(&view_sender, &view_transform, size);
+        eprintln!("[startup] initial viewport and view transform pushed");
         view_sender
             .send(RenderOp::BindRenderTree(initial_snapshot))
             .expect("send initial render steps");
+        eprintln!("[startup] initial render tree bound");
 
         Self {
             renderer,
@@ -301,6 +353,8 @@ impl GpuState {
             brush_buffer_tile_keys: BrushBufferTileRegistry::default(),
             gc_evicted_batches_total: 0,
             gc_evicted_keys_total: 0,
+            disable_merge_for_debug,
+            perf_log_enabled,
         }
     }
 
@@ -373,10 +427,20 @@ impl GpuState {
                 Ok(())
             }
             BrushRenderCommand::MergeBuffer(merge) => {
-                self.enqueue_stroke_merge_submission(
-                    merge.stroke_session_id,
-                    merge.target_layer_id,
-                );
+                if self.disable_merge_for_debug {
+                    self.brush_buffer_tile_keys
+                        .release_stroke_on_merge_failed(merge.stroke_session_id, &self.atlas_store);
+                    self.brush_execution_feedback_queue.push_back(
+                        BrushExecutionMergeFeedback::MergeApplied {
+                            stroke_session_id: merge.stroke_session_id,
+                        },
+                    );
+                } else {
+                    self.enqueue_stroke_merge_submission(
+                        merge.stroke_session_id,
+                        merge.target_layer_id,
+                    );
+                }
                 self.renderer
                     .enqueue_brush_render_command(BrushRenderCommand::MergeBuffer(merge))
             }
@@ -392,13 +456,24 @@ impl GpuState {
         &mut self,
         frame_id: u64,
     ) -> Result<(), MergeBridgeError> {
-        self.renderer
+        let perf_started = Instant::now();
+        let submission_report = self
+            .renderer
             .submit_pending_merges(frame_id, u32::MAX)
             .map_err(MergeBridgeError::RendererSubmit)?;
         let renderer_notices = self
             .renderer
             .poll_completion_notices(frame_id)
             .map_err(MergeBridgeError::RendererPoll)?;
+        if self.perf_log_enabled {
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} submitted_receipts={} renderer_submission_id={:?} renderer_notices={}",
+                frame_id,
+                submission_report.receipt_ids.len(),
+                submission_report.renderer_submission_id.map(|id| id.0),
+                renderer_notices.len(),
+            );
+        }
 
         let mut renderer_notice_by_key = HashMap::new();
         for renderer_notice in renderer_notices {
@@ -419,6 +494,13 @@ impl GpuState {
         }
 
         let completion_notices = self.tile_merge_engine.poll_submission_results();
+        if self.perf_log_enabled && !completion_notices.is_empty() {
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} tile_engine_completion_notices={}",
+                frame_id,
+                completion_notices.len(),
+            );
+        }
         for notice in completion_notices {
             let notice_key = (notice.notice_id, notice.receipt_id);
             let renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
@@ -437,8 +519,37 @@ impl GpuState {
         }
 
         let business_results = self.tile_merge_engine.drain_business_results();
+        if self.perf_log_enabled && !business_results.is_empty() {
+            let finalize_count = business_results
+                .iter()
+                .filter(|result| matches!(result, TilesBusinessResult::CanFinalize { .. }))
+                .count();
+            let abort_count = business_results.len().saturating_sub(finalize_count);
+            let total_dirty_tiles: usize = business_results
+                .iter()
+                .map(|result| match result {
+                    TilesBusinessResult::CanFinalize { dirty_tiles, .. } => dirty_tiles.len(),
+                    TilesBusinessResult::RequiresAbort { .. } => 0,
+                })
+                .sum();
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} business_results={} finalize={} abort={} dirty_tiles={}",
+                frame_id,
+                business_results.len(),
+                finalize_count,
+                abort_count,
+                total_dirty_tiles,
+            );
+        }
         self.apply_tiles_business_results(&business_results)?;
         self.drain_tile_gc_evictions();
+        if self.perf_log_enabled {
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} process_merge_completions_cpu_ms={:.3}",
+                frame_id,
+                perf_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
         Ok(())
     }
 
@@ -516,9 +627,11 @@ impl GpuState {
                     stroke_session_id,
                     layer_id,
                     new_key_mappings,
-                    dirty_tiles: _,
+                    dirty_tiles,
                     ..
                 } => {
+                    let apply_started = Instant::now();
+                    let atlas_store = Arc::clone(&self.atlas_store);
                     let document_apply_result: Result<(), MergeBridgeError> = (|| {
                         let mut document = self
                             .document
@@ -543,16 +656,52 @@ impl GpuState {
                         let mut updated_image = (*existing_image).clone();
                         apply_tile_key_mappings(&mut updated_image, new_key_mappings)
                             .map_err(MergeBridgeError::TileImageApply)?;
+                        let layer_dirty_tiles: Vec<TileCoordinate> = dirty_tiles
+                            .iter()
+                            .map(|(tile_x, tile_y)| TileCoordinate {
+                                tile_x: *tile_x,
+                                tile_y: *tile_y,
+                            })
+                            .collect();
                         document
-                            .apply_merge_image(*layer_id, *stroke_session_id, updated_image, false)
+                            .apply_merge_image(
+                                *layer_id,
+                                *stroke_session_id,
+                                updated_image,
+                                &layer_dirty_tiles,
+                                false,
+                            )
                             .map_err(MergeBridgeError::Document)?;
+                        let committed_image_handle = document
+                            .leaf_image_handle(*layer_id, *stroke_session_id)
+                            .map_err(MergeBridgeError::Document)?;
+                        let committed_image = document
+                            .image(committed_image_handle)
+                            .ok_or(MergeBridgeError::Document(
+                                DocumentMergeError::LayerNotFoundInStrokeSession {
+                                    layer_id: *layer_id,
+                                    stroke_session_id: *stroke_session_id,
+                                },
+                            ))?;
+                        for (tile_x, tile_y, tile_key) in committed_image.iter_tiles() {
+                            if atlas_store.resolve(tile_key).is_none() {
+                                panic!(
+                                    "merge committed unresolved layer tile key: layer_id={} stroke_session_id={} image_handle={:?} tile=({}, {}) key={:?}",
+                                    layer_id,
+                                    stroke_session_id,
+                                    committed_image_handle,
+                                    tile_x,
+                                    tile_y,
+                                    tile_key
+                                );
+                            }
+                        }
                         if document.take_render_tree_cache_dirty() {
                             let render_tree = document.render_tree_snapshot(document.revision());
                             self.view_sender
                                 .send(RenderOp::BindRenderTree(render_tree))
                                 .expect("send updated render tree after merge");
                         }
-                        let _dirty_layers = document.take_dirty_layers();
                         Ok(())
                     })(
                     );
@@ -564,6 +713,16 @@ impl GpuState {
                             },
                         );
                         return Err(error);
+                    }
+                    if self.perf_log_enabled {
+                        eprintln!(
+                            "[merge_bridge_perf] merge_finalize receipt_id={} stroke_session_id={} layer_id={} dirty_tiles={} cpu_apply_ms={:.3}",
+                            receipt_id.0,
+                            stroke_session_id,
+                            layer_id,
+                            dirty_tiles.len(),
+                            apply_started.elapsed().as_secs_f64() * 1_000.0,
+                        );
                     }
                     if let Err(error) = self.finalize_merge_receipt(*receipt_id) {
                         self.brush_execution_feedback_queue.push_back(
@@ -661,8 +820,16 @@ fn create_startup_document(
     startup_image_path: Option<&Path>,
 ) -> Document {
     let Some(startup_image_path) = startup_image_path else {
+        eprintln!(
+            "[startup] no startup image provided, using default empty document {}x{}",
+            DEFAULT_DOCUMENT_WIDTH, DEFAULT_DOCUMENT_HEIGHT
+        );
         return Document::new(DEFAULT_DOCUMENT_WIDTH, DEFAULT_DOCUMENT_HEIGHT);
     };
+    eprintln!(
+        "[startup] loading startup image from {}",
+        startup_image_path.display()
+    );
 
     let decoded = image::ImageReader::open(startup_image_path)
         .unwrap_or_else(|error| {
@@ -683,6 +850,12 @@ fn create_startup_document(
     let size_x = decoded.width();
     let size_y = decoded.height();
     let image_bytes = decoded.into_raw();
+    eprintln!(
+        "[startup] startup image decoded: {}x{} ({} bytes)",
+        size_x,
+        size_y,
+        image_bytes.len()
+    );
 
     let image = atlas_store
         .ingest_image_rgba8_strided(size_x, size_y, &image_bytes, size_x * 4)
@@ -692,10 +865,29 @@ fn create_startup_document(
                 startup_image_path.display()
             )
         });
+    let tile_count = image.iter_tiles().count();
+    eprintln!(
+        "[startup] startup image ingested into tile atlas: non_empty_tiles={}",
+        tile_count
+    );
 
     let mut document = Document::new(size_x, size_y);
     let _layer_id = document.new_layer_root_with_image(image, BlendMode::Normal);
+    eprintln!("[startup] startup layer inserted into document root");
     document
+}
+
+fn surface_format_to_default_atlas_format(surface_format: wgpu::TextureFormat) -> TileAtlasFormat {
+    match surface_format {
+        wgpu::TextureFormat::Rgba8Unorm => TileAtlasFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb => TileAtlasFormat::Rgba8UnormSrgb,
+        wgpu::TextureFormat::Bgra8Unorm => TileAtlasFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb => TileAtlasFormat::Bgra8UnormSrgb,
+        _ => panic!(
+            "unsupported surface format for default tile atlas format: {:?}",
+            surface_format
+        ),
+    }
 }
 
 fn push_view_state(
@@ -745,6 +937,26 @@ fn apply_gc_evicted_batch_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_format_mapping_preserves_rgba_bgra_variants() {
+        assert_eq!(
+            surface_format_to_default_atlas_format(wgpu::TextureFormat::Rgba8Unorm),
+            TileAtlasFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            surface_format_to_default_atlas_format(wgpu::TextureFormat::Rgba8UnormSrgb),
+            TileAtlasFormat::Rgba8UnormSrgb
+        );
+        assert_eq!(
+            surface_format_to_default_atlas_format(wgpu::TextureFormat::Bgra8Unorm),
+            TileAtlasFormat::Bgra8Unorm
+        );
+        assert_eq!(
+            surface_format_to_default_atlas_format(wgpu::TextureFormat::Bgra8UnormSrgb),
+            TileAtlasFormat::Bgra8UnormSrgb
+        );
+    }
 
     fn create_device_queue() -> (wgpu::Device, wgpu::Queue) {
         pollster::block_on(async {
@@ -852,7 +1064,7 @@ mod tests {
 
         let (device, queue) = create_device_queue();
         let (atlas_store, atlas_gpu) =
-            Renderer::create_default_tile_atlas(&device, wgpu::TextureFormat::Rgba8Unorm)
+            Renderer::create_default_tile_atlas(&device, TileAtlasFormat::Rgba8Unorm)
                 .expect("create tile atlas store");
 
         let virtual_image = atlas_store

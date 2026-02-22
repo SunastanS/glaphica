@@ -10,6 +10,8 @@ use render_protocol::{
     ReferenceSetId,
 };
 
+pub mod dab_to_buffer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrushExecutionQueueCreateError {
     ZeroCapacity,

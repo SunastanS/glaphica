@@ -4,6 +4,7 @@
 //! frame results after synchronization checks.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 
 use render_protocol::{
@@ -13,11 +14,11 @@ use render_protocol::{
 use tiles::{DirtySinceResult, TILE_SIZE};
 
 use crate::{
-    BrushControlError, BrushRenderEnqueueError, CompositeEmission, CompositePassContext,
-    DirtyExecutionPlan, DirtyPropagationEngine, DirtyRectMask, DirtyTileMask, FrameExecutionResult,
-    FrameGpuTimingReport, FramePlan, FrameState, GpuFrameTimingSlotState, PreparedBrushProgram,
-    PresentError, ReferenceSetState, RenderDataResolver, RenderNodeKey, RenderTreeNode, Renderer,
-    ViewportMode,
+    BrushControlError, BrushRenderEnqueueError, CompositeEmission, CompositeNodePlan,
+    CompositePassContext, DirtyExecutionPlan, DirtyPropagationEngine, DirtyRectMask, DirtyTileMask,
+    FrameExecutionResult, FrameGpuTimingReport, FramePlan, FrameState, GpuFrameTimingSlotState,
+    PreparedBrushProgram, PresentError, ReferenceSetState, RenderDataResolver, RenderNodeKey,
+    RenderTreeNode, Renderer, ViewportMode,
 };
 
 fn refresh_cached_render_tree_if_dirty(frame_state: &mut FrameState) {
@@ -72,26 +73,71 @@ fn mark_dirty_from_tile_history(
             .layer_dirty_versions
             .entry(*layer_id)
             .or_insert(crate::LayerDirtyVersion { last_version: 0 });
+        if crate::renderer_perf_log_enabled() {
+            eprintln!(
+                "[renderer_perf] layer_dirty_poll layer_id={} since_version={}",
+                layer_id, entry.last_version
+            );
+        }
         let Some(result) = resolver.layer_dirty_since(*layer_id, entry.last_version) else {
+            if crate::renderer_perf_log_enabled() {
+                eprintln!(
+                    "[renderer_perf] layer_dirty_poll layer_id={} resolver_result=none",
+                    layer_id
+                );
+            }
             continue;
         };
         match result {
-            DirtySinceResult::UpToDate => continue,
+            DirtySinceResult::UpToDate => {
+                if crate::renderer_perf_log_enabled() {
+                    eprintln!(
+                        "[renderer_perf] layer_dirty_poll layer_id={} result=up_to_date",
+                        layer_id
+                    );
+                }
+                continue;
+            }
             DirtySinceResult::HistoryTruncated => {
                 frame_state.dirty_state_store.mark_layer_full(*layer_id);
                 if let Some(layer_version) = resolver.layer_version(*layer_id) {
                     entry.last_version = layer_version;
+                }
+                if crate::renderer_perf_log_enabled() {
+                    eprintln!(
+                        "[renderer_perf] layer_dirty_poll layer_id={} result=history_truncated action=mark_layer_full new_since_version={}",
+                        layer_id, entry.last_version
+                    );
                 }
                 continue;
             }
             DirtySinceResult::HasChanges(query) => {
                 entry.last_version = query.latest_version;
                 if query.dirty_tiles.is_empty() {
+                    if crate::renderer_perf_log_enabled() {
+                        eprintln!(
+                            "[renderer_perf] layer_dirty_poll layer_id={} result=has_changes_empty latest_version={}",
+                            layer_id, query.latest_version
+                        );
+                    }
                     continue;
                 }
                 if query.dirty_tiles.is_full() {
                     frame_state.dirty_state_store.mark_layer_full(*layer_id);
+                    if crate::renderer_perf_log_enabled() {
+                        eprintln!(
+                            "[renderer_perf] layer_dirty_poll layer_id={} result=has_changes_full latest_version={} action=mark_layer_full",
+                            layer_id, query.latest_version
+                        );
+                    }
                     continue;
+                }
+                let dirty_tile_count = query.dirty_tiles.iter_dirty_tiles().count();
+                if crate::renderer_perf_log_enabled() {
+                    eprintln!(
+                        "[renderer_perf] layer_dirty_poll layer_id={} result=has_changes_partial latest_version={} dirty_tile_count={}",
+                        layer_id, query.latest_version, dirty_tile_count
+                    );
                 }
                 for (tile_x, tile_y) in query.dirty_tiles.iter_dirty_tiles() {
                     let min_x = tile_x.saturating_mul(TILE_SIZE) as i32;
@@ -174,6 +220,84 @@ fn build_dirty_execution_plan(
         dirty_group_tiles,
     }
 }
+
+#[derive(Default)]
+struct CompositePlanPerfStats {
+    leaf_nodes: usize,
+    rebuilt_leaf_nodes: usize,
+    rebuilt_leaf_partial_tiles: usize,
+    rebuilt_leaf_unknown_tiles: usize,
+    group_nodes: usize,
+    rerender_group_nodes: usize,
+    rerender_group_tiles: usize,
+    cache_group_nodes: usize,
+}
+
+fn collect_composite_plan_perf_stats(node: &CompositeNodePlan, stats: &mut CompositePlanPerfStats) {
+    match node {
+        CompositeNodePlan::Leaf {
+            should_rebuild,
+            dirty_tiles,
+            ..
+        } => {
+            stats.leaf_nodes = stats
+                .leaf_nodes
+                .checked_add(1)
+                .expect("leaf node perf count overflow");
+            if *should_rebuild {
+                stats.rebuilt_leaf_nodes = stats
+                    .rebuilt_leaf_nodes
+                    .checked_add(1)
+                    .expect("rebuilt leaf node perf count overflow");
+                match dirty_tiles {
+                    Some(DirtyTileMask::Partial(tiles)) => {
+                        stats.rebuilt_leaf_partial_tiles = stats
+                            .rebuilt_leaf_partial_tiles
+                            .checked_add(tiles.len())
+                            .expect("rebuilt leaf partial tile perf count overflow");
+                    }
+                    _ => {
+                        stats.rebuilt_leaf_unknown_tiles = stats
+                            .rebuilt_leaf_unknown_tiles
+                            .checked_add(1)
+                            .expect("rebuilt leaf unknown tile perf count overflow");
+                    }
+                }
+            }
+        }
+        CompositeNodePlan::Group {
+            decision, children, ..
+        } => {
+            stats.group_nodes = stats
+                .group_nodes
+                .checked_add(1)
+                .expect("group node perf count overflow");
+            if matches!(decision.mode, crate::GroupRerenderMode::Rerender) {
+                stats.rerender_group_nodes = stats
+                    .rerender_group_nodes
+                    .checked_add(1)
+                    .expect("rerender group node perf count overflow");
+                if let Some(tiles) = decision.rerender_tiles.as_ref() {
+                    stats.rerender_group_tiles = stats
+                        .rerender_group_tiles
+                        .checked_add(tiles.len())
+                        .expect("rerender group tile perf count overflow");
+                }
+            } else {
+                stats.cache_group_nodes = stats
+                    .cache_group_nodes
+                    .checked_add(1)
+                    .expect("cache group node perf count overflow");
+            }
+            for child in children {
+                collect_composite_plan_perf_stats(child, stats);
+            }
+        }
+    }
+}
+
+static FRAME_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+static EXECUTE_PLAN_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 impl Renderer {
     pub fn apply_brush_control_command(
@@ -663,6 +787,80 @@ impl Renderer {
         let composite_plan = render_tree
             .as_ref()
             .map(|render_tree| self.build_composite_node_plan(render_tree, &dirty_plan, None));
+        if crate::renderer_perf_log_enabled() || crate::renderer_perf_jsonl_enabled() {
+            let dirty_leaf_full = dirty_plan
+                .dirty_leaf_tiles
+                .values()
+                .filter(|mask| matches!(mask, DirtyTileMask::Full))
+                .count();
+            let dirty_leaf_partial_tiles: usize = dirty_plan
+                .dirty_leaf_tiles
+                .values()
+                .map(|mask| match mask {
+                    DirtyTileMask::Partial(tiles) => tiles.len(),
+                    DirtyTileMask::Full => 0,
+                })
+                .sum();
+            let dirty_group_full = dirty_plan
+                .dirty_group_tiles
+                .values()
+                .filter(|mask| matches!(mask, DirtyTileMask::Full))
+                .count();
+            let dirty_group_partial_tiles: usize = dirty_plan
+                .dirty_group_tiles
+                .values()
+                .map(|mask| match mask {
+                    DirtyTileMask::Partial(tiles) => tiles.len(),
+                    DirtyTileMask::Full => 0,
+                })
+                .sum();
+            let mut composite_stats = CompositePlanPerfStats::default();
+            if let Some(root_plan) = composite_plan.as_ref() {
+                collect_composite_plan_perf_stats(root_plan, &mut composite_stats);
+            }
+            if crate::renderer_perf_log_enabled() {
+                eprintln!(
+                    "[renderer_perf] frame_plan frame_id={} dirty_layers={} dirty_leaf_full={} dirty_leaf_partial_tiles={} dirty_group_full={} dirty_group_partial_tiles={} rerender_group_nodes={} rerender_group_tiles={} rebuilt_leaf_nodes={} rebuilt_leaf_partial_tiles={} rebuilt_leaf_unknown_tiles={}",
+                    frame_id,
+                    layer_dirty_rect_masks.len(),
+                    dirty_leaf_full,
+                    dirty_leaf_partial_tiles,
+                    dirty_group_full,
+                    dirty_group_partial_tiles,
+                    composite_stats.rerender_group_nodes,
+                    composite_stats.rerender_group_tiles,
+                    composite_stats.rebuilt_leaf_nodes,
+                    composite_stats.rebuilt_leaf_partial_tiles,
+                    composite_stats.rebuilt_leaf_unknown_tiles,
+                );
+            }
+            if crate::renderer_perf_jsonl_enabled() {
+                crate::renderer_perf_jsonl_write(&format!(
+                    "{{\"event\":\"frame_plan\",\"frame_id\":{},\"dirty_layers\":{},\"dirty_leaf_full\":{},\"dirty_leaf_partial_tiles\":{},\"dirty_group_full\":{},\"dirty_group_partial_tiles\":{},\"rerender_group_nodes\":{},\"rerender_group_tiles\":{},\"rebuilt_leaf_nodes\":{},\"rebuilt_leaf_partial_tiles\":{},\"rebuilt_leaf_unknown_tiles\":{}}}",
+                    frame_id,
+                    layer_dirty_rect_masks.len(),
+                    dirty_leaf_full,
+                    dirty_leaf_partial_tiles,
+                    dirty_group_full,
+                    dirty_group_partial_tiles,
+                    composite_stats.rerender_group_nodes,
+                    composite_stats.rerender_group_tiles,
+                    composite_stats.rebuilt_leaf_nodes,
+                    composite_stats.rebuilt_leaf_partial_tiles,
+                    composite_stats.rebuilt_leaf_unknown_tiles,
+                ));
+            }
+        }
+        if FRAME_PLAN_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
+            eprintln!(
+                "[renderer] frame_plan frame_id={} has_render_tree={} dirty_layers={} force_group_rerender={} has_composite_plan={}",
+                frame_id,
+                render_tree.is_some(),
+                layer_dirty_rect_masks.len(),
+                force_group_rerender,
+                composite_plan.is_some()
+            );
+        }
 
         FramePlan {
             version: self
@@ -680,6 +878,12 @@ impl Renderer {
         frame_plan: FramePlan,
         frame_view: &wgpu::TextureView,
     ) -> FrameExecutionResult {
+        if EXECUTE_PLAN_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
+            eprintln!(
+                "[renderer] execute_frame_plan composite_plan={}",
+                frame_plan.composite_plan.is_some()
+            );
+        }
         if let Some(composite_plan) = frame_plan.composite_plan.as_ref() {
             self.gpu_state.queue.write_buffer(
                 &self.gpu_state.view_uniform_buffer,

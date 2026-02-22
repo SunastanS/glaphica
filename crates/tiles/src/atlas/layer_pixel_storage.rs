@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::brush_buffer_storage;
-use super::format::{Rgba8Spec, Rgba8SrgbSpec, rgba8_tile_len};
+use super::format::{Bgra8Spec, Bgra8SrgbSpec, Rgba8Spec, Rgba8SrgbSpec, rgba8_tile_len};
 use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
 
 #[derive(Debug)]
@@ -24,12 +24,16 @@ pub struct TileAtlasGpuArray {
 enum LayerStoreBackend {
     Unorm(brush_buffer_storage::GenericTileAtlasStore<Rgba8Spec>),
     Srgb(brush_buffer_storage::GenericTileAtlasStore<Rgba8SrgbSpec>),
+    BgraUnorm(brush_buffer_storage::GenericTileAtlasStore<Bgra8Spec>),
+    BgraSrgb(brush_buffer_storage::GenericTileAtlasStore<Bgra8SrgbSpec>),
 }
 
 #[derive(Debug)]
 enum LayerGpuBackend {
     Unorm(brush_buffer_storage::GenericTileAtlasGpuArray<Rgba8Spec>),
     Srgb(brush_buffer_storage::GenericTileAtlasGpuArray<Rgba8SrgbSpec>),
+    BgraUnorm(brush_buffer_storage::GenericTileAtlasGpuArray<Bgra8Spec>),
+    BgraSrgb(brush_buffer_storage::GenericTileAtlasGpuArray<Bgra8SrgbSpec>),
 }
 
 impl TileAtlasStore {
@@ -83,6 +87,36 @@ impl TileAtlasStore {
                     },
                 ))
             }
+            TileAtlasFormat::Bgra8Unorm => {
+                let (store, gpu) =
+                    brush_buffer_storage::GenericTileAtlasStore::<Bgra8Spec>::with_config(
+                        device,
+                        GenericTileAtlasConfig::from(config),
+                    )?;
+                Ok((
+                    Self {
+                        generic: LayerStoreBackend::BgraUnorm(store),
+                    },
+                    TileAtlasGpuArray {
+                        generic: LayerGpuBackend::BgraUnorm(gpu),
+                    },
+                ))
+            }
+            TileAtlasFormat::Bgra8UnormSrgb => {
+                let (store, gpu) =
+                    brush_buffer_storage::GenericTileAtlasStore::<Bgra8SrgbSpec>::with_config(
+                        device,
+                        GenericTileAtlasConfig::from(config),
+                    )?;
+                Ok((
+                    Self {
+                        generic: LayerStoreBackend::BgraSrgb(store),
+                    },
+                    TileAtlasGpuArray {
+                        generic: LayerGpuBackend::BgraSrgb(gpu),
+                    },
+                ))
+            }
             _ => Err(TileAtlasCreateError::UnsupportedPayloadFormat),
         }
     }
@@ -91,6 +125,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.is_allocated(key),
             LayerStoreBackend::Srgb(store) => store.is_allocated(key),
+            LayerStoreBackend::BgraUnorm(store) => store.is_allocated(key),
+            LayerStoreBackend::BgraSrgb(store) => store.is_allocated(key),
         }
     }
 
@@ -98,6 +134,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.resolve(key),
             LayerStoreBackend::Srgb(store) => store.resolve(key),
+            LayerStoreBackend::BgraUnorm(store) => store.resolve(key),
+            LayerStoreBackend::BgraSrgb(store) => store.resolve(key),
         }
     }
 
@@ -105,6 +143,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.allocate(),
             LayerStoreBackend::Srgb(store) => store.allocate(),
+            LayerStoreBackend::BgraUnorm(store) => store.allocate(),
+            LayerStoreBackend::BgraSrgb(store) => store.allocate(),
         }
     }
 
@@ -112,6 +152,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.release(key),
             LayerStoreBackend::Srgb(store) => store.release(key),
+            LayerStoreBackend::BgraUnorm(store) => store.release(key),
+            LayerStoreBackend::BgraSrgb(store) => store.release(key),
         }
     }
 
@@ -119,6 +161,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.force_release_all_keys(),
             LayerStoreBackend::Srgb(store) => store.force_release_all_keys(),
+            LayerStoreBackend::BgraUnorm(store) => store.force_release_all_keys(),
+            LayerStoreBackend::BgraSrgb(store) => store.force_release_all_keys(),
         }
     }
 
@@ -126,6 +170,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.mark_keys_active(keys),
             LayerStoreBackend::Srgb(store) => store.mark_keys_active(keys),
+            LayerStoreBackend::BgraUnorm(store) => store.mark_keys_active(keys),
+            LayerStoreBackend::BgraSrgb(store) => store.mark_keys_active(keys),
         }
     }
 
@@ -133,6 +179,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.retain_keys_new_batch(keys),
             LayerStoreBackend::Srgb(store) => store.retain_keys_new_batch(keys),
+            LayerStoreBackend::BgraUnorm(store) => store.retain_keys_new_batch(keys),
+            LayerStoreBackend::BgraSrgb(store) => store.retain_keys_new_batch(keys),
         }
     }
 
@@ -140,6 +188,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.drain_evicted_retain_batches(),
             LayerStoreBackend::Srgb(store) => store.drain_evicted_retain_batches(),
+            LayerStoreBackend::BgraUnorm(store) => store.drain_evicted_retain_batches(),
+            LayerStoreBackend::BgraSrgb(store) => store.drain_evicted_retain_batches(),
         }
     }
 
@@ -147,6 +197,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.reserve_tile_set(count),
             LayerStoreBackend::Srgb(store) => store.reserve_tile_set(count),
+            LayerStoreBackend::BgraUnorm(store) => store.reserve_tile_set(count),
+            LayerStoreBackend::BgraSrgb(store) => store.reserve_tile_set(count),
         }
     }
 
@@ -158,6 +210,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.adopt_tile_set(keys.iter().copied()),
             LayerStoreBackend::Srgb(store) => store.adopt_tile_set(keys.iter().copied()),
+            LayerStoreBackend::BgraUnorm(store) => store.adopt_tile_set(keys.iter().copied()),
+            LayerStoreBackend::BgraSrgb(store) => store.adopt_tile_set(keys.iter().copied()),
         }
     }
 
@@ -165,6 +219,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.release_tile_set(set),
             LayerStoreBackend::Srgb(store) => store.release_tile_set(set),
+            LayerStoreBackend::BgraUnorm(store) => store.release_tile_set(set),
+            LayerStoreBackend::BgraSrgb(store) => store.release_tile_set(set),
         }
     }
 
@@ -172,6 +228,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.clear_tile_set(set),
             LayerStoreBackend::Srgb(store) => store.clear_tile_set(set),
+            LayerStoreBackend::BgraUnorm(store) => store.clear_tile_set(set),
+            LayerStoreBackend::BgraSrgb(store) => store.clear_tile_set(set),
         }
     }
 
@@ -182,6 +240,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.resolve_tile_set(set),
             LayerStoreBackend::Srgb(store) => store.resolve_tile_set(set),
+            LayerStoreBackend::BgraUnorm(store) => store.resolve_tile_set(set),
+            LayerStoreBackend::BgraSrgb(store) => store.resolve_tile_set(set),
         }
     }
 
@@ -409,6 +469,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.usage(),
             LayerStoreBackend::Srgb(store) => store.usage(),
+            LayerStoreBackend::BgraUnorm(store) => store.usage(),
+            LayerStoreBackend::BgraSrgb(store) => store.usage(),
         }
     }
 
@@ -416,6 +478,8 @@ impl TileAtlasStore {
         match &self.generic {
             LayerStoreBackend::Unorm(store) => store.enqueue_upload_bytes(bytes),
             LayerStoreBackend::Srgb(store) => store.enqueue_upload_bytes(bytes),
+            LayerStoreBackend::BgraUnorm(store) => store.enqueue_upload_bytes(bytes),
+            LayerStoreBackend::BgraSrgb(store) => store.enqueue_upload_bytes(bytes),
         }
     }
 }
@@ -425,6 +489,8 @@ impl TileAtlasGpuArray {
         match &self.generic {
             LayerGpuBackend::Unorm(gpu) => gpu.view(),
             LayerGpuBackend::Srgb(gpu) => gpu.view(),
+            LayerGpuBackend::BgraUnorm(gpu) => gpu.view(),
+            LayerGpuBackend::BgraSrgb(gpu) => gpu.view(),
         }
     }
 
@@ -432,6 +498,8 @@ impl TileAtlasGpuArray {
         match &self.generic {
             LayerGpuBackend::Unorm(gpu) => gpu.texture(),
             LayerGpuBackend::Srgb(gpu) => gpu.texture(),
+            LayerGpuBackend::BgraUnorm(gpu) => gpu.texture(),
+            LayerGpuBackend::BgraSrgb(gpu) => gpu.texture(),
         }
     }
 
@@ -439,6 +507,8 @@ impl TileAtlasGpuArray {
         match &self.generic {
             LayerGpuBackend::Unorm(gpu) => gpu.layout(),
             LayerGpuBackend::Srgb(gpu) => gpu.layout(),
+            LayerGpuBackend::BgraUnorm(gpu) => gpu.layout(),
+            LayerGpuBackend::BgraSrgb(gpu) => gpu.layout(),
         }
     }
 
@@ -446,6 +516,8 @@ impl TileAtlasGpuArray {
         match &self.generic {
             LayerGpuBackend::Unorm(_) => TileAtlasFormat::Rgba8Unorm,
             LayerGpuBackend::Srgb(_) => TileAtlasFormat::Rgba8UnormSrgb,
+            LayerGpuBackend::BgraUnorm(_) => TileAtlasFormat::Bgra8Unorm,
+            LayerGpuBackend::BgraSrgb(_) => TileAtlasFormat::Bgra8UnormSrgb,
         }
     }
 
@@ -453,6 +525,8 @@ impl TileAtlasGpuArray {
         match &self.generic {
             LayerGpuBackend::Unorm(gpu) => gpu.drain_and_execute(queue),
             LayerGpuBackend::Srgb(gpu) => gpu.drain_and_execute(queue),
+            LayerGpuBackend::BgraUnorm(gpu) => gpu.drain_and_execute(queue),
+            LayerGpuBackend::BgraSrgb(gpu) => gpu.drain_and_execute(queue),
         }
     }
 }

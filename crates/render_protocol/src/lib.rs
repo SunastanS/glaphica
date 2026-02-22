@@ -492,7 +492,6 @@ pub enum RenderOp {
     SetViewTransform { matrix: TransformMatrix4x4 },
     SetViewport(Viewport),
     BindRenderTree(RenderTreeSnapshot),
-    MarkLayerDirty { layer_id: u64 },
     SetBrushCommandQuota { max_commands: u32 },
     DropStaleWorkBeforeRevision { revision: u64 },
     PresentToSurface,
