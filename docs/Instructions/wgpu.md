@@ -1,5 +1,8 @@
 # wgpu / WGSL 排查记录
 
+另见：
+- `docs/Instructions/debug_playbook.md`（更偏“渲染树/赃区/缓存/提交语义”的综合排查流程）
+
 ## 案例：WGSL 保留字导致管线无效
 
 ### 现象
@@ -58,3 +61,53 @@
 - 禁止：在单次 submit 内，依赖“循环多次覆盖同一 buffer + 多 pass 读取”的隐式顺序语义。
 - 必须：为 fan-out 场景设置容量上限断言，溢出直接 panic，防止 silent truncation。
 - 建议：在 `GLAPHICA_BRUSH_TRACE=1` 下输出每批 `command_count/chunk_count`，便于快速判断是否进入高风险路径。
+
+## 案例：同一 submit 内覆盖 tile instance buffer 导致 tile 错位/拼贴
+
+### 典型现象
+- 画面出现“拼贴/mosaic”或 tile 位置错乱：同一张 tile 被贴到多个位置，或不同 tile 被交换位置。
+- 常伴随“新增了一层 group / live preview / 多一次 composite pass 后才出现”，即在 render tree 更深、composite pass 次数变多时更容易触发。
+- 视觉上更像“整块瓦片被移动/复制”，而不是笔刷写入的局部像素错误。
+
+### 根因（非常典型）
+- 在同一个 `Queue` 提交（同一帧的同一次 composite submit）里：
+  1. 使用同一个 GPU buffer（例如 `tile_instance_buffer`）作为 storage/uniform 输入；
+  2. 在 CPU 侧反复调用 `queue.write_buffer(buffer, offset=0, ...)` 覆盖同一段内存；
+  3. 同时把多个 render pass 都编码进同一个 `CommandEncoder`，最后只 `queue.submit` 一次。
+- 由于 `queue.write_buffer` 的写入会在该 submit 执行前按顺序发生，最终 command buffer 执行时所有 pass 都只能读到“最后一次覆盖后的内容”，从而导致早先 pass 的 draw instance 被污染，表现为 tile 错位/拼贴。
+
+一句话：**“同一 submit 内，多次覆盖同一段 buffer + 多个 pass 读取”不会产生你想要的 per-pass 语义。**
+
+### 验证方式（推荐 fail-fast）
+1. 写一个最小可视化回归测试，确保 tile 坐标映射正确：
+   - 构造 `256x256` 图像拆成 `2x2` tiles（每块不同颜色）。
+   - 走完整条 composite 路径并做 readback，逐像素断言输出和输入一致。
+2. 再加一个“嵌套 group cache”版本：
+   - leaf -> groupA (slot composite + tile copy) -> groupB (slot composite + tile copy) -> output (content composite)
+   - tile_index 使用稀疏/不连续值，避免“偶然按顺序”掩盖问题。
+
+本仓库对应的复现测试（默认 `#[ignore]`，需要手动跑）：
+- `crates/renderer/src/tests.rs`: `composite_tile_mapping_renders_quadrant_image_exactly`
+- `crates/renderer/src/tests.rs`: `composite_tile_mapping_survives_nested_group_cache_levels`
+
+运行：
+```bash
+cargo test -p renderer composite_tile_mapping_renders_quadrant_image_exactly -- --ignored --nocapture --test-threads=1
+cargo test -p renderer composite_tile_mapping_survives_nested_group_cache_levels -- --ignored --nocapture --test-threads=1
+```
+
+### 修复方式（优先级从高到低）
+1. **实例数据用“arena/append-only”分配（推荐）**
+   - 在一次 submit 期间，把每个 pass 需要的 instance 数据写到 buffer 的不同 offset（append-only）。
+   - `draw()` 的 instance range 需要加上该 pass 的 `base_instance_index`。
+   - 在 submit 之间重置 cursor（例如 composite submit 结束后再重置给 view submit）。
+2. **每个 pass 单独 submit（止血方案）**
+   - 每次 `write_buffer` 后立即 `queue.submit` 对应 encoder，保证写入和读取不会被后续覆盖。
+   - 成本较高（submit 次数多），但语义最直观。
+3. **使用动态 offset / 多个 buffer**
+   - uniform 使用 dynamic offset；
+   - storage 使用数组或多 buffer（每 pass 独立绑定区域）。
+
+### 经验规则（避免回归）
+- 禁止：在单次 submit 内，通过多次 `queue.write_buffer` 覆盖同一段内存来“给不同 pass 传参”。
+- 必须：如果一个 encoder 内有多个 pass 且它们读取同类 per-pass 数据，数据要么在 GPU 侧可索引（数组/offset），要么在 CPU 侧按 offset 分配。
