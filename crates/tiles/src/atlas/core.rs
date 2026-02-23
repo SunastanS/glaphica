@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{mpsc, Mutex};
 
-use crate::{INDEX_SHARDS, TILE_STRIDE};
 use crate::{
     TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle,
     TileSetId,
 };
+use crate::{INDEX_SHARDS, TILE_STRIDE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::atlas) struct AtlasUsage {
@@ -310,11 +310,8 @@ impl<UploadPayload> TileOpQueue<UploadPayload> {
             .receiver
             .lock()
             .expect("tile op queue receiver lock poisoned");
-        loop {
-            match receiver.try_recv() {
-                Ok(operation) => operations.push(operation),
-                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
-            }
+        while let Ok(operation) = receiver.try_recv() {
+            operations.push(operation);
         }
         operations
     }
@@ -975,7 +972,7 @@ pub(in crate::atlas) fn tile_coords_from_index_with_row(
 #[cfg(test)]
 mod tests {
     use super::{AtlasLayout, TileAtlasCpu};
-    use crate::{TILE_STRIDE, TileAllocError};
+    use crate::{TileAllocError, TILE_STRIDE};
 
     fn test_layout(tiles_per_row: u32, tiles_per_column: u32) -> AtlasLayout {
         let tiles_per_atlas = tiles_per_row

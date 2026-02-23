@@ -447,10 +447,10 @@ fn crate_name_from_path(path: &std::path::Path) -> String {
     let Some(first) = components.next() else {
         return "workspace".to_string();
     };
-    if first.as_os_str() == OsStr::new("crates") {
-        if let Some(second) = components.next() {
-            return second.as_os_str().to_string_lossy().to_string();
-        }
+    if first.as_os_str() == OsStr::new("crates")
+        && let Some(second) = components.next()
+    {
+        return second.as_os_str().to_string_lossy().to_string();
     }
     "workspace".to_string()
 }
