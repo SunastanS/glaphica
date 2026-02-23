@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use render_protocol::{BlendMode, ImageHandle, TransformMatrix4x4};
+use render_protocol::{BlendMode, ImageSource, TransformMatrix4x4};
 
 use super::{DirtyTileMask, RenderTreeNode, TileCoord};
 
@@ -84,7 +84,7 @@ pub(super) enum CompositeNodePlan {
     Leaf {
         layer_id: u64,
         blend: BlendMode,
-        image_handle: ImageHandle,
+        image_source: ImageSource,
         should_rebuild: bool,
         dirty_tiles: Option<DirtyTileMask>,
         visible_tiles: Option<HashSet<TileCoord>>,

@@ -24,11 +24,13 @@ pub struct Document {
     size_x: u32,
     size_y: u32,
     revision: u64,
+    render_tree_revision: u64,
     next_layer_id: u64,
     render_tree_cache_dirty: bool,
     layer_versions: HashMap<LayerId, u64>,
     layer_dirty_history: HashMap<LayerId, LayerDirtyHistory>,
     active_merge: Option<ActiveMerge>,
+    active_preview_buffer: Option<ActivePreviewBuffer>,
     consumed_stroke_sessions: HashSet<StrokeSessionId>,
 }
 
@@ -127,6 +129,12 @@ impl DocumentMergeError {
 
 #[derive(Debug, Clone, Copy)]
 struct ActiveMerge {
+    layer_id: LayerId,
+    stroke_session_id: StrokeSessionId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivePreviewBuffer {
     layer_id: LayerId,
     stroke_session_id: StrokeSessionId,
 }
@@ -274,11 +282,13 @@ impl Document {
             size_x,
             size_y,
             revision: 0,
+            render_tree_revision: 0,
             next_layer_id: 1,
             render_tree_cache_dirty: true,
             layer_versions: HashMap::new(),
             layer_dirty_history: HashMap::new(),
             active_merge: None,
+            active_preview_buffer: None,
             consumed_stroke_sessions: HashSet::new(),
         }
     }
@@ -295,11 +305,54 @@ impl Document {
         self.revision
     }
 
-    pub fn render_tree_snapshot(&self, revision: u64) -> RenderTreeSnapshot {
+    pub fn render_tree_revision(&self) -> u64 {
+        self.render_tree_revision
+    }
+
+    pub fn render_tree_snapshot(&self) -> RenderTreeSnapshot {
         RenderTreeSnapshot {
-            revision,
-            root: Arc::new(self.layer_tree.build_render_node_snapshot()),
+            revision: self.render_tree_revision,
+            root: Arc::new(
+                self.layer_tree
+                    .build_render_node_snapshot(self.active_preview_buffer),
+            ),
         }
+    }
+
+    pub fn set_active_preview_buffer(
+        &mut self,
+        layer_id: LayerId,
+        stroke_session_id: StrokeSessionId,
+    ) -> Result<(), DocumentMergeError> {
+        let layer_lookup = self.lookup_leaf_image_handle(layer_id)?;
+        if !layer_lookup.is_leaf {
+            return Err(DocumentMergeError::LayerIsNotLeaf {
+                layer_id,
+                stroke_session_id,
+            });
+        }
+
+        self.active_preview_buffer = Some(ActivePreviewBuffer {
+            layer_id,
+            stroke_session_id,
+        });
+        self.mark_render_tree_dirty();
+        Ok(())
+    }
+
+    pub fn clear_active_preview_buffer(&mut self, stroke_session_id: StrokeSessionId) -> bool {
+        let should_clear = matches!(
+            self.active_preview_buffer,
+            Some(ActivePreviewBuffer {
+                stroke_session_id: active_stroke_session_id,
+                ..
+            }) if active_stroke_session_id == stroke_session_id
+        );
+        if should_clear {
+            self.active_preview_buffer = None;
+            self.mark_render_tree_dirty();
+        }
+        should_clear
     }
 
     pub fn root(&self) -> &[LayerTreeNode] {
@@ -411,6 +464,15 @@ impl Document {
                 })?;
         self.revision = next_revision;
         self.active_merge = None;
+        if matches!(
+            self.active_preview_buffer,
+            Some(ActivePreviewBuffer {
+                layer_id: active_layer_id,
+                stroke_session_id: active_stroke_session_id,
+            }) if active_layer_id == layer_id && active_stroke_session_id == stroke_session_id
+        ) {
+            self.active_preview_buffer = None;
+        }
         self.consumed_stroke_sessions.insert(stroke_session_id);
         self.mark_render_tree_dirty();
         Ok(MergeCommitSummary {
@@ -610,6 +672,16 @@ impl Document {
     ) -> Result<(), DocumentMergeError> {
         self.validate_active_merge(layer_id, stroke_session_id)?;
         self.active_merge = None;
+        if matches!(
+            self.active_preview_buffer,
+            Some(ActivePreviewBuffer {
+                layer_id: active_layer_id,
+                stroke_session_id: active_stroke_session_id,
+            }) if active_layer_id == layer_id && active_stroke_session_id == stroke_session_id
+        ) {
+            self.active_preview_buffer = None;
+            self.mark_render_tree_dirty();
+        }
         self.consumed_stroke_sessions.insert(stroke_session_id);
         Ok(())
     }
@@ -632,6 +704,10 @@ impl Document {
 
     fn mark_render_tree_dirty(&mut self) {
         self.render_tree_cache_dirty = true;
+        self.render_tree_revision = self
+            .render_tree_revision
+            .checked_add(1)
+            .expect("render tree revision overflow");
     }
 
     fn alloc_layer_id(&mut self) -> LayerNodeId {
@@ -909,14 +985,17 @@ impl LayerTreeNode {
         }
     }
 
-    fn build_render_node_snapshot(&self) -> RenderNodeSnapshot {
+    fn build_render_node_snapshot(
+        &self,
+        active_preview_buffer: Option<ActivePreviewBuffer>,
+    ) -> RenderNodeSnapshot {
         match self {
             LayerTreeNode::Root { children } => RenderNodeSnapshot::Group {
                 group_id: LayerNodeId::ROOT.0,
                 blend: BlendMode::Normal,
                 children: children
                     .iter()
-                    .map(Self::build_render_node_snapshot)
+                    .map(|child| child.build_render_node_snapshot(active_preview_buffer))
                     .collect::<Vec<_>>()
                     .into_boxed_slice()
                     .into(),
@@ -930,7 +1009,7 @@ impl LayerTreeNode {
                 blend: *blend,
                 children: children
                     .iter()
-                    .map(Self::build_render_node_snapshot)
+                    .map(|child| child.build_render_node_snapshot(active_preview_buffer))
                     .collect::<Vec<_>>()
                     .into_boxed_slice()
                     .into(),
@@ -939,11 +1018,34 @@ impl LayerTreeNode {
                 id,
                 blend,
                 image_handle,
-            } => RenderNodeSnapshot::Leaf {
-                layer_id: id.0,
-                blend: *blend,
-                image_handle: *image_handle,
-            },
+            } => {
+                // Always model layers as a group node so that live preview can attach brush buffer
+                // leaves without changing the existence/type of the layer node itself.
+                let base_layer_leaf = RenderNodeSnapshot::Leaf {
+                    layer_id: id.0,
+                    blend: BlendMode::Normal,
+                    image_source: render_protocol::ImageSource::LayerImage {
+                        image_handle: *image_handle,
+                    },
+                };
+                let mut children = vec![base_layer_leaf];
+                if let Some(preview_buffer) = active_preview_buffer {
+                    if preview_buffer.layer_id == id.0 {
+                        children.push(RenderNodeSnapshot::Leaf {
+                            layer_id: id.0,
+                            blend: BlendMode::Normal,
+                            image_source: render_protocol::ImageSource::BrushBuffer {
+                                stroke_session_id: preview_buffer.stroke_session_id,
+                            },
+                        });
+                    }
+                }
+                RenderNodeSnapshot::Group {
+                    group_id: id.0,
+                    blend: *blend,
+                    children: children.into_boxed_slice().into(),
+                }
+            }
         }
     }
 }
@@ -953,7 +1055,7 @@ mod tests {
     use super::*;
 
     fn snapshot_signature(document: &Document) -> String {
-        render_node_signature(document.render_tree_snapshot(7).root.as_ref())
+        render_node_signature(document.render_tree_snapshot().root.as_ref())
     }
 
     fn render_node_signature(node: &RenderNodeSnapshot) -> String {
@@ -974,6 +1076,17 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join(",");
                 format!("G({group_id}:{blend:?})[{children_repr}]")
+            }
+        }
+    }
+
+    fn contains_brush_buffer_leaf(node: &RenderNodeSnapshot) -> bool {
+        match node {
+            RenderNodeSnapshot::Leaf { image_source, .. } => {
+                matches!(image_source, render_protocol::ImageSource::BrushBuffer { .. })
+            }
+            RenderNodeSnapshot::Group { children, .. } => {
+                children.iter().any(contains_brush_buffer_leaf)
             }
         }
     }
@@ -1220,8 +1333,8 @@ mod tests {
         assert_eq!(
             snapshot_signature(&document),
             format!(
-                "G(0:Normal)[G({}:Normal)[L({}:Normal),L({}:Normal)],L({}:Normal)]",
-                branch.0, a.0, b.0, c.0
+                "G(0:Normal)[G({}:Normal)[G({}:Normal)[L({}:Normal)],G({}:Normal)[L({}:Normal)]],G({}:Normal)[L({}:Normal)]]",
+                branch.0, a.0, a.0, b.0, b.0, c.0, c.0
             )
         );
     }
@@ -1238,7 +1351,7 @@ mod tests {
 
         assert_eq!(
             snapshot_signature(&document),
-            format!("G(0:Normal)[L({}:Multiply)]", a.0)
+            format!("G(0:Normal)[G({}:Multiply)[L({}:Normal)]]", a.0, a.0)
         );
     }
 
@@ -1258,8 +1371,8 @@ mod tests {
         assert_eq!(
             snapshot_signature(&document),
             format!(
-                "G(0:Normal)[G({}:Multiply)[L({}:Normal),L({}:Normal)]]",
-                branch.0, a.0, b.0
+                "G(0:Normal)[G({}:Multiply)[G({}:Normal)[L({}:Normal)],G({}:Normal)[L({}:Normal)]]]",
+                branch.0, a.0, a.0, b.0, b.0
             )
         );
     }
@@ -1269,11 +1382,19 @@ mod tests {
         let mut document = Document::new(8, 4);
         let _ = document.new_layer_root();
 
-        let snapshot = document.render_tree_snapshot(1);
+        let snapshot = document.render_tree_snapshot();
         let image_handle = match snapshot.root.as_ref() {
             RenderNodeSnapshot::Group { children, .. } => match children.first() {
-                Some(RenderNodeSnapshot::Leaf { image_handle, .. }) => *image_handle,
-                _ => panic!("snapshot should contain one leaf"),
+                Some(RenderNodeSnapshot::Group { children, .. }) => match children.first() {
+                    Some(RenderNodeSnapshot::Leaf { image_source, .. }) => match image_source {
+                        render_protocol::ImageSource::LayerImage { image_handle } => *image_handle,
+                        render_protocol::ImageSource::BrushBuffer { .. } => {
+                            panic!("document snapshot must not contain brush buffer image source")
+                        }
+                    },
+                    _ => panic!("snapshot should contain one leaf"),
+                },
+                _ => panic!("snapshot should contain one layer group"),
             },
             RenderNodeSnapshot::Leaf { .. } => panic!("snapshot root must be a group"),
         };
@@ -1283,6 +1404,101 @@ mod tests {
             .expect("leaf image handle should resolve");
         assert_eq!(image.size_x(), 8);
         assert_eq!(image.size_y(), 4);
+    }
+
+    #[test]
+    fn render_tree_snapshot_wraps_leaf_with_brush_preview_group() {
+        let mut document = Document::new(8, 4);
+        let layer_id = document.new_layer_root().0;
+        document
+            .set_active_preview_buffer(layer_id, 42)
+            .expect("set active preview buffer");
+
+        let snapshot = document.render_tree_snapshot();
+        match snapshot.root.as_ref() {
+            RenderNodeSnapshot::Group { children, .. } => match children.first() {
+                Some(RenderNodeSnapshot::Group { blend, children, .. }) => {
+                    assert_eq!(*blend, BlendMode::Normal);
+                    assert_eq!(children.len(), 2);
+                    match &children[0] {
+                        RenderNodeSnapshot::Leaf {
+                            image_source:
+                                render_protocol::ImageSource::LayerImage { .. },
+                            ..
+                        } => {}
+                        _ => panic!("preview group first child must be layer image leaf"),
+                    }
+                    match &children[1] {
+                        RenderNodeSnapshot::Leaf {
+                            image_source:
+                                render_protocol::ImageSource::BrushBuffer {
+                                    stroke_session_id,
+                                },
+                            ..
+                        } => assert_eq!(*stroke_session_id, 42),
+                        _ => panic!("preview group second child must be brush buffer leaf"),
+                    }
+                }
+                _ => panic!("snapshot root first child must be wrapped preview group"),
+            },
+            RenderNodeSnapshot::Leaf { .. } => panic!("snapshot root must be a group"),
+        }
+    }
+
+    #[test]
+    fn clear_active_preview_buffer_restores_plain_leaf() {
+        let mut document = Document::new(8, 4);
+        let layer_id = document.new_layer_root().0;
+        document
+            .set_active_preview_buffer(layer_id, 77)
+            .expect("set active preview buffer");
+        let _ = document.take_render_tree_cache_dirty();
+
+        assert!(document.clear_active_preview_buffer(77));
+        assert!(document.take_render_tree_cache_dirty());
+
+        let snapshot = document.render_tree_snapshot();
+        match snapshot.root.as_ref() {
+            RenderNodeSnapshot::Group { children, .. } => match children.first() {
+                Some(RenderNodeSnapshot::Group { children, .. }) => {
+                    assert_eq!(children.len(), 1);
+                    match children.first() {
+                        Some(RenderNodeSnapshot::Leaf {
+                            image_source:
+                                render_protocol::ImageSource::LayerImage { .. },
+                            ..
+                        }) => {}
+                        _ => panic!("cleared preview must restore plain layer leaf"),
+                    }
+                }
+                _ => panic!("cleared preview must restore layer group"),
+            },
+            RenderNodeSnapshot::Leaf { .. } => panic!("snapshot root must be a group"),
+        }
+    }
+
+    #[test]
+    fn preview_buffer_bumps_render_tree_revision() {
+        let mut document = Document::new(8, 4);
+        let layer_id = document.new_layer_root().0;
+
+        let rev0 = document.render_tree_revision();
+        document
+            .set_active_preview_buffer(layer_id, 42)
+            .expect("set active preview buffer");
+        let rev1 = document.render_tree_revision();
+        assert!(
+            rev1 > rev0,
+            "render tree revision must advance when preview buffer changes"
+        );
+
+        let _ = document.take_render_tree_cache_dirty();
+        assert!(document.clear_active_preview_buffer(42));
+        let rev2 = document.render_tree_revision();
+        assert!(
+            rev2 > rev1,
+            "render tree revision must advance when preview buffer is cleared"
+        );
     }
 
     fn test_tile_key(raw: u64) -> TileKey {
@@ -1349,6 +1565,37 @@ mod tests {
             .expect("read tile")
             .expect("tile should be assigned");
         assert_eq!(key, test_tile_key(10));
+    }
+
+    #[test]
+    fn merge_apply_clears_active_preview_buffer_for_same_stroke() {
+        let mut document = Document::new(128, 128);
+        let layer_id = document.new_layer_root();
+        let image_handle = document
+            .leaf_image_handle(layer_id.0, 900)
+            .expect("resolve image handle");
+        let existing_image = document
+            .image(image_handle)
+            .expect("resolve image for merge apply");
+        let updated_image = (*existing_image).clone();
+
+        document
+            .set_active_preview_buffer(layer_id.0, 900)
+            .expect("set active preview buffer");
+        assert!(contains_brush_buffer_leaf(
+            document.render_tree_snapshot().root.as_ref()
+        ));
+
+        document
+            .begin_merge(layer_id.0, 900, document.revision())
+            .expect("begin merge");
+        document
+            .apply_merge_image(layer_id.0, 900, updated_image, &[], false)
+            .expect("apply merge");
+
+        assert!(!contains_brush_buffer_leaf(
+            document.render_tree_snapshot().root.as_ref()
+        ));
     }
 
     #[test]
@@ -1533,5 +1780,26 @@ mod tests {
             .abort_merge(layer_id.0, 120)
             .expect("explicit abort after begin merge");
         assert!(!document.has_active_merge(layer_id.0, 120));
+    }
+
+    #[test]
+    fn merge_abort_clears_active_preview_buffer_for_same_stroke() {
+        let mut document = Document::new(128, 128);
+        let layer_id = document.new_layer_root();
+        document
+            .set_active_preview_buffer(layer_id.0, 333)
+            .expect("set active preview buffer");
+        assert!(contains_brush_buffer_leaf(
+            document.render_tree_snapshot().root.as_ref()
+        ));
+
+        document
+            .begin_merge(layer_id.0, 333, document.revision())
+            .expect("begin merge");
+        document.abort_merge(layer_id.0, 333).expect("abort merge");
+
+        assert!(!contains_brush_buffer_leaf(
+            document.render_tree_snapshot().root.as_ref()
+        ));
     }
 }

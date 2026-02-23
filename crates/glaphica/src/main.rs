@@ -479,7 +479,19 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.pump_input_replay_events();
-        if let Some(window) = self.window.as_ref() {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let pending_brush_commands =
+            u32::try_from(gpu.pending_brush_command_count()).unwrap_or(u32::MAX);
+        let should_continue_rendering = self.frame_scheduler.is_active()
+            || self.driver_debug.has_active_stroke()
+            || pending_brush_commands > 0
+            || gpu.has_pending_merge_work();
+        if should_continue_rendering {
             window.request_redraw();
         }
     }
@@ -577,6 +589,9 @@ impl App {
                 }
             }
             self.last_cursor_position = None;
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
         }
     }
 
@@ -951,10 +966,24 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
         return;
     };
     gpu.set_brush_command_quota(max_commands);
-    println!(
-        "[frame_scheduler] frame={} active={} brush_commands={} reason={:?}",
-        decision.frame_sequence_id, decision.scheduler_active, max_commands, decision.update_reason,
-    );
+    let trace_enabled =
+        std::env::var_os("GLAPHICA_FRAME_SCHEDULER_TRACE").is_some_and(|value| value != "0");
+    let should_log = trace_enabled
+        || matches!(
+            decision.update_reason,
+            Some(frame_scheduler::SchedulerUpdateReason::BrushHotPathActivated)
+                | Some(frame_scheduler::SchedulerUpdateReason::BrushHotPathDeactivated)
+        )
+        || max_commands > 0;
+    if should_log {
+        println!(
+            "[frame_scheduler] frame={} active={} brush_commands={} reason={:?}",
+            decision.frame_sequence_id,
+            decision.scheduler_active,
+            max_commands,
+            decision.update_reason,
+        );
+    }
 }
 
 fn brush_trace_enabled() -> bool {

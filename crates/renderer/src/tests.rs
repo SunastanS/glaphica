@@ -14,7 +14,9 @@ fn leaf(layer_id: u64, blend: BlendMode) -> RenderTreeNode {
     RenderTreeNode::Leaf {
         layer_id,
         blend,
-        image_handle: image_handle(),
+        image_source: render_protocol::ImageSource::LayerImage {
+            image_handle: image_handle(),
+        },
     }
 }
 
@@ -150,7 +152,9 @@ fn group_decision_engine_marks_group_for_rerender_when_dirty() {
 fn leaf_should_rebuild_when_dirty_even_with_cache_hit() {
     let cached_leaf = CachedLeafDraw {
         blend: BlendMode::Normal,
-        image_handle: image_handle(),
+        image_source: render_protocol::ImageSource::LayerImage {
+            image_handle: image_handle(),
+        },
         draw_instances: vec![TileDrawInstance {
             blend_mode: BlendMode::Normal,
             tile: TileInstanceGpu {
@@ -171,7 +175,7 @@ fn leaf_should_rebuild_when_dirty_even_with_cache_hit() {
         Some(&DirtyTileMask::Partial(dirty_tiles)),
         Some(&cached_leaf),
         BlendMode::Normal,
-        cached_leaf.image_handle,
+        cached_leaf.image_source,
     ));
 }
 
@@ -180,7 +184,7 @@ fn leaf_should_not_rebuild_when_cache_matches_and_clean() {
     let image_handle = image_handle();
     let cached_leaf = CachedLeafDraw {
         blend: BlendMode::Normal,
-        image_handle,
+        image_source: render_protocol::ImageSource::LayerImage { image_handle },
         draw_instances: vec![TileDrawInstance {
             blend_mode: BlendMode::Normal,
             tile: TileInstanceGpu {
@@ -197,7 +201,7 @@ fn leaf_should_not_rebuild_when_cache_matches_and_clean() {
         None,
         Some(&cached_leaf),
         BlendMode::Normal,
-        image_handle,
+        cached_leaf.image_source,
     ));
 }
 
@@ -205,7 +209,9 @@ fn leaf_should_not_rebuild_when_cache_matches_and_clean() {
 fn cached_leaf_partial_replace_keeps_index_consistent() {
     let mut cached_leaf = CachedLeafDraw {
         blend: BlendMode::Normal,
-        image_handle: image_handle(),
+        image_source: render_protocol::ImageSource::LayerImage {
+            image_handle: image_handle(),
+        },
         draw_instances: vec![
             TileDrawInstance {
                 blend_mode: BlendMode::Normal,
@@ -417,6 +423,84 @@ impl RenderDataResolver for FakeResolver {
     }
 }
 
+#[derive(Default)]
+struct FakeBrushBufferResolver {
+    visit_calls: Cell<u32>,
+    resolve_calls: Cell<u32>,
+    brush_tile_key: Option<TileKey>,
+}
+
+impl RenderDataResolver for FakeBrushBufferResolver {
+    fn document_size(&self) -> (u32, u32) {
+        (TILE_SIZE, TILE_SIZE)
+    }
+
+    fn visit_image_tiles(
+        &self,
+        _image_handle: ImageHandle,
+        _visitor: &mut dyn FnMut(u32, u32, TileKey),
+    ) {
+    }
+
+    fn visit_image_source_tiles(
+        &self,
+        image_source: render_protocol::ImageSource,
+        visitor: &mut dyn FnMut(u32, u32, TileKey),
+    ) {
+        self.visit_calls.set(self.visit_calls.get() + 1);
+        match image_source {
+            render_protocol::ImageSource::BrushBuffer { .. } => {
+                visitor(
+                    5,
+                    7,
+                    self.brush_tile_key
+                        .expect("fake brush resolver requires brush tile key"),
+                );
+            }
+            render_protocol::ImageSource::LayerImage { .. } => {
+                panic!("fake brush resolver only supports brush buffer source");
+            }
+        }
+    }
+
+    fn resolve_tile_address(&self, _tile_key: TileKey) -> Option<TileAddress> {
+        None
+    }
+
+    fn resolve_image_source_tile_address(
+        &self,
+        image_source: render_protocol::ImageSource,
+        tile_key: TileKey,
+    ) -> Option<TileAddress> {
+        self.resolve_calls.set(self.resolve_calls.get() + 1);
+        match image_source {
+            render_protocol::ImageSource::BrushBuffer { .. } => {
+                if Some(tile_key) == self.brush_tile_key {
+                    Some(TileAddress {
+                        atlas_layer: 3,
+                        tile_index: 11,
+                    })
+                } else {
+                    None
+                }
+            }
+            render_protocol::ImageSource::LayerImage { .. } => None,
+        }
+    }
+
+    fn layer_dirty_since(
+        &self,
+        _layer_id: u64,
+        _since_version: u64,
+    ) -> Option<tiles::DirtySinceResult> {
+        None
+    }
+
+    fn layer_version(&self, _layer_id: u64) -> Option<u64> {
+        None
+    }
+}
+
 #[test]
 #[should_panic(expected = "layer tile key unresolved while building full leaf draw instances")]
 fn build_leaf_tile_draw_instances_panics_on_unresolved_tile_key() {
@@ -428,7 +512,36 @@ fn build_leaf_tile_draw_instances_panics_on_unresolved_tile_key() {
         ..Default::default()
     };
 
-    let _ = build_leaf_tile_draw_instances(BlendMode::Multiply, image_handle(), &resolver);
+    let _ = build_leaf_tile_draw_instances(
+        BlendMode::Multiply,
+        render_protocol::ImageSource::LayerImage {
+            image_handle: image_handle(),
+        },
+        &resolver,
+    );
+}
+
+#[test]
+fn build_leaf_tile_draw_instances_supports_brush_buffer_source() {
+    let tile_key = allocate_tile_keys(1)[0];
+    let resolver = FakeBrushBufferResolver {
+        brush_tile_key: Some(tile_key),
+        ..Default::default()
+    };
+    let draw_instances = build_leaf_tile_draw_instances(
+        BlendMode::Normal,
+        render_protocol::ImageSource::BrushBuffer {
+            stroke_session_id: 1,
+        },
+        &resolver,
+    );
+    assert_eq!(resolver.visit_calls.get(), 1);
+    assert_eq!(resolver.resolve_calls.get(), 1);
+    assert_eq!(draw_instances.len(), 1);
+    assert_eq!(draw_instances[0].tile.document_x, (5 * TILE_SIZE) as f32);
+    assert_eq!(draw_instances[0].tile.document_y, (7 * TILE_SIZE) as f32);
+    assert_eq!(draw_instances[0].tile.atlas_layer, 3.0);
+    assert_eq!(draw_instances[0].tile.tile_index, 11);
 }
 
 #[test]
@@ -448,7 +561,9 @@ fn build_leaf_tile_draw_instances_for_tiles_panics_on_unresolved_tile_key() {
 
     let draw_instances = build_leaf_tile_draw_instances_for_tiles(
         BlendMode::Multiply,
-        image_handle(),
+        render_protocol::ImageSource::LayerImage {
+            image_handle: image_handle(),
+        },
         &resolver,
         &requested_tiles,
     );
@@ -975,4 +1090,1340 @@ fn allocate_tile_keys(count: usize) -> Vec<TileKey> {
             .iter_keys()
             .collect()
     })
+}
+
+fn rgba8_texture_upload_bytes_padded(
+    width: u32,
+    height: u32,
+    mut pixel_at: impl FnMut(u32, u32) -> [u8; 4],
+) -> (Vec<u8>, u32) {
+    // wgpu requires bytes_per_row to be a multiple of 256 for texture uploads/copies.
+    let unpadded_bytes_per_row = width
+        .checked_mul(4)
+        .expect("rgba8 bytes_per_row overflow");
+    let padded_bytes_per_row = unpadded_bytes_per_row
+        .checked_add(255)
+        .expect("bytes_per_row pad overflow")
+        / 256
+        * 256;
+    let mut bytes = vec![
+        0u8;
+        (padded_bytes_per_row as usize)
+            .checked_mul(height as usize)
+            .expect("rgba8 upload buffer size overflow")
+    ];
+    for y in 0..height {
+        for x in 0..width {
+            let rgba = pixel_at(x, y);
+            let row_start = (y as usize)
+                .checked_mul(padded_bytes_per_row as usize)
+                .expect("row start overflow");
+            let offset = row_start
+                .checked_add((x as usize) * 4)
+                .expect("pixel offset overflow");
+            bytes[offset..offset + 4].copy_from_slice(&rgba);
+        }
+    }
+    (bytes, padded_bytes_per_row)
+}
+
+fn rgba8_texture_readback_bytes_padded(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> (Vec<u8>, u32) {
+    // wgpu requires bytes_per_row to be a multiple of 256 for texture copies to buffers.
+    let unpadded_bytes_per_row = width
+        .checked_mul(4)
+        .expect("rgba8 readback bytes_per_row overflow");
+    let padded_bytes_per_row = unpadded_bytes_per_row
+        .checked_add(255)
+        .expect("readback bytes_per_row pad overflow")
+        / 256
+        * 256;
+    let buffer_size = (padded_bytes_per_row as u64)
+        .checked_mul(height as u64)
+        .expect("rgba8 readback buffer size overflow");
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("renderer.test.quadrant.readback_encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+        sender.send(result).expect("send map result");
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll must succeed for readback mapping");
+    receiver
+        .recv()
+        .expect("receive map result")
+        .expect("map readback buffer");
+    let mapped = readback.slice(..).get_mapped_range();
+    let bytes = mapped.to_vec();
+    drop(mapped);
+    readback.unmap();
+    (bytes, padded_bytes_per_row)
+}
+
+#[test]
+#[ignore = "repro for tile coordinate mapping regression; run explicitly while debugging"]
+fn composite_tile_mapping_renders_quadrant_image_exactly() {
+    // Repro harness for "tile coordinate mapping" regressions:
+    // - Build a 256x256 image composed of 4 differently-colored tiles (2x2).
+    // - Render through the slot composite shader into a slot-sized scratch texture.
+    // - Copy scratch into a tile atlas (stride layout).
+    // - Render through the content composite shader into a 256x256 output texture.
+    // - Read back and assert pixel-perfect match.
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: true,
+            })
+            .await
+            .expect("request test adapter");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("renderer.test_device.quadrant_mapping"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .expect("request test device");
+
+        let tile_size = TILE_SIZE;
+        assert_eq!(tile_size, 128, "test assumes TILE_SIZE=128");
+        let tile_stride = TILE_STRIDE;
+        assert!(
+            tile_stride >= tile_size,
+            "tile stride must be at least tile size"
+        );
+
+        let content_width = 256u32;
+        let content_height = 256u32;
+        let tiles_per_row = content_width / tile_size;
+        let tiles_per_column = content_height / tile_size;
+        assert_eq!(tiles_per_row, 2);
+        assert_eq!(tiles_per_column, 2);
+        let atlas_width = tiles_per_row * tile_stride;
+        let atlas_height = tiles_per_column * tile_stride;
+
+        let layer_atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("renderer.test.quadrant.layer_atlas"),
+            size: wgpu::Extent3d {
+                width: atlas_width,
+                height: atlas_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let (layer_upload, layer_bytes_per_row) =
+            rgba8_texture_upload_bytes_padded(atlas_width, atlas_height, |x, y| {
+                let tile_x = x / tile_stride;
+                let tile_y = y / tile_stride;
+                match (tile_x, tile_y) {
+                    (0, 0) => [255, 0, 0, 255],   // top-left: red
+                    (1, 0) => [0, 255, 0, 255],   // top-right: green
+                    (0, 1) => [0, 0, 255, 255],   // bottom-left: blue
+                    (1, 1) => [255, 255, 0, 255], // bottom-right: yellow
+                    _ => [0, 0, 0, 255],
+                }
+            });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &layer_atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &layer_upload,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(layer_bytes_per_row),
+                rows_per_image: Some(atlas_height),
+            },
+            wgpu::Extent3d {
+                width: atlas_width,
+                height: atlas_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let layer_atlas_view = layer_atlas.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("renderer.test.quadrant.layer_atlas.view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let group_atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("renderer.test.quadrant.group_atlas"),
+            size: wgpu::Extent3d {
+                width: atlas_width,
+                height: atlas_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let group_atlas_view = group_atlas.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("renderer.test.quadrant.group_atlas.view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let scratch = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("renderer.test.quadrant.scratch"),
+            size: wgpu::Extent3d {
+                width: atlas_width,
+                height: atlas_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let scratch_view = scratch.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("renderer.test.quadrant.output"),
+            size: wgpu::Extent3d {
+                width: content_width,
+                height: content_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let view_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.test.quadrant.view_uniform"),
+            size: std::mem::size_of::<TransformMatrix4x4>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let tile_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.test.quadrant.tile_instances"),
+            size: (std::mem::size_of::<TileInstanceGpu>() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let instances = [
+            TileInstanceGpu {
+                document_x: 0.0,
+                document_y: 0.0,
+                atlas_layer: 0.0,
+                tile_index: 0,
+                _padding0: 0,
+            },
+            TileInstanceGpu {
+                document_x: tile_size as f32,
+                document_y: 0.0,
+                atlas_layer: 0.0,
+                tile_index: 1,
+                _padding0: 0,
+            },
+            TileInstanceGpu {
+                document_x: 0.0,
+                document_y: tile_size as f32,
+                atlas_layer: 0.0,
+                tile_index: 2,
+                _padding0: 0,
+            },
+            TileInstanceGpu {
+                document_x: tile_size as f32,
+                document_y: tile_size as f32,
+                atlas_layer: 0.0,
+                tile_index: 3,
+                _padding0: 0,
+            },
+        ];
+        queue.write_buffer(&tile_instance_buffer, 0, bytemuck::cast_slice(&instances));
+
+        let tile_texture_manager = TileTextureManagerGpu {
+            atlas_width: atlas_width as f32,
+            atlas_height: atlas_height as f32,
+            tiles_per_row,
+            tiles_per_column,
+            tile_size: tile_size as f32,
+            tile_stride: tile_stride as f32,
+            tile_gutter: TILE_GUTTER as f32,
+            _padding0: 0.0,
+        };
+        let manager_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.test.quadrant.tile_texture_manager"),
+            size: std::mem::size_of::<TileTextureManagerGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&manager_buffer, 0, bytemuck::bytes_of(&tile_texture_manager));
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("renderer.test.quadrant.sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let per_frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("renderer.test.quadrant.per_frame_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("renderer.test.quadrant.atlas_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let per_frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("renderer.test.quadrant.per_frame"),
+            layout: &per_frame_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: view_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: tile_instance_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let layer_atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("renderer.test.quadrant.layer_atlas_bind_group"),
+            layout: &atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&layer_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: manager_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let group_atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("renderer.test.quadrant.group_atlas_bind_group"),
+            layout: &atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&group_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: manager_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("renderer.test.quadrant.pipeline_layout"),
+            bind_group_layouts: &[&per_frame_layout, &atlas_layout],
+            immediate_size: 0,
+        });
+        let slot_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.test.quadrant.slot_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite_slot.wgsl").into()),
+        });
+        let content_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.test.quadrant.content_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite.wgsl").into()),
+        });
+        let slot_pipeline = crate::renderer_pipeline::create_composite_pipeline(
+            &device,
+            &pipeline_layout,
+            &slot_shader,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::BlendState::REPLACE,
+            "renderer.test.quadrant.slot_pipeline",
+        );
+        let content_pipeline = crate::renderer_pipeline::create_composite_pipeline(
+            &device,
+            &pipeline_layout,
+            &content_shader,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::BlendState::REPLACE,
+            "renderer.test.quadrant.content_pipeline",
+        );
+
+        // Pass 1: layer atlas -> scratch (slot composite space).
+        queue.write_buffer(
+            &view_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&document_clip_matrix_from_size(atlas_width, atlas_height)),
+        );
+        {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("renderer.test.quadrant.encoder.slot"),
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("renderer.test.quadrant.pass.slot"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &scratch_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&slot_pipeline);
+                pass.set_bind_group(0, &per_frame_bind_group, &[]);
+                pass.set_bind_group(1, &layer_atlas_bind_group, &[]);
+                pass.draw(0..6, 0..4);
+            }
+            queue.submit(Some(encoder.finish()));
+        }
+
+        // Stage readback: validate slot pass output in scratch.
+        let (scratch_bytes, scratch_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &scratch,
+            atlas_width,
+            atlas_height,
+            "renderer.test.quadrant.readback.scratch",
+        );
+        let scratch_pixel = |x: u32, y: u32| -> [u8; 4] {
+            let offset = (y as usize) * (scratch_bpr as usize) + (x as usize) * 4;
+            [
+                scratch_bytes[offset],
+                scratch_bytes[offset + 1],
+                scratch_bytes[offset + 2],
+                scratch_bytes[offset + 3],
+            ]
+        };
+        assert_eq!(scratch_pixel(0, 0), [255, 0, 0, 255], "scratch top-left must be red");
+        assert_eq!(
+            scratch_pixel(tile_stride, 0),
+            [0, 255, 0, 255],
+            "scratch top-right slot origin must be green"
+        );
+        assert_eq!(
+            scratch_pixel(0, tile_stride),
+            [0, 0, 255, 255],
+            "scratch bottom-left slot origin must be blue"
+        );
+        assert_eq!(
+            scratch_pixel(tile_stride, tile_stride),
+            [255, 255, 0, 255],
+            "scratch bottom-right slot origin must be yellow"
+        );
+
+        // Mimic group cache tile-slot writeback into an atlas + content pass in a separate submission.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("renderer.test.quadrant.encoder.content"),
+        });
+        for tile_y in 0..tiles_per_column {
+            for tile_x in 0..tiles_per_row {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &scratch,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: tile_x * tile_stride,
+                            y: tile_y * tile_stride,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &group_atlas,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: tile_x * tile_stride,
+                            y: tile_y * tile_stride,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: tile_stride,
+                        height: tile_stride,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+
+        // Pass 2: group atlas -> output (content composite space).
+        queue.write_buffer(
+            &view_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&document_clip_matrix_from_size(content_width, content_height)),
+        );
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("renderer.test.quadrant.pass.content"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&content_pipeline);
+            pass.set_bind_group(0, &per_frame_bind_group, &[]);
+            pass.set_bind_group(1, &group_atlas_bind_group, &[]);
+            pass.draw(0..6, 0..4);
+        }
+        queue.submit(Some(encoder.finish()));
+        let (output_bytes, output_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &output,
+            content_width,
+            content_height,
+            "renderer.test.quadrant.readback.output",
+        );
+        let expected_pixel = |x: u32, y: u32| -> [u8; 4] {
+            match (x < tile_size, y < tile_size) {
+                (true, true) => [255, 0, 0, 255],
+                (false, true) => [0, 255, 0, 255],
+                (true, false) => [0, 0, 255, 255],
+                (false, false) => [255, 255, 0, 255],
+            }
+        };
+
+        for y in 0..content_height {
+            for x in 0..content_width {
+                let offset = (y as usize) * (output_bpr as usize) + (x as usize) * 4;
+                let got = [output_bytes[offset], output_bytes[offset + 1], output_bytes[offset + 2], output_bytes[offset + 3]];
+                let expected = expected_pixel(x, y);
+                assert_eq!(
+                    got, expected,
+                    "pixel mismatch at ({}, {}): got={:?} expected={:?}",
+                    x, y, got, expected
+                );
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "repro for nested group-cache mapping regressions; run explicitly while debugging"]
+fn composite_tile_mapping_survives_nested_group_cache_levels() {
+    // This is closer to the renderer's real execution structure after introducing per-layer groups:
+    // - leaf(layer atlas) -> layer group scratch (slot) -> group atlas A (tile copy)
+    // - group atlas A -> root scratch (slot) -> group atlas B (tile copy)
+    // - group atlas B -> output (content)
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: true,
+            })
+            .await
+            .expect("request test adapter");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("renderer.test_device.nested_group_mapping"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .expect("request test device");
+
+        let tile_size = TILE_SIZE;
+        assert_eq!(tile_size, 128, "test assumes TILE_SIZE=128");
+        let tile_stride = TILE_STRIDE;
+
+        let content_width = 256u32;
+        let content_height = 256u32;
+        let tiles_per_row_doc = content_width / tile_size;
+        let tiles_per_col_doc = content_height / tile_size;
+        assert_eq!(tiles_per_row_doc, 2);
+        assert_eq!(tiles_per_col_doc, 2);
+
+        // Use an atlas layout that is NOT a tight 2x2 grid, and choose sparse tile indices to
+        // ensure we don't accidentally depend on sequential indexing.
+        let atlas_tiles_per_row = 8u32;
+        let atlas_tiles_per_col = 8u32;
+        let atlas_width = atlas_tiles_per_row * tile_stride;
+        let atlas_height = atlas_tiles_per_col * tile_stride;
+
+        let tile_indices_layer = [0u32, 7, 8, 63];
+        let tile_indices_group_a = [1u32, 6, 9, 62];
+        let tile_indices_group_b = [2u32, 5, 10, 61];
+
+        let make_atlas = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: atlas_width,
+                    height: atlas_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        };
+
+        let layer_atlas = make_atlas("renderer.test.nested.layer_atlas");
+        let group_atlas_a = make_atlas("renderer.test.nested.group_atlas_a");
+        let group_atlas_b = make_atlas("renderer.test.nested.group_atlas_b");
+
+        let layer_atlas_view = layer_atlas.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("renderer.test.nested.layer_atlas.view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let group_atlas_a_view = group_atlas_a.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("renderer.test.nested.group_atlas_a.view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let group_atlas_b_view = group_atlas_b.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("renderer.test.nested.group_atlas_b.view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        // Upload per-tile slot regions into the layer atlas at sparse indices.
+        let tile_slot_bytes = |rgba: [u8; 4]| -> (Vec<u8>, u32) {
+            rgba8_texture_upload_bytes_padded(tile_stride, tile_stride, |_x, _y| rgba)
+        };
+        let colors = [
+            [255, 0, 0, 255],   // TL
+            [0, 255, 0, 255],   // TR
+            [0, 0, 255, 255],   // BL
+            [255, 255, 0, 255], // BR
+        ];
+        for (slot_i, tile_index) in tile_indices_layer.iter().copied().enumerate() {
+            let tile_x = tile_index % atlas_tiles_per_row;
+            let tile_y = tile_index / atlas_tiles_per_row;
+            let (bytes, bpr) = tile_slot_bytes(colors[slot_i]);
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &layer_atlas,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: tile_x * tile_stride,
+                        y: tile_y * tile_stride,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(tile_stride),
+                },
+                wgpu::Extent3d {
+                    width: tile_stride,
+                    height: tile_stride,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let view_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.test.nested.view_uniform"),
+            size: std::mem::size_of::<TransformMatrix4x4>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let tile_texture_manager = TileTextureManagerGpu {
+            atlas_width: atlas_width as f32,
+            atlas_height: atlas_height as f32,
+            tiles_per_row: atlas_tiles_per_row,
+            tiles_per_column: atlas_tiles_per_col,
+            tile_size: tile_size as f32,
+            tile_stride: tile_stride as f32,
+            tile_gutter: TILE_GUTTER as f32,
+            _padding0: 0.0,
+        };
+        let manager_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.test.nested.tile_texture_manager"),
+            size: std::mem::size_of::<TileTextureManagerGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&manager_buffer, 0, bytemuck::bytes_of(&tile_texture_manager));
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("renderer.test.nested.sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let tile_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("renderer.test.nested.tile_instances"),
+            size: (std::mem::size_of::<TileInstanceGpu>() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let instances_for_indices = |indices: [u32; 4]| -> [TileInstanceGpu; 4] {
+            [
+                TileInstanceGpu {
+                    document_x: 0.0,
+                    document_y: 0.0,
+                    atlas_layer: 0.0,
+                    tile_index: indices[0],
+                    _padding0: 0,
+                },
+                TileInstanceGpu {
+                    document_x: tile_size as f32,
+                    document_y: 0.0,
+                    atlas_layer: 0.0,
+                    tile_index: indices[1],
+                    _padding0: 0,
+                },
+                TileInstanceGpu {
+                    document_x: 0.0,
+                    document_y: tile_size as f32,
+                    atlas_layer: 0.0,
+                    tile_index: indices[2],
+                    _padding0: 0,
+                },
+                TileInstanceGpu {
+                    document_x: tile_size as f32,
+                    document_y: tile_size as f32,
+                    atlas_layer: 0.0,
+                    tile_index: indices[3],
+                    _padding0: 0,
+                },
+            ]
+        };
+
+        let per_frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("renderer.test.nested.per_frame_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("renderer.test.nested.atlas_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let per_frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("renderer.test.nested.per_frame"),
+            layout: &per_frame_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: view_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: tile_instance_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let atlas_bind_group = |view: &wgpu::TextureView, label: &str| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &atlas_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: manager_buffer.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let layer_bind_group = atlas_bind_group(&layer_atlas_view, "renderer.test.nested.layer_bg");
+        let group_a_bind_group =
+            atlas_bind_group(&group_atlas_a_view, "renderer.test.nested.group_a_bg");
+        let group_b_bind_group =
+            atlas_bind_group(&group_atlas_b_view, "renderer.test.nested.group_b_bg");
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("renderer.test.nested.pipeline_layout"),
+            bind_group_layouts: &[&per_frame_layout, &atlas_layout],
+            immediate_size: 0,
+        });
+        let slot_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.test.nested.slot_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite_slot.wgsl").into()),
+        });
+        let content_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.test.nested.content_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite.wgsl").into()),
+        });
+        let slot_pipeline = crate::renderer_pipeline::create_composite_pipeline(
+            &device,
+            &pipeline_layout,
+            &slot_shader,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::BlendState::REPLACE,
+            "renderer.test.nested.slot_pipeline",
+        );
+        let content_pipeline = crate::renderer_pipeline::create_composite_pipeline(
+            &device,
+            &pipeline_layout,
+            &content_shader,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::BlendState::REPLACE,
+            "renderer.test.nested.content_pipeline",
+        );
+
+        let make_scratch = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: tiles_per_row_doc * tile_stride,
+                    height: tiles_per_col_doc * tile_stride,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+
+        let layer_scratch = make_scratch("renderer.test.nested.layer_scratch");
+        let root_scratch = make_scratch("renderer.test.nested.root_scratch");
+        let layer_scratch_view = layer_scratch.create_view(&wgpu::TextureViewDescriptor::default());
+        let root_scratch_view = root_scratch.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("renderer.test.nested.output"),
+            size: wgpu::Extent3d {
+                width: content_width,
+                height: content_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Stage 1: layer atlas -> layer scratch (slot), then copy to group atlas A at sparse indices.
+        queue.write_buffer(
+            &view_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&document_clip_matrix_from_size(
+                tiles_per_row_doc * tile_stride,
+                tiles_per_col_doc * tile_stride,
+            )),
+        );
+        queue.write_buffer(
+            &tile_instance_buffer,
+            0,
+            bytemuck::cast_slice(&instances_for_indices(tile_indices_layer)),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("renderer.test.nested.encoder.stage1"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("renderer.test.nested.pass.stage1_slot"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &layer_scratch_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&slot_pipeline);
+            pass.set_bind_group(0, &per_frame_bind_group, &[]);
+            pass.set_bind_group(1, &layer_bind_group, &[]);
+            pass.draw(0..6, 0..4);
+        }
+        for (coord_i, dest_tile_index) in tile_indices_group_a.iter().copied().enumerate() {
+            let src_tile_x = (coord_i as u32) % tiles_per_row_doc;
+            let src_tile_y = (coord_i as u32) / tiles_per_row_doc;
+            let dest_tile_x = dest_tile_index % atlas_tiles_per_row;
+            let dest_tile_y = dest_tile_index / atlas_tiles_per_row;
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &layer_scratch,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: src_tile_x * tile_stride,
+                        y: src_tile_y * tile_stride,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &group_atlas_a,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: dest_tile_x * tile_stride,
+                        y: dest_tile_y * tile_stride,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: tile_stride,
+                    height: tile_stride,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        queue.submit(Some(encoder.finish()));
+
+        let sample_from_padded = |bytes: &[u8], bpr: u32, x: u32, y: u32| -> [u8; 4] {
+            let offset = (y as usize) * (bpr as usize) + (x as usize) * 4;
+            [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]
+        };
+
+        // Stage readback: layer_scratch must contain the expected colors at slot origins.
+        let (layer_scratch_bytes, layer_scratch_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &layer_scratch,
+            tiles_per_row_doc * tile_stride,
+            tiles_per_col_doc * tile_stride,
+            "renderer.test.nested.readback.layer_scratch",
+        );
+        assert_eq!(
+            sample_from_padded(&layer_scratch_bytes, layer_scratch_bpr, 0, 0),
+            [255, 0, 0, 255],
+            "layer_scratch TL must be red"
+        );
+        assert_eq!(
+            sample_from_padded(&layer_scratch_bytes, layer_scratch_bpr, tile_stride, 0),
+            [0, 255, 0, 255],
+            "layer_scratch TR must be green"
+        );
+        assert_eq!(
+            sample_from_padded(&layer_scratch_bytes, layer_scratch_bpr, 0, tile_stride),
+            [0, 0, 255, 255],
+            "layer_scratch BL must be blue"
+        );
+        assert_eq!(
+            sample_from_padded(&layer_scratch_bytes, layer_scratch_bpr, tile_stride, tile_stride),
+            [255, 255, 0, 255],
+            "layer_scratch BR must be yellow"
+        );
+
+        // Stage readback: group_atlas_a must contain the copied slots at the chosen sparse indices.
+        let (group_a_bytes, group_a_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &group_atlas_a,
+            atlas_width,
+            atlas_height,
+            "renderer.test.nested.readback.group_atlas_a",
+        );
+        for (coord_i, tile_index) in tile_indices_group_a.iter().copied().enumerate() {
+            let tx = tile_index % atlas_tiles_per_row;
+            let ty = tile_index / atlas_tiles_per_row;
+            let got = sample_from_padded(&group_a_bytes, group_a_bpr, tx * tile_stride, ty * tile_stride);
+            assert_eq!(
+                got, colors[coord_i],
+                "group_atlas_a slot origin mismatch for coord_i={} tile_index={}",
+                coord_i, tile_index
+            );
+        }
+
+        // Stage 2: group atlas A -> root scratch (slot), then copy to group atlas B at sparse indices.
+        queue.write_buffer(
+            &view_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&document_clip_matrix_from_size(
+                tiles_per_row_doc * tile_stride,
+                tiles_per_col_doc * tile_stride,
+            )),
+        );
+        queue.write_buffer(
+            &tile_instance_buffer,
+            0,
+            bytemuck::cast_slice(&instances_for_indices(tile_indices_group_a)),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("renderer.test.nested.encoder.stage2"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("renderer.test.nested.pass.stage2_slot"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &root_scratch_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&slot_pipeline);
+            pass.set_bind_group(0, &per_frame_bind_group, &[]);
+            pass.set_bind_group(1, &group_a_bind_group, &[]);
+            pass.draw(0..6, 0..4);
+        }
+        for (coord_i, dest_tile_index) in tile_indices_group_b.iter().copied().enumerate() {
+            let src_tile_x = (coord_i as u32) % tiles_per_row_doc;
+            let src_tile_y = (coord_i as u32) / tiles_per_row_doc;
+            let dest_tile_x = dest_tile_index % atlas_tiles_per_row;
+            let dest_tile_y = dest_tile_index / atlas_tiles_per_row;
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &root_scratch,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: src_tile_x * tile_stride,
+                        y: src_tile_y * tile_stride,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &group_atlas_b,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: dest_tile_x * tile_stride,
+                        y: dest_tile_y * tile_stride,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: tile_stride,
+                    height: tile_stride,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        queue.submit(Some(encoder.finish()));
+
+        // Stage readback: root_scratch must match expected colors at slot origins.
+        let (root_scratch_bytes, root_scratch_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &root_scratch,
+            tiles_per_row_doc * tile_stride,
+            tiles_per_col_doc * tile_stride,
+            "renderer.test.nested.readback.root_scratch",
+        );
+        assert_eq!(
+            sample_from_padded(&root_scratch_bytes, root_scratch_bpr, 0, 0),
+            [255, 0, 0, 255],
+            "root_scratch TL must be red"
+        );
+        assert_eq!(
+            sample_from_padded(&root_scratch_bytes, root_scratch_bpr, tile_stride, 0),
+            [0, 255, 0, 255],
+            "root_scratch TR must be green"
+        );
+        assert_eq!(
+            sample_from_padded(&root_scratch_bytes, root_scratch_bpr, 0, tile_stride),
+            [0, 0, 255, 255],
+            "root_scratch BL must be blue"
+        );
+        assert_eq!(
+            sample_from_padded(&root_scratch_bytes, root_scratch_bpr, tile_stride, tile_stride),
+            [255, 255, 0, 255],
+            "root_scratch BR must be yellow"
+        );
+
+        // Stage readback: group_atlas_b must contain the copied slots at the chosen sparse indices.
+        let (group_b_bytes, group_b_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &group_atlas_b,
+            atlas_width,
+            atlas_height,
+            "renderer.test.nested.readback.group_atlas_b",
+        );
+        for (coord_i, tile_index) in tile_indices_group_b.iter().copied().enumerate() {
+            let tx = tile_index % atlas_tiles_per_row;
+            let ty = tile_index / atlas_tiles_per_row;
+            let got = sample_from_padded(&group_b_bytes, group_b_bpr, tx * tile_stride, ty * tile_stride);
+            assert_eq!(
+                got, colors[coord_i],
+                "group_atlas_b slot origin mismatch for coord_i={} tile_index={}",
+                coord_i, tile_index
+            );
+        }
+
+        // Stage 3: group atlas B -> output (content).
+        queue.write_buffer(
+            &view_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&document_clip_matrix_from_size(content_width, content_height)),
+        );
+        queue.write_buffer(
+            &tile_instance_buffer,
+            0,
+            bytemuck::cast_slice(&instances_for_indices(tile_indices_group_b)),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("renderer.test.nested.encoder.stage3"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("renderer.test.nested.pass.stage3_content"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&content_pipeline);
+            pass.set_bind_group(0, &per_frame_bind_group, &[]);
+            pass.set_bind_group(1, &group_b_bind_group, &[]);
+            pass.draw(0..6, 0..4);
+        }
+        queue.submit(Some(encoder.finish()));
+
+        let (output_bytes, output_bpr) = rgba8_texture_readback_bytes_padded(
+            &device,
+            &queue,
+            &output,
+            content_width,
+            content_height,
+            "renderer.test.nested.readback.output",
+        );
+        let expected_pixel = |x: u32, y: u32| -> [u8; 4] {
+            match (x < tile_size, y < tile_size) {
+                (true, true) => [255, 0, 0, 255],
+                (false, true) => [0, 255, 0, 255],
+                (true, false) => [0, 0, 255, 255],
+                (false, false) => [255, 255, 0, 255],
+            }
+        };
+        for y in 0..content_height {
+            for x in 0..content_width {
+                let offset = (y as usize) * (output_bpr as usize) + (x as usize) * 4;
+                let got = [
+                    output_bytes[offset],
+                    output_bytes[offset + 1],
+                    output_bytes[offset + 2],
+                    output_bytes[offset + 3],
+                ];
+                let expected = expected_pixel(x, y);
+                assert_eq!(
+                    got, expected,
+                    "nested mapping pixel mismatch at ({}, {}): got={:?} expected={:?}",
+                    x, y, got, expected
+                );
+            }
+        }
+    });
 }

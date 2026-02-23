@@ -271,6 +271,18 @@ impl<S: MergeTileStore> TileMergeEngine<S> {
         }
     }
 
+    pub fn has_pending_work(&self) -> bool {
+        if !self.completion_notice_queue.is_empty()
+            || !self.ackable_notices.is_empty()
+            || !self.business_results.is_empty()
+        {
+            return true;
+        }
+        self.receipts
+            .values()
+            .any(|entry| entry.state == ReceiptState::Pending)
+    }
+
     pub fn submit_merge_plan(
         &mut self,
         request: MergePlanRequest,

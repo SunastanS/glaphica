@@ -10,6 +10,13 @@ slotmap::new_key_type! {
     pub struct ImageHandle;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageSource {
+    LayerImage { image_handle: ImageHandle },
+    // Reserved for brush preview integration. Renderer will currently reject this in composite.
+    BrushBuffer { stroke_session_id: StrokeSessionId },
+}
+
 pub type TransformMatrix4x4 = [f32; 16];
 pub const BRUSH_COMMAND_BATCH_CAPACITY: usize = 16;
 pub const BRUSH_DAB_CHUNK_CAPACITY: usize = 16;
@@ -364,7 +371,7 @@ pub enum RenderNodeSnapshot {
     Leaf {
         layer_id: u64,
         blend: BlendMode,
-        image_handle: ImageHandle,
+        image_source: ImageSource,
     },
     Group {
         group_id: u64,
@@ -514,7 +521,9 @@ mod tests {
         let root = RenderNodeSnapshot::Leaf {
             layer_id: 11,
             blend: BlendMode::Multiply,
-            image_handle: ImageHandle::default(),
+            image_source: ImageSource::LayerImage {
+                image_handle: ImageHandle::default(),
+            },
         };
         let snapshot = snapshot(root);
 
@@ -532,7 +541,9 @@ mod tests {
                 vec![RenderNodeSnapshot::Leaf {
                     layer_id: 5,
                     blend: BlendMode::Normal,
-                    image_handle: ImageHandle::default(),
+                    image_source: ImageSource::LayerImage {
+                        image_handle: ImageHandle::default(),
+                    },
                 }]
                 .into_boxed_slice(),
             ),

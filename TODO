@@ -35,3 +35,5 @@ crates/tiles/src/merge_submission.rs:200 submitted_tokens 生命周期
   - 这会影响 ETU/RFC：职责边界看起来仍是“双持有”。
   - 建议：明确一种边界并收敛实现（要么删掉 renderer 对这两类命令的处理，要么在代码
     注释中声明“仅保留兼容，不应被调用”并加断言）。
+
+- 解耦：当前 leaf key cache 缓存的是 image_source_kind + layer_id, 这导致 buffer 语义侵入 renderer 细节，正确行为是 为每个 tile 实例分配 id，然后用 tile_store_id + layer_id 去处理

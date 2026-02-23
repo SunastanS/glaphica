@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use render_protocol::{BlendMode, ImageHandle};
+use render_protocol::{BlendMode, ImageSource};
 use tiles::{GroupTileAtlasStore, TILE_SIZE, TileImage, TileKey};
 
 use crate::{
@@ -14,17 +14,17 @@ use crate::{
 
 pub(crate) fn build_leaf_tile_draw_instances(
     blend: BlendMode,
-    image_handle: ImageHandle,
+    image_source: ImageSource,
     render_data_resolver: &dyn RenderDataResolver,
 ) -> Vec<TileDrawInstance> {
     let mut draw_instances = Vec::new();
     let mut collect_tile = |tile_x: u32, tile_y: u32, tile_key: TileKey| {
         let address = render_data_resolver
-            .resolve_tile_address(tile_key)
+            .resolve_image_source_tile_address(image_source, tile_key)
             .unwrap_or_else(|| {
                 panic!(
-                    "layer tile key unresolved while building full leaf draw instances: image_handle={:?} tile=({}, {}) key={:?}",
-                    image_handle,
+                    "layer tile key unresolved while building full leaf draw instances: image_source={:?} tile=({}, {}) key={:?}",
+                    image_source,
                     tile_x,
                     tile_y,
                     tile_key
@@ -48,13 +48,13 @@ pub(crate) fn build_leaf_tile_draw_instances(
             },
         });
     };
-    render_data_resolver.visit_image_tiles(image_handle, &mut collect_tile);
+    render_data_resolver.visit_image_source_tiles(image_source, &mut collect_tile);
     draw_instances
 }
 
 pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
     blend: BlendMode,
-    image_handle: ImageHandle,
+    image_source: ImageSource,
     render_data_resolver: &dyn RenderDataResolver,
     tiles: &HashSet<TileCoord>,
 ) -> Vec<TileDrawInstance> {
@@ -69,11 +69,11 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
     let mut draw_instances = Vec::new();
     let mut collect_tile = |tile_x: u32, tile_y: u32, tile_key: TileKey| {
         let address = render_data_resolver
-            .resolve_tile_address(tile_key)
+            .resolve_image_source_tile_address(image_source, tile_key)
             .unwrap_or_else(|| {
                 panic!(
-                    "layer tile key unresolved while building partial leaf draw instances: image_handle={:?} tile=({}, {}) key={:?}",
-                    image_handle,
+                    "layer tile key unresolved while building partial leaf draw instances: image_source={:?} tile=({}, {}) key={:?}",
+                    image_source,
                     tile_x,
                     tile_y,
                     tile_key
@@ -97,8 +97,8 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
             },
         });
     };
-    render_data_resolver.visit_image_tiles_for_coords(
-        image_handle,
+    render_data_resolver.visit_image_source_tiles_for_coords(
+        image_source,
         &requested_coords,
         &mut collect_tile,
     );
@@ -162,7 +162,7 @@ pub(crate) fn leaf_should_rebuild(
     dirty_tiles: Option<&DirtyTileMask>,
     cached_leaf: Option<&CachedLeafDraw>,
     blend: BlendMode,
-    image_handle: ImageHandle,
+    image_source: ImageSource,
 ) -> bool {
     if dirty_tiles.is_some() {
         return true;
@@ -171,6 +171,6 @@ pub(crate) fn leaf_should_rebuild(
         return true;
     };
     cached_leaf.blend != blend
-        || cached_leaf.image_handle != image_handle
+        || cached_leaf.image_source != image_source
         || cached_leaf.draw_instances.is_empty()
 }

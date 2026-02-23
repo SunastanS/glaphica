@@ -21,19 +21,48 @@ fn render_node_semantics_equal_ignoring_image_handle(
     left: &RenderNodeSnapshot,
     right: &RenderNodeSnapshot,
 ) -> bool {
+    fn is_preview_leaf(node: &&RenderNodeSnapshot) -> bool {
+        matches!(
+            node,
+            RenderNodeSnapshot::Leaf {
+                image_source: render_protocol::ImageSource::BrushBuffer { .. },
+                ..
+            }
+        )
+    }
+
     match (left, right) {
         (
             RenderNodeSnapshot::Leaf {
                 layer_id: left_layer_id,
                 blend: left_blend,
-                ..
+                image_source: left_source,
             },
             RenderNodeSnapshot::Leaf {
                 layer_id: right_layer_id,
                 blend: right_blend,
-                ..
+                image_source: right_source,
             },
-        ) => left_layer_id == right_layer_id && left_blend == right_blend,
+        ) => {
+            let source_semantics_equal = match (left_source, right_source) {
+                (
+                    render_protocol::ImageSource::LayerImage { .. },
+                    render_protocol::ImageSource::LayerImage { .. },
+                ) => true,
+                (
+                    render_protocol::ImageSource::BrushBuffer {
+                        stroke_session_id: _left_stroke,
+                    },
+                    render_protocol::ImageSource::BrushBuffer {
+                        stroke_session_id: _right_stroke,
+                    },
+                ) => true,
+                _ => false,
+            };
+            left_layer_id == right_layer_id
+                && left_blend == right_blend
+                && source_semantics_equal
+        }
         (
             RenderNodeSnapshot::Group {
                 group_id: left_group_id,
@@ -46,14 +75,26 @@ fn render_node_semantics_equal_ignoring_image_handle(
                 children: right_children,
             },
         ) => {
+            // Treat brush buffer leaves as "non-semantic" for cache invalidation purposes.
+            // Their impact should be driven by dirty-tile propagation rather than forcing
+            // full-document composite dirtiness on preview set/clear.
             left_group_id == right_group_id
                 && left_blend == right_blend
-                && left_children.len() == right_children.len()
-                && left_children.iter().zip(right_children.iter()).all(
-                    |(left_child, right_child)| {
+                && left_children
+                    .iter()
+                    .filter(|child| !is_preview_leaf(child))
+                    .zip(right_children.iter().filter(|child| !is_preview_leaf(child)))
+                    .all(|(left_child, right_child)| {
                         render_node_semantics_equal_ignoring_image_handle(left_child, right_child)
-                    },
-                )
+                    })
+                && left_children
+                    .iter()
+                    .filter(|child| !is_preview_leaf(child))
+                    .count()
+                    == right_children
+                        .iter()
+                        .filter(|child| !is_preview_leaf(child))
+                        .count()
         }
         _ => false,
     }
@@ -191,6 +232,16 @@ impl Renderer {
                                 error.step_index, error.reason
                             )
                         });
+                    if crate::renderer_render_tree_trace_enabled() {
+                        let force_document_composite_dirty = should_force_document_composite_dirty(
+                            self.frame_state.bound_tree.as_ref(),
+                            &snapshot,
+                        );
+                        eprintln!(
+                            "[renderer] bind render tree: revision={} force_document_composite_dirty={}",
+                            snapshot.revision, force_document_composite_dirty
+                        );
+                    }
                     self.retain_live_leaf_caches(&snapshot);
                     self.retain_live_group_targets(&snapshot);
                     apply_bound_snapshot(&mut self.frame_state, snapshot);

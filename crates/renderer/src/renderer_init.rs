@@ -18,7 +18,7 @@ use wgpu::util::DeviceExt;
 use crate::{
     BrushDabWriteGpu, BrushDabWriteMetaGpu, BrushWorkState, CacheState, DataState, DirtyStateStore,
     FrameState, FrameSync, GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState,
-    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX,
+    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX, TileCompositePipelines,
     INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer, TileInstanceGpu,
     TileTextureManagerGpu, ViewState, create_composite_pipeline, multiply_blend_state,
 };
@@ -130,7 +130,7 @@ impl Renderer {
                 ],
             });
 
-        let atlas_bind_group_layout =
+        let atlas_bind_group_layout_filterable =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("renderer.atlas_layout"),
                 entries: &[
@@ -163,6 +163,39 @@ impl Renderer {
                 ],
             });
 
+        let atlas_bind_group_layout_nonfilterable =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("renderer.atlas_layout.nonfilterable"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         let tile_sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("renderer.tile_sampler.linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -175,53 +208,116 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let tile_sampler_nearest_nonfiltering = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("renderer.tile_sampler.nearest.nonfiltering"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader_rgba = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("renderer.tile_composite"),
             source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite.wgsl").into()),
         });
-        let slot_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let slot_shader_rgba = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("renderer.tile_composite.slot"),
             source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite_slot.wgsl").into()),
         });
+        let shader_r32float = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.tile_composite.r32float"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tile_composite_r32float.wgsl").into()),
+        });
+        let slot_shader_r32float = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("renderer.tile_composite.slot.r32float"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("tile_composite_slot_r32float.wgsl").into(),
+            ),
+        });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("renderer.composite_layout"),
-            bind_group_layouts: &[&per_frame_bind_group_layout, &atlas_bind_group_layout],
+        let pipeline_layout_rgba = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("renderer.composite_layout.rgba"),
+            bind_group_layouts: &[&per_frame_bind_group_layout, &atlas_bind_group_layout_filterable],
             immediate_size: 0,
         });
-        let alpha_composite_pipeline = create_composite_pipeline(
+        let composite_pipelines_rgba = TileCompositePipelines {
+            alpha_content: create_composite_pipeline(
             &device,
-            &pipeline_layout,
-            &shader,
+            &pipeline_layout_rgba,
+            &shader_rgba,
             surface_config.format,
             wgpu::BlendState::ALPHA_BLENDING,
             "renderer.composite_pipeline.alpha",
-        );
-        let multiply_composite_pipeline = create_composite_pipeline(
+            ),
+            multiply_content: create_composite_pipeline(
             &device,
-            &pipeline_layout,
-            &shader,
+            &pipeline_layout_rgba,
+            &shader_rgba,
             surface_config.format,
             multiply_blend_state(),
             "renderer.composite_pipeline.multiply",
-        );
-        let alpha_composite_slot_pipeline = create_composite_pipeline(
+            ),
+            alpha_slot: create_composite_pipeline(
             &device,
-            &pipeline_layout,
-            &slot_shader,
+            &pipeline_layout_rgba,
+            &slot_shader_rgba,
             surface_config.format,
             wgpu::BlendState::ALPHA_BLENDING,
             "renderer.composite_pipeline.slot.alpha",
-        );
-        let multiply_composite_slot_pipeline = create_composite_pipeline(
+            ),
+            multiply_slot: create_composite_pipeline(
             &device,
-            &pipeline_layout,
-            &slot_shader,
+            &pipeline_layout_rgba,
+            &slot_shader_rgba,
             surface_config.format,
             multiply_blend_state(),
             "renderer.composite_pipeline.slot.multiply",
-        );
+            ),
+        };
+
+        let pipeline_layout_r32float =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("renderer.composite_layout.r32float"),
+                bind_group_layouts: &[
+                    &per_frame_bind_group_layout,
+                    &atlas_bind_group_layout_nonfilterable,
+                ],
+                immediate_size: 0,
+            });
+        let composite_pipelines_r32float = TileCompositePipelines {
+            alpha_content: create_composite_pipeline(
+                &device,
+                &pipeline_layout_r32float,
+                &shader_r32float,
+                surface_config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+                "renderer.composite_pipeline.r32float.alpha",
+            ),
+            multiply_content: create_composite_pipeline(
+                &device,
+                &pipeline_layout_r32float,
+                &shader_r32float,
+                surface_config.format,
+                multiply_blend_state(),
+                "renderer.composite_pipeline.r32float.multiply",
+            ),
+            alpha_slot: create_composite_pipeline(
+                &device,
+                &pipeline_layout_r32float,
+                &slot_shader_r32float,
+                surface_config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+                "renderer.composite_pipeline.r32float.slot.alpha",
+            ),
+            multiply_slot: create_composite_pipeline(
+                &device,
+                &pipeline_layout_r32float,
+                &slot_shader_r32float,
+                surface_config.format,
+                multiply_blend_state(),
+                "renderer.composite_pipeline.r32float.slot.multiply",
+            ),
+        };
 
         let tile_texture_manager_buffer = Self::create_texture_manager_buffer(
             &device,
@@ -230,7 +326,7 @@ impl Renderer {
         );
         let atlas_bind_group_linear = Self::create_atlas_bind_group(
             &device,
-            &atlas_bind_group_layout,
+            &atlas_bind_group_layout_filterable,
             tile_atlas.view(),
             &tile_sampler_linear,
             &tile_texture_manager_buffer,
@@ -258,7 +354,7 @@ impl Renderer {
         );
         let group_atlas_bind_group_linear = Self::create_atlas_bind_group(
             &device,
-            &atlas_bind_group_layout,
+            &atlas_bind_group_layout_filterable,
             group_tile_atlas.view(),
             &tile_sampler_linear,
             &group_texture_manager_buffer,
@@ -266,11 +362,25 @@ impl Renderer {
         );
         let group_atlas_bind_group_nearest = Self::create_atlas_bind_group(
             &device,
-            &atlas_bind_group_layout,
+            &atlas_bind_group_layout_filterable,
             group_tile_atlas.view(),
             &tile_sampler_nearest,
             &group_texture_manager_buffer,
             "renderer.group_atlas_bind_group.nearest",
+        );
+
+        let brush_buffer_texture_manager_buffer = Self::create_texture_manager_buffer(
+            &device,
+            brush_buffer_atlas.layout(),
+            "renderer.brush_buffer_texture_manager",
+        );
+        let brush_buffer_atlas_bind_group_nearest = Self::create_atlas_bind_group(
+            &device,
+            &atlas_bind_group_layout_nonfilterable,
+            brush_buffer_atlas.view(),
+            &tile_sampler_nearest_nonfiltering,
+            &brush_buffer_texture_manager_buffer,
+            "renderer.brush_buffer_atlas_bind_group.nearest",
         );
 
         let tile_instance_buffer =
@@ -560,10 +670,8 @@ impl Renderer {
                 surface,
                 surface_config,
                 view_uniform_buffer,
-                alpha_composite_pipeline,
-                multiply_composite_pipeline,
-                alpha_composite_slot_pipeline,
-                multiply_composite_slot_pipeline,
+                composite_pipelines_rgba,
+                composite_pipelines_r32float,
                 per_frame_bind_group_layout,
                 per_frame_bind_group,
                 group_tile_store,
@@ -577,6 +685,8 @@ impl Renderer {
                 atlas_bind_group_linear,
                 _tile_texture_manager_buffer: tile_texture_manager_buffer,
                 tile_atlas,
+                brush_buffer_atlas_bind_group_nearest,
+                _brush_buffer_texture_manager_buffer: brush_buffer_texture_manager_buffer,
                 gpu_timing,
                 brush_pipeline_layout,
                 brush_dab_write_pipeline,
@@ -630,6 +740,7 @@ impl Renderer {
                 frame_sync: FrameSync::default(),
                 layer_dirty_versions: HashMap::new(),
             },
+            tile_instance_arena_cursor: 0,
         };
 
         (renderer, crate::ViewOpSender(view_sender))

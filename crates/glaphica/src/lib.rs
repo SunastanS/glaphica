@@ -11,7 +11,8 @@ use std::time::Instant;
 use document::{Document, DocumentMergeError, TileCoordinate};
 use render_protocol::{
     BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle,
-    ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, StrokeExecutionReceiptId, Viewport,
+    ImageSource, ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, RenderTreeSnapshot,
+    StrokeExecutionReceiptId, Viewport,
 };
 use renderer::{
     BrushControlError, BrushRenderEnqueueError, FrameGpuTimingReport, MergeAckError,
@@ -35,6 +36,8 @@ const DEFAULT_DOCUMENT_HEIGHT: u32 = 720;
 struct DocumentRenderDataResolver {
     document: Arc<RwLock<Document>>,
     atlas_store: Arc<TileAtlasStore>,
+    brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+    brush_buffer_tile_keys: Arc<RwLock<BrushBufferTileRegistry>>,
 }
 
 impl RenderDataResolver for DocumentRenderDataResolver {
@@ -115,6 +118,86 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 }
             }
             visitor(tile_x, tile_y, tile_key);
+        }
+    }
+
+    fn visit_image_source_tiles(
+        &self,
+        image_source: ImageSource,
+        visitor: &mut dyn FnMut(u32, u32, TileKey),
+    ) {
+        match image_source {
+            ImageSource::LayerImage { image_handle } => self.visit_image_tiles(image_handle, visitor),
+            ImageSource::BrushBuffer { stroke_session_id } => {
+                let brush_buffer_tile_keys = self
+                    .brush_buffer_tile_keys
+                    .read()
+                    .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"));
+                #[cfg(debug_assertions)]
+                let mut resolved_address_to_tile: HashMap<TileAddress, (TileKey, u32, u32)> =
+                    HashMap::new();
+                #[cfg(debug_assertions)]
+                let mut tile_coord_by_key: HashMap<TileKey, (u32, u32)> = HashMap::new();
+
+                brush_buffer_tile_keys.visit_tiles(stroke_session_id, |tile_coordinate, tile_key| {
+                    if tile_coordinate.tile_x < 0 || tile_coordinate.tile_y < 0 {
+                        return;
+                    }
+                    let tile_x = u32::try_from(tile_coordinate.tile_x)
+                        .expect("positive brush tile x must convert to u32");
+                    let tile_y = u32::try_from(tile_coordinate.tile_y)
+                        .expect("positive brush tile y must convert to u32");
+                    #[cfg(debug_assertions)]
+                    {
+                        if let Some((existing_tile_x, existing_tile_y)) =
+                            tile_coord_by_key.get(&tile_key).copied()
+                        {
+                            if (existing_tile_x, existing_tile_y) != (tile_x, tile_y) {
+                                panic!(
+                                    "brush buffer uses duplicated tile key across coordinates: stroke_session_id={} key={:?} first_tile=({}, {}) duplicate_tile=({}, {})",
+                                    stroke_session_id,
+                                    tile_key,
+                                    existing_tile_x,
+                                    existing_tile_y,
+                                    tile_x,
+                                    tile_y
+                                );
+                            }
+                        } else {
+                            tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
+                        }
+                        let tile_address = self.brush_buffer_store.resolve(tile_key).unwrap_or_else(|| {
+                            panic!(
+                                "brush buffer tile key unresolved in debug address uniqueness check: stroke_session_id={} tile=({}, {}) key={:?}",
+                                stroke_session_id,
+                                tile_x,
+                                tile_y,
+                                tile_key
+                            )
+                        });
+                        if let Some((existing_key, existing_tile_x, existing_tile_y)) =
+                            resolved_address_to_tile.get(&tile_address).copied()
+                        {
+                            if existing_key != tile_key {
+                                panic!(
+                                    "brush buffer tile keys resolved to duplicated atlas address: stroke_session_id={} first_tile=({}, {}) first_key={:?} second_tile=({}, {}) second_key={:?} address={:?}",
+                                    stroke_session_id,
+                                    existing_tile_x,
+                                    existing_tile_y,
+                                    existing_key,
+                                    tile_x,
+                                    tile_y,
+                                    tile_key,
+                                    tile_address
+                                );
+                            }
+                        } else {
+                            resolved_address_to_tile.insert(tile_address, (tile_key, tile_x, tile_y));
+                        }
+                    }
+                    visitor(tile_x, tile_y, tile_key);
+                });
+            }
         }
     }
 
@@ -201,6 +284,17 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         self.atlas_store.resolve(tile_key)
     }
 
+    fn resolve_image_source_tile_address(
+        &self,
+        image_source: ImageSource,
+        tile_key: TileKey,
+    ) -> Option<TileAddress> {
+        match image_source {
+            ImageSource::LayerImage { .. } => self.atlas_store.resolve(tile_key),
+            ImageSource::BrushBuffer { .. } => self.brush_buffer_store.resolve(tile_key),
+        }
+    }
+
     fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult> {
         let document = self
             .document
@@ -261,11 +355,13 @@ pub struct GpuState {
     surface_size: PhysicalSize<u32>,
     next_frame_id: u64,
     brush_execution_feedback_queue: VecDeque<BrushExecutionMergeFeedback>,
-    brush_buffer_tile_keys: BrushBufferTileRegistry,
+    brush_buffer_tile_keys: Arc<RwLock<BrushBufferTileRegistry>>,
     gc_evicted_batches_total: u64,
     gc_evicted_keys_total: u64,
     disable_merge_for_debug: bool,
     perf_log_enabled: bool,
+    #[cfg(debug_assertions)]
+    last_bound_render_tree: Option<(u64, u64)>,
 }
 
 #[derive(Debug)]
@@ -307,6 +403,113 @@ impl GpuState {
         })
     }
 
+    fn render_tree_trace_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GLAPHICA_RENDER_TREE_TRACE").is_some_and(|value| value != "0")
+        })
+    }
+
+    fn render_tree_invariants_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GLAPHICA_RENDER_TREE_INVARIANTS").is_some_and(|value| value != "0")
+        })
+    }
+
+    fn render_node_semantic_hash(node: &render_protocol::RenderNodeSnapshot) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        fn hash_node<H: Hasher>(node: &render_protocol::RenderNodeSnapshot, state: &mut H) {
+            match node {
+                render_protocol::RenderNodeSnapshot::Leaf {
+                    layer_id,
+                    blend,
+                    image_source,
+                } => {
+                    0u8.hash(state);
+                    layer_id.hash(state);
+                    blend.hash(state);
+                    match image_source {
+                        render_protocol::ImageSource::LayerImage { .. } => {
+                            0u8.hash(state);
+                        }
+                        render_protocol::ImageSource::BrushBuffer { stroke_session_id } => {
+                            1u8.hash(state);
+                            stroke_session_id.hash(state);
+                        }
+                    }
+                }
+                render_protocol::RenderNodeSnapshot::Group {
+                    group_id,
+                    blend,
+                    children,
+                } => {
+                    1u8.hash(state);
+                    group_id.hash(state);
+                    blend.hash(state);
+                    children.len().hash(state);
+                    for child in children.iter() {
+                        hash_node(child, state);
+                    }
+                }
+            }
+        }
+        hash_node(node, &mut hasher);
+        hasher.finish()
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_render_tree_semantics_invariants(
+        reason: &'static str,
+        last_bound: Option<(u64, u64)>,
+        snapshot: &RenderTreeSnapshot,
+        trace_enabled: bool,
+        invariants_enabled: bool,
+    ) -> (u64, u64) {
+        let revision = snapshot.revision;
+        let hash = Self::render_node_semantic_hash(snapshot.root.as_ref());
+        if trace_enabled {
+            eprintln!(
+                "[render_tree] bind reason={} revision={} semantic_hash={:016x}",
+                reason, revision, hash
+            );
+        }
+        if invariants_enabled {
+            if let Some((last_revision, last_hash)) = last_bound {
+                if last_revision == revision && last_hash != hash {
+                    panic!(
+                        "render tree semantics changed without revision bump: reason={} revision={} last_hash={:016x} new_hash={:016x}",
+                        reason, revision, last_hash, hash
+                    );
+                }
+            }
+        }
+        (revision, hash)
+    }
+
+    fn note_bound_render_tree(&mut self, reason: &'static str, snapshot: &RenderTreeSnapshot) {
+        #[cfg(debug_assertions)]
+        {
+            let trace_enabled = Self::render_tree_trace_enabled();
+            let invariants_enabled = Self::render_tree_invariants_enabled();
+            let next = Self::check_render_tree_semantics_invariants(
+                reason,
+                self.last_bound_render_tree,
+                snapshot,
+                trace_enabled,
+                invariants_enabled,
+            );
+            self.last_bound_render_tree = Some(next);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = reason;
+            let _ = snapshot;
+        }
+    }
+
     fn build_stroke_tile_merge_plan(
         &self,
         stroke_session_id: u64,
@@ -336,9 +539,11 @@ impl GpuState {
         let mut op_trace_id = 0u64;
         let mut seen_output_tiles = HashSet::new();
         let mut stroke_tile_by_key = HashMap::new();
-        self.brush_buffer_tile_keys.visit_tiles(
-            stroke_session_id,
-            |tile_coordinate, stroke_buffer_key| {
+        let brush_buffer_tile_keys = self
+            .brush_buffer_tile_keys
+            .read()
+            .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"));
+        brush_buffer_tile_keys.visit_tiles(stroke_session_id, |tile_coordinate, stroke_buffer_key| {
                 if tile_coordinate.tile_x < 0 || tile_coordinate.tile_y < 0 {
                     return;
                 }
@@ -384,8 +589,7 @@ impl GpuState {
                 op_trace_id = op_trace_id
                     .checked_add(1)
                     .expect("merge op index exceeds u64");
-            },
-        );
+            });
         if tile_ops.is_empty() {
             return None;
         }
@@ -416,7 +620,10 @@ impl GpuState {
         let Some(merge_plan) = self.build_stroke_tile_merge_plan(stroke_session_id, layer_id)
         else {
             self.brush_buffer_tile_keys
+                .write()
+                .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
                 .release_stroke_on_merge_failed(stroke_session_id, &self.brush_buffer_store);
+            self.clear_preview_buffer_and_rebind(stroke_session_id);
             self.brush_execution_feedback_queue
                 .push_back(BrushExecutionMergeFeedback::MergeApplied { stroke_session_id });
             return;
@@ -434,6 +641,49 @@ impl GpuState {
                 submission.renderer_submit_payload.meta,
             )
             .unwrap_or_else(|error| panic!("enqueue planned merge failed: {error:?}"));
+    }
+
+    fn set_preview_buffer_and_rebind(&mut self, layer_id: u64, stroke_session_id: u64) {
+        let render_tree = {
+            let mut document = self
+                .document
+                .write()
+                .unwrap_or_else(|_| panic!("document write lock poisoned"));
+            document
+                .set_active_preview_buffer(layer_id, stroke_session_id)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "set active preview buffer failed: layer_id={} stroke_session_id={} error={error:?}",
+                        layer_id, stroke_session_id
+                    )
+                });
+            if !document.take_render_tree_cache_dirty() {
+                return;
+            }
+            document.render_tree_snapshot()
+        };
+        self.note_bound_render_tree("preview_set", &render_tree);
+        self.view_sender
+            .send(RenderOp::BindRenderTree(render_tree))
+            .expect("send updated render tree after preview set");
+    }
+
+    fn clear_preview_buffer_and_rebind(&mut self, stroke_session_id: u64) {
+        let render_tree = {
+            let mut document = self
+                .document
+                .write()
+                .unwrap_or_else(|_| panic!("document write lock poisoned"));
+            let _ = document.clear_active_preview_buffer(stroke_session_id);
+            if !document.take_render_tree_cache_dirty() {
+                return;
+            }
+            document.render_tree_snapshot()
+        };
+        self.note_bound_render_tree("preview_clear", &render_tree);
+        self.view_sender
+            .send(RenderOp::BindRenderTree(render_tree))
+            .expect("send updated render tree after preview clear");
     }
 
     pub async fn new(window: Arc<Window>, startup_image_path: Option<PathBuf>) -> Self {
@@ -587,7 +837,7 @@ impl GpuState {
             document.size_y(),
             document.revision()
         );
-        let initial_snapshot = document.render_tree_snapshot(document.revision());
+        let initial_snapshot = document.render_tree_snapshot();
         initial_snapshot
             .validate_executable(&RenderStepSupportMatrix::current_executable_semantics())
             .unwrap_or_else(|error| {
@@ -597,11 +847,6 @@ impl GpuState {
                 )
             });
         let document = Arc::new(RwLock::new(document));
-
-        let render_data_resolver = Box::new(DocumentRenderDataResolver {
-            document: Arc::clone(&document),
-            atlas_store: Arc::clone(&atlas_store),
-        });
 
         let (brush_buffer_store_raw, brush_buffer_atlas) =
             GenericR32FloatTileAtlasStore::with_config(
@@ -618,6 +863,14 @@ impl GpuState {
             )
             .expect("create brush buffer atlas store");
         let brush_buffer_store = Arc::new(brush_buffer_store_raw);
+        let brush_buffer_tile_keys = Arc::new(RwLock::new(BrushBufferTileRegistry::default()));
+
+        let render_data_resolver = Box::new(DocumentRenderDataResolver {
+            document: Arc::clone(&document),
+            atlas_store: Arc::clone(&atlas_store),
+            brush_buffer_store: Arc::clone(&brush_buffer_store),
+            brush_buffer_tile_keys: Arc::clone(&brush_buffer_tile_keys),
+        });
 
         let tile_merge_engine = TileMergeEngine::new(MergeStores {
             layer_store: Arc::clone(&atlas_store),
@@ -648,12 +901,12 @@ impl GpuState {
         let view_transform = ViewTransform::default();
         push_view_state(&view_sender, &view_transform, size);
         eprintln!("[startup] initial viewport and view transform pushed");
+        let initial_snapshot_for_trace = initial_snapshot.clone();
         view_sender
             .send(RenderOp::BindRenderTree(initial_snapshot))
             .expect("send initial render steps");
-        eprintln!("[startup] initial render tree bound");
-
-        Self {
+        // Track invariants/logging for the initial snapshot as well.
+        let mut state = Self {
             renderer,
             view_sender,
             atlas_store,
@@ -664,12 +917,18 @@ impl GpuState {
             surface_size: size,
             next_frame_id: 0,
             brush_execution_feedback_queue: VecDeque::new(),
-            brush_buffer_tile_keys: BrushBufferTileRegistry::default(),
+            brush_buffer_tile_keys,
             gc_evicted_batches_total: 0,
             gc_evicted_keys_total: 0,
             disable_merge_for_debug,
             perf_log_enabled,
-        }
+            #[cfg(debug_assertions)]
+            last_bound_render_tree: None,
+        };
+        state.note_bound_render_tree("startup", &initial_snapshot_for_trace);
+        eprintln!("[startup] initial render tree bound");
+
+        state
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -724,8 +983,16 @@ impl GpuState {
         command: BrushRenderCommand,
     ) -> Result<(), BrushRenderEnqueueError> {
         match command {
+            BrushRenderCommand::BeginStroke(begin) => {
+                self.renderer
+                    .enqueue_brush_render_command(BrushRenderCommand::BeginStroke(begin))?;
+                self.set_preview_buffer_and_rebind(begin.target_layer_id, begin.stroke_session_id);
+                Ok(())
+            }
             BrushRenderCommand::AllocateBufferTiles(allocate) => {
                 self.brush_buffer_tile_keys
+                    .write()
+                    .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
                     .allocate_tiles(
                         allocate.stroke_session_id,
                         allocate.tiles.clone(),
@@ -739,6 +1006,8 @@ impl GpuState {
                     });
                 let tile_bindings = self
                     .brush_buffer_tile_keys
+                    .read()
+                    .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"))
                     .tile_bindings_for_stroke(allocate.stroke_session_id);
                 self.renderer
                     .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
@@ -748,10 +1017,14 @@ impl GpuState {
             }
             BrushRenderCommand::MergeBuffer(merge) => {
                 if self.disable_merge_for_debug {
-                    self.brush_buffer_tile_keys.release_stroke_on_merge_failed(
-                        merge.stroke_session_id,
-                        &self.brush_buffer_store,
-                    );
+                    self.brush_buffer_tile_keys
+                        .write()
+                        .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                        .release_stroke_on_merge_failed(
+                            merge.stroke_session_id,
+                            &self.brush_buffer_store,
+                        );
+                    self.clear_preview_buffer_and_rebind(merge.stroke_session_id);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: merge.stroke_session_id,
@@ -777,6 +1050,10 @@ impl GpuState {
 
     pub fn pending_brush_command_count(&self) -> u64 {
         self.renderer.pending_brush_command_count()
+    }
+
+    pub fn has_pending_merge_work(&self) -> bool {
+        self.tile_merge_engine.has_pending_work()
     }
 
     pub fn process_renderer_merge_completions(
@@ -1010,7 +1287,8 @@ impl GpuState {
                         );
                     }
                     let atlas_store = Arc::clone(&self.atlas_store);
-                    let document_apply_result: Result<(), MergeBridgeError> = (|| {
+                    let document_apply_result: Result<Option<RenderTreeSnapshot>, MergeBridgeError> =
+                        (|| {
                         let mut document = self
                             .document
                             .write()
@@ -1074,23 +1352,30 @@ impl GpuState {
                                 );
                             }
                         }
-                        if document.take_render_tree_cache_dirty() {
-                            let render_tree = document.render_tree_snapshot(document.revision());
-                            self.view_sender
-                                .send(RenderOp::BindRenderTree(render_tree))
-                                .expect("send updated render tree after merge");
-                        }
-                        Ok(())
+                        Ok(if document.take_render_tree_cache_dirty() {
+                            Some(document.render_tree_snapshot())
+                        } else {
+                            None
+                        })
                     })(
                     );
-                    if let Err(error) = document_apply_result {
-                        self.brush_execution_feedback_queue.push_back(
-                            BrushExecutionMergeFeedback::MergeFailed {
-                                stroke_session_id: *stroke_session_id,
-                                message: format!("document merge apply failed: {error:?}"),
-                            },
-                        );
-                        return Err(error);
+                    let render_tree = match document_apply_result {
+                        Ok(render_tree) => render_tree,
+                        Err(error) => {
+                            self.brush_execution_feedback_queue.push_back(
+                                BrushExecutionMergeFeedback::MergeFailed {
+                                    stroke_session_id: *stroke_session_id,
+                                    message: format!("document merge apply failed: {error:?}"),
+                                },
+                            );
+                            return Err(error);
+                        }
+                    };
+                    if let Some(render_tree) = render_tree {
+                        self.note_bound_render_tree("merge_apply", &render_tree);
+                        self.view_sender
+                            .send(RenderOp::BindRenderTree(render_tree))
+                            .expect("send updated render tree after merge");
                     }
                     if self.perf_log_enabled {
                         eprintln!(
@@ -1112,6 +1397,8 @@ impl GpuState {
                         return Err(error);
                     }
                     self.brush_buffer_tile_keys
+                        .write()
+                        .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
                         .retain_stroke_tiles(*stroke_session_id, &self.brush_buffer_store);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
@@ -1126,7 +1413,8 @@ impl GpuState {
                     message,
                     ..
                 } => {
-                    let document_abort_result: Result<(), MergeBridgeError> = (|| {
+                    let document_abort_result: Result<Option<RenderTreeSnapshot>, MergeBridgeError> =
+                        (|| {
                         let mut document = self
                             .document
                             .write()
@@ -1136,17 +1424,30 @@ impl GpuState {
                                 .abort_merge(*layer_id, *stroke_session_id)
                                 .map_err(MergeBridgeError::Document)?;
                         }
-                        Ok(())
+                        Ok(if document.take_render_tree_cache_dirty() {
+                            Some(document.render_tree_snapshot())
+                        } else {
+                            None
+                        })
                     })(
                     );
-                    if let Err(error) = document_abort_result {
-                        self.brush_execution_feedback_queue.push_back(
-                            BrushExecutionMergeFeedback::MergeFailed {
-                                stroke_session_id: *stroke_session_id,
-                                message: format!("document merge abort failed: {error:?}"),
-                            },
-                        );
-                        return Err(error);
+                    let render_tree = match document_abort_result {
+                        Ok(render_tree) => render_tree,
+                        Err(error) => {
+                            self.brush_execution_feedback_queue.push_back(
+                                BrushExecutionMergeFeedback::MergeFailed {
+                                    stroke_session_id: *stroke_session_id,
+                                    message: format!("document merge abort failed: {error:?}"),
+                                },
+                            );
+                            return Err(error);
+                        }
+                    };
+                    if let Some(render_tree) = render_tree {
+                        self.note_bound_render_tree("merge_abort", &render_tree);
+                        self.view_sender
+                            .send(RenderOp::BindRenderTree(render_tree))
+                            .expect("send updated render tree after merge abort");
                     }
                     if let Err(error) = self.abort_merge_receipt(*receipt_id) {
                         self.brush_execution_feedback_queue.push_back(
@@ -1157,10 +1458,10 @@ impl GpuState {
                         );
                         return Err(error);
                     }
-                    self.brush_buffer_tile_keys.release_stroke_on_merge_failed(
-                        *stroke_session_id,
-                        &self.brush_buffer_store,
-                    );
+                    self.brush_buffer_tile_keys
+                        .write()
+                        .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                        .release_stroke_on_merge_failed(*stroke_session_id, &self.brush_buffer_store);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeFailed {
                             stroke_session_id: *stroke_session_id,
@@ -1177,6 +1478,8 @@ impl GpuState {
         let evicted_batches = self.brush_buffer_store.drain_evicted_retain_batches();
         for evicted_batch in evicted_batches {
             self.brush_buffer_tile_keys
+                .write()
+                .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
                 .apply_retained_eviction(evicted_batch.retain_id, &evicted_batch.keys);
             self.apply_gc_evicted_batch(evicted_batch.retain_id, evicted_batch.keys.len());
         }
@@ -1318,6 +1621,51 @@ fn apply_gc_evicted_batch_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_with_source(revision: u64, source: ImageSource) -> RenderTreeSnapshot {
+        RenderTreeSnapshot {
+            revision,
+            root: Arc::new(render_protocol::RenderNodeSnapshot::Group {
+                group_id: 0,
+                blend: BlendMode::Normal,
+                children: Arc::from([render_protocol::RenderNodeSnapshot::Leaf {
+                    layer_id: 1,
+                    blend: BlendMode::Normal,
+                    image_source: source,
+                }]),
+            }),
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "render tree semantics changed without revision bump")]
+    fn render_tree_invariants_panics_on_semantics_change_without_revision_bump() {
+        let base = snapshot_with_source(
+            0,
+            ImageSource::LayerImage {
+                image_handle: ImageHandle::default(),
+            },
+        );
+        let preview = snapshot_with_source(0, ImageSource::BrushBuffer { stroke_session_id: 42 });
+
+        let trace_enabled = false;
+        let invariants_enabled = true;
+        let last = GpuState::check_render_tree_semantics_invariants(
+            "startup",
+            None,
+            &base,
+            trace_enabled,
+            invariants_enabled,
+        );
+        let _ = GpuState::check_render_tree_semantics_invariants(
+            "preview_set",
+            Some(last),
+            &preview,
+            trace_enabled,
+            invariants_enabled,
+        );
+    }
 
     #[test]
     fn required_device_features_include_brush_storage_texture_support() {
@@ -1467,7 +1815,7 @@ mod tests {
 
         let mut document = Document::new(size_x, size_y);
         let _layer_id = document.new_layer_root_with_image(virtual_image, BlendMode::Normal);
-        let snapshot = document.render_tree_snapshot(1);
+        let snapshot = document.render_tree_snapshot();
         let image_handle = find_first_leaf_image_handle(snapshot.root.as_ref())
             .expect("snapshot should contain a leaf image");
         let document_image = document
@@ -1532,7 +1880,10 @@ mod tests {
         node: &render_protocol::RenderNodeSnapshot,
     ) -> Option<ImageHandle> {
         match node {
-            render_protocol::RenderNodeSnapshot::Leaf { image_handle, .. } => Some(*image_handle),
+            render_protocol::RenderNodeSnapshot::Leaf { image_source, .. } => match image_source {
+                render_protocol::ImageSource::LayerImage { image_handle } => Some(*image_handle),
+                render_protocol::ImageSource::BrushBuffer { .. } => None,
+            },
             render_protocol::RenderNodeSnapshot::Group { children, .. } => {
                 children.iter().find_map(find_first_leaf_image_handle)
             }

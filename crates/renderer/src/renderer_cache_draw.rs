@@ -9,23 +9,96 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_STRIDE, TileImage, TileKey};
+use tiles::{TILE_SIZE, TILE_STRIDE, TileImage, TileKey};
 
 use crate::{
-    BlendMode, DrawPassContext, GroupTargetCacheEntry, Renderer, TileCompositeSpace, TileCoord,
-    TileDrawInstance, ViewportMode, build_group_tile_draw_instances, tile_coord_from_draw_instance,
+    BlendMode, DrawPassContext, GroupTargetCacheEntry, LeafDrawCacheKey, Renderer,
+    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode, build_group_tile_draw_instances,
+    tile_coord_from_draw_instance,
 };
 
 static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 impl Renderer {
+    pub(super) fn visible_tiles_for_view(&self) -> Option<HashSet<TileCoord>> {
+        if self.view_state.viewport.is_none() {
+            return None;
+        }
+        // The view matrix maps document/content space to clip space. We invert the 2D affine part
+        // to estimate which document-space tiles intersect the clip rectangle.
+        let matrix = self.view_state.view_matrix;
+        let (inv_a00, inv_a01, inv_a10, inv_a11, inv_tx, inv_ty) =
+            invert_2d_affine_clip_matrix(matrix);
+
+        let clip_corners = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for (clip_x, clip_y) in clip_corners {
+            let doc_x = inv_a00 * clip_x + inv_a01 * clip_y + inv_tx;
+            let doc_y = inv_a10 * clip_x + inv_a11 * clip_y + inv_ty;
+            min_x = min_x.min(doc_x);
+            min_y = min_y.min(doc_y);
+            max_x = max_x.max(doc_x);
+            max_y = max_y.max(doc_y);
+        }
+
+        if !(min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()) {
+            panic!("visible tile computation produced non-finite bounds");
+        }
+
+        let (document_width, document_height) = self.data_state.render_data_resolver.document_size();
+        if document_width == 0 || document_height == 0 {
+            panic!("document size must be positive");
+        }
+        let tiles_per_row = document_width.div_ceil(TILE_SIZE);
+        let tiles_per_column = document_height.div_ceil(TILE_SIZE);
+
+        // Clamp to document bounds first, so wildly-panned views don't create huge sets.
+        let min_x = min_x.clamp(0.0, document_width as f32);
+        let min_y = min_y.clamp(0.0, document_height as f32);
+        let max_x = max_x.clamp(0.0, document_width as f32);
+        let max_y = max_y.clamp(0.0, document_height as f32);
+
+        let min_tile_x = (min_x / (TILE_SIZE as f32)).floor() as i32;
+        let min_tile_y = (min_y / (TILE_SIZE as f32)).floor() as i32;
+        let max_tile_x = (max_x / (TILE_SIZE as f32)).floor() as i32;
+        let max_tile_y = (max_y / (TILE_SIZE as f32)).floor() as i32;
+
+        let min_tile_x = min_tile_x.clamp(0, tiles_per_row.saturating_sub(1) as i32) as u32;
+        let min_tile_y = min_tile_y.clamp(0, tiles_per_column.saturating_sub(1) as i32) as u32;
+        let max_tile_x = max_tile_x.clamp(0, tiles_per_row.saturating_sub(1) as i32) as u32;
+        let max_tile_y = max_tile_y.clamp(0, tiles_per_column.saturating_sub(1) as i32) as u32;
+
+        let estimated_count = (max_tile_x - min_tile_x + 1) as usize
+            * (max_tile_y - min_tile_y + 1) as usize;
+        let mut visible = HashSet::with_capacity(estimated_count.min(2048));
+        for tile_y in min_tile_y..=max_tile_y {
+            for tile_x in min_tile_x..=max_tile_x {
+                visible.insert(TileCoord { tile_x, tile_y });
+            }
+        }
+
+        Some(visible)
+    }
+
     fn collect_live_node_ids(
         node: &RenderNodeSnapshot,
+        live_leaf_keys: &mut HashSet<LeafDrawCacheKey>,
         live_leaf_layers: &mut HashSet<u64>,
         live_group_ids: &mut HashSet<u64>,
     ) {
         match node {
-            RenderNodeSnapshot::Leaf { layer_id, .. } => {
+            RenderNodeSnapshot::Leaf {
+                layer_id,
+                image_source,
+                ..
+            } => {
+                live_leaf_keys.insert(LeafDrawCacheKey {
+                    layer_id: *layer_id,
+                    image_source: *image_source,
+                });
                 live_leaf_layers.insert(*layer_id);
             }
             RenderNodeSnapshot::Group {
@@ -33,21 +106,28 @@ impl Renderer {
             } => {
                 live_group_ids.insert(*group_id);
                 for child in children.iter() {
-                    Self::collect_live_node_ids(child, live_leaf_layers, live_group_ids);
+                    Self::collect_live_node_ids(
+                        child,
+                        live_leaf_keys,
+                        live_leaf_layers,
+                        live_group_ids,
+                    );
                 }
             }
         }
     }
 
-    fn live_ids(snapshot: &RenderTreeSnapshot) -> (HashSet<u64>, HashSet<u64>) {
+    fn live_ids(snapshot: &RenderTreeSnapshot) -> (HashSet<LeafDrawCacheKey>, HashSet<u64>, HashSet<u64>) {
+        let mut live_leaf_keys = HashSet::new();
         let mut live_leaf_layers = HashSet::new();
         let mut live_group_ids = HashSet::new();
         Self::collect_live_node_ids(
             snapshot.root.as_ref(),
+            &mut live_leaf_keys,
             &mut live_leaf_layers,
             &mut live_group_ids,
         );
-        (live_leaf_layers, live_group_ids)
+        (live_leaf_keys, live_leaf_layers, live_group_ids)
     }
 
     pub(super) fn draw_root_group_to_surface(
@@ -61,10 +141,12 @@ impl Renderer {
             .group_target_cache
             .remove(&ROOT_GROUP_ID)
             .expect("root group cache must exist before view pass");
+        let visible_tiles = self.visible_tiles_for_view();
         if ROOT_DRAW_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 8 {
             eprintln!(
-                "[renderer] draw_root_group_to_surface draw_instances={} group_cache_entries={}",
+                "[renderer] draw_root_group_to_surface draw_instances={} visible_tiles={} group_cache_entries={}",
                 group_target.draw_instances.len(),
+                visible_tiles.as_ref().map_or(0, HashSet::len),
                 self.cache_state.group_target_cache.len() + 1
             );
         }
@@ -73,10 +155,12 @@ impl Renderer {
         } else {
             self.gpu_state.group_atlas_bind_group_linear.clone()
         };
+        let pipelines = self.gpu_state.composite_pipelines_rgba.clone();
         let draw_context = DrawPassContext {
             target_view,
             atlas_bind_group: &group_atlas_bind_group,
-            visible_tiles: None,
+            pipelines: &pipelines,
+            visible_tiles: visible_tiles.as_ref(),
             viewport_mode: ViewportMode::Apply,
             composite_space: TileCompositeSpace::Content,
         };
@@ -110,17 +194,17 @@ impl Renderer {
     }
 
     pub(super) fn retain_live_leaf_caches(&mut self, snapshot: &RenderTreeSnapshot) {
-        let (live_leaf_layers, _) = Self::live_ids(snapshot);
+        let (live_leaf_keys, live_leaf_layers, _) = Self::live_ids(snapshot);
         self.cache_state
             .leaf_draw_cache
-            .retain(|layer_id, _| live_leaf_layers.contains(layer_id));
+            .retain(|cache_key, _| live_leaf_keys.contains(cache_key));
         self.frame_state
             .dirty_state_store
             .retain_layers(&live_leaf_layers);
     }
 
     pub(super) fn retain_live_group_targets(&mut self, snapshot: &RenderTreeSnapshot) {
-        let (_, live_group_ids) = Self::live_ids(snapshot);
+        let (_, _, live_group_ids) = Self::live_ids(snapshot);
         let mut retained_cache = HashMap::new();
         let previous_cache = std::mem::take(&mut self.cache_state.group_target_cache);
         for (group_id, entry) in previous_cache {
@@ -468,7 +552,7 @@ impl Renderer {
         #[cfg(debug_assertions)]
         self.assert_unique_effective_tile_coords(effective_instances);
 
-        self.upload_effective_instances(effective_instances);
+        let base_instance_index = self.upload_effective_instances(effective_instances);
 
         let support_matrix =
             render_protocol::RenderStepSupportMatrix::current_executable_semantics();
@@ -511,8 +595,10 @@ impl Renderer {
         self.draw_instance_runs(
             &mut pass,
             effective_instances,
+            base_instance_index,
             context.composite_space,
             support_matrix,
+            context.pipelines,
         );
     }
 
@@ -546,26 +632,39 @@ impl Renderer {
         }
     }
 
-    fn upload_effective_instances(&mut self, effective_instances: &[TileDrawInstance]) {
+    fn upload_effective_instances(&mut self, effective_instances: &[TileDrawInstance]) -> u32 {
+        let base_instance_index =
+            u32::try_from(self.tile_instance_arena_cursor).expect("tile instance index overflow");
         self.gpu_state.tile_instance_gpu_staging.clear();
         self.gpu_state.tile_instance_gpu_staging.extend(
             effective_instances
                 .iter()
                 .map(|draw_instance| draw_instance.tile),
         );
-        self.ensure_tile_instance_capacity(self.gpu_state.tile_instance_gpu_staging.len());
+        let required_len = self
+            .tile_instance_arena_cursor
+            .checked_add(self.gpu_state.tile_instance_gpu_staging.len())
+            .expect("tile instance arena length overflow");
+        self.ensure_tile_instance_capacity(required_len);
+        let offset_bytes = (self.tile_instance_arena_cursor as u64)
+            .checked_mul(std::mem::size_of::<TileInstanceGpu>() as u64)
+            .expect("tile instance buffer write offset overflow");
         let instance_bytes: &[u8] = bytemuck::cast_slice(&self.gpu_state.tile_instance_gpu_staging);
         self.gpu_state
             .queue
-            .write_buffer(&self.gpu_state.tile_instance_buffer, 0, instance_bytes);
+            .write_buffer(&self.gpu_state.tile_instance_buffer, offset_bytes, instance_bytes);
+        self.tile_instance_arena_cursor = required_len;
+        base_instance_index
     }
 
     fn draw_instance_runs(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         effective_instances: &[TileDrawInstance],
+        base_instance_index: u32,
         composite_space: TileCompositeSpace,
         support_matrix: render_protocol::RenderStepSupportMatrix,
+        pipelines: &crate::TileCompositePipelines,
     ) {
         let mut run_start = 0usize;
         while run_start < effective_instances.len() {
@@ -577,30 +676,55 @@ impl Renderer {
                 run_end += 1;
             }
 
-            let pipeline = match (support_matrix.blend_strategy(blend_mode), composite_space) {
-                (BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Content) => {
-                    &self.gpu_state.alpha_composite_pipeline
-                }
-                (BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Content) => {
-                    &self.gpu_state.multiply_composite_pipeline
-                }
-                (BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Slot) => {
-                    &self.gpu_state.alpha_composite_slot_pipeline
-                }
-                (BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Slot) => {
-                    &self.gpu_state.multiply_composite_slot_pipeline
-                }
-                (BlendModePipelineStrategy::Unsupported, _) => {
-                    panic!("unsupported blend mode in draw list: {blend_mode:?}")
-                }
-            };
+            let blend_strategy = support_matrix.blend_strategy(blend_mode);
+            if matches!(blend_strategy, BlendModePipelineStrategy::Unsupported) {
+                panic!("unsupported blend mode in draw list: {blend_mode:?}");
+            }
+            let pipeline = pipelines.select(blend_strategy, composite_space);
             pass.set_pipeline(pipeline);
 
             let start_instance =
                 u32::try_from(run_start).expect("tile instance range start exceeds u32");
             let end_instance = u32::try_from(run_end).expect("tile instance range end exceeds u32");
-            pass.draw(0..6, start_instance..end_instance);
+            pass.draw(
+                0..6,
+                start_instance
+                    .checked_add(base_instance_index)
+                    .expect("tile instance start index overflow")
+                    ..end_instance
+                        .checked_add(base_instance_index)
+                        .expect("tile instance end index overflow"),
+            );
             run_start = run_end;
         }
     }
+}
+
+fn invert_2d_affine_clip_matrix(
+    matrix: TransformMatrix4x4,
+) -> (f32, f32, f32, f32, f32, f32) {
+    // Column-major 4x4.
+    // clip_x = a00 * doc_x + a01 * doc_y + tx
+    // clip_y = a10 * doc_x + a11 * doc_y + ty
+    let a00 = matrix[0];
+    let a01 = matrix[4];
+    let a10 = matrix[1];
+    let a11 = matrix[5];
+    let tx = matrix[12];
+    let ty = matrix[13];
+
+    let det = a00.mul_add(a11, -(a01 * a10));
+    if det.abs() < 1e-10 {
+        panic!("view matrix affine part is singular (det={det})");
+    }
+    let inv_det = 1.0 / det;
+    let inv_a00 = a11 * inv_det;
+    let inv_a01 = -a01 * inv_det;
+    let inv_a10 = -a10 * inv_det;
+    let inv_a11 = a00 * inv_det;
+
+    // inv_t = -A^-1 * t
+    let inv_tx = -(inv_a00 * tx + inv_a01 * ty);
+    let inv_ty = -(inv_a10 * tx + inv_a11 * ty);
+    (inv_a00, inv_a01, inv_a10, inv_a11, inv_tx, inv_ty)
 }

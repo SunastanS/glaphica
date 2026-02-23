@@ -18,7 +18,7 @@ use std::{fs::OpenOptions, io::Write};
 
 use render_protocol::{
     BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, BufferTileCoordinate, ImageHandle,
-    LayerId, ProgramRevision, ReferenceLayerSelection, ReferenceSetId, RenderOp,
+    ImageSource, LayerId, ProgramRevision, ReferenceLayerSelection, ReferenceSetId, RenderOp,
     RenderTreeSnapshot, TransformMatrix4x4, Viewport,
 };
 use tiles::{
@@ -99,7 +99,7 @@ use renderer_pipeline::{create_composite_pipeline, multiply_blend_state};
 #[derive(Debug, Clone)]
 struct CachedLeafDraw {
     blend: BlendMode,
-    image_handle: ImageHandle,
+    image_source: render_protocol::ImageSource,
     draw_instances: Vec<TileDrawInstance>,
     tile_instance_index: HashMap<TileCoord, usize>,
 }
@@ -127,11 +127,11 @@ impl CachedLeafDraw {
     fn replace_all_instances(
         &mut self,
         blend: BlendMode,
-        image_handle: ImageHandle,
+        image_source: render_protocol::ImageSource,
         draw_instances: Vec<TileDrawInstance>,
     ) {
         self.blend = blend;
-        self.image_handle = image_handle;
+        self.image_source = image_source;
         self.draw_instances = draw_instances;
         self.rebuild_tile_index();
     }
@@ -172,6 +172,12 @@ impl CachedLeafDraw {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LeafDrawCacheKey {
+    layer_id: u64,
+    image_source: render_protocol::ImageSource,
+}
+
 #[derive(Debug)]
 struct GroupTargetCacheEntry {
     image: TileImage,
@@ -195,6 +201,22 @@ pub trait RenderDataResolver {
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     );
 
+    fn visit_image_source_tiles(
+        &self,
+        image_source: ImageSource,
+        visitor: &mut dyn FnMut(u32, u32, TileKey),
+    ) {
+        match image_source {
+            ImageSource::LayerImage { image_handle } => self.visit_image_tiles(image_handle, visitor),
+            ImageSource::BrushBuffer { stroke_session_id } => {
+                panic!(
+                    "render data resolver does not support brush buffer tile visit: stroke_session_id={}",
+                    stroke_session_id
+                );
+            }
+        }
+    }
+
     fn visit_image_tiles_for_coords(
         &self,
         image_handle: ImageHandle,
@@ -214,6 +236,31 @@ pub trait RenderDataResolver {
         self.visit_image_tiles(image_handle, &mut filtered);
     }
 
+    fn visit_image_source_tiles_for_coords(
+        &self,
+        image_source: ImageSource,
+        tile_coords: &[(u32, u32)],
+        visitor: &mut dyn FnMut(u32, u32, TileKey),
+    ) {
+        match image_source {
+            ImageSource::LayerImage { image_handle } => {
+                self.visit_image_tiles_for_coords(image_handle, tile_coords, visitor)
+            }
+            ImageSource::BrushBuffer { .. } => {
+                let requested_tiles: HashSet<(u32, u32)> = tile_coords.iter().copied().collect();
+                if requested_tiles.is_empty() {
+                    return;
+                }
+                let mut filtered = |tile_x: u32, tile_y: u32, tile_key: TileKey| {
+                    if requested_tiles.contains(&(tile_x, tile_y)) {
+                        visitor(tile_x, tile_y, tile_key);
+                    }
+                };
+                self.visit_image_source_tiles(image_source, &mut filtered);
+            }
+        }
+    }
+
     // Reserved hook for future special node kinds (for example filter-driven layers that
     // expand dirty regions and may not map to a direct image handle). The final propagation
     // model is still being designed, so renderer currently uses this default identity behavior.
@@ -226,6 +273,23 @@ pub trait RenderDataResolver {
     }
 
     fn resolve_tile_address(&self, tile_key: TileKey) -> Option<TileAddress>;
+
+    fn resolve_image_source_tile_address(
+        &self,
+        image_source: ImageSource,
+        tile_key: TileKey,
+    ) -> Option<TileAddress> {
+        match image_source {
+            ImageSource::LayerImage { .. } => self.resolve_tile_address(tile_key),
+            ImageSource::BrushBuffer { stroke_session_id } => {
+                panic!(
+                    "render data resolver does not support brush buffer tile address resolution: stroke_session_id={} key={:?}",
+                    stroke_session_id,
+                    tile_key
+                );
+            }
+        }
+    }
 
     fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult>;
 
@@ -247,6 +311,13 @@ pub(crate) fn renderer_brush_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var_os("GLAPHICA_BRUSH_TRACE").is_some_and(|value| value != "0"))
+}
+
+pub(crate) fn renderer_render_tree_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("GLAPHICA_RENDER_TREE_TRACE").is_some_and(|value| value != "0")
+    })
 }
 
 fn renderer_perf_jsonl_file() -> Option<&'static Mutex<std::fs::File>> {
@@ -302,7 +373,7 @@ struct FrameState {
 
 struct CacheState {
     group_target_cache: HashMap<u64, GroupTargetCacheEntry>,
-    leaf_draw_cache: HashMap<u64, CachedLeafDraw>,
+    leaf_draw_cache: HashMap<LeafDrawCacheKey, CachedLeafDraw>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,10 +413,8 @@ struct GpuState {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     view_uniform_buffer: wgpu::Buffer,
-    alpha_composite_pipeline: wgpu::RenderPipeline,
-    multiply_composite_pipeline: wgpu::RenderPipeline,
-    alpha_composite_slot_pipeline: wgpu::RenderPipeline,
-    multiply_composite_slot_pipeline: wgpu::RenderPipeline,
+    composite_pipelines_rgba: TileCompositePipelines,
+    composite_pipelines_r32float: TileCompositePipelines,
     per_frame_bind_group_layout: wgpu::BindGroupLayout,
     per_frame_bind_group: wgpu::BindGroup,
     group_tile_store: GroupTileAtlasStore,
@@ -359,6 +428,8 @@ struct GpuState {
     atlas_bind_group_linear: wgpu::BindGroup,
     _tile_texture_manager_buffer: wgpu::Buffer,
     tile_atlas: TileAtlasGpuArray,
+    brush_buffer_atlas_bind_group_nearest: wgpu::BindGroup,
+    _brush_buffer_texture_manager_buffer: wgpu::Buffer,
     gpu_timing: GpuFrameTimingState,
     brush_pipeline_layout: wgpu::PipelineLayout,
     brush_dab_write_pipeline: wgpu::ComputePipeline,
@@ -416,6 +487,11 @@ pub struct Renderer {
     merge_orchestrator: renderer_merge::MergeOrchestrator,
 
     frame_state: FrameState,
+
+    // Instance data is uploaded via `queue.write_buffer`. If we overwrite the same buffer range
+    // multiple times while encoding a single command buffer, earlier passes will read the latest
+    // contents at execution time. Treat the instance buffer as an append-only arena per submit.
+    tile_instance_arena_cursor: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,6 +566,7 @@ struct CompositePassContext<'a> {
 struct DrawPassContext<'a> {
     target_view: &'a wgpu::TextureView,
     atlas_bind_group: &'a wgpu::BindGroup,
+    pipelines: &'a TileCompositePipelines,
     visible_tiles: Option<&'a HashSet<TileCoord>>,
     viewport_mode: ViewportMode,
     composite_space: TileCompositeSpace,
@@ -499,6 +576,40 @@ struct DrawPassContext<'a> {
 pub enum PresentError {
     Surface(wgpu::SurfaceError),
     TileDrain(TileGpuDrainError),
+}
+
+#[derive(Clone)]
+struct TileCompositePipelines {
+    alpha_content: wgpu::RenderPipeline,
+    multiply_content: wgpu::RenderPipeline,
+    alpha_slot: wgpu::RenderPipeline,
+    multiply_slot: wgpu::RenderPipeline,
+}
+
+impl TileCompositePipelines {
+    fn select(
+        &self,
+        blend_strategy: render_protocol::BlendModePipelineStrategy,
+        composite_space: TileCompositeSpace,
+    ) -> &wgpu::RenderPipeline {
+        match (blend_strategy, composite_space) {
+            (render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Content) => {
+                &self.alpha_content
+            }
+            (render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Content) => {
+                &self.multiply_content
+            }
+            (render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Slot) => {
+                &self.alpha_slot
+            }
+            (render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Slot) => {
+                &self.multiply_slot
+            }
+            (render_protocol::BlendModePipelineStrategy::Unsupported, _) => {
+                panic!("unsupported blend strategy in composite pipelines");
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -869,8 +869,20 @@ impl Renderer {
                     chunk.stroke_session_id
                 )
             });
+        let target_layer_id = self
+            .brush_work_state
+            .stroke_target_layer
+            .get(&chunk.stroke_session_id)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "brush stroke {} missing target layer id before dab dispatch",
+                    chunk.stroke_session_id
+                )
+            });
         let atlas_layout = self.gpu_state.brush_buffer_atlas.layout();
         let mut mapped_dabs = Vec::with_capacity(chunk.dab_count().saturating_mul(4));
+        let mut dirty_tiles = HashSet::<BufferTileCoordinate>::new();
         for index in 0..chunk.dab_count() {
             self.append_dab_write_commands(
                 chunk.canvas_x()[index],
@@ -879,6 +891,7 @@ impl Renderer {
                 bound_tile_keys,
                 atlas_layout,
                 &mut mapped_dabs,
+                &mut dirty_tiles,
             );
         }
         if mapped_dabs.is_empty() {
@@ -901,6 +914,31 @@ impl Renderer {
         let encoder = brush_encoder
             .as_mut()
             .expect("brush command encoder must exist");
+
+        for tile in dirty_tiles.iter() {
+            let min_x = tile.tile_x.saturating_mul(TILE_SIZE as i32);
+            let min_y = tile.tile_y.saturating_mul(TILE_SIZE as i32);
+            let max_x = tile
+                .tile_x
+                .saturating_add(1)
+                .saturating_mul(TILE_SIZE as i32);
+            let max_y = tile
+                .tile_y
+                .saturating_add(1)
+                .saturating_mul(TILE_SIZE as i32);
+            if self.frame_state.dirty_state_store.mark_layer_rect(
+                target_layer_id,
+                crate::DirtyRect {
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                },
+            ) {
+                self.frame_state.frame_sync.note_state_change();
+            }
+        }
+
         self.gpu_state.queue.write_buffer(
             &self.gpu_state.brush_dab_write_buffer,
             0,
@@ -947,6 +985,7 @@ impl Renderer {
         bound_tile_keys: &HashMap<BufferTileCoordinate, tiles::TileKey>,
         atlas_layout: TileAtlasLayout,
         mapped_dabs: &mut Vec<crate::BrushDabWriteGpu>,
+        dirty_tiles: &mut HashSet<BufferTileCoordinate>,
     ) {
         if !canvas_x.is_finite() || !canvas_y.is_finite() || !pressure.is_finite() {
             panic!("dab values must be finite");
@@ -1004,6 +1043,7 @@ impl Renderer {
                 if write_min_x > write_max_x || write_min_y > write_max_y {
                     continue;
                 }
+                dirty_tiles.insert(tile_coordinate);
                 let write_min_x = u32::try_from(write_min_x).expect("write min x out of u32");
                 let write_min_y = u32::try_from(write_min_y).expect("write min y out of u32");
                 let write_max_x = u32::try_from(write_max_x).expect("write max x out of u32");
@@ -1068,9 +1108,29 @@ impl Renderer {
             force_group_rerender,
             group_tile_count(tiles_per_row, tiles_per_column),
         );
+
+        let root_cache_missing = !self.cache_state.group_target_cache.contains_key(&0);
+        let active_tiles = if force_group_rerender && !root_cache_missing {
+            // When the render-tree semantics change (e.g. live preview toggles), we need to rerender,
+            // but rerendering the entire document can be catastrophically expensive. Restrict forced
+            // rerenders to what the user can see plus currently-known dirty tiles.
+            let mut active = self.visible_tiles_for_view().unwrap_or_default();
+            for mask in dirty_plan
+                .dirty_leaf_tiles
+                .values()
+                .chain(dirty_plan.dirty_group_tiles.values())
+            {
+                if let DirtyTileMask::Partial(tiles) = mask {
+                    active.extend(tiles.iter().copied());
+                }
+            }
+            Some(active)
+        } else {
+            None
+        };
         let composite_plan = render_tree
             .as_ref()
-            .map(|render_tree| self.build_composite_node_plan(render_tree, &dirty_plan, None));
+            .map(|render_tree| self.build_composite_node_plan(render_tree, &dirty_plan, active_tiles.as_ref()));
         if crate::renderer_perf_log_enabled() || crate::renderer_perf_jsonl_enabled() {
             let dirty_leaf_full = dirty_plan
                 .dirty_leaf_tiles
@@ -1169,6 +1229,9 @@ impl Renderer {
             );
         }
         if let Some(composite_plan) = frame_plan.composite_plan.as_ref() {
+            // Each command buffer submit must treat the instance buffer as immutable. We upload
+            // per-pass instance segments into a shared arena and refer to them by instance index.
+            self.tile_instance_arena_cursor = 0;
             self.gpu_state.queue.write_buffer(
                 &self.gpu_state.view_uniform_buffer,
                 0,
@@ -1195,6 +1258,8 @@ impl Renderer {
                 .queue
                 .submit(Some(composite_encoder.finish()));
 
+            // Safe to reuse instance buffer from offset 0 after the composite submit completes.
+            self.tile_instance_arena_cursor = 0;
             self.gpu_state.queue.write_buffer(
                 &self.gpu_state.view_uniform_buffer,
                 0,
@@ -1436,7 +1501,9 @@ mod tests {
             children: vec![RenderNodeSnapshot::Leaf {
                 layer_id,
                 blend: BlendMode::Normal,
-                image_handle: ImageHandle::from(KeyData::from_ffi(12)),
+                image_source: render_protocol::ImageSource::LayerImage {
+                    image_handle: ImageHandle::from(KeyData::from_ffi(12)),
+                },
             }]
             .into_boxed_slice()
             .into(),
