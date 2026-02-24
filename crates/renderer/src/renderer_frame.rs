@@ -569,7 +569,8 @@ impl Renderer {
                 .expect("pending dab count overflow");
         }
         if let BrushRenderCommand::EndStroke(end) = &command {
-            self.brush_work_state.enqueue_end_stroke(end.stroke_session_id);
+            self.brush_work_state
+                .enqueue_end_stroke(end.stroke_session_id);
         }
         if let BrushRenderCommand::MergeBuffer(merge) = &command {
             self.brush_work_state
@@ -1083,9 +1084,9 @@ impl Renderer {
         } else {
             None
         };
-        let composite_plan = render_tree
-            .as_ref()
-            .map(|render_tree| self.build_composite_node_plan(render_tree, &dirty_plan, active_tiles.as_ref()));
+        let composite_plan = render_tree.as_ref().map(|render_tree| {
+            self.build_composite_node_plan(render_tree, &dirty_plan, active_tiles.as_ref())
+        });
         if crate::renderer_perf_log_enabled() || crate::renderer_perf_jsonl_enabled() {
             let dirty_leaf_full = dirty_plan
                 .dirty_leaf_tiles

@@ -18,9 +18,10 @@ use wgpu::util::DeviceExt;
 use crate::{
     BrushDabWriteGpu, BrushDabWriteMetaGpu, BrushWorkState, CacheState, DataState, DirtyStateStore,
     FrameState, FrameSync, GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState,
-    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX, TileCompositePipelines,
-    INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer, TileInstanceGpu,
-    TileTextureManagerGpu, ViewState, create_composite_pipeline, multiply_blend_state,
+    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX,
+    INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer,
+    TileCompositePipelines, TileInstanceGpu, TileTextureManagerGpu, ViewState,
+    create_composite_pipeline, multiply_blend_state,
 };
 
 impl Renderer {
@@ -237,41 +238,44 @@ impl Renderer {
 
         let pipeline_layout_rgba = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("renderer.composite_layout.rgba"),
-            bind_group_layouts: &[&per_frame_bind_group_layout, &atlas_bind_group_layout_filterable],
+            bind_group_layouts: &[
+                &per_frame_bind_group_layout,
+                &atlas_bind_group_layout_filterable,
+            ],
             immediate_size: 0,
         });
         let composite_pipelines_rgba = TileCompositePipelines {
             alpha_content: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &shader_rgba,
-            surface_config.format,
-            wgpu::BlendState::ALPHA_BLENDING,
-            "renderer.composite_pipeline.alpha",
+                &device,
+                &pipeline_layout_rgba,
+                &shader_rgba,
+                surface_config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+                "renderer.composite_pipeline.alpha",
             ),
             multiply_content: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &shader_rgba,
-            surface_config.format,
-            multiply_blend_state(),
-            "renderer.composite_pipeline.multiply",
+                &device,
+                &pipeline_layout_rgba,
+                &shader_rgba,
+                surface_config.format,
+                multiply_blend_state(),
+                "renderer.composite_pipeline.multiply",
             ),
             alpha_slot: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &slot_shader_rgba,
-            surface_config.format,
-            wgpu::BlendState::ALPHA_BLENDING,
-            "renderer.composite_pipeline.slot.alpha",
+                &device,
+                &pipeline_layout_rgba,
+                &slot_shader_rgba,
+                surface_config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+                "renderer.composite_pipeline.slot.alpha",
             ),
             multiply_slot: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &slot_shader_rgba,
-            surface_config.format,
-            multiply_blend_state(),
-            "renderer.composite_pipeline.slot.multiply",
+                &device,
+                &pipeline_layout_rgba,
+                &slot_shader_rgba,
+                surface_config.format,
+                multiply_blend_state(),
+                "renderer.composite_pipeline.slot.multiply",
             ),
         };
 

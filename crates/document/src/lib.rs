@@ -1083,7 +1083,10 @@ mod tests {
     fn contains_brush_buffer_leaf(node: &RenderNodeSnapshot) -> bool {
         match node {
             RenderNodeSnapshot::Leaf { image_source, .. } => {
-                matches!(image_source, render_protocol::ImageSource::BrushBuffer { .. })
+                matches!(
+                    image_source,
+                    render_protocol::ImageSource::BrushBuffer { .. }
+                )
             }
             RenderNodeSnapshot::Group { children, .. } => {
                 children.iter().any(contains_brush_buffer_leaf)
@@ -1417,13 +1420,14 @@ mod tests {
         let snapshot = document.render_tree_snapshot();
         match snapshot.root.as_ref() {
             RenderNodeSnapshot::Group { children, .. } => match children.first() {
-                Some(RenderNodeSnapshot::Group { blend, children, .. }) => {
+                Some(RenderNodeSnapshot::Group {
+                    blend, children, ..
+                }) => {
                     assert_eq!(*blend, BlendMode::Normal);
                     assert_eq!(children.len(), 2);
                     match &children[0] {
                         RenderNodeSnapshot::Leaf {
-                            image_source:
-                                render_protocol::ImageSource::LayerImage { .. },
+                            image_source: render_protocol::ImageSource::LayerImage { .. },
                             ..
                         } => {}
                         _ => panic!("preview group first child must be layer image leaf"),
@@ -1431,9 +1435,7 @@ mod tests {
                     match &children[1] {
                         RenderNodeSnapshot::Leaf {
                             image_source:
-                                render_protocol::ImageSource::BrushBuffer {
-                                    stroke_session_id,
-                                },
+                                render_protocol::ImageSource::BrushBuffer { stroke_session_id },
                             ..
                         } => assert_eq!(*stroke_session_id, 42),
                         _ => panic!("preview group second child must be brush buffer leaf"),
@@ -1464,8 +1466,7 @@ mod tests {
                     assert_eq!(children.len(), 1);
                     match children.first() {
                         Some(RenderNodeSnapshot::Leaf {
-                            image_source:
-                                render_protocol::ImageSource::LayerImage { .. },
+                            image_source: render_protocol::ImageSource::LayerImage { .. },
                             ..
                         }) => {}
                         _ => panic!("cleared preview must restore plain layer leaf"),

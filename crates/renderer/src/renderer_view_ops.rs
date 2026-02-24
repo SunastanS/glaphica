@@ -59,9 +59,7 @@ fn render_node_semantics_equal_ignoring_image_handle(
                 ) => true,
                 _ => false,
             };
-            left_layer_id == right_layer_id
-                && left_blend == right_blend
-                && source_semantics_equal
+            left_layer_id == right_layer_id && left_blend == right_blend && source_semantics_equal
         }
         (
             RenderNodeSnapshot::Group {
@@ -83,7 +81,11 @@ fn render_node_semantics_equal_ignoring_image_handle(
                 && left_children
                     .iter()
                     .filter(|child| !is_preview_leaf(child))
-                    .zip(right_children.iter().filter(|child| !is_preview_leaf(child)))
+                    .zip(
+                        right_children
+                            .iter()
+                            .filter(|child| !is_preview_leaf(child)),
+                    )
                     .all(|(left_child, right_child)| {
                         render_node_semantics_equal_ignoring_image_handle(left_child, right_child)
                     })

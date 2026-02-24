@@ -207,7 +207,9 @@ pub trait RenderDataResolver {
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
         match image_source {
-            ImageSource::LayerImage { image_handle } => self.visit_image_tiles(image_handle, visitor),
+            ImageSource::LayerImage { image_handle } => {
+                self.visit_image_tiles(image_handle, visitor)
+            }
             ImageSource::BrushBuffer { stroke_session_id } => {
                 panic!(
                     "render data resolver does not support brush buffer tile visit: stroke_session_id={}",
@@ -284,8 +286,7 @@ pub trait RenderDataResolver {
             ImageSource::BrushBuffer { stroke_session_id } => {
                 panic!(
                     "render data resolver does not support brush buffer tile address resolution: stroke_session_id={} key={:?}",
-                    stroke_session_id,
-                    tile_key
+                    stroke_session_id, tile_key
                 );
             }
         }
@@ -643,18 +644,22 @@ impl TileCompositePipelines {
         composite_space: TileCompositeSpace,
     ) -> &wgpu::RenderPipeline {
         match (blend_strategy, composite_space) {
-            (render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Content) => {
-                &self.alpha_content
-            }
-            (render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Content) => {
-                &self.multiply_content
-            }
-            (render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Slot) => {
-                &self.alpha_slot
-            }
-            (render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Slot) => {
-                &self.multiply_slot
-            }
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend,
+                TileCompositeSpace::Content,
+            ) => &self.alpha_content,
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend,
+                TileCompositeSpace::Content,
+            ) => &self.multiply_content,
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend,
+                TileCompositeSpace::Slot,
+            ) => &self.alpha_slot,
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend,
+                TileCompositeSpace::Slot,
+            ) => &self.multiply_slot,
             (render_protocol::BlendModePipelineStrategy::Unsupported, _) => {
                 panic!("unsupported blend strategy in composite pipelines");
             }

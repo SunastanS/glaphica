@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use document::{Document, DocumentMergeError, TileCoordinate};
 use render_protocol::{
-    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle,
-    ImageSource, ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, RenderTreeSnapshot,
+    BlendMode, BrushControlAck, BrushControlCommand, BrushRenderCommand, ImageHandle, ImageSource,
+    ReceiptTerminalState, RenderOp, RenderStepSupportMatrix, RenderTreeSnapshot,
     StrokeExecutionReceiptId, Viewport,
 };
 use renderer::{
@@ -127,15 +127,19 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
         match image_source {
-            ImageSource::LayerImage { image_handle } => self.visit_image_tiles(image_handle, visitor),
+            ImageSource::LayerImage { image_handle } => {
+                self.visit_image_tiles(image_handle, visitor)
+            }
             ImageSource::BrushBuffer { stroke_session_id } => {
-                let brush_buffer_tile_keys = self
-                    .brush_buffer_tile_keys
-                    .read()
-                    .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"));
+                let brush_buffer_tile_keys =
+                    self.brush_buffer_tile_keys.read().unwrap_or_else(|_| {
+                        panic!("brush buffer tile key registry read lock poisoned")
+                    });
                 #[cfg(debug_assertions)]
-                let mut resolved_address_to_tile: HashMap<TileAddress, (TileKey, u32, u32)> =
-                    HashMap::new();
+                let mut resolved_address_to_tile: HashMap<
+                    TileAddress,
+                    (TileKey, u32, u32),
+                > = HashMap::new();
                 #[cfg(debug_assertions)]
                 let mut tile_coord_by_key: HashMap<TileKey, (u32, u32)> = HashMap::new();
 
@@ -362,6 +366,15 @@ pub struct GpuState {
     perf_log_enabled: bool,
     #[cfg(debug_assertions)]
     last_bound_render_tree: Option<(u64, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuSemanticStateDigest {
+    pub document_revision: u64,
+    pub render_tree_revision: u64,
+    pub render_tree_semantic_hash: u64,
+    pub pending_brush_command_count: u64,
+    pub has_pending_merge_work: bool,
 }
 
 #[derive(Debug)]
@@ -992,7 +1005,9 @@ impl GpuState {
             BrushRenderCommand::AllocateBufferTiles(allocate) => {
                 self.brush_buffer_tile_keys
                     .write()
-                    .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                    .unwrap_or_else(|_| {
+                        panic!("brush buffer tile key registry write lock poisoned")
+                    })
                     .allocate_tiles(
                         allocate.stroke_session_id,
                         allocate.tiles.clone(),
@@ -1019,7 +1034,9 @@ impl GpuState {
                 if self.disable_merge_for_debug {
                     self.brush_buffer_tile_keys
                         .write()
-                        .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                        .unwrap_or_else(|_| {
+                            panic!("brush buffer tile key registry write lock poisoned")
+                        })
                         .release_stroke_on_merge_failed(
                             merge.stroke_session_id,
                             &self.brush_buffer_store,
@@ -1050,6 +1067,31 @@ impl GpuState {
 
     pub fn pending_brush_command_count(&self) -> u64 {
         self.renderer.pending_brush_command_count()
+    }
+
+    pub fn semantic_state_digest(&self) -> GpuSemanticStateDigest {
+        let (document_revision, render_tree_revision, render_tree_semantic_hash) = {
+            let document = self
+                .document
+                .read()
+                .unwrap_or_else(|_| panic!("document read lock poisoned"));
+            let document_revision = document.revision();
+            let snapshot = document.render_tree_snapshot();
+            let render_tree_revision = snapshot.revision;
+            let render_tree_semantic_hash = Self::render_node_semantic_hash(snapshot.root.as_ref());
+            (
+                document_revision,
+                render_tree_revision,
+                render_tree_semantic_hash,
+            )
+        };
+        GpuSemanticStateDigest {
+            document_revision,
+            render_tree_revision,
+            render_tree_semantic_hash,
+            pending_brush_command_count: self.renderer.pending_brush_command_count(),
+            has_pending_merge_work: self.tile_merge_engine.has_pending_work(),
+        }
     }
 
     pub fn has_pending_merge_work(&self) -> bool {
@@ -1287,8 +1329,10 @@ impl GpuState {
                         );
                     }
                     let atlas_store = Arc::clone(&self.atlas_store);
-                    let document_apply_result: Result<Option<RenderTreeSnapshot>, MergeBridgeError> =
-                        (|| {
+                    let document_apply_result: Result<
+                        Option<RenderTreeSnapshot>,
+                        MergeBridgeError,
+                    > = (|| {
                         let mut document = self
                             .document
                             .write()
@@ -1357,8 +1401,7 @@ impl GpuState {
                         } else {
                             None
                         })
-                    })(
-                    );
+                    })();
                     let render_tree = match document_apply_result {
                         Ok(render_tree) => render_tree,
                         Err(error) => {
@@ -1398,7 +1441,9 @@ impl GpuState {
                     }
                     self.brush_buffer_tile_keys
                         .write()
-                        .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                        .unwrap_or_else(|_| {
+                            panic!("brush buffer tile key registry write lock poisoned")
+                        })
                         .retain_stroke_tiles(*stroke_session_id, &self.brush_buffer_store);
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
@@ -1413,8 +1458,10 @@ impl GpuState {
                     message,
                     ..
                 } => {
-                    let document_abort_result: Result<Option<RenderTreeSnapshot>, MergeBridgeError> =
-                        (|| {
+                    let document_abort_result: Result<
+                        Option<RenderTreeSnapshot>,
+                        MergeBridgeError,
+                    > = (|| {
                         let mut document = self
                             .document
                             .write()
@@ -1429,8 +1476,7 @@ impl GpuState {
                         } else {
                             None
                         })
-                    })(
-                    );
+                    })();
                     let render_tree = match document_abort_result {
                         Ok(render_tree) => render_tree,
                         Err(error) => {
@@ -1460,8 +1506,13 @@ impl GpuState {
                     }
                     self.brush_buffer_tile_keys
                         .write()
-                        .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
-                        .release_stroke_on_merge_failed(*stroke_session_id, &self.brush_buffer_store);
+                        .unwrap_or_else(|_| {
+                            panic!("brush buffer tile key registry write lock poisoned")
+                        })
+                        .release_stroke_on_merge_failed(
+                            *stroke_session_id,
+                            &self.brush_buffer_store,
+                        );
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeFailed {
                             stroke_session_id: *stroke_session_id,
@@ -1647,7 +1698,12 @@ mod tests {
                 image_handle: ImageHandle::default(),
             },
         );
-        let preview = snapshot_with_source(0, ImageSource::BrushBuffer { stroke_session_id: 42 });
+        let preview = snapshot_with_source(
+            0,
+            ImageSource::BrushBuffer {
+                stroke_session_id: 42,
+            },
+        );
 
         let trace_enabled = false;
         let invariants_enabled = true;

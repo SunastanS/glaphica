@@ -10,8 +10,7 @@ use crate::planning::GroupRenderDecision;
 use crate::{
     CachedLeafDraw, CompositeEmission, CompositeNodePlan, CompositePassContext, DirtyExecutionPlan,
     DirtyTileMask, DrawPassContext, GroupDecisionEngine, GroupRerenderMode, LeafDrawCacheKey,
-    Renderer,
-    TileCompositeSpace, TileCoord, ViewportMode, build_group_tile_draw_instances,
+    Renderer, TileCompositeSpace, TileCoord, ViewportMode, build_group_tile_draw_instances,
     build_leaf_tile_draw_instances, build_leaf_tile_draw_instances_for_tiles, leaf_should_rebuild,
 };
 

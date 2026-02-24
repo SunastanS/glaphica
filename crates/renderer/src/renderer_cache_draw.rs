@@ -13,8 +13,8 @@ use tiles::{TILE_SIZE, TILE_STRIDE, TileImage, TileKey};
 
 use crate::{
     BlendMode, DrawPassContext, GroupTargetCacheEntry, LeafDrawCacheKey, Renderer,
-    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode, build_group_tile_draw_instances,
-    tile_coord_from_draw_instance,
+    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance,
 };
 
 static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -48,7 +48,8 @@ impl Renderer {
             panic!("visible tile computation produced non-finite bounds");
         }
 
-        let (document_width, document_height) = self.data_state.render_data_resolver.document_size();
+        let (document_width, document_height) =
+            self.data_state.render_data_resolver.document_size();
         if document_width == 0 || document_height == 0 {
             panic!("document size must be positive");
         }
@@ -71,8 +72,8 @@ impl Renderer {
         let max_tile_x = max_tile_x.clamp(0, tiles_per_row.saturating_sub(1) as i32) as u32;
         let max_tile_y = max_tile_y.clamp(0, tiles_per_column.saturating_sub(1) as i32) as u32;
 
-        let estimated_count = (max_tile_x - min_tile_x + 1) as usize
-            * (max_tile_y - min_tile_y + 1) as usize;
+        let estimated_count =
+            (max_tile_x - min_tile_x + 1) as usize * (max_tile_y - min_tile_y + 1) as usize;
         let mut visible = HashSet::with_capacity(estimated_count.min(2048));
         for tile_y in min_tile_y..=max_tile_y {
             for tile_x in min_tile_x..=max_tile_x {
@@ -117,7 +118,9 @@ impl Renderer {
         }
     }
 
-    fn live_ids(snapshot: &RenderTreeSnapshot) -> (HashSet<LeafDrawCacheKey>, HashSet<u64>, HashSet<u64>) {
+    fn live_ids(
+        snapshot: &RenderTreeSnapshot,
+    ) -> (HashSet<LeafDrawCacheKey>, HashSet<u64>, HashSet<u64>) {
         let mut live_leaf_keys = HashSet::new();
         let mut live_leaf_layers = HashSet::new();
         let mut live_group_ids = HashSet::new();
@@ -650,9 +653,11 @@ impl Renderer {
             .checked_mul(std::mem::size_of::<TileInstanceGpu>() as u64)
             .expect("tile instance buffer write offset overflow");
         let instance_bytes: &[u8] = bytemuck::cast_slice(&self.gpu_state.tile_instance_gpu_staging);
-        self.gpu_state
-            .queue
-            .write_buffer(&self.gpu_state.tile_instance_buffer, offset_bytes, instance_bytes);
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.tile_instance_buffer,
+            offset_bytes,
+            instance_bytes,
+        );
         self.tile_instance_arena_cursor = required_len;
         base_instance_index
     }
@@ -700,9 +705,7 @@ impl Renderer {
     }
 }
 
-fn invert_2d_affine_clip_matrix(
-    matrix: TransformMatrix4x4,
-) -> (f32, f32, f32, f32, f32, f32) {
+fn invert_2d_affine_clip_matrix(matrix: TransformMatrix4x4) -> (f32, f32, f32, f32, f32, f32) {
     // Column-major 4x4.
     // clip_x = a00 * doc_x + a01 * doc_y + tx
     // clip_y = a10 * doc_x + a11 * doc_y + ty

@@ -1148,9 +1148,7 @@ fn rgba8_texture_upload_bytes_padded(
     mut pixel_at: impl FnMut(u32, u32) -> [u8; 4],
 ) -> (Vec<u8>, u32) {
     // wgpu requires bytes_per_row to be a multiple of 256 for texture uploads/copies.
-    let unpadded_bytes_per_row = width
-        .checked_mul(4)
-        .expect("rgba8 bytes_per_row overflow");
+    let unpadded_bytes_per_row = width.checked_mul(4).expect("rgba8 bytes_per_row overflow");
     let padded_bytes_per_row = unpadded_bytes_per_row
         .checked_add(255)
         .expect("bytes_per_row pad overflow")
@@ -1230,9 +1228,11 @@ fn rgba8_texture_readback_bytes_padded(
     queue.submit(Some(encoder.finish()));
 
     let (sender, receiver) = std::sync::mpsc::channel();
-    readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-        sender.send(result).expect("send map result");
-    });
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).expect("send map result");
+        });
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("device poll must succeed for readback mapping");
@@ -1466,7 +1466,11 @@ fn composite_tile_mapping_renders_quadrant_image_exactly() {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&manager_buffer, 0, bytemuck::bytes_of(&tile_texture_manager));
+        queue.write_buffer(
+            &manager_buffer,
+            0,
+            bytemuck::bytes_of(&tile_texture_manager),
+        );
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("renderer.test.quadrant.sampler"),
@@ -1666,7 +1670,11 @@ fn composite_tile_mapping_renders_quadrant_image_exactly() {
                 scratch_bytes[offset + 3],
             ]
         };
-        assert_eq!(scratch_pixel(0, 0), [255, 0, 0, 255], "scratch top-left must be red");
+        assert_eq!(
+            scratch_pixel(0, 0),
+            [255, 0, 0, 255],
+            "scratch top-left must be red"
+        );
         assert_eq!(
             scratch_pixel(tile_stride, 0),
             [0, 255, 0, 255],
@@ -1723,7 +1731,10 @@ fn composite_tile_mapping_renders_quadrant_image_exactly() {
         queue.write_buffer(
             &view_uniform_buffer,
             0,
-            bytemuck::bytes_of(&document_clip_matrix_from_size(content_width, content_height)),
+            bytemuck::bytes_of(&document_clip_matrix_from_size(
+                content_width,
+                content_height,
+            )),
         );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1768,7 +1779,12 @@ fn composite_tile_mapping_renders_quadrant_image_exactly() {
         for y in 0..content_height {
             for x in 0..content_width {
                 let offset = (y as usize) * (output_bpr as usize) + (x as usize) * 4;
-                let got = [output_bytes[offset], output_bytes[offset + 1], output_bytes[offset + 2], output_bytes[offset + 3]];
+                let got = [
+                    output_bytes[offset],
+                    output_bytes[offset + 1],
+                    output_bytes[offset + 2],
+                    output_bytes[offset + 3],
+                ];
                 let expected = expected_pixel(x, y);
                 assert_eq!(
                     got, expected,
@@ -1936,7 +1952,11 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&manager_buffer, 0, bytemuck::bytes_of(&tile_texture_manager));
+        queue.write_buffer(
+            &manager_buffer,
+            0,
+            bytemuck::bytes_of(&tile_texture_manager),
+        );
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("renderer.test.nested.sampler"),
@@ -2226,7 +2246,12 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
 
         let sample_from_padded = |bytes: &[u8], bpr: u32, x: u32, y: u32| -> [u8; 4] {
             let offset = (y as usize) * (bpr as usize) + (x as usize) * 4;
-            [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]
+            [
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]
         };
 
         // Stage readback: layer_scratch must contain the expected colors at slot origins.
@@ -2254,7 +2279,12 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
             "layer_scratch BL must be blue"
         );
         assert_eq!(
-            sample_from_padded(&layer_scratch_bytes, layer_scratch_bpr, tile_stride, tile_stride),
+            sample_from_padded(
+                &layer_scratch_bytes,
+                layer_scratch_bpr,
+                tile_stride,
+                tile_stride
+            ),
             [255, 255, 0, 255],
             "layer_scratch BR must be yellow"
         );
@@ -2271,7 +2301,12 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
         for (coord_i, tile_index) in tile_indices_group_a.iter().copied().enumerate() {
             let tx = tile_index % atlas_tiles_per_row;
             let ty = tile_index / atlas_tiles_per_row;
-            let got = sample_from_padded(&group_a_bytes, group_a_bpr, tx * tile_stride, ty * tile_stride);
+            let got = sample_from_padded(
+                &group_a_bytes,
+                group_a_bpr,
+                tx * tile_stride,
+                ty * tile_stride,
+            );
             assert_eq!(
                 got, colors[coord_i],
                 "group_atlas_a slot origin mismatch for coord_i={} tile_index={}",
@@ -2379,7 +2414,12 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
             "root_scratch BL must be blue"
         );
         assert_eq!(
-            sample_from_padded(&root_scratch_bytes, root_scratch_bpr, tile_stride, tile_stride),
+            sample_from_padded(
+                &root_scratch_bytes,
+                root_scratch_bpr,
+                tile_stride,
+                tile_stride
+            ),
             [255, 255, 0, 255],
             "root_scratch BR must be yellow"
         );
@@ -2396,7 +2436,12 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
         for (coord_i, tile_index) in tile_indices_group_b.iter().copied().enumerate() {
             let tx = tile_index % atlas_tiles_per_row;
             let ty = tile_index / atlas_tiles_per_row;
-            let got = sample_from_padded(&group_b_bytes, group_b_bpr, tx * tile_stride, ty * tile_stride);
+            let got = sample_from_padded(
+                &group_b_bytes,
+                group_b_bpr,
+                tx * tile_stride,
+                ty * tile_stride,
+            );
             assert_eq!(
                 got, colors[coord_i],
                 "group_atlas_b slot origin mismatch for coord_i={} tile_index={}",
@@ -2408,7 +2453,10 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
         queue.write_buffer(
             &view_uniform_buffer,
             0,
-            bytemuck::bytes_of(&document_clip_matrix_from_size(content_width, content_height)),
+            bytemuck::bytes_of(&document_clip_matrix_from_size(
+                content_width,
+                content_height,
+            )),
         );
         queue.write_buffer(
             &tile_instance_buffer,
