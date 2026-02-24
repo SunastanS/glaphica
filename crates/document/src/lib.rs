@@ -395,34 +395,6 @@ impl Document {
             })
     }
 
-    pub(crate) fn replace_leaf_image(
-        &mut self,
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        image: TileImage,
-    ) -> Result<(), DocumentMergeError> {
-        let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
-        let next_layer_version = self
-            .layer_versions
-            .get(&layer_id)
-            .copied()
-            .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
-        let next_layer_version = next_layer_version
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("layer version overflow for {layer_id}"));
-        self.layer_versions.insert(layer_id, next_layer_version);
-        let dirty_tiles = self.full_layer_dirty_tiles();
-        self.record_layer_dirty_history(layer_id, next_layer_version, dirty_tiles);
-        if let Some(image_entry) = self.images.get_mut(image_handle) {
-            *image_entry = Arc::new(image);
-            return Ok(());
-        }
-        Err(DocumentMergeError::LayerNotFoundInStrokeSession {
-            layer_id,
-            stroke_session_id,
-        })
-    }
-
     pub fn apply_merge_image(
         &mut self,
         layer_id: LayerId,

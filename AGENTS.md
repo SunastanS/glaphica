@@ -7,6 +7,7 @@
 - Stop early when you need more context and references, maybe docs, examples
 - Never write a fallback, make the program panic fast
 - If a roll of developing didn't reach its original target, report next steps
+- Do not run test automatically unless in debug tracing work
 
 **Read `docs/Instructions/coding_guidelines.md` before coding.**
 

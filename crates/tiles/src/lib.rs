@@ -154,10 +154,6 @@ impl TileSetHandle {
         &self.keys
     }
 
-    pub(crate) fn into_keys(self) -> Vec<TileKey> {
-        self.keys
-    }
-
     pub(crate) fn owner_tag(&self) -> u64 {
         self.owner_tag
     }
