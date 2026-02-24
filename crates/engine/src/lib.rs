@@ -1,11 +1,31 @@
-use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use protocol::{GpuCmdMsg, GpuFeedbackFrame, InputRingSample, InputSignal, PrioritizedInputSignal};
+use protocol::{GpuCmdMsg, GpuFeedbackFrame, InputControlEvent, InputRingSample};
 use ringbuf::traits::{Consumer, RingBuffer};
 use ringbuf::HeapRb;
+
+/// Compose engine-owned aggregate enums from feature-specific message types.
+///
+/// Correct assembly pattern for this refactor:
+/// 1. Every feature crate defines its own message type (for example `renderer::RendererMsg`,
+///    `document::DocumentMsg`) without depending on `engine`.
+/// 2. `engine` owns the aggregate enum (for example `EngineMsg`) that contains those variants.
+/// 3. `engine` implements `From<FeatureMsg> for EngineMsg` for each feature message type.
+/// 4. Callers use this trait (or plain `From`) to convert feature-local messages into the
+///    engine aggregate enum at the thread boundary.
+pub trait ComposeIntoEngine<EngineAggregate> {
+    fn compose_into_engine(self) -> EngineAggregate;
+}
+
+impl<EngineAggregate, FeatureMessage> ComposeIntoEngine<EngineAggregate> for FeatureMessage
+where
+    EngineAggregate: From<FeatureMessage>,
+{
+    fn compose_into_engine(self) -> EngineAggregate {
+        EngineAggregate::from(self)
+    }
+}
 
 pub struct MainThreadChannels<Command, Receipt, Error> {
     pub input_control_queue: MainInputControlQueue,
@@ -46,29 +66,29 @@ impl EngineInputRingConsumer {
 }
 
 pub struct MainInputControlQueue {
-    shared_queue: Arc<Mutex<BinaryHeap<PrioritizedInputSignal<InputSignal>>>>,
-    sequence_counter: Arc<AtomicU64>,
+    sender: mpsc::Sender<InputControlEvent>,
 }
 
 impl MainInputControlQueue {
-    pub fn push(&self, priority: u8, control: InputSignal) {
-        let sequence = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
-        let item = PrioritizedInputSignal::new(priority, sequence, control);
-        self.shared_queue.lock().expect("queue poisoned").push(item);
+    pub fn push(
+        &self,
+        control: InputControlEvent,
+    ) -> Result<(), mpsc::SendError<InputControlEvent>> {
+        self.sender.send(control)
     }
 }
 
 pub struct EngineInputControlQueue {
-    shared_queue: Arc<Mutex<BinaryHeap<PrioritizedInputSignal<InputSignal>>>>,
+    receiver: mpsc::Receiver<InputControlEvent>,
 }
 
 impl EngineInputControlQueue {
-    pub fn pop(&self) -> Option<InputSignal> {
-        self.shared_queue
-            .lock()
-            .expect("queue poisoned")
-            .pop()
-            .map(|item| item.control)
+    pub fn pop(&self) -> Result<InputControlEvent, mpsc::RecvError> {
+        self.receiver.recv()
+    }
+
+    pub fn try_pop(&self) -> Result<InputControlEvent, mpsc::TryRecvError> {
+        self.receiver.try_recv()
     }
 }
 
@@ -81,16 +101,13 @@ pub fn create_thread_channels<Command, Receipt, Error>(
     let input_ring = Arc::new(Mutex::new(HeapRb::<InputRingSample>::new(
         input_ring_capacity,
     )));
-    let shared_input_control_queue =
-        Arc::new(Mutex::new(BinaryHeap::<PrioritizedInputSignal<InputSignal>>::new()));
-    let sequence_counter = Arc::new(AtomicU64::new(0));
+    let (input_control_sender, input_control_receiver) = mpsc::channel();
     let (gpu_command_sender, gpu_command_receiver) = mpsc::channel();
     let (gpu_feedback_sender, gpu_feedback_receiver) = mpsc::channel();
 
     let main_thread_channels = MainThreadChannels {
         input_control_queue: MainInputControlQueue {
-            shared_queue: shared_input_control_queue.clone(),
-            sequence_counter,
+            sender: input_control_sender,
         },
         input_ring_producer: MainInputRingProducer {
             ring: input_ring.clone(),
@@ -101,7 +118,7 @@ pub fn create_thread_channels<Command, Receipt, Error>(
 
     let engine_thread_channels = EngineThreadChannels {
         input_control_queue: EngineInputControlQueue {
-            shared_queue: shared_input_control_queue,
+            receiver: input_control_receiver,
         },
         input_ring_consumer: EngineInputRingConsumer { ring: input_ring },
         gpu_command_sender,

@@ -1,20 +1,13 @@
-use std::collections::HashSet;
-use std::hash::Hash;
-use std::cmp::Ordering;
-
-pub trait DedupKey {
-    type Key: Eq + Hash;
-
-    fn dedup_key(&self) -> Self::Key;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputSignal {
-    Notify,
-}
+/// Input transport design:
+/// - Ring buffer: lossy high-frequency samples (ok to drop/overwrite).
+/// - Control events that define semantic boundaries (stroke begin/end, tool change, layer change)
+///   MUST be delivered reliably (bounded queue) and MUST NOT be stored only in the overwrite ring.
+///   Dropping boundary events causes undefined stroke state.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InputRingSample {
+    /// - `epoch` groups samples that share the same semantic state (tool/params/target).
+    ///   Back-end must treat epoch boundaries as "can only change at safe points".
     pub epoch: u32,
     pub cursor_x: f32,
     pub cursor_y: f32,
@@ -23,64 +16,52 @@ pub struct InputRingSample {
     pub twist: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputControlEvent {
+    Notify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PresentFrameId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SubmitWaterline(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExecutedBatchWaterline(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CompleteWaterline(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GpuCmdMsg<Command> {
     Command(Command),
 }
 
-#[derive(Debug, Clone)]
-pub struct PrioritizedInputSignal<Control> {
-    pub priority: u8,
-    pub sequence: u64,
-    pub control: Control,
-}
-
-impl<Control> PrioritizedInputSignal<Control> {
-    pub fn new(priority: u8, sequence: u64, control: Control) -> Self {
-        Self {
-            priority,
-            sequence,
-            control,
-        }
-    }
-}
-
-impl<Control> PartialEq for PrioritizedInputSignal<Control> {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.sequence == other.sequence
-    }
-}
-
-impl<Control> Eq for PrioritizedInputSignal<Control> {}
-
-impl<Control> PartialOrd for PrioritizedInputSignal<Control> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<Control> Ord for PrioritizedInputSignal<Control> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.priority
-            .cmp(&other.priority)
-            .then_with(|| other.sequence.cmp(&self.sequence))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuFeedbackFrame<Receipt, Error> {
-    pub present_frame_id: u64,
-    pub submit_waterline: u64,
-    pub executed_batch_waterline: u64,
-    pub complete_waterline: u64,
+    pub present_frame_id: PresentFrameId,
+    pub submit_waterline: SubmitWaterline,
+    pub executed_batch_waterline: ExecutedBatchWaterline,
+    pub complete_waterline: CompleteWaterline,
+    /// `receipts` / `errors` are non-overwritable deltas.
+    /// They must not be modeled as a single waterline because they are not contiguous,
+    /// and loss would break correctness (resource allocation results, failure reasons, etc.).
     pub receipts: Vec<Receipt>,
     pub errors: Vec<Error>,
 }
 
+/// To avoid the protocol layer being "oversmart", we left the merge action to be implemented by upper layers
+/// This function should auto remove the repeated elements
+/// Avoid native `iter().any()` dedup, which is O(n^2)
+pub trait MergeVec: Sized {
+    fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>);
+}
+
 impl<Receipt, Error> GpuFeedbackFrame<Receipt, Error>
 where
-    Receipt: DedupKey,
-    Error: DedupKey,
+    Receipt: MergeVec,
+    Error: MergeVec,
 {
     pub fn merge_mailbox(mut current: Self, newer: Self) -> Self {
         current.present_frame_id = current.present_frame_id.max(newer.present_frame_id);
@@ -89,39 +70,31 @@ where
             .executed_batch_waterline
             .max(newer.executed_batch_waterline);
         current.complete_waterline = current.complete_waterline.max(newer.complete_waterline);
-        merge_unique_by_key(&mut current.receipts, newer.receipts);
-        merge_unique_by_key(&mut current.errors, newer.errors);
+        Receipt::merge_vec(&mut current.receipts, newer.receipts);
+        Error::merge_vec(&mut current.errors, newer.errors);
         current
-    }
-}
-
-fn merge_unique_by_key<T>(current: &mut Vec<T>, incoming: Vec<T>)
-where
-    T: DedupKey,
-{
-    let mut existing_keys: HashSet<T::Key> = current.iter().map(T::dedup_key).collect();
-    for item in incoming {
-        let item_key = item.dedup_key();
-        if existing_keys.insert(item_key) {
-            current.push(item);
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DedupKey, GpuFeedbackFrame};
+    use super::{
+        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, MergeVec, PresentFrameId,
+        SubmitWaterline,
+    };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestReceipt {
         key: u64,
     }
 
-    impl DedupKey for TestReceipt {
-        type Key = u64;
-
-        fn dedup_key(&self) -> Self::Key {
-            self.key
+    impl MergeVec for TestReceipt {
+        fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>) {
+            for item in incoming {
+                if !current.iter().any(|existing| existing.key == item.key) {
+                    current.push(item);
+                }
+            }
         }
     }
 
@@ -130,39 +103,42 @@ mod tests {
         key: u64,
     }
 
-    impl DedupKey for TestError {
-        type Key = u64;
-
-        fn dedup_key(&self) -> Self::Key {
-            self.key
+    impl MergeVec for TestError {
+        fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>) {
+            for item in incoming {
+                // WARN: Do not use this method in production code for bad performance.
+                if !current.iter().any(|existing| existing.key == item.key) {
+                    current.push(item);
+                }
+            }
         }
     }
 
     #[test]
     fn mailbox_merge_is_idempotent_and_uses_max_waterlines() {
         let current = GpuFeedbackFrame {
-            present_frame_id: 10,
-            submit_waterline: 2,
-            executed_batch_waterline: 3,
-            complete_waterline: 4,
+            present_frame_id: PresentFrameId(10),
+            submit_waterline: SubmitWaterline(2),
+            executed_batch_waterline: ExecutedBatchWaterline(3),
+            complete_waterline: CompleteWaterline(4),
             receipts: vec![TestReceipt { key: 1 }],
             errors: vec![TestError { key: 2 }],
         };
         let newer = GpuFeedbackFrame {
-            present_frame_id: 9,
-            submit_waterline: 20,
-            executed_batch_waterline: 30,
-            complete_waterline: 40,
+            present_frame_id: PresentFrameId(9),
+            submit_waterline: SubmitWaterline(20),
+            executed_batch_waterline: ExecutedBatchWaterline(30),
+            complete_waterline: CompleteWaterline(40),
             receipts: vec![TestReceipt { key: 1 }, TestReceipt { key: 3 }],
             errors: vec![TestError { key: 2 }, TestError { key: 4 }],
         };
 
         let once = GpuFeedbackFrame::merge_mailbox(current, newer.clone());
         let twice = GpuFeedbackFrame::merge_mailbox(once.clone(), newer);
-        assert_eq!(once.present_frame_id, 10);
-        assert_eq!(once.submit_waterline, 20);
-        assert_eq!(once.executed_batch_waterline, 30);
-        assert_eq!(once.complete_waterline, 40);
+        assert_eq!(once.present_frame_id, PresentFrameId(10));
+        assert_eq!(once.submit_waterline, SubmitWaterline(20));
+        assert_eq!(once.executed_batch_waterline, ExecutedBatchWaterline(30));
+        assert_eq!(once.complete_waterline, CompleteWaterline(40));
         assert_eq!(once.receipts.len(), 2);
         assert_eq!(once.errors.len(), 2);
         assert_eq!(once, twice);
