@@ -1,0 +1,4 @@
+interface:
+  display_name: "Glaphica Debugger"
+  short_description: "Debug Glaphica app issues fast"
+  default_prompt: "Use $glaphica-debugger to triage a Glaphica GUI bug with logs and a minimal repro test."
