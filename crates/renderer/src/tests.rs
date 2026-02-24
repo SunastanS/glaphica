@@ -1092,6 +1092,56 @@ fn allocate_tile_keys(count: usize) -> Vec<TileKey> {
     })
 }
 
+#[test]
+fn brush_dispatch_does_not_panic_when_endstroke_enqueued_with_pending_chunk() {
+    let key = BrushProgramKey {
+        brush_id: 10,
+        program_revision: 99,
+    };
+
+    let mut brush_work_state = BrushWorkState {
+        pending_commands: std::collections::VecDeque::new(),
+        pending_dab_count: 0,
+        carry_credit_dabs: 0,
+        prepared_programs: HashMap::new(),
+        active_program_by_brush: HashMap::new(),
+        active_strokes: HashMap::new(),
+        executing_strokes: HashMap::new(),
+        reference_sets: HashMap::new(),
+        stroke_reference_set: HashMap::new(),
+        stroke_target_layer: HashMap::new(),
+        ended_strokes_pending_merge: HashMap::new(),
+        bound_buffer_tile_keys_by_stroke: HashMap::new(),
+    };
+
+    brush_work_state.executing_strokes.insert(1, key);
+    brush_work_state
+        .bound_buffer_tile_keys_by_stroke
+        .insert(1, HashMap::new());
+    brush_work_state.stroke_target_layer.insert(1, 1234);
+
+    let chunk =
+        render_protocol::BrushDabChunkF32::from_slices(1, &[1.0], &[2.0], &[0.5]).expect("chunk");
+    brush_work_state
+        .pending_commands
+        .push_back(BrushRenderCommand::PushDabChunkF32(chunk));
+
+    // Simulate `enqueue_brush_render_command(EndStroke)` after a chunk is already pending.
+    brush_work_state.enqueue_end_stroke(1);
+
+    let pending = brush_work_state
+        .pending_commands
+        .front()
+        .cloned()
+        .expect("pending command");
+    match pending {
+        BrushRenderCommand::PushDabChunkF32(chunk) => {
+            let _ = brush_work_state.dispatch_context_for_brush_chunk(chunk.stroke_session_id);
+        }
+        other => panic!("unexpected pending command: {other:?}"),
+    }
+}
+
 fn rgba8_texture_upload_bytes_padded(
     width: u32,
     height: u32,

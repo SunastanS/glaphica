@@ -396,6 +396,56 @@ struct BrushWorkState {
     bound_buffer_tile_keys_by_stroke: HashMap<u64, HashMap<BufferTileCoordinate, TileKey>>,
 }
 
+impl BrushWorkState {
+    pub(crate) fn enqueue_end_stroke(&mut self, stroke_session_id: u64) -> LayerId {
+        let target_layer_id = self
+            .stroke_target_layer
+            .get(&stroke_session_id)
+            .copied()
+            .unwrap_or_else(|| panic!("target layer missing for ended stroke {stroke_session_id}"));
+        self.active_strokes.remove(&stroke_session_id);
+        self.ended_strokes_pending_merge
+            .insert(stroke_session_id, target_layer_id);
+        target_layer_id
+    }
+
+    pub(crate) fn dispatch_context_for_brush_chunk(
+        &self,
+        stroke_session_id: u64,
+    ) -> (&HashMap<BufferTileCoordinate, TileKey>, LayerId) {
+        let _stroke_program_key = self
+            .executing_strokes
+            .get(&stroke_session_id)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "brush stroke {} missing active execution state while dispatching chunk",
+                    stroke_session_id
+                )
+            });
+        let bound_tile_keys = self
+            .bound_buffer_tile_keys_by_stroke
+            .get(&stroke_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "brush stroke {} has no bound buffer tile keys before dab dispatch",
+                    stroke_session_id
+                )
+            });
+        let target_layer_id = self
+            .stroke_target_layer
+            .get(&stroke_session_id)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "brush stroke {} missing target layer id before dab dispatch",
+                    stroke_session_id
+                )
+            });
+        (bound_tile_keys, target_layer_id)
+    }
+}
+
 struct PreparedBrushProgram {
     payload_hash: u64,
     _wgsl_source: std::sync::Arc<str>,

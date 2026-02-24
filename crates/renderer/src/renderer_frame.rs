@@ -569,29 +569,7 @@ impl Renderer {
                 .expect("pending dab count overflow");
         }
         if let BrushRenderCommand::EndStroke(end) = &command {
-            let target_layer_id = self
-                .brush_work_state
-                .stroke_target_layer
-                .get(&end.stroke_session_id)
-                .copied()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "target layer missing for ended stroke {}",
-                        end.stroke_session_id
-                    )
-                });
-            self.brush_work_state
-                .active_strokes
-                .remove(&end.stroke_session_id);
-            self.brush_work_state
-                .stroke_reference_set
-                .remove(&end.stroke_session_id);
-            self.brush_work_state
-                .stroke_target_layer
-                .remove(&end.stroke_session_id);
-            self.brush_work_state
-                .ended_strokes_pending_merge
-                .insert(end.stroke_session_id, target_layer_id);
+            self.brush_work_state.enqueue_end_stroke(end.stroke_session_id);
         }
         if let BrushRenderCommand::MergeBuffer(merge) = &command {
             self.brush_work_state
@@ -785,6 +763,12 @@ impl Renderer {
                     self.brush_work_state
                         .executing_strokes
                         .remove(&end.stroke_session_id);
+                    self.brush_work_state
+                        .stroke_reference_set
+                        .remove(&end.stroke_session_id);
+                    self.brush_work_state
+                        .stroke_target_layer
+                        .remove(&end.stroke_session_id);
                     let _ = self.brush_work_state.pending_commands.pop_front();
                 }
                 BrushRenderCommand::MergeBuffer(merge) => {
@@ -848,38 +832,9 @@ impl Renderer {
         brush_encoder: &mut Option<wgpu::CommandEncoder>,
         chunk: &render_protocol::BrushDabChunkF32,
     ) {
-        let _stroke_program_key = self
+        let (bound_tile_keys, target_layer_id) = self
             .brush_work_state
-            .executing_strokes
-            .get(&chunk.stroke_session_id)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!(
-                    "brush stroke {} missing active execution state while dispatching chunk",
-                    chunk.stroke_session_id
-                )
-            });
-        let bound_tile_keys = self
-            .brush_work_state
-            .bound_buffer_tile_keys_by_stroke
-            .get(&chunk.stroke_session_id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "brush stroke {} has no bound buffer tile keys before dab dispatch",
-                    chunk.stroke_session_id
-                )
-            });
-        let target_layer_id = self
-            .brush_work_state
-            .stroke_target_layer
-            .get(&chunk.stroke_session_id)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!(
-                    "brush stroke {} missing target layer id before dab dispatch",
-                    chunk.stroke_session_id
-                )
-            });
+            .dispatch_context_for_brush_chunk(chunk.stroke_session_id);
         let atlas_layout = self.gpu_state.brush_buffer_atlas.layout();
         let mut mapped_dabs = Vec::with_capacity(chunk.dab_count().saturating_mul(4));
         let mut dirty_tiles = HashSet::<BufferTileCoordinate>::new();
