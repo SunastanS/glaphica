@@ -5,11 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use replay_protocol::{
-    CompareError, OutputEvent, OutputKind, OutputPayload, OutputPhase, ValidationError,
-    compare_semantic_events, read_jsonl_events, validate_event_stream, write_jsonl_event_line,
+    CompareError, DebugOutput, OutputEvent, OutputKind, OutputPayload, OutputPhase,
+    ValidationError, compare_semantic_events, read_jsonl_events, validate_event_stream,
+    write_jsonl_event_line,
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+const TRACE_RECORDER_FLUSH_EVERY_EVENTS: u32 = 128;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecordedInputEventKind {
     MouseInput { pressed: bool },
     CursorMoved { x: f64, y: f64 },
@@ -17,15 +22,20 @@ pub enum RecordedInputEventKind {
     MouseWheelPixel { delta_y: f64 },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RecordedInputEvent {
+    schema_version: u32,
+    event_id: u64,
     elapsed_micros: u64,
+    #[serde(flatten)]
     kind: RecordedInputEventKind,
 }
 
 pub struct InputTraceRecorder {
     started_at: Instant,
     writer: BufWriter<File>,
+    next_event_id: u64,
+    pending_events_since_flush: u32,
 }
 
 impl InputTraceRecorder {
@@ -36,6 +46,8 @@ impl InputTraceRecorder {
         Self {
             started_at: Instant::now(),
             writer: BufWriter::new(file),
+            next_event_id: 1,
+            pending_events_since_flush: 0,
         }
     }
 
@@ -43,33 +55,56 @@ impl InputTraceRecorder {
         let elapsed_micros = self.started_at.elapsed().as_micros();
         let elapsed_micros = u64::try_from(elapsed_micros)
             .unwrap_or_else(|_| panic!("input trace timestamp overflow"));
-        let line = match kind {
-            RecordedInputEventKind::MouseInput { pressed } => {
-                format!(
-                    "{elapsed_micros}\tmouse_input\t{}",
-                    if pressed { "1" } else { "0" }
-                )
-            }
-            RecordedInputEventKind::CursorMoved { x, y } => {
-                format!("{elapsed_micros}\tcursor_moved\t{x}\t{y}")
-            }
-            RecordedInputEventKind::MouseWheelLine { vertical_lines } => {
-                format!("{elapsed_micros}\tmouse_wheel_line\t{vertical_lines}")
-            }
-            RecordedInputEventKind::MouseWheelPixel { delta_y } => {
-                format!("{elapsed_micros}\tmouse_wheel_pixel\t{delta_y}")
-            }
+        let event = RecordedInputEvent {
+            schema_version: 1,
+            event_id: self.next_event_id,
+            elapsed_micros,
+            kind,
         };
-        writeln!(self.writer, "{line}")
+        self.next_event_id = self
+            .next_event_id
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("input trace event id overflow"));
+        serde_json::to_writer(&mut self.writer, &event)
             .unwrap_or_else(|error| panic!("write input trace event failed: {error}"));
+        writeln!(self.writer)
+            .unwrap_or_else(|error| panic!("write input trace event failed: {error}"));
+        self.pending_events_since_flush = self
+            .pending_events_since_flush
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("input trace pending event counter overflow"));
+        self.flush_if_needed();
+    }
+
+    fn flush_if_needed(&mut self) {
+        if self.pending_events_since_flush < TRACE_RECORDER_FLUSH_EVERY_EVENTS {
+            return;
+        }
         self.writer
             .flush()
             .unwrap_or_else(|error| panic!("flush input trace event failed: {error}"));
+        self.pending_events_since_flush = 0;
+    }
+
+    fn flush_all(&mut self) {
+        if self.pending_events_since_flush == 0 {
+            return;
+        }
+        self.writer
+            .flush()
+            .unwrap_or_else(|error| panic!("flush input trace event failed: {error}"));
+        self.pending_events_since_flush = 0;
+    }
+}
+
+impl Drop for InputTraceRecorder {
+    fn drop(&mut self) {
+        self.flush_all();
     }
 }
 
 pub struct InputTraceReplay {
-    started_at: Instant,
+    replay_elapsed_micros: u64,
     events: Vec<RecordedInputEvent>,
     next_event_index: usize,
     completion_logged: bool,
@@ -80,7 +115,7 @@ impl InputTraceReplay {
         let file = File::open(&path)
             .unwrap_or_else(|error| panic!("open input trace file '{}': {error}", path.display()));
         let reader = BufReader::new(file);
-        let mut events = Vec::new();
+        let mut events: Vec<RecordedInputEvent> = Vec::new();
         for (line_index, line_result) in reader.lines().enumerate() {
             let line_number = line_index
                 .checked_add(1)
@@ -90,10 +125,32 @@ impl InputTraceReplay {
             if line.trim().is_empty() {
                 continue;
             }
-            events.push(parse_recorded_input_event(&line, line_number));
+            let event = serde_json::from_str::<RecordedInputEvent>(&line).unwrap_or_else(|error| {
+                panic!("invalid input trace json at line {line_number}: {error}")
+            });
+            assert!(
+                event.schema_version == 1,
+                "unsupported input trace schema version {} at line {line_number}",
+                event.schema_version
+            );
+            if let Some(previous) = events.last() {
+                assert!(
+                    event.event_id > previous.event_id,
+                    "non-monotonic input trace event_id at line {line_number}: {} <= {}",
+                    event.event_id,
+                    previous.event_id
+                );
+                assert!(
+                    event.elapsed_micros >= previous.elapsed_micros,
+                    "non-monotonic input trace elapsed_micros at line {line_number}: {} < {}",
+                    event.elapsed_micros,
+                    previous.elapsed_micros
+                );
+            }
+            events.push(event);
         }
         Self {
-            started_at: Instant::now(),
+            replay_elapsed_micros: 0,
             events,
             next_event_index: 0,
             completion_logged: false,
@@ -105,16 +162,24 @@ impl InputTraceReplay {
     }
 
     pub fn restart_clock(&mut self) {
-        self.started_at = Instant::now();
+        self.replay_elapsed_micros = 0;
     }
 
-    pub fn take_ready_events(&mut self) -> Vec<RecordedInputEventKind> {
-        let elapsed_micros = self.started_at.elapsed().as_micros();
-        let elapsed_micros = u64::try_from(elapsed_micros)
-            .unwrap_or_else(|_| panic!("input replay timestamp overflow"));
+    pub fn has_pending_events(&self) -> bool {
+        self.next_event_index < self.events.len()
+    }
+
+    pub fn advance_and_take_ready_events(
+        &mut self,
+        delta_micros: u64,
+    ) -> Vec<RecordedInputEventKind> {
+        self.replay_elapsed_micros = self
+            .replay_elapsed_micros
+            .checked_add(delta_micros)
+            .unwrap_or_else(|| panic!("input replay timeline overflow"));
         let mut ready = Vec::new();
         while self.next_event_index < self.events.len()
-            && self.events[self.next_event_index].elapsed_micros <= elapsed_micros
+            && self.events[self.next_event_index].elapsed_micros <= self.replay_elapsed_micros
         {
             ready.push(self.events[self.next_event_index].kind.clone());
             self.next_event_index = self
@@ -135,69 +200,6 @@ impl InputTraceReplay {
     }
 }
 
-fn parse_recorded_input_event(line: &str, line_number: usize) -> RecordedInputEvent {
-    let fields = line.split('\t').collect::<Vec<_>>();
-    assert!(
-        fields.len() >= 3,
-        "invalid input trace format at line {line_number}: expected at least 3 fields"
-    );
-    let elapsed_micros = fields[0].parse::<u64>().unwrap_or_else(|error| {
-        panic!("invalid input trace timestamp at line {line_number}: {error}")
-    });
-    let kind = match fields[1] {
-        "mouse_input" => {
-            assert!(
-                fields.len() == 3,
-                "invalid mouse_input trace format at line {line_number}"
-            );
-            let pressed = match fields[2] {
-                "1" => true,
-                "0" => false,
-                value => panic!("invalid mouse_input value '{value}' at line {line_number}"),
-            };
-            RecordedInputEventKind::MouseInput { pressed }
-        }
-        "cursor_moved" => {
-            assert!(
-                fields.len() == 4,
-                "invalid cursor_moved trace format at line {line_number}"
-            );
-            let x = fields[2]
-                .parse::<f64>()
-                .unwrap_or_else(|error| panic!("invalid cursor x at line {line_number}: {error}"));
-            let y = fields[3]
-                .parse::<f64>()
-                .unwrap_or_else(|error| panic!("invalid cursor y at line {line_number}: {error}"));
-            RecordedInputEventKind::CursorMoved { x, y }
-        }
-        "mouse_wheel_line" => {
-            assert!(
-                fields.len() == 3,
-                "invalid mouse_wheel_line trace format at line {line_number}"
-            );
-            let vertical_lines = fields[2].parse::<f32>().unwrap_or_else(|error| {
-                panic!("invalid mouse wheel line delta at line {line_number}: {error}")
-            });
-            RecordedInputEventKind::MouseWheelLine { vertical_lines }
-        }
-        "mouse_wheel_pixel" => {
-            assert!(
-                fields.len() == 3,
-                "invalid mouse_wheel_pixel trace format at line {line_number}"
-            );
-            let delta_y = fields[2].parse::<f64>().unwrap_or_else(|error| {
-                panic!("invalid mouse wheel pixel delta at line {line_number}: {error}")
-            });
-            RecordedInputEventKind::MouseWheelPixel { delta_y }
-        }
-        kind => panic!("unknown input trace event kind '{kind}' at line {line_number}"),
-    };
-    RecordedInputEvent {
-        elapsed_micros,
-        kind,
-    }
-}
-
 pub struct OutputTraceRecorder {
     started_at: Instant,
     scenario_id: String,
@@ -205,6 +207,7 @@ pub struct OutputTraceRecorder {
     writer: BufWriter<File>,
     next_event_id: u64,
     next_merge_request_id: u64,
+    pending_events_since_flush: u32,
 }
 
 impl OutputTraceRecorder {
@@ -224,6 +227,7 @@ impl OutputTraceRecorder {
             writer: BufWriter::new(file),
             next_event_id: 1,
             next_merge_request_id: 1,
+            pending_events_since_flush: 0,
         }
     }
 
@@ -246,10 +250,13 @@ impl OutputTraceRecorder {
                 kind,
             },
             payload,
-            debug_wall_time_micros: Some(
-                u64::try_from(self.started_at.elapsed().as_micros())
-                    .unwrap_or_else(|_| panic!("output trace timestamp overflow")),
-            ),
+            debug: Some(DebugOutput {
+                wall_time_micros: Some(
+                    u64::try_from(self.started_at.elapsed().as_micros())
+                        .unwrap_or_else(|_| panic!("output trace timestamp overflow")),
+                ),
+            }),
+            debug_wall_time_micros: None,
         };
         self.next_event_id = self
             .next_event_id
@@ -257,9 +264,31 @@ impl OutputTraceRecorder {
             .unwrap_or_else(|| panic!("output trace event id overflow"));
         write_jsonl_event_line(&mut self.writer, &event)
             .unwrap_or_else(|error| panic!("write output trace event failed: {error}"));
+        self.pending_events_since_flush = self
+            .pending_events_since_flush
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("output trace pending event counter overflow"));
+        self.flush_if_needed();
+    }
+
+    fn flush_if_needed(&mut self) {
+        if self.pending_events_since_flush < TRACE_RECORDER_FLUSH_EVERY_EVENTS {
+            return;
+        }
         self.writer
             .flush()
             .unwrap_or_else(|error| panic!("flush output trace event failed: {error}"));
+        self.pending_events_since_flush = 0;
+    }
+
+    fn flush_all(&mut self) {
+        if self.pending_events_since_flush == 0 {
+            return;
+        }
+        self.writer
+            .flush()
+            .unwrap_or_else(|error| panic!("flush output trace event failed: {error}"));
+        self.pending_events_since_flush = 0;
     }
 
     pub fn next_merge_request_id(&mut self) -> u64 {
@@ -269,6 +298,12 @@ impl OutputTraceRecorder {
             .checked_add(1)
             .unwrap_or_else(|| panic!("output trace merge request id overflow"));
         merge_request_id
+    }
+}
+
+impl Drop for OutputTraceRecorder {
+    fn drop(&mut self) {
+        self.flush_all();
     }
 }
 
@@ -349,6 +384,7 @@ pub fn compare_output_files(
 mod tests {
     use super::*;
     use replay_protocol::{OutputPayload, RenderCommandOutput};
+    use serde_json::Value;
 
     fn test_event(event_id: u64, tick: u64) -> OutputEvent {
         OutputEvent {
@@ -368,7 +404,10 @@ mod tests {
                 tile_keys_digest: String::from("fx:0"),
                 blend_mode: String::from("N/A"),
             }),
-            debug_wall_time_micros: Some(1),
+            debug: Some(DebugOutput {
+                wall_time_micros: Some(1),
+            }),
+            debug_wall_time_micros: None,
         }
     }
 
@@ -387,6 +426,74 @@ mod tests {
     }
 
     #[test]
+    fn input_trace_recorder_writes_jsonl() {
+        let base =
+            std::env::temp_dir().join(format!("window_replay_input_jsonl_{}", std::process::id()));
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("create temp test dir '{}': {error}", base.display()));
+        let path = base.join("input.jsonl");
+        {
+            let mut recorder = InputTraceRecorder::from_path(path.clone());
+            recorder.record(RecordedInputEventKind::MouseInput { pressed: true });
+        }
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read input trace '{}': {error}", path.display()));
+        let first_line = content
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("input trace '{}' is empty", path.display()));
+        let parsed: Value = serde_json::from_str(first_line)
+            .unwrap_or_else(|error| panic!("parse input json line failed: {error}"));
+        assert_eq!(parsed["schema_version"], Value::from(1));
+        assert_eq!(parsed["event_id"], Value::from(1));
+        assert_eq!(parsed["kind"], Value::from("mouse_input"));
+        assert_eq!(parsed["pressed"], Value::from(true));
+    }
+
+    #[test]
+    fn input_trace_replay_reads_jsonl() {
+        let base =
+            std::env::temp_dir().join(format!("window_replay_input_replay_{}", std::process::id()));
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("create temp test dir '{}': {error}", base.display()));
+        let path = base.join("input.jsonl");
+        let lines = [
+            "{\"schema_version\":1,\"event_id\":1,\"elapsed_micros\":0,\"kind\":\"mouse_input\",\"pressed\":true}",
+            "{\"schema_version\":1,\"event_id\":2,\"elapsed_micros\":1,\"kind\":\"cursor_moved\",\"x\":1.0,\"y\":2.0}",
+        ];
+        std::fs::write(&path, lines.join("\n"))
+            .unwrap_or_else(|error| panic!("write input trace '{}': {error}", path.display()));
+
+        let replay = InputTraceReplay::from_path(path);
+        assert_eq!(replay.event_count(), 2);
+    }
+
+    #[test]
+    fn input_trace_replay_uses_simulated_timeline() {
+        let base = std::env::temp_dir().join(format!(
+            "window_replay_input_timeline_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base)
+            .unwrap_or_else(|error| panic!("create temp test dir '{}': {error}", base.display()));
+        let path = base.join("input.jsonl");
+        let lines = [
+            "{\"schema_version\":1,\"event_id\":1,\"elapsed_micros\":1000,\"kind\":\"mouse_input\",\"pressed\":true}",
+            "{\"schema_version\":1,\"event_id\":2,\"elapsed_micros\":2500,\"kind\":\"cursor_moved\",\"x\":1.0,\"y\":2.0}",
+        ];
+        std::fs::write(&path, lines.join("\n"))
+            .unwrap_or_else(|error| panic!("write input trace '{}': {error}", path.display()));
+
+        let mut replay = InputTraceReplay::from_path(path);
+        assert!(replay.has_pending_events());
+        assert!(replay.advance_and_take_ready_events(500).is_empty());
+        assert_eq!(replay.advance_and_take_ready_events(500).len(), 1);
+        assert_eq!(replay.advance_and_take_ready_events(1000).len(), 0);
+        assert_eq!(replay.advance_and_take_ready_events(500).len(), 1);
+        assert!(!replay.has_pending_events());
+    }
+
+    #[test]
     fn compare_output_files_accepts_matching_semantics() {
         let base =
             std::env::temp_dir().join(format!("window_replay_compare_ok_{}", std::process::id()));
@@ -396,8 +503,12 @@ mod tests {
         let actual_path = base.join("actual.jsonl");
         let mut expected_event = test_event(1, 1);
         let mut actual_event = expected_event.clone();
-        expected_event.debug_wall_time_micros = Some(10);
-        actual_event.debug_wall_time_micros = Some(20);
+        expected_event.debug = Some(DebugOutput {
+            wall_time_micros: Some(10),
+        });
+        actual_event.debug = Some(DebugOutput {
+            wall_time_micros: Some(20),
+        });
         write_events(&expected_path, &[expected_event]);
         write_events(&actual_path, &[actual_event]);
 

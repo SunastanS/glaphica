@@ -109,10 +109,22 @@ pub enum OutputPayload {
     StateDigest(StateDigestOutput),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_time_micros: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputEvent {
+    // Stable semantic layer used for regression comparisons.
     pub envelope: EventEnvelope,
     pub payload: OutputPayload,
+    // Debug layer for diagnostics; ignored by semantic compare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebugOutput>,
+    // Legacy debug field retained for backward compatibility with old traces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_wall_time_micros: Option<u64>,
 }
 
@@ -121,8 +133,16 @@ impl OutputEvent {
         Self {
             envelope,
             payload,
+            debug: None,
             debug_wall_time_micros: None,
         }
+    }
+
+    pub fn with_debug_wall_time_micros(mut self, wall_time_micros: u64) -> Self {
+        self.debug = Some(DebugOutput {
+            wall_time_micros: Some(wall_time_micros),
+        });
+        self
     }
 }
 
@@ -209,6 +229,10 @@ pub enum ValidationError {
 }
 
 pub fn validate_event_stream(events: &[OutputEvent]) -> Result<(), ValidationError> {
+    validate_stable_event_stream(events)
+}
+
+pub fn validate_stable_event_stream(events: &[OutputEvent]) -> Result<(), ValidationError> {
     if events.is_empty() {
         return Err(ValidationError::EmptyScenario);
     }
@@ -361,6 +385,13 @@ pub fn compare_semantic_events(
     expected: &[OutputEvent],
     actual: &[OutputEvent],
 ) -> Result<(), CompareError> {
+    compare_stable_events(expected, actual)
+}
+
+pub fn compare_stable_events(
+    expected: &[OutputEvent],
+    actual: &[OutputEvent],
+) -> Result<(), CompareError> {
     if expected.len() != actual.len() {
         return Err(CompareError::EventCountMismatch {
             expected: expected.len(),
@@ -369,12 +400,22 @@ pub fn compare_semantic_events(
     }
 
     for (index, (left, right)) in expected.iter().zip(actual.iter()).enumerate() {
-        if left.envelope != right.envelope || left.payload != right.payload {
+        if !semantic_envelope_matches(&left.envelope, &right.envelope)
+            || left.payload != right.payload
+        {
             return Err(CompareError::EventMismatch { index });
         }
     }
 
     Ok(())
+}
+
+fn semantic_envelope_matches(left: &EventEnvelope, right: &EventEnvelope) -> bool {
+    left.schema_version == right.schema_version
+        && left.event_id == right.event_id
+        && left.tick == right.tick
+        && left.phase == right.phase
+        && left.kind == right.kind
 }
 
 #[cfg(test)]
@@ -476,8 +517,34 @@ mod tests {
         let mut left = render(1, 1, 9, BrushCommandKind::BeginStroke);
         let mut right = render(1, 1, 9, BrushCommandKind::BeginStroke);
 
-        left.debug_wall_time_micros = Some(100);
-        right.debug_wall_time_micros = Some(200);
+        left.debug = Some(DebugOutput {
+            wall_time_micros: Some(100),
+        });
+        right.debug = Some(DebugOutput {
+            wall_time_micros: Some(200),
+        });
+
+        assert_eq!(compare_semantic_events(&[left], &[right]), Ok(()));
+    }
+
+    #[test]
+    fn compare_semantic_events_ignores_run_id() {
+        let mut left = render(1, 1, 9, BrushCommandKind::BeginStroke);
+        let mut right = render(1, 1, 9, BrushCommandKind::BeginStroke);
+
+        left.envelope.run_id = String::from("run-left");
+        right.envelope.run_id = String::from("run-right");
+
+        assert_eq!(compare_semantic_events(&[left], &[right]), Ok(()));
+    }
+
+    #[test]
+    fn compare_semantic_events_ignores_scenario_id() {
+        let mut left = render(1, 1, 9, BrushCommandKind::BeginStroke);
+        let mut right = render(1, 1, 9, BrushCommandKind::BeginStroke);
+
+        left.envelope.scenario_id = String::from("scenario-left");
+        right.envelope.scenario_id = String::from("scenario-right");
 
         assert_eq!(compare_semantic_events(&[left], &[right]), Ok(()));
     }

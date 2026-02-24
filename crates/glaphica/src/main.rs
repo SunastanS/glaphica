@@ -44,6 +44,7 @@ const DEFAULT_BRUSH_ID: u64 = 1;
 const DEFAULT_PROGRAM_REVISION: u64 = 1;
 const DEFAULT_REFERENCE_SET_ID: u64 = 1;
 const DEFAULT_TARGET_LAYER_ID: u64 = 1;
+const REPLAY_TIMELINE_STEP_MICROS: u64 = 16_667;
 const DEFAULT_PROGRAM_WGSL: &str = r#"
 @compute @workgroup_size(1)
 fn main() {
@@ -74,9 +75,10 @@ impl DriverDebugState {
     fn drain_debug_output(
         &mut self,
         frame_sequence_id: u64,
+        trace_enabled: bool,
     ) -> (FrameDrainStats, Vec<driver::FramedSampleChunk>) {
         let FrameDrainResult { stats, chunks } = self.bridge.drain_frame(frame_sequence_id);
-        if stats.has_activity() {
+        if trace_enabled && stats.has_activity() {
             println!(
                 "[driver] frame={} input(total={} down={} move={} up={} cancel={} hover={} handle_us={}) output(chunks={} samples={} discontinuity_chunks={} dropped_before={})",
                 stats.frame_sequence_id,
@@ -93,26 +95,28 @@ impl DriverDebugState {
                 stats.output.dropped_chunk_count_before_total,
             );
         }
-        for framed_chunk in &chunks {
-            let chunk = &framed_chunk.chunk;
-            let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
-            let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
-            let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
-            let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
-            println!(
-                "[driver] chunk frame={} stroke={} samples={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
-                framed_chunk.frame_sequence_id,
-                chunk.stroke_session_id,
-                chunk.sample_count(),
-                chunk.starts_stroke,
-                chunk.ends_stroke,
-                chunk.discontinuity_before,
-                chunk.dropped_chunk_count_before,
-                first_x,
-                first_y,
-                last_x,
-                last_y,
-            );
+        if trace_enabled {
+            for framed_chunk in &chunks {
+                let chunk = &framed_chunk.chunk;
+                let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
+                let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
+                let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
+                let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
+                println!(
+                    "[driver] chunk frame={} stroke={} samples={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
+                    framed_chunk.frame_sequence_id,
+                    chunk.stroke_session_id,
+                    chunk.sample_count(),
+                    chunk.starts_stroke,
+                    chunk.ends_stroke,
+                    chunk.discontinuity_before,
+                    chunk.dropped_chunk_count_before,
+                    first_x,
+                    first_y,
+                    last_x,
+                    last_y,
+                );
+            }
         }
         (stats, chunks)
     }
@@ -183,6 +187,24 @@ impl App {
         self.input_trace_replay.is_some()
     }
 
+    fn has_pending_replay_events(&self) -> bool {
+        self.input_trace_replay
+            .as_ref()
+            .is_some_and(InputTraceReplay::has_pending_events)
+    }
+
+    fn should_ignore_live_event_during_replay(event: &WindowEvent) -> bool {
+        matches!(
+            event,
+            WindowEvent::MouseInput { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::Touch { .. }
+        )
+    }
+
     fn update_interaction_mode(&mut self) {
         self.interaction_mode = self.input_modifiers.interaction_mode();
     }
@@ -203,11 +225,13 @@ impl App {
                     actual_output_path.display()
                 )
             });
-        println!(
-            "[output_compare] semantic output matched expected trace: expected={} actual={}",
-            expected_output_path.display(),
-            actual_output_path.display()
-        );
+        if self.brush_trace_enabled {
+            println!(
+                "[output_compare] semantic output matched expected trace: expected={} actual={}",
+                expected_output_path.display(),
+                actual_output_path.display()
+            );
+        }
     }
 
     fn maybe_record_input(&mut self, kind: RecordedInputEventKind) {
@@ -225,7 +249,7 @@ impl App {
                 .input_trace_replay
                 .as_mut()
                 .unwrap_or_else(|| panic!("input replay state missing"));
-            replay.take_ready_events()
+            replay.advance_and_take_ready_events(REPLAY_TIMELINE_STEP_MICROS)
         };
         for replay_event in replay_events {
             match replay_event {
@@ -258,7 +282,9 @@ impl App {
             replay.take_completion_notice()
         };
         if should_log_completion {
-            println!("[input_replay] all recorded events have been replayed");
+            if self.brush_trace_enabled {
+                println!("[input_replay] all recorded events have been replayed");
+            }
         }
     }
 }
@@ -291,16 +317,18 @@ impl ApplicationHandler for App {
         self.gpu = Some(gpu);
         if let Some(replay) = self.input_trace_replay.as_mut() {
             replay.restart_clock();
-            println!(
-                "[input_replay] replay started with {} events",
-                replay.event_count()
-            );
-            println!("[input_replay] live mouse input is ignored during replay");
+            if self.brush_trace_enabled {
+                println!(
+                    "[input_replay] replay started with {} events",
+                    replay.event_count()
+                );
+                println!("[input_replay] live mouse input is ignored during replay");
+            }
         }
-        if self.input_trace_recorder.is_some() {
+        if self.brush_trace_enabled && self.input_trace_recorder.is_some() {
             println!("[input_record] recording input trace events");
         }
-        if self.output_trace_recorder.is_some() {
+        if self.brush_trace_enabled && self.output_trace_recorder.is_some() {
             println!("[output_record] recording semantic output events");
         }
         self.initialize_brush_execution();
@@ -328,6 +356,10 @@ impl ApplicationHandler for App {
             _ => {}
         }
 
+        if self.is_input_replay_active() && Self::should_ignore_live_event_during_replay(&event) {
+            return;
+        }
+
         self.handle_input_event(&event);
         self.handle_pointer_event(&event);
     }
@@ -345,7 +377,8 @@ impl ApplicationHandler for App {
         let should_continue_rendering = self.frame_scheduler.is_active()
             || self.driver_debug.has_active_stroke()
             || pending_brush_commands > 0
-            || gpu.has_pending_merge_work();
+            || gpu.has_pending_merge_work()
+            || self.has_pending_replay_events();
         if should_continue_rendering {
             window.request_redraw();
         }
@@ -553,7 +586,8 @@ impl App {
         gpu: &mut GpuState,
         brush_trace_enabled: bool,
     ) -> FrameDrainStats {
-        let (frame_stats, sample_chunks) = driver_debug.drain_debug_output(frame_sequence_id);
+        let (frame_stats, sample_chunks) =
+            driver_debug.drain_debug_output(frame_sequence_id, brush_trace_enabled);
         if let Some(recorder) = output_trace_recorder.as_mut() {
             for (chunk_index, sample_chunk) in sample_chunks.iter().enumerate() {
                 recorder.record(
@@ -998,6 +1032,9 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
         return;
     };
     gpu.set_brush_command_quota(max_commands);
+    if quiet_mode_enabled() {
+        return;
+    }
     let trace_enabled =
         std::env::var_os("GLAPHICA_FRAME_SCHEDULER_TRACE").is_some_and(|value| value != "0");
     let should_log = trace_enabled
@@ -1005,8 +1042,7 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
             decision.update_reason,
             Some(frame_scheduler::SchedulerUpdateReason::BrushHotPathActivated)
                 | Some(frame_scheduler::SchedulerUpdateReason::BrushHotPathDeactivated)
-        )
-        || max_commands > 0;
+        );
     if should_log {
         println!(
             "[frame_scheduler] frame={} active={} brush_commands={} reason={:?}",
@@ -1019,7 +1055,14 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
 }
 
 fn brush_trace_enabled() -> bool {
+    if quiet_mode_enabled() {
+        return false;
+    }
     std::env::var_os("GLAPHICA_BRUSH_TRACE").is_some_and(|value| value != "0")
+}
+
+fn quiet_mode_enabled() -> bool {
+    std::env::var_os("GLAPHICA_QUIET").is_some_and(|value| value != "0")
 }
 
 fn brush_command_kind(command: &BrushRenderCommand) -> &'static str {

@@ -27,6 +27,7 @@
   - `GLAPHICA_RENDER_TREE_INVARIANTS=1`
   - `GLAPHICA_PERF_LOG=1`
   - `GLAPHICA_FRAME_SCHEDULER_TRACE=1`
+  - `GLAPHICA_QUIET=1` (global quiet mode; when set, suppresses business logs even if trace switches are enabled)
 - **GPU/wgpu**: Be extremely cautious with CPU→GPU ordering. Prefer safe ordering first, optimize after correctness.
 - **Command-Queue**: Clean up state at the correct time boundary - only at enqueue time if no later command depends on it.
 
