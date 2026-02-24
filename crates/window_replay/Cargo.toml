@@ -1,0 +1,7 @@
+[package]
+name = "window_replay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+replay_protocol = { path = "../replay_protocol" }
