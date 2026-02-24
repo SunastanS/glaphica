@@ -179,6 +179,10 @@ impl App {
         self.window.as_ref().map(|w| w.id())
     }
 
+    fn is_input_replay_active(&self) -> bool {
+        self.input_trace_replay.is_some()
+    }
+
     fn update_interaction_mode(&mut self) {
         self.interaction_mode = self.input_modifiers.interaction_mode();
     }
@@ -291,6 +295,7 @@ impl ApplicationHandler for App {
                 "[input_replay] replay started with {} events",
                 replay.event_count()
             );
+            println!("[input_replay] live mouse input is ignored during replay");
         }
         if self.input_trace_recorder.is_some() {
             println!("[input_record] recording input trace events");
@@ -368,6 +373,9 @@ impl App {
                 self.handle_keyboard_input(event);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.is_input_replay_active() {
+                    return;
+                }
                 self.handle_mouse_wheel(delta);
             }
             WindowEvent::Resized(new_size) => {
@@ -383,6 +391,11 @@ impl App {
     }
 
     fn handle_pointer_event(&mut self, event: &WindowEvent) {
+        // Replay mode must stay deterministic: ignore live pointer events so OS cursor/focus
+        // changes cannot perturb the recorded stroke stream.
+        if self.is_input_replay_active() {
+            return;
+        }
         match event {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_input(*state, *button);
