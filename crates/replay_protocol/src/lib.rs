@@ -412,7 +412,6 @@ pub fn compare_stable_events(
 
 fn semantic_envelope_matches(left: &EventEnvelope, right: &EventEnvelope) -> bool {
     left.schema_version == right.schema_version
-        && left.event_id == right.event_id
         && left.tick == right.tick
         && left.phase == right.phase
         && left.kind == right.kind
@@ -547,6 +546,23 @@ mod tests {
         right.envelope.scenario_id = String::from("scenario-right");
 
         assert_eq!(compare_semantic_events(&[left], &[right]), Ok(()));
+    }
+
+    #[test]
+    fn compare_semantic_events_ignores_event_id() {
+        let mut left = render(10, 1, 9, BrushCommandKind::BeginStroke);
+        let right = render(20, 1, 9, BrushCommandKind::BeginStroke);
+
+        assert_eq!(
+            compare_semantic_events(&[left.clone()], std::slice::from_ref(&right)),
+            Ok(())
+        );
+
+        left.envelope.tick = 2;
+        assert_eq!(
+            compare_semantic_events(&[left], &[right]),
+            Err(CompareError::EventMismatch { index: 0 })
+        );
     }
 
     #[test]
