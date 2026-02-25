@@ -43,6 +43,9 @@ pub struct EngineThreadChannels<Command, Receipt, Error> {
     pub gpu_feedback_receiver: Consumer<GpuFeedbackFrame<Receipt, Error>>,
 }
 
+// This ring is designed for single‑producer, single‑consumer use.
+// The Arc inside MainInputRingProducer and EngineInputRingConsumer is not exposed,
+// preventing accidental creation of additional producers or consumers.
 struct SharedInputRing {
     // This ring intentionally does not use rtrb: our write policy is "drop oldest, keep newest"
     // on overflow, and that overwrite operation requires coarse-grained exclusive access.
@@ -53,8 +56,12 @@ struct SharedInputRing {
     pushed: AtomicU64,
 }
 
+use std::marker::PhantomData;
+
 pub struct MainInputRingProducer {
     shared: Arc<SharedInputRing>,
+    // Prevents accidental cloning or creation of additional producers.
+    _not_clone: PhantomData<*const ()>,
 }
 
 impl MainInputRingProducer {
@@ -86,6 +93,8 @@ impl MainInputRingProducer {
 
 pub struct EngineInputRingConsumer {
     shared: Arc<SharedInputRing>,
+    // Prevents accidental cloning or creation of additional consumers.
+    _not_clone: PhantomData<*const ()>,
 }
 
 /// Drain up to `max_items` samples into `output`.
@@ -227,6 +236,7 @@ pub fn create_thread_channels<Command, Receipt, Error>(
         },
         input_ring_producer: MainInputRingProducer {
             shared: shared_input_ring.clone(),
+            _not_clone: PhantomData,
         },
         gpu_command_receiver,
         gpu_feedback_sender,
@@ -238,6 +248,7 @@ pub fn create_thread_channels<Command, Receipt, Error>(
         },
         input_ring_consumer: EngineInputRingConsumer {
             shared: shared_input_ring,
+            _not_clone: PhantomData,
         },
         gpu_command_sender,
         gpu_feedback_receiver,
