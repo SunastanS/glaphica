@@ -160,9 +160,6 @@ impl MainInputControlQueue {
                     control = returned_control;
                     std::thread::yield_now();
                 }
-                Err(PushError::Closed(_)) => {
-                    break;
-                }
             }
         }
     }
