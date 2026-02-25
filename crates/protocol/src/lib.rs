@@ -1,4 +1,7 @@
-/// This crate defines the buttom communication protocol of app thread and engine thread
+use std::collections::HashMap;
+use std::hash::Hash;
+
+/// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
 /// Should not depend on other crates
 
@@ -55,11 +58,58 @@ pub struct GpuFeedbackFrame<Receipt, Error> {
     pub errors: Vec<Error>,
 }
 
-/// To avoid the protocol layer being "oversmart", we left the merge action to be implemented by upper layers
-/// This function should auto remove the repeated elements
-/// Avoid native `iter().any()` dedup, which is O(n^2)
+/// Vector merge abstraction consumed by mailbox merge.
+/// `MergeItem` provides the default implementation used by feature modules.
 pub trait MergeVec: Sized {
     fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>);
+}
+
+/// Minimal contract for centralized vector merge:
+/// - each module only defines how to compute identity key;
+/// - protocol layer performs O(n) dedup and optional duplicate reconciliation.
+pub trait MergeItem: Sized {
+    type MergeKey: Eq + Hash;
+
+    /// Key must be stable for one logical entity across frames.
+    fn merge_key(&self) -> Self::MergeKey;
+
+    /// Duplicate reconciliation policy.
+    /// If duplicates are possible for this item type, implementations must provide this method.
+    /// The default is fail-fast to avoid silent data corruption.
+    fn merge_duplicate(existing: &mut Self, incoming: Self) {
+        let _ = existing;
+        let _ = incoming;
+        panic!("merge_duplicate is not implemented for this item type");
+    }
+}
+
+impl<Item> MergeVec for Item
+where
+    Item: MergeItem,
+{
+    fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>) {
+        let mut index_by_key = HashMap::with_capacity(current.len() + incoming.len());
+        for (index, item) in current.iter().enumerate() {
+            let duplicated_index = index_by_key.insert(item.merge_key(), index);
+            if duplicated_index.is_some() {
+                panic!("current vector contains duplicated merge key before merge");
+            }
+        }
+
+        for incoming_item in incoming {
+            let key = incoming_item.merge_key();
+            match index_by_key.get(&key).copied() {
+                Some(existing_index) => {
+                    Item::merge_duplicate(&mut current[existing_index], incoming_item);
+                }
+                None => {
+                    let new_index = current.len();
+                    current.push(incoming_item);
+                    index_by_key.insert(key, new_index);
+                }
+            }
+        }
+    }
 }
 
 impl<Receipt, Error> GpuFeedbackFrame<Receipt, Error>
@@ -83,21 +133,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, MergeVec, PresentFrameId,
+        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, MergeItem, PresentFrameId,
         SubmitWaterline,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestReceipt {
         key: u64,
+        payload_version: u64,
     }
 
-    impl MergeVec for TestReceipt {
-        fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>) {
-            for item in incoming {
-                if !current.iter().any(|existing| existing.key == item.key) {
-                    current.push(item);
-                }
+    impl MergeItem for TestReceipt {
+        type MergeKey = u64;
+
+        fn merge_key(&self) -> Self::MergeKey {
+            self.key
+        }
+
+        fn merge_duplicate(existing: &mut Self, incoming: Self) {
+            if incoming.payload_version > existing.payload_version {
+                *existing = incoming;
             }
         }
     }
@@ -107,14 +162,16 @@ mod tests {
         key: u64,
     }
 
-    impl MergeVec for TestError {
-        fn merge_vec(current: &mut Vec<Self>, incoming: Vec<Self>) {
-            for item in incoming {
-                // WARN: Do not use this method in production code for bad performance.
-                if !current.iter().any(|existing| existing.key == item.key) {
-                    current.push(item);
-                }
-            }
+    impl MergeItem for TestError {
+        type MergeKey = u64;
+
+        fn merge_key(&self) -> Self::MergeKey {
+            self.key
+        }
+
+        fn merge_duplicate(existing: &mut Self, incoming: Self) {
+            let _ = incoming;
+            let _ = existing;
         }
     }
 
@@ -125,7 +182,10 @@ mod tests {
             submit_waterline: SubmitWaterline(2),
             executed_batch_waterline: ExecutedBatchWaterline(3),
             complete_waterline: CompleteWaterline(4),
-            receipts: vec![TestReceipt { key: 1 }],
+            receipts: vec![TestReceipt {
+                key: 1,
+                payload_version: 10,
+            }],
             errors: vec![TestError { key: 2 }],
         };
         let newer = GpuFeedbackFrame {
@@ -133,7 +193,16 @@ mod tests {
             submit_waterline: SubmitWaterline(20),
             executed_batch_waterline: ExecutedBatchWaterline(30),
             complete_waterline: CompleteWaterline(40),
-            receipts: vec![TestReceipt { key: 1 }, TestReceipt { key: 3 }],
+            receipts: vec![
+                TestReceipt {
+                    key: 1,
+                    payload_version: 11,
+                },
+                TestReceipt {
+                    key: 3,
+                    payload_version: 1,
+                },
+            ],
             errors: vec![TestError { key: 2 }, TestError { key: 4 }],
         };
 
@@ -145,6 +214,85 @@ mod tests {
         assert_eq!(once.complete_waterline, CompleteWaterline(40));
         assert_eq!(once.receipts.len(), 2);
         assert_eq!(once.errors.len(), 2);
+        assert_eq!(once.receipts[0].payload_version, 11);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    #[should_panic(expected = "current vector contains duplicated merge key before merge")]
+    fn mailbox_merge_panics_when_current_contains_duplicated_keys() {
+        let current = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(1),
+            submit_waterline: SubmitWaterline(1),
+            executed_batch_waterline: ExecutedBatchWaterline(1),
+            complete_waterline: CompleteWaterline(1),
+            receipts: vec![
+                TestReceipt {
+                    key: 1,
+                    payload_version: 1,
+                },
+                TestReceipt {
+                    key: 1,
+                    payload_version: 2,
+                },
+            ],
+            errors: vec![TestError { key: 10 }],
+        };
+        let newer = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(2),
+            submit_waterline: SubmitWaterline(2),
+            executed_batch_waterline: ExecutedBatchWaterline(2),
+            complete_waterline: CompleteWaterline(2),
+            receipts: vec![TestReceipt {
+                key: 2,
+                payload_version: 1,
+            }],
+            errors: vec![TestError { key: 20 }],
+        };
+
+        let _ = GpuFeedbackFrame::merge_mailbox(current, newer);
+    }
+
+    #[test]
+    fn mailbox_merge_merges_duplicated_incoming_keys_with_item_policy() {
+        let current = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(1),
+            submit_waterline: SubmitWaterline(1),
+            executed_batch_waterline: ExecutedBatchWaterline(1),
+            complete_waterline: CompleteWaterline(1),
+            receipts: vec![TestReceipt {
+                key: 7,
+                payload_version: 5,
+            }],
+            errors: vec![TestError { key: 100 }],
+        };
+        let newer = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(2),
+            submit_waterline: SubmitWaterline(2),
+            executed_batch_waterline: ExecutedBatchWaterline(2),
+            complete_waterline: CompleteWaterline(2),
+            receipts: vec![
+                TestReceipt {
+                    key: 7,
+                    payload_version: 8,
+                },
+                TestReceipt {
+                    key: 7,
+                    payload_version: 6,
+                },
+                TestReceipt {
+                    key: 9,
+                    payload_version: 1,
+                },
+            ],
+            errors: vec![TestError { key: 200 }],
+        };
+
+        let merged = GpuFeedbackFrame::merge_mailbox(current, newer);
+        assert_eq!(merged.receipts.len(), 2);
+        assert_eq!(merged.receipts[0].key, 7);
+        assert_eq!(merged.receipts[0].payload_version, 8);
+        assert_eq!(merged.receipts[1].key, 9);
+        assert_eq!(merged.receipts[1].payload_version, 1);
     }
 }

@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use parking_lot::{Condvar, Mutex};
-use protocol::{GpuCmdMsg, GpuFeedbackFrame, InputControlEvent, InputRingSample};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
+use crossbeam_queue::ArrayQueue;
+use protocol::{GpuCmdMsg, GpuFeedbackFrame, InputControlEvent, InputRingSample, MergeVec};
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 
 /// Compose engine-owned aggregate enums from feature-specific message types.
@@ -29,6 +29,23 @@ where
     }
 }
 
+/// Engine-level unified entry for mailbox merge.
+/// Keep merge callsites centralized so feature modules only provide merge item contracts.
+pub struct MailboxMergePolicy;
+
+impl MailboxMergePolicy {
+    pub fn merge_feedback_frame<Receipt, Error>(
+        current: GpuFeedbackFrame<Receipt, Error>,
+        newer: GpuFeedbackFrame<Receipt, Error>,
+    ) -> GpuFeedbackFrame<Receipt, Error>
+    where
+        Receipt: MergeVec,
+        Error: MergeVec,
+    {
+        GpuFeedbackFrame::merge_mailbox(current, newer)
+    }
+}
+
 pub struct MainThreadChannels<Command, Receipt, Error> {
     pub input_control_queue: MainInputControlQueue,
     pub input_ring_producer: MainInputRingProducer,
@@ -47,11 +64,10 @@ pub struct EngineThreadChannels<Command, Receipt, Error> {
 // The Arc inside MainInputRingProducer and EngineInputRingConsumer is not exposed,
 // preventing accidental creation of additional producers or consumers.
 struct SharedInputRing {
-    // This ring intentionally does not use rtrb: our write policy is "drop oldest, keep newest"
-    // on overflow, and that overwrite operation requires coarse-grained exclusive access.
-    queue: Mutex<VecDeque<InputRingSample>>,
-    not_empty: Condvar,
-    capacity: usize,
+    // UI thread writes are lock-free; when full we evict oldest and keep newest.
+    queue: ArrayQueue<InputRingSample>,
+    notify_sender: Sender<()>,
+    notify_receiver: Receiver<()>,
     dropped: AtomicU64,
     pushed: AtomicU64,
 }
@@ -66,19 +82,29 @@ pub struct MainInputRingProducer {
 
 impl MainInputRingProducer {
     pub fn push(&self, sample: InputRingSample) {
-        let was_empty = {
-            let mut queue = self.shared.queue.lock();
-            let was_empty = queue.is_empty();
-            if queue.len() == self.shared.capacity {
-                queue.pop_front();
-                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+        let mut pending_sample = sample;
+        loop {
+            match self.shared.queue.push(pending_sample) {
+                Ok(()) => {
+                    self.shared.pushed.fetch_add(1, Ordering::Relaxed);
+                    match self.shared.notify_sender.try_send(()) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(())) => {}
+                        Err(TrySendError::Disconnected(())) => {
+                            panic!("input ring notify channel disconnected")
+                        }
+                    }
+                    return;
+                }
+                Err(returned_sample) => {
+                    pending_sample = returned_sample;
+                    if self.shared.queue.pop().is_some() {
+                        self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
             }
-            queue.push_back(sample);
-            self.shared.pushed.fetch_add(1, Ordering::Relaxed);
-            was_empty
-        };
-        if was_empty {
-            self.shared.not_empty.notify_one();
         }
     }
 
@@ -115,32 +141,48 @@ impl EngineInputRingConsumer {
             return;
         }
 
-        let mut queue = self.shared.queue.lock();
-        while queue.is_empty() {
-            if self
-                .shared
-                .not_empty
-                .wait_for(&mut queue, wait_timeout)
-                .timed_out()
-            {
-                break;
-            }
-        }
-
-        let mut local = Vec::with_capacity(max_items.min(queue.len()));
         let mut drained_count = 0;
         while drained_count < max_items {
-            match queue.pop_front() {
+            match self.shared.queue.pop() {
                 Some(sample) => {
-                    local.push(sample);
+                    output.push(sample);
                     drained_count += 1;
                 }
                 None => break,
             }
         }
-        drop(queue);
+        if drained_count > 0 || wait_timeout.is_zero() {
+            return;
+        }
 
-        output.extend(local);
+        let wait_deadline = Instant::now() + wait_timeout;
+        loop {
+            let now = Instant::now();
+            if now >= wait_deadline {
+                return;
+            }
+            let remaining = wait_deadline.saturating_duration_since(now);
+            match self.shared.notify_receiver.recv_timeout(remaining) {
+                Ok(()) => {
+                    while drained_count < max_items {
+                        match self.shared.queue.pop() {
+                            Some(sample) => {
+                                output.push(sample);
+                                drained_count += 1;
+                            }
+                            None => break,
+                        }
+                    }
+                    if drained_count > 0 {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => return,
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("input ring notify channel disconnected")
+                }
+            }
+        }
     }
 
     pub fn dropped_samples(&self) -> u64 {
@@ -218,10 +260,11 @@ pub fn create_thread_channels<Command, Receipt, Error>(
         "gpu feedback capacity must be greater than zero"
     );
 
+    let (notify_sender, notify_receiver) = bounded(1);
     let shared_input_ring = Arc::new(SharedInputRing {
-        queue: Mutex::new(VecDeque::with_capacity(input_ring_capacity)),
-        not_empty: Condvar::new(),
-        capacity: input_ring_capacity,
+        queue: ArrayQueue::new(input_ring_capacity),
+        notify_sender,
+        notify_receiver,
         dropped: AtomicU64::new(0),
         pushed: AtomicU64::new(0),
     });
@@ -255,4 +298,83 @@ pub fn create_thread_channels<Command, Receipt, Error>(
     };
 
     (main_thread_channels, engine_thread_channels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MailboxMergePolicy;
+    use protocol::{
+        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, MergeItem, PresentFrameId,
+        SubmitWaterline,
+    };
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestReceipt {
+        key: u64,
+        revision: u64,
+    }
+
+    impl MergeItem for TestReceipt {
+        type MergeKey = u64;
+
+        fn merge_key(&self) -> Self::MergeKey {
+            self.key
+        }
+
+        fn merge_duplicate(existing: &mut Self, incoming: Self) {
+            if incoming.revision > existing.revision {
+                *existing = incoming;
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestError {
+        key: u64,
+    }
+
+    impl MergeItem for TestError {
+        type MergeKey = u64;
+
+        fn merge_key(&self) -> Self::MergeKey {
+            self.key
+        }
+
+        fn merge_duplicate(existing: &mut Self, incoming: Self) {
+            let _ = existing;
+            let _ = incoming;
+        }
+    }
+
+    #[test]
+    fn mailbox_merge_policy_matches_protocol_merge_mailbox() {
+        let current = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(2),
+            submit_waterline: SubmitWaterline(3),
+            executed_batch_waterline: ExecutedBatchWaterline(4),
+            complete_waterline: CompleteWaterline(5),
+            receipts: vec![TestReceipt {
+                key: 10,
+                revision: 1,
+            }],
+            errors: vec![TestError { key: 99 }],
+        };
+        let newer = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(1),
+            submit_waterline: SubmitWaterline(30),
+            executed_batch_waterline: ExecutedBatchWaterline(40),
+            complete_waterline: CompleteWaterline(50),
+            receipts: vec![TestReceipt {
+                key: 10,
+                revision: 2,
+            }],
+            errors: vec![TestError { key: 99 }, TestError { key: 100 }],
+        };
+
+        let via_policy = MailboxMergePolicy::merge_feedback_frame(current.clone(), newer.clone());
+        let via_protocol = GpuFeedbackFrame::merge_mailbox(current, newer);
+
+        assert_eq!(via_policy, via_protocol);
+        assert_eq!(via_policy.receipts[0].revision, 2);
+    }
 }
