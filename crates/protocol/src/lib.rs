@@ -104,9 +104,9 @@ impl<Key> MergeVecIndex<Key> {
 }
 
 #[derive(Debug, Default)]
-pub struct GpuFeedbackMergeState<ReceiptKey, ErrorKey> {
-    pub receipt_index: MergeVecIndex<ReceiptKey>,
-    pub error_index: MergeVecIndex<ErrorKey>,
+pub struct GpuFeedbackMergeState<Receipt, Error> {
+    pub receipt_index: MergeVecIndex<Receipt::MergeKey>,
+    pub error_index: MergeVecIndex<Error::MergeKey>,
 }
 
 pub fn merge_vec<Item>(
@@ -148,7 +148,7 @@ where
     pub fn merge_mailbox(
         mut current: Self,
         newer: Self,
-        merge_state: &mut GpuFeedbackMergeState<Receipt::MergeKey, Error::MergeKey>,
+        merge_state: &mut GpuFeedbackMergeState<Receipt, Error>,
     ) -> Self {
         current.present_frame_id = current.present_frame_id.max(newer.present_frame_id);
         current.submit_waterline = current.submit_waterline.max(newer.submit_waterline);
@@ -238,7 +238,7 @@ mod tests {
             errors: vec![TestError { key: 2 }, TestError { key: 4 }],
         };
 
-        let mut merge_state = GpuFeedbackMergeState::default();
+        let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
         let once = GpuFeedbackFrame::merge_mailbox(current, newer.clone(), &mut merge_state);
         let twice = GpuFeedbackFrame::merge_mailbox(once.clone(), newer, &mut merge_state);
         assert_eq!(once.present_frame_id, PresentFrameId(10));
@@ -283,7 +283,7 @@ mod tests {
             errors: vec![TestError { key: 20 }],
         };
 
-        let mut merge_state = GpuFeedbackMergeState::default();
+        let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
         let _ = GpuFeedbackFrame::merge_mailbox(current, newer, &mut merge_state);
     }
 
@@ -322,7 +322,7 @@ mod tests {
             errors: vec![TestError { key: 200 }],
         };
 
-        let mut merge_state = GpuFeedbackMergeState::default();
+        let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
         let merged = GpuFeedbackFrame::merge_mailbox(current, newer, &mut merge_state);
         assert_eq!(merged.receipts.len(), 2);
         assert_eq!(merged.receipts[0].key, 7);
