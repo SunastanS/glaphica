@@ -1,5 +1,8 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::hash::Hash;
+use smallvec::SmallVec;
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
@@ -54,8 +57,10 @@ pub struct GpuFeedbackFrame<Receipt, Error> {
     /// `receipts` / `errors` are non-overwritable deltas.
     /// They must not be modeled as a single waterline because they are not contiguous,
     /// and loss would break correctness (resource allocation results, failure reasons, etc.).
-    pub receipts: Vec<Receipt>,
-    pub errors: Vec<Error>,
+    /// Callers should prefer waterline-based feedback whenever possible and only rely on
+    /// receipts/errors for non-contiguous events that cannot be represented by waterlines.
+    pub receipts: SmallVec<[Receipt; 4]>,
+    pub errors: SmallVec<[Error; 4]>,
 }
 
 /// Minimal contract for centralized vector merge:
@@ -63,7 +68,7 @@ pub struct GpuFeedbackFrame<Receipt, Error> {
 /// - protocol layer performs O(n) dedup and optional duplicate reconciliation
 ///   using caller-owned reusable hash indexes.
 pub trait MergeItem: Sized {
-    type MergeKey: Eq + Hash;
+    type MergeKey: Eq + Hash + Debug;
 
     /// Key must be stable for one logical entity across frames.
     fn merge_key(&self) -> Self::MergeKey;
@@ -125,8 +130,8 @@ where
 }
 
 pub fn merge_vec<Item>(
-    current: &mut Vec<Item>,
-    incoming: Vec<Item>,
+    current: &mut SmallVec<[Item; 4]>,
+    incoming: SmallVec<[Item; 4]>,
     merge_index: &mut MergeVecIndex<Item::MergeKey>,
 )
 where
@@ -134,12 +139,22 @@ where
 {
     merge_index.clear();
     for (index, item) in current.iter().enumerate() {
-        let duplicated_index = merge_index.index_by_key.insert(item.merge_key(), index);
-        if duplicated_index.is_some() {
-            panic!("current vector contains duplicated merge key before merge");
+        match merge_index.index_by_key.entry(item.merge_key()) {
+            Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            Entry::Occupied(existing) => {
+                panic!(
+                    "current vector contains duplicated merge key before merge: key={:?}, first_index={}, duplicated_index={}",
+                    existing.key(),
+                    existing.get(),
+                    index,
+                );
+            }
         }
     }
 
+    current.reserve(incoming.len());
     for incoming_item in incoming {
         let key = incoming_item.merge_key();
         match merge_index.index_by_key.get(&key).copied() {
@@ -177,17 +192,13 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, GpuFeedbackMergeState,
-        MergeItem, PresentFrameId, SubmitWaterline,
-    };
+pub mod merge_test_support {
+    use crate::MergeItem;
 
     #[derive(Debug, Clone, PartialEq, Eq, Default)]
-    struct TestReceipt {
-        key: u64,
-        payload_version: u64,
+    pub struct TestReceipt {
+        pub key: u64,
+        pub payload_version: u64,
     }
 
     impl MergeItem for TestReceipt {
@@ -205,8 +216,8 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Default)]
-    struct TestError {
-        key: u64,
+    pub struct TestError {
+        pub key: u64,
     }
 
     impl MergeItem for TestError {
@@ -215,12 +226,18 @@ mod tests {
         fn merge_key(&self) -> Self::MergeKey {
             self.key
         }
-
-        // Use the default merge_duplicate which replaces existing with incoming
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, GpuFeedbackMergeState,
+        PresentFrameId, SubmitWaterline, merge_test_support::{TestError, TestReceipt},
+    };
 
     #[test]
-    fn mailbox_merge_is_idempotent_and_uses_max_waterlines() {
+    fn mailbox_merge_is_absorptive_and_uses_max_waterlines() {
         let current = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(10),
             submit_waterline: SubmitWaterline(2),
@@ -229,8 +246,9 @@ mod tests {
             receipts: vec![TestReceipt {
                 key: 1,
                 payload_version: 10,
-            }],
-            errors: vec![TestError { key: 2 }],
+            }]
+            .into(),
+            errors: vec![TestError { key: 2 }].into(),
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(9),
@@ -246,8 +264,9 @@ mod tests {
                     key: 3,
                     payload_version: 1,
                 },
-            ],
-            errors: vec![TestError { key: 2 }, TestError { key: 4 }],
+            ]
+            .into(),
+            errors: vec![TestError { key: 2 }, TestError { key: 4 }].into(),
         };
 
         let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
@@ -261,6 +280,32 @@ mod tests {
         assert_eq!(once.errors.len(), 2);
         assert_eq!(once.receipts[0].payload_version, 11);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn mailbox_merge_is_idempotent_for_identical_frames() {
+        let frame = GpuFeedbackFrame {
+            present_frame_id: PresentFrameId(42),
+            submit_waterline: SubmitWaterline(100),
+            executed_batch_waterline: ExecutedBatchWaterline(101),
+            complete_waterline: CompleteWaterline(102),
+            receipts: vec![
+                TestReceipt {
+                    key: 1,
+                    payload_version: 7,
+                },
+                TestReceipt {
+                    key: 3,
+                    payload_version: 2,
+                },
+            ]
+            .into(),
+            errors: vec![TestError { key: 9 }, TestError { key: 10 }].into(),
+        };
+
+        let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
+        let merged = GpuFeedbackFrame::merge_mailbox(frame.clone(), frame.clone(), &mut merge_state);
+        assert_eq!(merged, frame);
     }
 
     #[test]
@@ -280,8 +325,9 @@ mod tests {
                     key: 1,
                     payload_version: 2,
                 },
-            ],
-            errors: vec![TestError { key: 10 }],
+            ]
+            .into(),
+            errors: vec![TestError { key: 10 }].into(),
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(2),
@@ -291,8 +337,9 @@ mod tests {
             receipts: vec![TestReceipt {
                 key: 2,
                 payload_version: 1,
-            }],
-            errors: vec![TestError { key: 20 }],
+            }]
+            .into(),
+            errors: vec![TestError { key: 20 }].into(),
         };
 
         let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
@@ -309,8 +356,9 @@ mod tests {
             receipts: vec![TestReceipt {
                 key: 7,
                 payload_version: 5,
-            }],
-            errors: vec![TestError { key: 100 }],
+            }]
+            .into(),
+            errors: vec![TestError { key: 100 }].into(),
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(2),
@@ -330,8 +378,9 @@ mod tests {
                     key: 9,
                     payload_version: 1,
                 },
-            ],
-            errors: vec![TestError { key: 200 }],
+            ]
+            .into(),
+            errors: vec![TestError { key: 200 }].into(),
         };
 
         let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
