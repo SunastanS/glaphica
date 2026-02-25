@@ -103,10 +103,27 @@ impl<Key> MergeVecIndex<Key> {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct GpuFeedbackMergeState<Receipt, Error> {
+#[derive(Debug)]
+pub struct GpuFeedbackMergeState<Receipt, Error> 
+where
+    Receipt: MergeItem,
+    Error: MergeItem,
+{
     pub receipt_index: MergeVecIndex<Receipt::MergeKey>,
     pub error_index: MergeVecIndex<Error::MergeKey>,
+}
+
+impl<Receipt, Error> Default for GpuFeedbackMergeState<Receipt, Error> 
+where
+    Receipt: MergeItem,
+    Error: MergeItem,
+{
+    fn default() -> Self {
+        Self {
+            receipt_index: MergeVecIndex::default(),
+            error_index: MergeVecIndex::default(),
+        }
+    }
 }
 
 pub fn merge_vec<Item>(
@@ -169,7 +186,7 @@ mod tests {
         MergeItem, PresentFrameId, SubmitWaterline,
     };
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     struct TestReceipt {
         key: u64,
         payload_version: u64,
@@ -189,7 +206,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     struct TestError {
         key: u64,
     }
