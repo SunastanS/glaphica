@@ -69,12 +69,10 @@ pub trait MergeItem: Sized {
     fn merge_key(&self) -> Self::MergeKey;
 
     /// Duplicate reconciliation policy.
-    /// If duplicates are possible for this item type, implementations must provide this method.
-    /// The default is fail-fast to avoid silent data corruption.
+    /// The default implementation replaces the existing item with the incoming one.
+    /// Override this method if you need custom merging logic.
     fn merge_duplicate(existing: &mut Self, incoming: Self) {
-        let _ = existing;
-        let _ = incoming;
-        panic!("merge_duplicate is not implemented for this item type");
+        *existing = incoming;
     }
 }
 
@@ -218,10 +216,7 @@ mod tests {
             self.key
         }
 
-        fn merge_duplicate(existing: &mut Self, incoming: Self) {
-            let _ = incoming;
-            let _ = existing;
-        }
+        // Use the default merge_duplicate which replaces existing with incoming
     }
 
     #[test]
