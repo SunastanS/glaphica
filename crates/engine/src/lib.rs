@@ -59,14 +59,17 @@ pub struct MainInputRingProducer {
 
 impl MainInputRingProducer {
     pub fn push(&self, sample: InputRingSample) {
-        let mut queue = self.shared.queue.lock();
-        let was_empty = queue.is_empty();
-        if queue.len() == self.shared.capacity {
-            queue.pop_front();
-            self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-        }
-        queue.push_back(sample);
-        self.shared.pushed.fetch_add(1, Ordering::Relaxed);
+        let was_empty = {
+            let mut queue = self.shared.queue.lock();
+            let was_empty = queue.is_empty();
+            if queue.len() == self.shared.capacity {
+                queue.pop_front();
+                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            queue.push_back(sample);
+            self.shared.pushed.fetch_add(1, Ordering::Relaxed);
+            was_empty
+        };
         if was_empty {
             self.shared.not_empty.notify_one();
         }
