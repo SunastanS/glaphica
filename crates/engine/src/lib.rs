@@ -118,16 +118,20 @@ impl EngineInputRingConsumer {
             }
         }
 
+        let mut local = Vec::with_capacity(max_items.min(queue.len()));
         let mut drained_count = 0;
         while drained_count < max_items {
             match queue.pop_front() {
                 Some(sample) => {
-                    output.push(sample);
+                    local.push(sample);
                     drained_count += 1;
                 }
                 None => break,
             }
         }
+        drop(queue);
+
+        output.extend(local);
     }
 
     pub fn dropped_samples(&self) -> u64 {
