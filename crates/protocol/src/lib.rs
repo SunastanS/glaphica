@@ -1,3 +1,7 @@
+/// This crate defines the buttom communication protocol of app thread and engine thread
+/// Can be dependent by any crates
+/// Should not depend on other crates
+
 /// Input transport design:
 /// - Ring buffer: lossy high-frequency samples (ok to drop/overwrite).
 /// - Control events that define semantic boundaries (stroke begin/end, tool change, layer change)
@@ -6,8 +10,8 @@
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InputRingSample {
-    /// - `epoch` groups samples that share the same semantic state (tool/params/target).
-    ///   Back-end must treat epoch boundaries as "can only change at safe points".
+    /// `epoch` groups samples that share the same semantic state (tool/params/target).
+    /// Back-end must treat epoch boundaries as "can only change at safe points".
     pub epoch: u32,
     pub cursor_x: f32,
     pub cursor_y: f32,

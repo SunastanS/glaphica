@@ -85,6 +85,13 @@ pub struct EngineInputRingConsumer {
     shared: Arc<SharedInputRing>,
 }
 
+/// Drain up to `max_items` samples into `output`.
+///
+/// NOTE:
+/// - This function APPENDS to `output`.
+/// - It does NOT clear the vector.
+/// - Caller is responsible for calling `output.clear()` if needed.
+/// - `output` capacity is reused to avoid reallocations.
 impl EngineInputRingConsumer {
     pub fn drain_batch_with_wait(
         &self,
@@ -97,8 +104,15 @@ impl EngineInputRingConsumer {
         }
 
         let mut queue = self.shared.queue.lock();
-        if queue.is_empty() {
-            self.shared.not_empty.wait_for(&mut queue, wait_timeout);
+        while queue.is_empty() {
+            if self
+                .shared
+                .not_empty
+                .wait_for(&mut queue, wait_timeout)
+                .timed_out()
+            {
+                break;
+            }
         }
 
         let mut drained_count = 0;
@@ -159,7 +173,10 @@ pub fn create_thread_channels<Command, Receipt, Error>(
     MainThreadChannels<Command, Receipt, Error>,
     EngineThreadChannels<Command, Receipt, Error>,
 ) {
-    assert!(input_ring_capacity > 0, "input ring capacity must be greater than zero");
+    assert!(
+        input_ring_capacity > 0,
+        "input ring capacity must be greater than zero"
+    );
     assert!(
         input_control_capacity > 0,
         "input control capacity must be greater than zero"
