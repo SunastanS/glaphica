@@ -152,6 +152,21 @@ impl MainInputControlQueue {
         self.producer.push(control)
     }
 
+    pub fn blocking_push(&mut self, mut control: InputControlEvent) {
+        loop {
+            match self.producer.push(control) {
+                Ok(()) => break,
+                Err(PushError::Full(returned_control)) => {
+                    control = returned_control;
+                    std::thread::yield_now();
+                }
+                Err(PushError::Closed(_)) => {
+                    break;
+                }
+            }
+        }
+    }
+
     pub fn slots(&self) -> usize {
         self.producer.slots()
     }
