@@ -12,6 +12,6 @@ members = ["crates/brush_execution",
     "crates/window_replay",
     "crates/view",
     "crates/engine",
-    "crates/protocol",
+    "crates/protocol", "crates/model",
 ]
 resolver = "3"

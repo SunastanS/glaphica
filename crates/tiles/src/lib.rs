@@ -15,6 +15,8 @@ pub const ATLAS_OCCUPANCY_WORDS: usize = (TILES_PER_ATLAS as usize).div_ceil(64)
 
 const INDEX_SHARDS: usize = 64;
 
+mod model;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey(u64);
 
