@@ -213,6 +213,29 @@ impl AppCore {
         self.perf_log_enabled
     }
 
+    /// Resize the surface.
+    ///
+    /// This is migrated to use the runtime command interface.
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
+        let width = new_size.width.max(1);
+        let height = new_size.height.max(1);
+
+        // Skip if unchanged
+        let current_size = self.runtime.surface_size();
+        if current_size.width == width && current_size.height == height {
+            return;
+        }
+
+        // Execute resize command via runtime
+        self.runtime
+            .execute(RuntimeCommand::Resize {
+                width,
+                height,
+                view_transform: &self.view_transform,
+            })
+            .unwrap_or_else(|err| panic!("resize command failed: {err:?}"));
+    }
+
     /// Render a frame.
     ///
     /// This is the main render path, migrated to use the runtime command interface.

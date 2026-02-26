@@ -4,6 +4,7 @@
 /// Commands are coarse-grained: one command per major operation.
 use render_protocol::{BrushRenderCommand, RenderTreeSnapshot};
 use renderer::MergeCompletionNotice;
+use view::ViewTransform;
 
 /// Coarse-grained commands from AppCore to GpuRuntime.
 #[derive(Debug)]
@@ -12,7 +13,11 @@ pub enum RuntimeCommand<'a> {
     PresentFrame { frame_id: u64 },
 
     /// Resize the surface.
-    Resize { width: u32, height: u32 },
+    Resize {
+        width: u32,
+        height: u32,
+        view_transform: &'a ViewTransform,
+    },
 
     /// Bind a new render tree.
     BindRenderTree {

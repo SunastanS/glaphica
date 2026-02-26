@@ -1638,7 +1638,7 @@ fn surface_format_to_default_atlas_format(surface_format: wgpu::TextureFormat) -
     }
 }
 
-fn push_view_state(
+pub(crate) fn push_view_state(
     view_sender: &ViewOpSender,
     view_transform: &ViewTransform,
     size: PhysicalSize<u32>,

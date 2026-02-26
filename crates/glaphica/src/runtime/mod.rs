@@ -77,9 +77,14 @@ impl GpuRuntime {
                 }
             }
 
-            RuntimeCommand::Resize { width, height } => {
+            RuntimeCommand::Resize {
+                width,
+                height,
+                view_transform,
+            } => {
                 self.renderer.resize(width, height);
                 self.surface_size = PhysicalSize::new(width, height);
+                crate::push_view_state(&self.view_sender, view_transform, self.surface_size);
                 Ok(RuntimeReceipt::Resized)
             }
 
