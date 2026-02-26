@@ -2,6 +2,9 @@
 ///
 /// Defines the command/receipt interface between AppCore and GpuRuntime.
 /// Commands are coarse-grained: one command per major operation.
+///
+/// Design note: Commands own their data (no lifetime parameters) to keep
+/// the command interface simple and avoid lifetime propagation.
 use render_protocol::{
     BrushRenderCommand, MergeAuditMeta, MergeExecutionResult, RenderTreeSnapshot,
     StrokeExecutionReceiptId,
@@ -11,8 +14,9 @@ use tiles::TileMergeCompletionNoticeId;
 use view::ViewTransform;
 
 /// Coarse-grained commands from AppCore to GpuRuntime.
+/// Commands own their data to avoid lifetime complexity.
 #[derive(Debug)]
-pub enum RuntimeCommand<'a> {
+pub enum RuntimeCommand {
     /// Present a frame and drain tile operations.
     PresentFrame { frame_id: u64 },
 
@@ -20,20 +24,20 @@ pub enum RuntimeCommand<'a> {
     Resize {
         width: u32,
         height: u32,
-        view_transform: &'a ViewTransform,
+        view_transform: ViewTransform,
     },
 
     /// Bind a new render tree.
     BindRenderTree {
-        snapshot: &'a RenderTreeSnapshot,
+        snapshot: RenderTreeSnapshot,
         reason: &'static str,
     },
 
-    /// Enqueue brush render commands.
-    EnqueueBrushCommands { commands: &'a [BrushRenderCommand] },
+    /// Enqueue brush render commands (batch).
+    EnqueueBrushCommands { commands: Vec<BrushRenderCommand> },
 
     /// Enqueue a single brush render command.
-    EnqueueBrushCommand { command: &'a BrushRenderCommand },
+    EnqueueBrushCommand { command: BrushRenderCommand },
 
     /// Poll merge completion notices from renderer.
     PollMergeNotices { frame_id: u64 },

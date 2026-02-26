@@ -84,7 +84,7 @@ impl GpuRuntime {
             } => {
                 self.renderer.resize(width, height);
                 self.surface_size = PhysicalSize::new(width, height);
-                crate::push_view_state(&self.view_sender, view_transform, self.surface_size);
+                crate::push_view_state(&self.view_sender, &view_transform, self.surface_size);
                 Ok(RuntimeReceipt::Resized)
             }
 
@@ -102,15 +102,13 @@ impl GpuRuntime {
                         }
                         _ => {}
                     }
-                    self.renderer
-                        .enqueue_brush_render_command(command.clone())?;
+                    self.renderer.enqueue_brush_render_command(command)?;
                 }
                 Ok(RuntimeReceipt::BrushCommandsEnqueued { dab_count })
             }
 
             RuntimeCommand::EnqueueBrushCommand { command } => {
-                self.renderer
-                    .enqueue_brush_render_command(command.clone())?;
+                self.renderer.enqueue_brush_render_command(command)?;
                 Ok(RuntimeReceipt::BrushCommandEnqueued)
             }
 
