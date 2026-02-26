@@ -135,37 +135,32 @@ impl From<renderer::MergePollError> for RuntimeError {
     }
 }
 
-impl From<RuntimeError> for renderer::BrushRenderEnqueueError {
-    fn from(err: RuntimeError) -> Self {
-        match err {
-            RuntimeError::BrushEnqueueError(e) => e,
-            other => {
-                // KNOWN LIMITATION (Phase 2): This panic indicates a logic bug.
-                // TODO(Phase 3): Extend BrushRenderEnqueueError to wrap RuntimeError.
-                debug_assert!(
-                    false,
-                    "unexpected runtime error in brush enqueue: {other:?}"
-                );
-                panic!("unexpected runtime error in brush enqueue: {other:?}")
-            }
+// RuntimeError conversion helpers (replaces panic-prone From impls)
+impl RuntimeError {
+    /// Convert to BrushRenderEnqueueError if possible.
+    /// Returns Err(self) if the variant doesn't match.
+    pub fn into_brush_enqueue(self) -> Result<renderer::BrushRenderEnqueueError, Self> {
+        match self {
+            RuntimeError::BrushEnqueueError(e) => Ok(e),
+            other => Err(other),
         }
     }
-}
 
-impl From<RuntimeError> for renderer::MergeSubmitError {
-    fn from(err: RuntimeError) -> Self {
-        match err {
-            RuntimeError::MergeSubmit(e) => e,
-            other => panic!("unexpected runtime error in merge submit: {other:?}"),
+    /// Convert to MergeSubmitError if possible.
+    /// Returns Err(self) if the variant doesn't match.
+    pub fn into_merge_submit(self) -> Result<renderer::MergeSubmitError, Self> {
+        match self {
+            RuntimeError::MergeSubmit(e) => Ok(e),
+            other => Err(other),
         }
     }
-}
 
-impl From<RuntimeError> for renderer::MergePollError {
-    fn from(err: RuntimeError) -> Self {
-        match err {
-            RuntimeError::MergePoll(e) => e,
-            other => panic!("unexpected runtime error in merge poll: {other:?}"),
+    /// Convert to MergePollError if possible.
+    /// Returns Err(self) if the variant doesn't match.
+    pub fn into_merge_poll(self) -> Result<renderer::MergePollError, Self> {
+        match self {
+            RuntimeError::MergePoll(e) => Ok(e),
+            other => Err(other),
         }
     }
 }

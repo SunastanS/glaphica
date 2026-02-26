@@ -360,7 +360,7 @@ impl AppCore {
                 // GPU enqueue through runtime
                 self.runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(BrushRenderEnqueueError::from)?;
+                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
 
                 // Business logic: preview buffer management
                 // TODO: migrate set_preview_buffer_and_rebind to AppCore
@@ -405,7 +405,7 @@ impl AppCore {
                 // GPU enqueue through runtime
                 self.runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(BrushRenderEnqueueError::from)?;
+                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
 
                 Ok(())
             }
@@ -437,7 +437,7 @@ impl AppCore {
                 // GPU enqueue through runtime
                 self.runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(BrushRenderEnqueueError::from)?;
+                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
 
                 Ok(())
             }
@@ -446,7 +446,7 @@ impl AppCore {
             _ => {
                 self.runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(BrushRenderEnqueueError::from)?;
+                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
                 Ok(())
             }
         }
@@ -466,7 +466,7 @@ impl AppCore {
             .runtime
             .execute(RuntimeCommand::ProcessMergeCompletions { frame_id })
             .map_err(|err| {
-                MergeBridgeError::RendererSubmit(renderer::MergeSubmitError::from(err))
+                MergeBridgeError::RendererSubmit(err.into_merge_submit().unwrap_or_else(|other| panic!("unexpected runtime error in merge submit: {:?}", other)))
             })?;
 
         let RuntimeReceipt::MergeCompletionsProcessed {
