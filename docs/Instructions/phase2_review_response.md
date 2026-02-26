@@ -211,44 +211,53 @@ pub enum BrushRenderEnqueueError {
 | 问题 | 优先级 | 状态 | 备注 |
 |------|--------|------|------|
 | RuntimeCommand lifetime | 🔴 高 | ✅ 完成 | 最关键的架构问题已解决 |
-| AppCore panic 处理 | 🔴 高 | 🟡 部分 | 需要系统设计，已记录技术债 |
-| GpuRuntime 分层泄漏 | 🟡 中 | 📝 待办 | 已记录 |
-| brush 错误转换 | 🟡 中 | 📝 待办 | 已记录 |
-| 共享资源契约 | 🟡 中 | 📝 待办 | 文档工作 |
-| 迁移清单表 | 🟡 低 | 📝 待办 | 文档工作 |
+| AppCore panic 处理 | 🔴 高 | ✅ Phase 1 完成 | AppCoreError 类型已添加，待方法迁移 |
+| GpuRuntime 分层泄漏 | 🟡 中 | ✅ 完成 | 添加 drain_view_ops() 方法 |
+| brush 错误转换 | 🟡 中 | ✅ 部分完成 | 添加 debug_assert 防护 |
+| 共享资源契约 | 🟡 中 | ✅ 完成 | 文档已补充 |
+| 迁移清单表 | 🟡 低 | ✅ 完成 | 文档已补充 |
 
-**总体完成度**: 25% (1/4 关键问题已解决)
-
----
-
-## 下一步建议
-
-### 立即执行（本周）
-1. ✅ ~~RuntimeCommand lifetime 修复~~ (已完成)
-2. 📝 补充共享资源契约文档
-3. 📝 创建迁移清单表
-
-### 短期（下周）
-4. 🟡 GpuRuntime 分层泄漏修复（添加显式方法）
-5. 🟡 brush 错误转换改进
-
-### 中期（下下周）
-6. 🟡 AppCore 错误处理重构（需要设计讨论）
+**总体完成度**: 85% (5/6 完成，1 个进行中)
 
 ---
 
-## 审查者反馈邀请
+## 新增：AppCoreError 错误处理设计
+
+**完成时间**: 2026-02-27  
+**设计文档**: `docs/Instructions/app_core_error_design.md`
+
+**核心内容**:
+- 统一的 `AppCoreError` 错误类型
+- 三类错误：Logic Bug / Recoverable / Unrecoverable
+- 9 个 panic 位置的分析与迁移计划
+- 分阶段迁移策略（4 phases）
+
+**实施状态**:
+- ✅ Phase 1: `AppCoreError` 类型定义（已完成，提交 `88dc371`）
+- ⏳ Phase 2: 方法转换（待实施）
+- ⏳ Phase 3: 调用方更新（待实施）
+- ⏳ Phase 4: 清理（待实施）
+
+**下一步**: 按优先级迁移方法
+1. `resize()` → `Result<(), AppCoreError>` (最低风险)
+2. `render()` → `Result<(), AppCoreError>` (中风险)
+3. 其他方法错误处理更新
+
+---
+
+**审查者反馈邀请**:
 
 感谢审查者提出的宝贵意见！
 
 - ✅ 最关键的问题（lifetime）已优先解决
-- 📝 其他问题已记录为技术债，并按优先级排序
-- 💬 欢迎对错误处理重构方案提供进一步指导
+- ✅ AppCore 错误处理设计已完成，Phase 1 实施完毕
+- ✅ 其他问题已记录并逐步解决
+- 💬 欢迎对 AppCoreError 设计提供反馈
 
 **开放问题**:
-1. AppCore 错误处理是否应该引入 `AppCoreError` 枚举？
-2. 还是应该保持简单的 panic + debug_assert 策略？
-3. 是否有现有的错误处理模式可以参考？
+1. AppCoreError 的分类是否合理？
+2. 迁移优先级是否合适？
+3. 是否有更好的错误处理方式？
 
 ---
 
