@@ -1408,7 +1408,10 @@ mod tests {
     use tiles::{TileAddress, TileAtlasLayout, TileDirtyBitset, TileDirtyQuery};
 
     use super::{assert_brush_dab_write_region_in_slot, mark_dirty_from_tile_history};
-    use crate::DirtyRectMask;
+    use crate::{
+        DirtyRectMask, DirtyStateStore, FrameState, FrameSync, LayerDirtyVersion,
+        RenderDataResolver,
+    };
 
     #[derive(Default)]
     struct HistoryResolver {
