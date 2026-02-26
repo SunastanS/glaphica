@@ -965,6 +965,11 @@ impl GpuState {
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // TODO(Phase 2 Step 4A): Migrated to AppCore - temporary direct implementation
+        // Uncomment when AppCore is fully integrated:
+        // self.core.render()
+        
+        // Current direct implementation (to be removed after migration)
         self.renderer.drain_view_ops();
 
         let frame_id = self.next_frame_id;

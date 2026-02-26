@@ -52,6 +52,9 @@ pub enum RuntimeError {
     /// Present failed.
     PresentError(renderer::PresentError),
 
+    /// Surface error (subset of PresentError).
+    SurfaceError(wgpu::SurfaceError),
+
     /// Resize failed.
     ResizeError(String),
 
@@ -62,6 +65,12 @@ pub enum RuntimeError {
 impl From<renderer::PresentError> for RuntimeError {
     fn from(err: renderer::PresentError) -> Self {
         RuntimeError::PresentError(err)
+    }
+}
+
+impl From<wgpu::SurfaceError> for RuntimeError {
+    fn from(err: wgpu::SurfaceError) -> Self {
+        RuntimeError::SurfaceError(err)
     }
 }
 

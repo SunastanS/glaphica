@@ -65,6 +65,9 @@ pub struct AppCore {
     /// Brush execution feedback queue.
     brush_execution_feedback_queue: VecDeque<BrushExecutionMergeFeedback>,
 
+    /// Frame ID counter.
+    next_frame_id: u64,
+
     /// GC statistics.
     gc_evicted_batches_total: u64,
     gc_evicted_keys_total: u64,
@@ -93,6 +96,7 @@ impl AppCore {
         runtime: GpuRuntime,
         disable_merge_for_debug: bool,
         perf_log_enabled: bool,
+        next_frame_id: u64,
     ) -> Self {
         Self {
             document,
@@ -101,6 +105,7 @@ impl AppCore {
             view_transform,
             runtime,
             brush_execution_feedback_queue: VecDeque::new(),
+            next_frame_id,
             gc_evicted_batches_total: 0,
             gc_evicted_keys_total: 0,
             disable_merge_for_debug,
@@ -175,6 +180,16 @@ impl AppCore {
         self.runtime.next_frame_id()
     }
 
+    /// Get and increment the frame ID.
+    pub fn get_next_frame_id(&mut self) -> u64 {
+        let id = self.next_frame_id;
+        self.next_frame_id = self
+            .next_frame_id
+            .checked_add(1)
+            .expect("frame id overflow");
+        id
+    }
+
     /// Get the surface size from runtime.
     pub fn surface_size(&self) -> PhysicalSize<u32> {
         self.runtime.surface_size()
@@ -196,5 +211,38 @@ impl AppCore {
     /// Check if performance logging is enabled.
     pub fn perf_log_enabled(&self) -> bool {
         self.perf_log_enabled
+    }
+
+    /// Render a frame.
+    ///
+    /// This is the main render path, migrated to use the runtime command interface.
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        // Drain view operations before presenting
+        self.runtime.renderer_mut().drain_view_ops();
+
+        // Get next frame ID
+        let frame_id = self.get_next_frame_id();
+
+        // Execute present command via runtime
+        match self
+            .runtime
+            .execute(RuntimeCommand::PresentFrame { frame_id })
+        {
+            Ok(RuntimeReceipt::FramePresented { .. }) => Ok(()),
+            Ok(_) => {
+                // Other receipts are unexpected for PresentFrame command
+                panic!("unexpected receipt for PresentFrame command")
+            }
+            Err(RuntimeError::PresentError(e)) => match e {
+                renderer::PresentError::Surface(err) => Err(err),
+                renderer::PresentError::TileDrain(error) => {
+                    panic!("tile atlas drain failed during present: {error}")
+                }
+            },
+            Err(RuntimeError::SurfaceError(err)) => Err(err),
+            Err(other) => {
+                panic!("unexpected runtime error during render: {other:?}")
+            }
+        }
     }
 }
