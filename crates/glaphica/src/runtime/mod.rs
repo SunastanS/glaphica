@@ -203,4 +203,11 @@ impl GpuRuntime {
         self.renderer
             .bind_brush_buffer_tiles(stroke_session_id, tile_bindings);
     }
+
+    /// Drain view operations before rendering.
+    ///
+    /// This is a runtime-level operation that must be called before presenting.
+    pub fn drain_view_ops(&mut self) {
+        self.renderer.drain_view_ops();
+    }
 }

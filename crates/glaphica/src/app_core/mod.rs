@@ -319,7 +319,7 @@ impl AppCore {
     /// This is the main render path, migrated to use the runtime command interface.
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         // Drain view operations before presenting
-        self.runtime.renderer_mut().drain_view_ops();
+        self.runtime.drain_view_ops();
 
         // Get next frame ID
         let frame_id = self.get_next_frame_id();
