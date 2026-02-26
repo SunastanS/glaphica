@@ -291,6 +291,20 @@ impl AppCore {
         self.perf_log_enabled
     }
 
+    /// Get the total number of GC evicted batches.
+    pub fn gc_evicted_batches_total(&self) -> u64 {
+        self.gc_evicted_batches_total
+    }
+
+    /// Get the total number of GC evicted keys.
+    pub fn gc_evicted_keys_total(&self) -> u64 {
+        self.gc_evicted_keys_total
+    }
+
+    /// Check if merge is disabled for debugging.
+    pub fn disable_merge_for_debug(&self) -> bool {
+        self.disable_merge_for_debug
+    }
     /// Resize the surface.
     ///
     /// This is migrated to use the runtime command interface.

@@ -46,7 +46,7 @@ struct DocumentRenderDataResolver {
 
 impl RenderDataResolver for DocumentRenderDataResolver {
     fn document_size(&self) -> (u32, u32) {
-        let document = self.core.document()
+        let document = self.document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         (document.size_x(), document.size_y())
@@ -57,7 +57,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         image_handle: ImageHandle,
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
-        let document = self.core.document()
+        let document = self.document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let Some(image) = document.image(image_handle) else {
@@ -90,7 +90,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 } else {
                     tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
                 }
-                let tile_address = self.core.runtime().atlas_store().resolve(tile_key).unwrap_or_else(|| {
+                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
                     panic!(
                         "image tile key unresolved in debug address uniqueness check: image_handle={:?} tile=({}, {}) key={:?}",
                         image_handle,
@@ -134,7 +134,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             }
             ImageSource::BrushBuffer { stroke_session_id } => {
                 let brush_buffer_tile_keys =
-                    self.core.brush_buffer_tile_keys().read().unwrap_or_else(|_| {
+                    self.brush_buffer_tile_keys.read().unwrap_or_else(|_| {
                         panic!("brush buffer tile key registry read lock poisoned")
                     });
                 #[cfg(debug_assertions)]
@@ -172,7 +172,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                         } else {
                             tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
                         }
-                        let tile_address = self.core.brush_buffer_store().resolve(tile_key).unwrap_or_else(|| {
+                        let tile_address = self.brush_buffer_store.resolve(tile_key).unwrap_or_else(|| {
                             panic!(
                                 "brush buffer tile key unresolved in debug address uniqueness check: stroke_session_id={} tile=({}, {}) key={:?}",
                                 stroke_session_id,
@@ -213,7 +213,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         tile_coords: &[(u32, u32)],
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
-        let document = self.core.document()
+        let document = self.document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let Some(image) = document.image(image_handle) else {
@@ -252,7 +252,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 } else {
                     tile_coord_by_key.insert(tile_key, (*tile_x, *tile_y));
                 }
-                let tile_address = self.core.runtime().atlas_store().resolve(tile_key).unwrap_or_else(|| {
+                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
                     panic!(
                         "image tile key unresolved in debug address uniqueness check for coords: image_handle={:?} tile=({}, {}) key={:?}",
                         image_handle,
@@ -286,7 +286,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
     }
 
     fn resolve_tile_address(&self, tile_key: TileKey) -> Option<TileAddress> {
-        self.core.runtime().atlas_store().resolve(tile_key)
+        self.atlas_store.resolve(tile_key)
     }
 
     fn resolve_image_source_tile_address(
@@ -295,20 +295,20 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         tile_key: TileKey,
     ) -> Option<TileAddress> {
         match image_source {
-            ImageSource::LayerImage { .. } => self.core.runtime().atlas_store().resolve(tile_key),
-            ImageSource::BrushBuffer { .. } => self.core.brush_buffer_store().resolve(tile_key),
+            ImageSource::LayerImage { .. } => self.atlas_store.resolve(tile_key),
+            ImageSource::BrushBuffer { .. } => self.brush_buffer_store.resolve(tile_key),
         }
     }
 
     fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult> {
-        let document = self.core.document()
+        let document = self.document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         document.layer_dirty_since(layer_id, since_version)
     }
 
     fn layer_version(&self, layer_id: u64) -> Option<u64> {
-        let document = self.core.document()
+        let document = self.document
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         document.layer_version(layer_id)
@@ -622,7 +622,7 @@ impl GpuState {
             self.core.brush_buffer_tile_keys()
                 .write()
                 .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
-                .release_stroke_on_merge_failed(stroke_session_id, &self.core.brush_buffer_store());
+                .release_stroke_on_merge_failed(stroke_session_id, self.core.brush_buffer_store().as_ref());
             self.clear_preview_buffer_and_rebind(stroke_session_id);
             self.core.brush_execution_feedback_queue_mut()
                 .push_back(BrushExecutionMergeFeedback::MergeApplied { stroke_session_id });
@@ -956,8 +956,8 @@ impl GpuState {
         // Current direct implementation (to be removed after migration)
         self.core.runtime_mut().renderer_mut().drain_view_ops();
 
-        let frame_id = self.core.runtime().next_frame_id;
-        self.core.runtime().next_frame_id = self
+        let frame_id = *self.core.runtime_mut().next_frame_id_mut();
+        *self.core.runtime_mut().next_frame_id_mut() = self
             .next_frame_id
             .checked_add(1)
             .expect("frame id overflow");
@@ -1008,7 +1008,7 @@ impl GpuState {
                     .allocate_tiles(
                         allocate.stroke_session_id,
                         allocate.tiles.clone(),
-                        &self.core.brush_buffer_store(),
+                        self.core.brush_buffer_store().as_ref(),
                     )
                     .unwrap_or_else(|error| {
                         panic!(
@@ -1027,7 +1027,7 @@ impl GpuState {
                     .enqueue_brush_render_command(BrushRenderCommand::AllocateBufferTiles(allocate))
             }
             BrushRenderCommand::MergeBuffer(merge) => {
-                if self.core.disable_merge_for_debug {
+                if self.core.disable_merge_for_debug() {
                     self.core.brush_buffer_tile_keys()
                         .write()
                         .unwrap_or_else(|_| {
@@ -1035,7 +1035,7 @@ impl GpuState {
                         })
                         .release_stroke_on_merge_failed(
                             merge.stroke_session_id,
-                            &self.core.brush_buffer_store(),
+                            self.core.brush_buffer_store().as_ref(),
                         );
                     self.clear_preview_buffer_and_rebind(merge.stroke_session_id);
                     self.core.brush_execution_feedback_queue_mut().push_back(
@@ -1132,7 +1132,7 @@ impl GpuState {
             );
         }
 
-        let completion_notices = self.core.tile_merge_engine().poll_submission_results();
+        let completion_notices = self.core.tile_merge_engine_mut().poll_submission_results();
         if self.core.perf_log_enabled() && !completion_notices.is_empty() {
             eprintln!(
                 "[merge_bridge_perf] frame_id={} tile_engine_completion_notices={}",
@@ -1157,7 +1157,7 @@ impl GpuState {
                 .map_err(MergeBridgeError::Tiles)?;
         }
 
-        let business_results = self.core.tile_merge_engine().drain_business_results();
+        let business_results = self.core.tile_merge_engine_mut().drain_business_results();
         if self.core.perf_log_enabled() && !business_results.is_empty() {
             let finalize_count = business_results
                 .iter()
@@ -1436,7 +1436,7 @@ impl GpuState {
                         .unwrap_or_else(|_| {
                             panic!("brush buffer tile key registry write lock poisoned")
                         })
-                        .retain_stroke_tiles(*stroke_session_id, &self.core.brush_buffer_store());
+                        .retain_stroke_tiles(*stroke_session_id, self.core.brush_buffer_store().as_ref());
                     self.core.brush_execution_feedback_queue_mut().push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: *stroke_session_id,
@@ -1502,7 +1502,7 @@ impl GpuState {
                         })
                         .release_stroke_on_merge_failed(
                             *stroke_session_id,
-                            &self.core.brush_buffer_store(),
+                            self.core.brush_buffer_store().as_ref(),
                         );
                     self.core.brush_execution_feedback_queue_mut().push_back(
                         BrushExecutionMergeFeedback::MergeFailed {
@@ -1529,14 +1529,14 @@ impl GpuState {
 
     fn apply_gc_evicted_batch(&mut self, retain_id: u64, key_count: usize) {
         apply_gc_evicted_batch_state(
-            &mut self.gc_evicted_batches_total,
-            &mut self.gc_evicted_keys_total,
+            &mut self.core.gc_evicted_batches_total(),
+            &mut self.core.gc_evicted_keys_total(),
             retain_id,
             key_count,
         );
         eprintln!(
             "tiles gc evicted retain batch: retain_id={} key_count={} total_batches={} total_keys={}",
-            retain_id, key_count, self.gc_evicted_batches_total, self.gc_evicted_keys_total
+            retain_id, key_count, self.core.gc_evicted_batches_total(), self.core.gc_evicted_keys_total()
         );
     }
 }
