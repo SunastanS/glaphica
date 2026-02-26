@@ -563,11 +563,71 @@ sed -i 's/\bTILE_SIZE\b/TILE_IMAGE/g' \
 **验收结果**:
 - ✅ 全 workspace 编译通过
 - ✅ 0 个弃用警告（`cargo check --workspace 2>&1 | grep -c "deprecated"` = 0）
-- ✅ 0 个 TILE_SIZE 引用（`grep -rn "TILE_SIZE" crates/ --include="*.rs"` 仅剩 `BRUSH_BUFFER_TILE_SIZE`）
+- ✅ 0 个 `TILE_SIZE` 引用（`grep -rn "TILE_SIZE" crates/ --include="*.rs"` 仅剩 `BRUSH_BUFFER_TILE_SIZE`）
 
-**遗留警告**: 21 个 dead_code 警告（`tile_key_encoding.rs` 中未使用的重构草稿代码）
+**遗留警告**: 21 个 dead_code 警告（`tile_key_encoding.rs` 中的重构草稿代码）
 - 这些是 TileKey 编码方案的草稿实现
 - 等待正式采用 TileKey 编码方案后再清理或启用
+
+### 13.8 Phase 2: GpuState 拆分（进行中 2026-02-27）
+
+**执行时间**: 2026-02-27 开始
+
+**目标**: 将 `GpuState` 拆分为 `AppCore`（业务编排）和 `GpuRuntime`（资源执行）
+
+**当前状态**: Step 4A 完成（render 路径基础设施）
+
+#### 已完成步骤
+
+**Step 1-3: 创建骨架** ✅
+- 创建 `crates/glaphica/src/runtime/` 模块
+  - `protocol.rs`: `RuntimeCommand`/`RuntimeReceipt`/`RuntimeError` 枚举
+  - `mod.rs`: `GpuRuntime` 结构体和 `execute()` 方法
+- 创建 `crates/glaphica/src/app_core/` 模块
+  - `mod.rs`: `AppCore` 结构体和 `MergeStores` 类型
+- 实现 `MergeTileStore` trait for `MergeStores`
+
+**Step 4A: render 路径迁移** ✅
+- 扩展 `RuntimeError` 支持 `wgpu::SurfaceError`
+- AppCore 添加 `next_frame_id` 字段管理
+- 实现 `AppCore::render()` 使用 `RuntimeCommand::PresentFrame`
+- 保留 `GpuState::render()` 当前实现，添加 TODO 标记
+
+**设计要点**:
+1. **粗粒度命令**: `PresentFrame { frame_id }`
+2. **frame_id 管理**: AppCore（业务逻辑）
+3. **错误处理**: 完全保留原有 panic 逻辑
+4. **drain_view_ops**: 显式在 AppCore::render() 中调用
+
+**编译状态**:
+```bash
+cargo check --workspace
+# Finished ✓
+# 7 warnings (GpuRuntime 字段暂未使用 - 预期)
+```
+
+**测试状态**:
+```bash
+cargo test -p renderer --lib
+# 47 passed ✓
+```
+
+#### 下一步计划
+
+**Step 4B**: 迁移 `enqueue_brush_render_command()` 路径
+- 添加 `EnqueueBrushCommands` 命令实现
+- 实现 `AppCore::enqueue_brush_render_command()`
+- 委托 `GpuState::enqueue_brush_render_command()`
+
+**Step 4C**: 迁移 `resize()` 路径
+- 实现 `RuntimeCommand::Resize`
+- 实现 `AppCore::resize()`
+- 委托 `GpuState::resize()`
+
+**Step 5**: 完全委托
+- 修改 `GpuState` 构造函数创建 `AppCore`
+- 所有方法委托给 `AppCore`
+- 移除直接字段访问
 
 ---
 
