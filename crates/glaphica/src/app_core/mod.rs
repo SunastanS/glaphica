@@ -309,7 +309,7 @@ impl AppCore {
             .execute(RuntimeCommand::Resize {
                 width,
                 height,
-                view_transform: &self.view_transform,
+                view_transform: self.view_transform.clone(),
             })
             .unwrap_or_else(|err| panic!("resize command failed: {err:?}"));
     }
@@ -359,7 +359,7 @@ impl AppCore {
             BrushRenderCommand::BeginStroke(begin) => {
                 // GPU enqueue through runtime
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
                     .map_err(BrushRenderEnqueueError::from)?;
 
                 // Business logic: preview buffer management
@@ -404,7 +404,7 @@ impl AppCore {
 
                 // GPU enqueue through runtime
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
                     .map_err(BrushRenderEnqueueError::from)?;
 
                 Ok(())
@@ -436,7 +436,7 @@ impl AppCore {
 
                 // GPU enqueue through runtime
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
                     .map_err(BrushRenderEnqueueError::from)?;
 
                 Ok(())
@@ -445,7 +445,7 @@ impl AppCore {
             // Other commands: direct passthrough to runtime
             _ => {
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
                     .map_err(BrushRenderEnqueueError::from)?;
                 Ok(())
             }
