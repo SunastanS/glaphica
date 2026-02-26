@@ -630,10 +630,10 @@ impl GpuState {
         };
         let request =
             self.build_merge_plan_request_from_plan(stroke_session_id, tx_token, merge_plan);
-        let submission = self.core.tile_merge_engine()
+        let submission = self.core.tile_merge_engine_mut()
             .submit_merge_plan(request)
             .unwrap_or_else(|error| panic!("submit merge plan failed: {error:?}"));
-        self.core.runtime().renderer()
+        self.core.runtime_mut().renderer_mut()
             .enqueue_planned_merge(
                 submission.renderer_submit_payload.receipt,
                 submission.renderer_submit_payload.gpu_merge_ops,
@@ -1230,14 +1230,14 @@ impl GpuState {
     }
 
     pub fn pan_canvas(&mut self, delta_x: f32, delta_y: f32) {
-        self.core.view_transform()
+        self.core.view_transform_mut()
             .pan_by(delta_x, delta_y)
             .unwrap_or_else(|error| panic!("pan canvas failed: {error:?}"));
         push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
     }
 
     pub fn rotate_canvas(&mut self, delta_radians: f32) {
-        self.core.view_transform()
+        self.core.view_transform_mut()
             .rotate_by(delta_radians)
             .unwrap_or_else(|error| panic!("rotate canvas failed: {error:?}"));
         push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
@@ -1249,7 +1249,7 @@ impl GpuState {
         viewport_x: f32,
         viewport_y: f32,
     ) {
-        self.core.view_transform()
+        self.core.view_transform_mut()
             .zoom_about_point(zoom_factor, viewport_x, viewport_y)
             .unwrap_or_else(|error| panic!("zoom canvas failed: {error:?}"));
         push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
