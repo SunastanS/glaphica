@@ -632,3 +632,139 @@ cargo test -p renderer --lib
 ---
 
 本方案用于指导多轮实施，不要求单轮完成全部内容。每轮结束后应更新本文件对应阶段状态和剩余风险。
+
+---
+
+## 14. Phase 2 完成状态（已完成 2026-02-27）
+
+### 14.1 完成的工作
+
+**核心架构**:
+- ✅ AppCore + GpuRuntime 架构建立
+- ✅ RuntimeCommand 命令协议（无 lifetime，拥有数据）
+- ✅ 4 条主要路径迁移到命令接口
+  - render/present 路径
+  - resize 路径
+  - brush enqueue 路径（部分迁移）
+  - merge polling 路径
+
+**架构改进**:
+- ✅ 移除 RuntimeCommand 的 lifetime 参数（避免复杂度传播）
+- ✅ 添加 `GpuRuntime::drain_view_ops()` 减少分层泄漏
+- ✅ 错误转换添加 debug_assert 防护
+
+### 14.2 共享资源契约
+
+#### atlas_store (`Arc<TileAtlasStore>`)
+
+**双持有模式**:
+- **AppCore 持有**: 用于 tile 分配/释放（merge 业务逻辑）
+  - `tile_merge_engine.allocate()` - 分配 tile key
+  - `tile_merge_engine.release()` - 释放 tile key
+  - `tile_merge_engine.resolve()` - 查询 tile 地址
+
+- **GpuRuntime 持有**: 用于 GPU drain 操作
+  - `GpuRuntime::execute(DrainTileOps)` - GPU 端执行 tile 操作
+  - `TileAtlasStore::drain()` - 同步 CPU/GPU 状态
+
+**时序约束**:
+```
+1. AppCore: tile_merge_engine.allocate() 分配 key
+2. AppCore: submit merge plan
+3. GpuRuntime: execute(DrainTileOps) GPU 执行
+4. GpuRuntime: TileAtlasStore::drain() 同步状态
+5. AppCore: tile_merge_engine.finalize() 完成 merge
+```
+
+**注意事项**:
+- ❌ 禁止在 GPU drain 期间修改 atlas_store
+- ✅ 可以在 GPU drain 期间查询（只读访问）
+- ⚠️ tile 释放必须在 GPU drain 完成后进行
+
+#### brush_buffer_store (`Arc<GenericR32FloatTileAtlasStore>`)
+
+**双持有模式**:
+- **AppCore 持有**: 用于 merge 业务
+  - `brush_buffer_store.resolve()` - 查询 tile 地址
+  - `brush_buffer_store.allocate()` - 分配（较少使用）
+
+- **GpuRuntime 持有**: 用于 brush buffer 更新
+  - `Renderer::bind_brush_buffer_tiles()` - 绑定 tile
+  - `Renderer::enqueue_brush_render_command()` - enqueue GPU 命令
+
+**时序约束**:
+```
+1. AppCore: allocate_tiles() 分配 brush buffer tiles
+2. AppCore: bind_brush_buffer_tiles() 通过 runtime
+3. GpuRuntime: enqueue_brush_render_command() GPU enqueue
+4. AppCore: merge 完成后可释放
+```
+
+**注意事项**:
+- ✅ 主要为只读访问，冲突风险低
+- ⚠️ allocation 需要在 GPU enqueue 之前完成
+
+#### brush_buffer_tile_keys (`Arc<RwLock<BrushBufferTileRegistry>>`)
+
+**访问模式**:
+- **AppCore 独占写**: tile 分配、释放、retention 管理
+- **GpuRuntime 只读**: 通过 AppCore 间接访问
+
+**锁策略**:
+```rust
+// AppCore 写操作
+self.brush_buffer_tile_keys
+    .write().unwrap()
+    .allocate_tiles(...);
+
+// AppCore 读操作
+let bindings = self.brush_buffer_tile_keys
+    .read().unwrap()
+    .tile_bindings_for_stroke(...);
+```
+
+**注意事项**:
+- ⚠️ 避免长时间持有写锁（会阻塞 GPU 命令）
+- ✅ 读锁可以安全地跨命令持有
+
+### 14.3 技术债清单
+
+| 问题 | 优先级 | 状态 | 计划 |
+|------|--------|------|------|
+| AppCore panic → Result | 🔴 高 | 📝 待设计 | Phase 3 或单独 PR |
+| brush 错误转换 panic | 🟡 中 | ⚠️ 缓解 | 已添加 debug_assert |
+| GpuRuntime 分层泄漏 | 🟡 中 | ✅ 部分修复 | drain_view_ops 方法 |
+| 迁移清单表 | 🟡 低 | 📝 待办 | 见下方 |
+
+### 14.4 迁移状态清单
+
+| 路径 | 当前状态 | 目标状态 | 待删除代码 |
+|------|----------|----------|------------|
+| render/present | Hybrid | ✅ AppCore+Runtime | GpuState::render() 直接实现 |
+| resize | Hybrid | ✅ AppCore+Runtime | GpuState::resize() 直接实现 |
+| brush enqueue | Hybrid | ⚠️ AppCore+Runtime (部分) | GpuState::enqueue_brush_render_command() 业务逻辑 |
+| merge polling | Hybrid | ✅ AppCore+Runtime | GpuState::process_renderer_merge_completions() GPU 调用 |
+| GC eviction | Old | - | 保留在 GpuState（低优先级） |
+| canvas 操作 | Old | - | 保留在 GpuState（低优先级） |
+
+**状态说明**:
+- **Old**: 完全在 GpuState 直接实现
+- **Hybrid**: AppCore 有实现，GpuState 也有（过渡期）
+- **AppCore+Runtime**: 完成迁移，GpuState 仅 facade 委托
+
+### 14.5 下一步建议
+
+**Phase 3: 清理与收口** (建议下一步)
+1. 删除 `tiles/src/tile_key_encoding.rs` 未使用代码
+2. 统一对外入口
+3. 最终文档收口
+
+**备选**:
+- Phase 2 深度改进：AppCore 错误处理重构（需要设计讨论）
+- 直接进入 Phase 4：真通道接入（建议完成 Phase 3 后）
+
+---
+
+**Phase 2 状态**: ✅ 核心完成，遗留技术债已记录  
+**文档版本**: 2.0 (Phase 2 complete)  
+**最后更新**: 2026-02-27
