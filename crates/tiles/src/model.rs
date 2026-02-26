@@ -1,5 +1,10 @@
-use bitvec::prelude::{BitVec, Lsb0};
-use model::{ImageLayout, ImageLayoutError, TILE_STRIDE};
+// REFACTORING:
+// There are two kinds of search work
+// 1. The position of a tile in image layout -> TileKey
+// 2. TileKey -> the position of a tile in atlas backend
+// We move the relatively simple one (1) to crates/model/src/lib.rs
+use model::TILE_STRIDE;
+use std::ops::BitOr;
 
 // REFRACTORING:
 // - use meaningful TileKey
@@ -141,31 +146,5 @@ impl AtlasTier {
                 array_layers: Pow2U16::new(16),
             },
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TileDirtyBitSet {
-    layout: ImageLayout,
-    bits: BitVec<usize, Lsb0>,
-    dirty_count: usize,
-}
-
-impl TileDirtyBitSet {
-    pub fn new(layout: ImageLayout) -> Result<Self, ImageLayoutError> {
-        let bits = BitVec::repeat(false, layout.max_tiles() as usize);
-        Ok(TileDirtyBitSet {
-            layout,
-            bits,
-            dirty_count: 0,
-        })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.dirty_count == 0
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.dirty_count == self.bits.len()
     }
 }
