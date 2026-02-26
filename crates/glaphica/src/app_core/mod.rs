@@ -294,6 +294,9 @@ impl AppCore {
     /// Resize the surface.
     ///
     /// This is migrated to use the runtime command interface.
+    /// 
+    /// TODO(Phase 2 Method Migration): Change return type to Result<(), AppCoreError>
+    /// Currently returns () for backward compatibility with GpuState wrapper.
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         let width = new_size.width.max(1);
         let height = new_size.height.max(1);
@@ -305,6 +308,7 @@ impl AppCore {
         }
 
         // Execute resize command via runtime
+        // TODO: Propagate error instead of panicking
         self.runtime
             .execute(RuntimeCommand::Resize {
                 width,

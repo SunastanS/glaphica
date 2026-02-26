@@ -160,6 +160,10 @@ impl GpuRuntime {
         id
     }
 
+    /// Get a mutable reference to the next frame ID.
+    pub fn next_frame_id_mut(&mut self) -> &mut u64 {
+        &mut self.next_frame_id
+    }
     /// Get the current surface size.
     pub fn surface_size(&self) -> PhysicalSize<u32> {
         self.surface_size

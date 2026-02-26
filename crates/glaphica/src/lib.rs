@@ -46,8 +46,7 @@ struct DocumentRenderDataResolver {
 
 impl RenderDataResolver for DocumentRenderDataResolver {
     fn document_size(&self) -> (u32, u32) {
-        let document = self
-            .document
+        let document = self.core.document()
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         (document.size_x(), document.size_y())
@@ -58,8 +57,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         image_handle: ImageHandle,
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
-        let document = self
-            .document
+        let document = self.core.document()
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let Some(image) = document.image(image_handle) else {
@@ -92,7 +90,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 } else {
                     tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
                 }
-                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
+                let tile_address = self.core.runtime().atlas_store().resolve(tile_key).unwrap_or_else(|| {
                     panic!(
                         "image tile key unresolved in debug address uniqueness check: image_handle={:?} tile=({}, {}) key={:?}",
                         image_handle,
@@ -136,7 +134,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             }
             ImageSource::BrushBuffer { stroke_session_id } => {
                 let brush_buffer_tile_keys =
-                    self.brush_buffer_tile_keys.read().unwrap_or_else(|_| {
+                    self.core.brush_buffer_tile_keys().read().unwrap_or_else(|_| {
                         panic!("brush buffer tile key registry read lock poisoned")
                     });
                 #[cfg(debug_assertions)]
@@ -174,7 +172,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                         } else {
                             tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
                         }
-                        let tile_address = self.brush_buffer_store.resolve(tile_key).unwrap_or_else(|| {
+                        let tile_address = self.core.brush_buffer_store().resolve(tile_key).unwrap_or_else(|| {
                             panic!(
                                 "brush buffer tile key unresolved in debug address uniqueness check: stroke_session_id={} tile=({}, {}) key={:?}",
                                 stroke_session_id,
@@ -215,8 +213,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         tile_coords: &[(u32, u32)],
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
-        let document = self
-            .document
+        let document = self.core.document()
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let Some(image) = document.image(image_handle) else {
@@ -255,7 +252,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 } else {
                     tile_coord_by_key.insert(tile_key, (*tile_x, *tile_y));
                 }
-                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
+                let tile_address = self.core.runtime().atlas_store().resolve(tile_key).unwrap_or_else(|| {
                     panic!(
                         "image tile key unresolved in debug address uniqueness check for coords: image_handle={:?} tile=({}, {}) key={:?}",
                         image_handle,
@@ -289,7 +286,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
     }
 
     fn resolve_tile_address(&self, tile_key: TileKey) -> Option<TileAddress> {
-        self.atlas_store.resolve(tile_key)
+        self.core.runtime().atlas_store().resolve(tile_key)
     }
 
     fn resolve_image_source_tile_address(
@@ -298,22 +295,20 @@ impl RenderDataResolver for DocumentRenderDataResolver {
         tile_key: TileKey,
     ) -> Option<TileAddress> {
         match image_source {
-            ImageSource::LayerImage { .. } => self.atlas_store.resolve(tile_key),
-            ImageSource::BrushBuffer { .. } => self.brush_buffer_store.resolve(tile_key),
+            ImageSource::LayerImage { .. } => self.core.runtime().atlas_store().resolve(tile_key),
+            ImageSource::BrushBuffer { .. } => self.core.brush_buffer_store().resolve(tile_key),
         }
     }
 
     fn layer_dirty_since(&self, layer_id: u64, since_version: u64) -> Option<DirtySinceResult> {
-        let document = self
-            .document
+        let document = self.core.document()
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         document.layer_dirty_since(layer_id, since_version)
     }
 
     fn layer_version(&self, layer_id: u64) -> Option<u64> {
-        let document = self
-            .document
+        let document = self.core.document()
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         document.layer_version(layer_id)
@@ -354,24 +349,10 @@ impl MergeTileStore for MergeStores {
 
 /// GpuState - main GPU state holder.
 ///
-/// TODO(Phase 2): This will be split into AppCore + GpuRuntime.
-/// For now, we keep the existing structure to maintain compatibility.
+/// Phase 2.5: Delegates all business logic to AppCore.
+/// GpuState is now a thin facade over AppCore.
 pub struct GpuState {
-    renderer: Renderer,
-    view_sender: ViewOpSender,
-    atlas_store: Arc<TileAtlasStore>,
-    brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
-    tile_merge_engine: TileMergeEngine<MergeStores>,
-    document: Arc<RwLock<Document>>,
-    view_transform: ViewTransform,
-    surface_size: PhysicalSize<u32>,
-    next_frame_id: u64,
-    brush_execution_feedback_queue: VecDeque<BrushExecutionMergeFeedback>,
-    brush_buffer_tile_keys: Arc<RwLock<BrushBufferTileRegistry>>,
-    gc_evicted_batches_total: u64,
-    gc_evicted_keys_total: u64,
-    disable_merge_for_debug: bool,
-    perf_log_enabled: bool,
+    core: AppCore,
     #[cfg(debug_assertions)]
     last_bound_render_tree: Option<(u64, u64)>,
 }
@@ -536,8 +517,7 @@ impl GpuState {
         stroke_session_id: u64,
         layer_id: u64,
     ) -> Option<StrokeTileMergePlan> {
-        let document = self
-            .document
+        let document = self.core.document()
             .read()
             .unwrap_or_else(|_| panic!("document read lock poisoned"));
         let layer_image_handle = document
@@ -560,8 +540,7 @@ impl GpuState {
         let mut op_trace_id = 0u64;
         let mut seen_output_tiles = HashSet::new();
         let mut stroke_tile_by_key = HashMap::new();
-        let brush_buffer_tile_keys = self
-            .brush_buffer_tile_keys
+        let brush_buffer_tile_keys = self.core.brush_buffer_tile_keys()
             .read()
             .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"));
         brush_buffer_tile_keys.visit_tiles(stroke_session_id, |tile_coordinate, stroke_buffer_key| {
@@ -640,22 +619,21 @@ impl GpuState {
     ) {
         let Some(merge_plan) = self.build_stroke_tile_merge_plan(stroke_session_id, layer_id)
         else {
-            self.brush_buffer_tile_keys
+            self.core.brush_buffer_tile_keys()
                 .write()
                 .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
-                .release_stroke_on_merge_failed(stroke_session_id, &self.brush_buffer_store);
+                .release_stroke_on_merge_failed(stroke_session_id, &self.core.brush_buffer_store());
             self.clear_preview_buffer_and_rebind(stroke_session_id);
-            self.brush_execution_feedback_queue
+            self.core.brush_execution_feedback_queue_mut()
                 .push_back(BrushExecutionMergeFeedback::MergeApplied { stroke_session_id });
             return;
         };
         let request =
             self.build_merge_plan_request_from_plan(stroke_session_id, tx_token, merge_plan);
-        let submission = self
-            .tile_merge_engine
+        let submission = self.core.tile_merge_engine()
             .submit_merge_plan(request)
             .unwrap_or_else(|error| panic!("submit merge plan failed: {error:?}"));
-        self.renderer
+        self.core.runtime().renderer()
             .enqueue_planned_merge(
                 submission.renderer_submit_payload.receipt,
                 submission.renderer_submit_payload.gpu_merge_ops,
@@ -666,8 +644,7 @@ impl GpuState {
 
     fn set_preview_buffer_and_rebind(&mut self, layer_id: u64, stroke_session_id: u64) {
         let render_tree = {
-            let mut document = self
-                .document
+            let mut document = self.core.document()
                 .write()
                 .unwrap_or_else(|_| panic!("document write lock poisoned"));
             document
@@ -684,15 +661,14 @@ impl GpuState {
             document.render_tree_snapshot()
         };
         self.note_bound_render_tree("preview_set", &render_tree);
-        self.view_sender
+        self.core.runtime().view_sender()
             .send(RenderOp::BindRenderTree(render_tree))
             .expect("send updated render tree after preview set");
     }
 
     fn clear_preview_buffer_and_rebind(&mut self, stroke_session_id: u64) {
         let render_tree = {
-            let mut document = self
-                .document
+            let mut document = self.core.document()
                 .write()
                 .unwrap_or_else(|_| panic!("document write lock poisoned"));
             let _ = document.clear_active_preview_buffer(stroke_session_id);
@@ -702,7 +678,7 @@ impl GpuState {
             document.render_tree_snapshot()
         };
         self.note_bound_render_tree("preview_clear", &render_tree);
-        self.view_sender
+        self.core.runtime().view_sender()
             .send(RenderOp::BindRenderTree(render_tree))
             .expect("send updated render tree after preview clear");
     }
@@ -926,23 +902,31 @@ impl GpuState {
         view_sender
             .send(RenderOp::BindRenderTree(initial_snapshot))
             .expect("send initial render steps");
-        // Track invariants/logging for the initial snapshot as well.
-        let mut state = Self {
+        
+        // Create GpuRuntime with GPU resources
+        let runtime = crate::runtime::GpuRuntime::new(
             renderer,
             view_sender,
             atlas_store,
             brush_buffer_store,
-            tile_merge_engine,
+            size,
+            0, // next_frame_id
+        );
+        
+        // Create AppCore with runtime and business components
+        let core = AppCore::new(
             document,
-            view_transform,
-            surface_size: size,
-            next_frame_id: 0,
-            brush_execution_feedback_queue: VecDeque::new(),
+            tile_merge_engine,
             brush_buffer_tile_keys,
-            gc_evicted_batches_total: 0,
-            gc_evicted_keys_total: 0,
+            view_transform,
+            runtime,
             disable_merge_for_debug,
             perf_log_enabled,
+            0, // next_frame_id
+        );
+        
+        let mut state = Self {
+            core,
             #[cfg(debug_assertions)]
             last_bound_render_tree: None,
         };
@@ -955,13 +939,13 @@ impl GpuState {
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         let width = new_size.width.max(1);
         let height = new_size.height.max(1);
-        if self.surface_size.width == width && self.surface_size.height == height {
+        if self.core.runtime().surface_size().width == width && self.core.runtime().surface_size().height == height {
             return;
         }
 
-        self.surface_size = PhysicalSize::new(width, height);
-        self.renderer.resize(width, height);
-        push_view_state(&self.view_sender, &self.view_transform, self.surface_size);
+        self.core.runtime().surface_size() = PhysicalSize::new(width, height);
+        self.core.runtime_mut().renderer_mut().resize(width, height);
+        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -970,15 +954,15 @@ impl GpuState {
         // self.core.render()
         
         // Current direct implementation (to be removed after migration)
-        self.renderer.drain_view_ops();
+        self.core.runtime_mut().renderer_mut().drain_view_ops();
 
-        let frame_id = self.next_frame_id;
-        self.next_frame_id = self
+        let frame_id = self.core.runtime().next_frame_id;
+        self.core.runtime().next_frame_id = self
             .next_frame_id
             .checked_add(1)
             .expect("frame id overflow");
 
-        match self.renderer.present_frame(frame_id) {
+        match self.core.runtime_mut().renderer_mut().present_frame(frame_id) {
             Ok(()) => Ok(()),
             Err(PresentError::Surface(error)) => Err(error),
             Err(PresentError::TileDrain(error)) => {
@@ -988,20 +972,20 @@ impl GpuState {
     }
 
     pub fn set_brush_command_quota(&self, max_commands: u32) {
-        self.view_sender
+        self.core.runtime().view_sender()
             .send(RenderOp::SetBrushCommandQuota { max_commands })
             .expect("send brush command quota");
     }
 
     pub fn take_latest_gpu_timing_report(&mut self) -> Option<FrameGpuTimingReport> {
-        self.renderer.take_latest_gpu_timing_report()
+        self.core.runtime_mut().renderer_mut().take_latest_gpu_timing_report()
     }
 
     pub fn apply_brush_control_command(
         &mut self,
         command: BrushControlCommand,
     ) -> Result<BrushControlAck, BrushControlError> {
-        self.renderer.apply_brush_control_command(command)
+        self.core.runtime_mut().renderer_mut().apply_brush_control_command(command)
     }
 
     pub fn enqueue_brush_render_command(
@@ -1010,13 +994,13 @@ impl GpuState {
     ) -> Result<(), BrushRenderEnqueueError> {
         match command {
             BrushRenderCommand::BeginStroke(begin) => {
-                self.renderer
+                self.core.runtime().renderer()
                     .enqueue_brush_render_command(BrushRenderCommand::BeginStroke(begin))?;
                 self.set_preview_buffer_and_rebind(begin.target_layer_id, begin.stroke_session_id);
                 Ok(())
             }
             BrushRenderCommand::AllocateBufferTiles(allocate) => {
-                self.brush_buffer_tile_keys
+                self.core.brush_buffer_tile_keys()
                     .write()
                     .unwrap_or_else(|_| {
                         panic!("brush buffer tile key registry write lock poisoned")
@@ -1024,7 +1008,7 @@ impl GpuState {
                     .allocate_tiles(
                         allocate.stroke_session_id,
                         allocate.tiles.clone(),
-                        &self.brush_buffer_store,
+                        &self.core.brush_buffer_store(),
                     )
                     .unwrap_or_else(|error| {
                         panic!(
@@ -1032,30 +1016,29 @@ impl GpuState {
                             allocate.stroke_session_id
                         )
                     });
-                let tile_bindings = self
-                    .brush_buffer_tile_keys
+                let tile_bindings = self.core.brush_buffer_tile_keys()
                     .read()
                     .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"))
                     .tile_bindings_for_stroke(allocate.stroke_session_id);
-                self.renderer
+                self.core.runtime().renderer()
                     .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
                 self.drain_tile_gc_evictions();
-                self.renderer
+                self.core.runtime().renderer()
                     .enqueue_brush_render_command(BrushRenderCommand::AllocateBufferTiles(allocate))
             }
             BrushRenderCommand::MergeBuffer(merge) => {
-                if self.disable_merge_for_debug {
-                    self.brush_buffer_tile_keys
+                if self.core.disable_merge_for_debug {
+                    self.core.brush_buffer_tile_keys()
                         .write()
                         .unwrap_or_else(|_| {
                             panic!("brush buffer tile key registry write lock poisoned")
                         })
                         .release_stroke_on_merge_failed(
                             merge.stroke_session_id,
-                            &self.brush_buffer_store,
+                            &self.core.brush_buffer_store(),
                         );
                     self.clear_preview_buffer_and_rebind(merge.stroke_session_id);
-                    self.brush_execution_feedback_queue.push_back(
+                    self.core.brush_execution_feedback_queue_mut().push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: merge.stroke_session_id,
                         },
@@ -1067,25 +1050,24 @@ impl GpuState {
                         merge.target_layer_id,
                     );
                 }
-                self.renderer
+                self.core.runtime().renderer()
                     .enqueue_brush_render_command(BrushRenderCommand::MergeBuffer(merge))
             }
-            other => self.renderer.enqueue_brush_render_command(other),
+            other => self.core.runtime_mut().renderer_mut().enqueue_brush_render_command(other),
         }
     }
 
     pub fn pending_brush_dab_count(&self) -> u64 {
-        self.renderer.pending_brush_dab_count()
+        self.core.runtime().renderer().pending_brush_dab_count()
     }
 
     pub fn pending_brush_command_count(&self) -> u64 {
-        self.renderer.pending_brush_command_count()
+        self.core.runtime().renderer().pending_brush_command_count()
     }
 
     pub fn semantic_state_digest(&self) -> GpuSemanticStateDigest {
         let (document_revision, render_tree_revision, render_tree_semantic_hash) = {
-            let document = self
-                .document
+            let document = self.core.document()
                 .read()
                 .unwrap_or_else(|_| panic!("document read lock poisoned"));
             let document_revision = document.revision();
@@ -1102,13 +1084,13 @@ impl GpuState {
             document_revision,
             render_tree_revision,
             render_tree_semantic_hash,
-            pending_brush_command_count: self.renderer.pending_brush_command_count(),
-            has_pending_merge_work: self.tile_merge_engine.has_pending_work(),
+            pending_brush_command_count: self.core.runtime().renderer().pending_brush_command_count(),
+            has_pending_merge_work: self.core.tile_merge_engine().has_pending_work(),
         }
     }
 
     pub fn has_pending_merge_work(&self) -> bool {
-        self.tile_merge_engine.has_pending_work()
+        self.core.tile_merge_engine().has_pending_work()
     }
 
     pub fn process_renderer_merge_completions(
@@ -1116,15 +1098,13 @@ impl GpuState {
         frame_id: u64,
     ) -> Result<(), MergeBridgeError> {
         let perf_started = Instant::now();
-        let submission_report = self
-            .renderer
+        let submission_report = self.core.runtime().renderer()
             .submit_pending_merges(frame_id, u32::MAX)
             .map_err(MergeBridgeError::RendererSubmit)?;
-        let renderer_notices = self
-            .renderer
+        let renderer_notices = self.core.runtime().renderer()
             .poll_completion_notices(frame_id)
             .map_err(MergeBridgeError::RendererPoll)?;
-        if self.perf_log_enabled {
+        if self.core.perf_log_enabled() {
             eprintln!(
                 "[merge_bridge_perf] frame_id={} submitted_receipts={} renderer_submission_id={:?} renderer_notices={}",
                 frame_id,
@@ -1138,7 +1118,7 @@ impl GpuState {
         for renderer_notice in renderer_notices {
             let notice_id = notice_id_from_renderer(&renderer_notice);
             let notice_key = (notice_id, renderer_notice.receipt_id);
-            self.tile_merge_engine
+            self.core.tile_merge_engine()
                 .on_renderer_completion_signal(
                     renderer_notice.receipt_id,
                     renderer_notice.audit_meta,
@@ -1152,8 +1132,8 @@ impl GpuState {
             );
         }
 
-        let completion_notices = self.tile_merge_engine.poll_submission_results();
-        if self.perf_log_enabled && !completion_notices.is_empty() {
+        let completion_notices = self.core.tile_merge_engine().poll_submission_results();
+        if self.core.perf_log_enabled() && !completion_notices.is_empty() {
             eprintln!(
                 "[merge_bridge_perf] frame_id={} tile_engine_completion_notices={}",
                 frame_id,
@@ -1169,16 +1149,16 @@ impl GpuState {
                 },
             )?;
 
-            self.renderer
+            self.core.runtime().renderer()
                 .ack_merge_result(renderer_notice)
                 .map_err(MergeBridgeError::RendererAck)?;
-            self.tile_merge_engine
+            self.core.tile_merge_engine()
                 .ack_merge_result(notice.receipt_id, notice.notice_id)
                 .map_err(MergeBridgeError::Tiles)?;
         }
 
-        let business_results = self.tile_merge_engine.drain_business_results();
-        if self.perf_log_enabled && !business_results.is_empty() {
+        let business_results = self.core.tile_merge_engine().drain_business_results();
+        if self.core.perf_log_enabled() && !business_results.is_empty() {
             let finalize_count = business_results
                 .iter()
                 .filter(|result| matches!(result, TilesBusinessResult::CanFinalize { .. }))
@@ -1202,7 +1182,7 @@ impl GpuState {
         }
         self.apply_tiles_business_results(&business_results)?;
         self.drain_tile_gc_evictions();
-        if self.perf_log_enabled {
+        if self.core.perf_log_enabled() {
             eprintln!(
                 "[merge_bridge_perf] frame_id={} process_merge_completions_cpu_ms={:.3}",
                 frame_id,
@@ -1213,17 +1193,17 @@ impl GpuState {
     }
 
     pub fn drain_brush_execution_merge_feedbacks(&mut self) -> Vec<BrushExecutionMergeFeedback> {
-        self.brush_execution_feedback_queue.drain(..).collect()
+        self.core.brush_execution_feedback_queue_mut().drain(..).collect()
     }
 
     pub fn finalize_merge_receipt(
         &mut self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<(), MergeBridgeError> {
-        self.renderer
+        self.core.runtime().renderer()
             .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Finalized)
             .map_err(MergeBridgeError::RendererFinalize)?;
-        self.tile_merge_engine
+        self.core.tile_merge_engine()
             .finalize_receipt(receipt_id)
             .map_err(MergeBridgeError::Tiles)
     }
@@ -1232,10 +1212,10 @@ impl GpuState {
         &mut self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<(), MergeBridgeError> {
-        self.renderer
+        self.core.runtime().renderer()
             .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Aborted)
             .map_err(MergeBridgeError::RendererFinalize)?;
-        self.tile_merge_engine
+        self.core.tile_merge_engine()
             .abort_receipt(receipt_id)
             .map_err(MergeBridgeError::Tiles)
     }
@@ -1244,23 +1224,23 @@ impl GpuState {
         &self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<MergeAuditRecord, MergeBridgeError> {
-        self.tile_merge_engine
+        self.core.tile_merge_engine()
             .query_merge_audit_record(receipt_id)
             .map_err(MergeBridgeError::Tiles)
     }
 
     pub fn pan_canvas(&mut self, delta_x: f32, delta_y: f32) {
-        self.view_transform
+        self.core.view_transform()
             .pan_by(delta_x, delta_y)
             .unwrap_or_else(|error| panic!("pan canvas failed: {error:?}"));
-        push_view_state(&self.view_sender, &self.view_transform, self.surface_size);
+        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
     }
 
     pub fn rotate_canvas(&mut self, delta_radians: f32) {
-        self.view_transform
+        self.core.view_transform()
             .rotate_by(delta_radians)
             .unwrap_or_else(|error| panic!("rotate canvas failed: {error:?}"));
-        push_view_state(&self.view_sender, &self.view_transform, self.surface_size);
+        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
     }
 
     pub fn zoom_canvas_about_viewport_point(
@@ -1269,14 +1249,14 @@ impl GpuState {
         viewport_x: f32,
         viewport_y: f32,
     ) {
-        self.view_transform
+        self.core.view_transform()
             .zoom_about_point(zoom_factor, viewport_x, viewport_y)
             .unwrap_or_else(|error| panic!("zoom canvas failed: {error:?}"));
-        push_view_state(&self.view_sender, &self.view_transform, self.surface_size);
+        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
     }
 
     pub fn screen_to_canvas_point(&self, screen_x: f32, screen_y: f32) -> (f32, f32) {
-        self.view_transform
+        self.core.view_transform()
             .screen_to_canvas_point(screen_x, screen_y)
             .unwrap_or_else(|error| panic!("screen to canvas conversion failed: {error:?}"))
     }
@@ -1341,13 +1321,12 @@ impl GpuState {
                             dirty_tiles.len(),
                         );
                     }
-                    let atlas_store = Arc::clone(&self.atlas_store);
+                    let atlas_store = Arc::clone(&self.core.runtime().atlas_store());
                     let document_apply_result: Result<
                         Option<RenderTreeSnapshot>,
                         MergeBridgeError,
                     > = (|| {
-                        let mut document = self
-                            .document
+                        let mut document = self.core.document()
                             .write()
                             .unwrap_or_else(|_| panic!("document write lock poisoned"));
                         let expected_revision = document.revision();
@@ -1418,7 +1397,7 @@ impl GpuState {
                     let render_tree = match document_apply_result {
                         Ok(render_tree) => render_tree,
                         Err(error) => {
-                            self.brush_execution_feedback_queue.push_back(
+                            self.core.brush_execution_feedback_queue_mut().push_back(
                                 BrushExecutionMergeFeedback::MergeFailed {
                                     stroke_session_id: *stroke_session_id,
                                     message: format!("document merge apply failed: {error:?}"),
@@ -1429,11 +1408,11 @@ impl GpuState {
                     };
                     if let Some(render_tree) = render_tree {
                         self.note_bound_render_tree("merge_apply", &render_tree);
-                        self.view_sender
+                        self.core.runtime().view_sender()
                             .send(RenderOp::BindRenderTree(render_tree))
                             .expect("send updated render tree after merge");
                     }
-                    if self.perf_log_enabled {
+                    if self.core.perf_log_enabled() {
                         eprintln!(
                             "[merge_bridge_perf] merge_finalize receipt_id={} stroke_session_id={} layer_id={} dirty_tiles={} cpu_apply_ms={:.3}",
                             receipt_id.0,
@@ -1444,7 +1423,7 @@ impl GpuState {
                         );
                     }
                     if let Err(error) = self.finalize_merge_receipt(*receipt_id) {
-                        self.brush_execution_feedback_queue.push_back(
+                        self.core.brush_execution_feedback_queue_mut().push_back(
                             BrushExecutionMergeFeedback::MergeFailed {
                                 stroke_session_id: *stroke_session_id,
                                 message: format!("finalize merge receipt failed: {error:?}"),
@@ -1452,13 +1431,13 @@ impl GpuState {
                         );
                         return Err(error);
                     }
-                    self.brush_buffer_tile_keys
+                    self.core.brush_buffer_tile_keys()
                         .write()
                         .unwrap_or_else(|_| {
                             panic!("brush buffer tile key registry write lock poisoned")
                         })
-                        .retain_stroke_tiles(*stroke_session_id, &self.brush_buffer_store);
-                    self.brush_execution_feedback_queue.push_back(
+                        .retain_stroke_tiles(*stroke_session_id, &self.core.brush_buffer_store());
+                    self.core.brush_execution_feedback_queue_mut().push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: *stroke_session_id,
                         },
@@ -1475,8 +1454,7 @@ impl GpuState {
                         Option<RenderTreeSnapshot>,
                         MergeBridgeError,
                     > = (|| {
-                        let mut document = self
-                            .document
+                        let mut document = self.core.document()
                             .write()
                             .unwrap_or_else(|_| panic!("document write lock poisoned"));
                         if document.has_active_merge(*layer_id, *stroke_session_id) {
@@ -1493,7 +1471,7 @@ impl GpuState {
                     let render_tree = match document_abort_result {
                         Ok(render_tree) => render_tree,
                         Err(error) => {
-                            self.brush_execution_feedback_queue.push_back(
+                            self.core.brush_execution_feedback_queue_mut().push_back(
                                 BrushExecutionMergeFeedback::MergeFailed {
                                     stroke_session_id: *stroke_session_id,
                                     message: format!("document merge abort failed: {error:?}"),
@@ -1504,12 +1482,12 @@ impl GpuState {
                     };
                     if let Some(render_tree) = render_tree {
                         self.note_bound_render_tree("merge_abort", &render_tree);
-                        self.view_sender
+                        self.core.runtime().view_sender()
                             .send(RenderOp::BindRenderTree(render_tree))
                             .expect("send updated render tree after merge abort");
                     }
                     if let Err(error) = self.abort_merge_receipt(*receipt_id) {
-                        self.brush_execution_feedback_queue.push_back(
+                        self.core.brush_execution_feedback_queue_mut().push_back(
                             BrushExecutionMergeFeedback::MergeFailed {
                                 stroke_session_id: *stroke_session_id,
                                 message: format!("abort merge receipt failed: {error:?}"),
@@ -1517,16 +1495,16 @@ impl GpuState {
                         );
                         return Err(error);
                     }
-                    self.brush_buffer_tile_keys
+                    self.core.brush_buffer_tile_keys()
                         .write()
                         .unwrap_or_else(|_| {
                             panic!("brush buffer tile key registry write lock poisoned")
                         })
                         .release_stroke_on_merge_failed(
                             *stroke_session_id,
-                            &self.brush_buffer_store,
+                            &self.core.brush_buffer_store(),
                         );
-                    self.brush_execution_feedback_queue.push_back(
+                    self.core.brush_execution_feedback_queue_mut().push_back(
                         BrushExecutionMergeFeedback::MergeFailed {
                             stroke_session_id: *stroke_session_id,
                             message: format!("merge requires abort: {message}"),
@@ -1539,9 +1517,9 @@ impl GpuState {
     }
 
     fn drain_tile_gc_evictions(&mut self) {
-        let evicted_batches = self.brush_buffer_store.drain_evicted_retain_batches();
+        let evicted_batches = self.core.brush_buffer_store().drain_evicted_retain_batches();
         for evicted_batch in evicted_batches {
-            self.brush_buffer_tile_keys
+            self.core.brush_buffer_tile_keys()
                 .write()
                 .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
                 .apply_retained_eviction(evicted_batch.retain_id, &evicted_batch.keys);
