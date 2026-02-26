@@ -169,6 +169,10 @@ impl GpuRuntime {
         self.surface_size
     }
 
+    /// Set the surface size.
+    pub fn set_surface_size(&mut self, size: PhysicalSize<u32>) {
+        self.surface_size = size;
+    }
     /// Get the view sender.
     pub fn view_sender(&self) -> &ViewOpSender {
         &self.view_sender

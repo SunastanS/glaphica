@@ -869,7 +869,7 @@ impl GpuState {
             brush_buffer_tile_keys: Arc::clone(&brush_buffer_tile_keys),
         });
 
-        let tile_merge_engine = TileMergeEngine::new(MergeStores {
+        let tile_merge_engine = TileMergeEngine::new(crate::app_core::MergeStores {
             layer_store: Arc::clone(&atlas_store),
             stroke_store: Arc::clone(&brush_buffer_store),
         });
@@ -943,7 +943,7 @@ impl GpuState {
             return;
         }
 
-        self.core.runtime().surface_size() = PhysicalSize::new(width, height);
+        self.core.runtime_mut().set_surface_size(PhysicalSize::new(width, height));
         self.core.runtime_mut().renderer_mut().resize(width, height);
         push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
     }
@@ -957,8 +957,8 @@ impl GpuState {
         self.core.runtime_mut().renderer_mut().drain_view_ops();
 
         let frame_id = *self.core.runtime_mut().next_frame_id_mut();
-        *self.core.runtime_mut().next_frame_id_mut() = self
-            .next_frame_id
+        let current_frame_id = *self.core.runtime_mut().next_frame_id_mut();
+        *self.core.runtime_mut().next_frame_id_mut() = current_frame_id
             .checked_add(1)
             .expect("frame id overflow");
 
@@ -994,7 +994,7 @@ impl GpuState {
     ) -> Result<(), BrushRenderEnqueueError> {
         match command {
             BrushRenderCommand::BeginStroke(begin) => {
-                self.core.runtime().renderer()
+                self.core.runtime_mut().renderer_mut()
                     .enqueue_brush_render_command(BrushRenderCommand::BeginStroke(begin))?;
                 self.set_preview_buffer_and_rebind(begin.target_layer_id, begin.stroke_session_id);
                 Ok(())
@@ -1020,10 +1020,10 @@ impl GpuState {
                     .read()
                     .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"))
                     .tile_bindings_for_stroke(allocate.stroke_session_id);
-                self.core.runtime().renderer()
+                self.core.runtime_mut().renderer_mut()
                     .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
                 self.drain_tile_gc_evictions();
-                self.core.runtime().renderer()
+                self.core.runtime_mut().renderer_mut()
                     .enqueue_brush_render_command(BrushRenderCommand::AllocateBufferTiles(allocate))
             }
             BrushRenderCommand::MergeBuffer(merge) => {
@@ -1050,7 +1050,7 @@ impl GpuState {
                         merge.target_layer_id,
                     );
                 }
-                self.core.runtime().renderer()
+                self.core.runtime_mut().renderer_mut()
                     .enqueue_brush_render_command(BrushRenderCommand::MergeBuffer(merge))
             }
             other => self.core.runtime_mut().renderer_mut().enqueue_brush_render_command(other),
@@ -1098,10 +1098,10 @@ impl GpuState {
         frame_id: u64,
     ) -> Result<(), MergeBridgeError> {
         let perf_started = Instant::now();
-        let submission_report = self.core.runtime().renderer()
+        let submission_report = self.core.runtime_mut().renderer_mut()
             .submit_pending_merges(frame_id, u32::MAX)
             .map_err(MergeBridgeError::RendererSubmit)?;
-        let renderer_notices = self.core.runtime().renderer()
+        let renderer_notices = self.core.runtime_mut().renderer_mut()
             .poll_completion_notices(frame_id)
             .map_err(MergeBridgeError::RendererPoll)?;
         if self.core.perf_log_enabled() {
@@ -1118,7 +1118,7 @@ impl GpuState {
         for renderer_notice in renderer_notices {
             let notice_id = notice_id_from_renderer(&renderer_notice);
             let notice_key = (notice_id, renderer_notice.receipt_id);
-            self.core.tile_merge_engine()
+            self.core.tile_merge_engine_mut()
                 .on_renderer_completion_signal(
                     renderer_notice.receipt_id,
                     renderer_notice.audit_meta,
@@ -1149,10 +1149,10 @@ impl GpuState {
                 },
             )?;
 
-            self.core.runtime().renderer()
+            self.core.runtime_mut().renderer_mut()
                 .ack_merge_result(renderer_notice)
                 .map_err(MergeBridgeError::RendererAck)?;
-            self.core.tile_merge_engine()
+            self.core.tile_merge_engine_mut()
                 .ack_merge_result(notice.receipt_id, notice.notice_id)
                 .map_err(MergeBridgeError::Tiles)?;
         }
@@ -1200,10 +1200,10 @@ impl GpuState {
         &mut self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<(), MergeBridgeError> {
-        self.core.runtime().renderer()
+        self.core.runtime_mut().renderer_mut()
             .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Finalized)
             .map_err(MergeBridgeError::RendererFinalize)?;
-        self.core.tile_merge_engine()
+        self.core.tile_merge_engine_mut()
             .finalize_receipt(receipt_id)
             .map_err(MergeBridgeError::Tiles)
     }
@@ -1212,10 +1212,10 @@ impl GpuState {
         &mut self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<(), MergeBridgeError> {
-        self.core.runtime().renderer()
+        self.core.runtime_mut().renderer_mut()
             .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Aborted)
             .map_err(MergeBridgeError::RendererFinalize)?;
-        self.core.tile_merge_engine()
+        self.core.tile_merge_engine_mut()
             .abort_receipt(receipt_id)
             .map_err(MergeBridgeError::Tiles)
     }
