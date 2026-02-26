@@ -586,13 +586,15 @@ pub enum AppCoreError {
     /// Unexpected receipt type for command.
     UnexpectedReceipt {
         command: &'static str,
-        received_receipt: &'static str,
+        receipt_type: &'static str,
+        /// Optional receipt debug payload (use format!("{:?}", receipt) at call site)
+        receipt_debug: String,
     },
 
     /// Unexpected error variant in error conversion.
     UnexpectedErrorVariant {
         context: &'static str,
-        error: String,
+        error: RuntimeError,
     },
 
     /// Tile allocation failed due to logic error (not resource exhaustion).
@@ -640,11 +642,11 @@ pub enum AppCoreError {
 impl std::fmt::Display for AppCoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AppCoreError::UnexpectedReceipt { command, received_receipt } => {
-                write!(f, "unexpected receipt '{}' for command '{}'", received_receipt, command)
+            AppCoreError::UnexpectedReceipt { command, receipt_type, receipt_debug } => {
+                write!(f, "unexpected receipt '{}' for command '{}': {}", receipt_type, command, receipt_debug)
             }
             AppCoreError::UnexpectedErrorVariant { context, error } => {
-                write!(f, "unexpected error variant in {}: {}", context, error)
+                write!(f, "unexpected error variant in {}: {:?}", context, error)
             }
             AppCoreError::TileAllocationLogicError { stroke_session_id, reason } => {
                 write!(f, "tile allocation logic error for stroke {}: {}", stroke_session_id, reason)
