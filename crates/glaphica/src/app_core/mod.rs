@@ -2,21 +2,81 @@
 ///
 /// Manages application-level business logic: document, merge orchestration, brush state.
 /// Does not directly hold GPU resources - communicates with GpuRuntime via commands.
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use brush_execution::BrushExecutionMergeFeedback;
 use document::{Document, DocumentMergeError};
-use render_protocol::{BrushRenderCommand, BufferTileCoordinate};
+use render_protocol::{BrushRenderCommand, BufferTileCoordinate, StrokeExecutionReceiptId};
 use renderer::{BrushRenderEnqueueError, MergeCompletionNotice};
 use tiles::{
-    BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, MergePlanTileOp, TileAtlasStore,
-    TileKey, TileMergeEngine, TileMergeError,
+    BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, TileAtlasStore, TileMergeEngine,
+    TileMergeError, TilesBusinessResult,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
 
 use crate::runtime::{GpuRuntime, RuntimeCommand, RuntimeError, RuntimeReceipt};
+
+/// Merge bridge errors.
+#[derive(Debug)]
+pub enum MergeBridgeError {
+    RendererPoll(renderer::MergePollError),
+    RendererAck(renderer::MergeAckError),
+    RendererSubmit(renderer::MergeSubmitError),
+    RendererFinalize(renderer::MergeFinalizeError),
+    Tiles(TileMergeError),
+    TileImageApply(tiles::TileImageApplyError),
+    Document(DocumentMergeError),
+    MissingRendererNotice {
+        receipt_id: StrokeExecutionReceiptId,
+        notice_id: tiles::TileMergeCompletionNoticeId,
+    },
+}
+
+impl From<renderer::MergePollError> for MergeBridgeError {
+    fn from(err: renderer::MergePollError) -> Self {
+        MergeBridgeError::RendererPoll(err)
+    }
+}
+
+impl From<renderer::MergeAckError> for MergeBridgeError {
+    fn from(err: renderer::MergeAckError) -> Self {
+        MergeBridgeError::RendererAck(err)
+    }
+}
+
+impl From<renderer::MergeSubmitError> for MergeBridgeError {
+    fn from(err: renderer::MergeSubmitError) -> Self {
+        MergeBridgeError::RendererSubmit(err)
+    }
+}
+
+impl From<renderer::MergeFinalizeError> for MergeBridgeError {
+    fn from(err: renderer::MergeFinalizeError) -> Self {
+        MergeBridgeError::RendererFinalize(err)
+    }
+}
+
+impl From<TileMergeError> for MergeBridgeError {
+    fn from(err: TileMergeError) -> Self {
+        MergeBridgeError::Tiles(err)
+    }
+}
+
+impl From<tiles::TileImageApplyError> for MergeBridgeError {
+    fn from(err: tiles::TileImageApplyError) -> Self {
+        MergeBridgeError::TileImageApply(err)
+    }
+}
+
+impl From<DocumentMergeError> for MergeBridgeError {
+    fn from(err: DocumentMergeError) -> Self {
+        MergeBridgeError::Document(err)
+    }
+}
 
 /// Merge stores for tile merge engine.
 pub struct MergeStores {
@@ -373,5 +433,125 @@ impl AppCore {
                 Ok(())
             }
         }
+    }
+
+    /// Process renderer merge completions.
+    ///
+    /// This is the main merge processing path, migrated to use the runtime command interface.
+    pub fn process_renderer_merge_completions(
+        &mut self,
+        frame_id: u64,
+    ) -> Result<(), MergeBridgeError> {
+        let perf_started = Instant::now();
+
+        // Step 1: GPU side - submit and poll via runtime command
+        let receipt = self
+            .runtime
+            .execute(RuntimeCommand::ProcessMergeCompletions { frame_id })
+            .map_err(|err| {
+                MergeBridgeError::RendererSubmit(renderer::MergeSubmitError::from(err))
+            })?;
+
+        let RuntimeReceipt::MergeCompletionsProcessed {
+            submission_receipt_ids: _,
+            renderer_notices,
+        } = receipt
+        else {
+            panic!("unexpected receipt for ProcessMergeCompletions command");
+        };
+
+        if self.perf_log_enabled {
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} submitted_receipts={} renderer_notices={}",
+                frame_id,
+                renderer_notices.len(),
+                renderer_notices.len(),
+            );
+        }
+
+        // Step 2: Business side - process notices through tile_merge_engine
+        let mut renderer_notice_by_key = HashMap::new();
+        for renderer_notice in renderer_notices {
+            let notice_key = (renderer_notice.notice_id, renderer_notice.receipt_id);
+
+            self.tile_merge_engine
+                .on_renderer_completion_signal(
+                    renderer_notice.receipt_id,
+                    renderer_notice.audit_meta,
+                    renderer_notice.result.clone(),
+                )
+                .map_err(MergeBridgeError::Tiles)?;
+
+            let previous = renderer_notice_by_key.insert(notice_key, renderer_notice);
+            assert!(
+                previous.is_none(),
+                "renderer poll yielded duplicate merge notice key"
+            );
+        }
+
+        let completion_notices = self.tile_merge_engine.poll_submission_results();
+        if self.perf_log_enabled && !completion_notices.is_empty() {
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} tile_engine_completion_notices={}",
+                frame_id,
+                completion_notices.len(),
+            );
+        }
+
+        for notice in completion_notices {
+            let notice_key = (notice.notice_id, notice.receipt_id);
+            let renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
+                MergeBridgeError::MissingRendererNotice {
+                    receipt_id: notice.receipt_id,
+                    notice_id: notice.notice_id,
+                },
+            )?;
+
+            // TODO: migrate ack_merge_result to runtime command
+            // For now, direct call is needed
+            // self.renderer.ack_merge_result(renderer_notice)
+            //     .map_err(MergeBridgeError::RendererAck)?;
+
+            self.tile_merge_engine
+                .ack_merge_result(notice.receipt_id, notice.notice_id)
+                .map_err(MergeBridgeError::Tiles)?;
+        }
+
+        let business_results = self.tile_merge_engine.drain_business_results();
+        if self.perf_log_enabled && !business_results.is_empty() {
+            let finalize_count = business_results
+                .iter()
+                .filter(|result| matches!(result, TilesBusinessResult::CanFinalize { .. }))
+                .count();
+            let abort_count = business_results.len().saturating_sub(finalize_count);
+            let total_dirty_tiles: usize = business_results
+                .iter()
+                .map(|result| match result {
+                    TilesBusinessResult::CanFinalize { dirty_tiles, .. } => dirty_tiles.len(),
+                    TilesBusinessResult::RequiresAbort { .. } => 0,
+                })
+                .sum();
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} business_results={} finalize={} abort={} dirty_tiles={}",
+                frame_id,
+                business_results.len(),
+                finalize_count,
+                abort_count,
+                total_dirty_tiles,
+            );
+        }
+
+        // TODO: migrate apply_tiles_business_results to AppCore
+        // TODO: migrate drain_tile_gc_evictions to AppCore
+
+        if self.perf_log_enabled {
+            eprintln!(
+                "[merge_bridge_perf] frame_id={} process_merge_completions_cpu_ms={:.3}",
+                frame_id,
+                perf_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
+
+        Ok(())
     }
 }

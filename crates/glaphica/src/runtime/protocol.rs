@@ -2,8 +2,12 @@
 ///
 /// Defines the command/receipt interface between AppCore and GpuRuntime.
 /// Commands are coarse-grained: one command per major operation.
-use render_protocol::{BrushRenderCommand, RenderTreeSnapshot};
-use renderer::{BrushRenderEnqueueError, MergeCompletionNotice};
+use render_protocol::{
+    BrushRenderCommand, MergeAuditMeta, MergeExecutionResult, RenderTreeSnapshot,
+    StrokeExecutionReceiptId,
+};
+use renderer::MergeCompletionNotice;
+use tiles::TileMergeCompletionNoticeId;
 use view::ViewTransform;
 
 /// Coarse-grained commands from AppCore to GpuRuntime.
@@ -33,6 +37,9 @@ pub enum RuntimeCommand<'a> {
 
     /// Poll merge completion notices from renderer.
     PollMergeNotices { frame_id: u64 },
+
+    /// Process merge completions (coarse-grained: submit + poll + initial processing).
+    ProcessMergeCompletions { frame_id: u64 },
 }
 
 /// Receipts returned by GpuRuntime after executing commands.
@@ -55,6 +62,21 @@ pub enum RuntimeReceipt {
 
     /// Merge notices polled.
     MergeNotices { notices: Vec<MergeCompletionNotice> },
+
+    /// Merge completions processed (GPU side).
+    MergeCompletionsProcessed {
+        submission_receipt_ids: Vec<StrokeExecutionReceiptId>,
+        renderer_notices: Vec<RendererNotice>,
+    },
+}
+
+/// Renderer notice for merge completion processing.
+#[derive(Debug, Clone)]
+pub struct RendererNotice {
+    pub receipt_id: StrokeExecutionReceiptId,
+    pub audit_meta: MergeAuditMeta,
+    pub result: MergeExecutionResult,
+    pub notice_id: TileMergeCompletionNoticeId,
 }
 
 /// Runtime errors.
@@ -71,6 +93,12 @@ pub enum RuntimeError {
 
     /// Brush enqueue failed.
     BrushEnqueueError(renderer::BrushRenderEnqueueError),
+
+    /// Merge submit failed.
+    MergeSubmit(renderer::MergeSubmitError),
+
+    /// Merge poll failed.
+    MergePoll(renderer::MergePollError),
 }
 
 impl From<renderer::PresentError> for RuntimeError {
@@ -91,11 +119,41 @@ impl From<renderer::BrushRenderEnqueueError> for RuntimeError {
     }
 }
 
-impl From<RuntimeError> for BrushRenderEnqueueError {
+impl From<renderer::MergeSubmitError> for RuntimeError {
+    fn from(err: renderer::MergeSubmitError) -> Self {
+        RuntimeError::MergeSubmit(err)
+    }
+}
+
+impl From<renderer::MergePollError> for RuntimeError {
+    fn from(err: renderer::MergePollError) -> Self {
+        RuntimeError::MergePoll(err)
+    }
+}
+
+impl From<RuntimeError> for renderer::BrushRenderEnqueueError {
     fn from(err: RuntimeError) -> Self {
         match err {
             RuntimeError::BrushEnqueueError(e) => e,
             other => panic!("unexpected runtime error in brush enqueue: {other:?}"),
+        }
+    }
+}
+
+impl From<RuntimeError> for renderer::MergeSubmitError {
+    fn from(err: RuntimeError) -> Self {
+        match err {
+            RuntimeError::MergeSubmit(e) => e,
+            other => panic!("unexpected runtime error in merge submit: {other:?}"),
+        }
+    }
+}
+
+impl From<RuntimeError> for renderer::MergePollError {
+    fn from(err: RuntimeError) -> Self {
+        match err {
+            RuntimeError::MergePoll(e) => e,
+            other => panic!("unexpected runtime error in merge poll: {other:?}"),
         }
     }
 }

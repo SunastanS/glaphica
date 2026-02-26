@@ -1660,7 +1660,7 @@ pub(crate) fn push_view_state(
         .expect("send view transform");
 }
 
-fn notice_id_from_renderer(notice: &MergeCompletionNotice) -> TileMergeCompletionNoticeId {
+pub(crate) fn notice_id_from_renderer(notice: &MergeCompletionNotice) -> TileMergeCompletionNoticeId {
     TileMergeCompletionNoticeId {
         renderer_submission_id: notice.audit_meta.renderer_submission_id,
         frame_id: notice.audit_meta.frame_id,

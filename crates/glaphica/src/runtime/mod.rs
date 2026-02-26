@@ -120,6 +120,38 @@ impl GpuRuntime {
                     notices: Vec::new(),
                 })
             }
+
+            RuntimeCommand::ProcessMergeCompletions { frame_id } => {
+                // GPU side: submit pending merges and poll completion notices
+                let submission_report = self
+                    .renderer
+                    .submit_pending_merges(frame_id, u32::MAX)
+                    .map_err(RuntimeError::from)?;
+
+                let renderer_notices = self
+                    .renderer
+                    .poll_completion_notices(frame_id)
+                    .map_err(RuntimeError::from)?;
+
+                // Convert to protocol types
+                let protocol_notices: Vec<protocol::RendererNotice> = renderer_notices
+                    .into_iter()
+                    .map(|notice| {
+                        let notice_id = crate::notice_id_from_renderer(&notice);
+                        protocol::RendererNotice {
+                            receipt_id: notice.receipt_id,
+                            audit_meta: notice.audit_meta,
+                            result: notice.result,
+                            notice_id,
+                        }
+                    })
+                    .collect();
+
+                Ok(RuntimeReceipt::MergeCompletionsProcessed {
+                    submission_receipt_ids: submission_report.receipt_ids,
+                    renderer_notices: protocol_notices,
+                })
+            }
         }
     }
 
