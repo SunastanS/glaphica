@@ -108,6 +108,12 @@ impl GpuRuntime {
                 Ok(RuntimeReceipt::BrushCommandsEnqueued { dab_count })
             }
 
+            RuntimeCommand::EnqueueBrushCommand { command } => {
+                self.renderer
+                    .enqueue_brush_render_command(command.clone())?;
+                Ok(RuntimeReceipt::BrushCommandEnqueued)
+            }
+
             RuntimeCommand::PollMergeNotices { frame_id: _ } => {
                 // TODO: Implement merge polling when migrating merge logic
                 Ok(RuntimeReceipt::MergeNotices {
@@ -151,5 +157,15 @@ impl GpuRuntime {
     /// Get the brush buffer store.
     pub fn brush_buffer_store(&self) -> &Arc<GenericR32FloatTileAtlasStore> {
         &self.brush_buffer_store
+    }
+
+    /// Bind brush buffer tiles for a stroke.
+    pub fn bind_brush_buffer_tiles(
+        &mut self,
+        stroke_session_id: u64,
+        tile_bindings: Vec<(render_protocol::BufferTileCoordinate, tiles::TileKey)>,
+    ) {
+        self.renderer
+            .bind_brush_buffer_tiles(stroke_session_id, tile_bindings);
     }
 }

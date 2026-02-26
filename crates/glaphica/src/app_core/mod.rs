@@ -7,7 +7,8 @@ use std::sync::{Arc, RwLock};
 
 use brush_execution::BrushExecutionMergeFeedback;
 use document::{Document, DocumentMergeError};
-use renderer::MergeCompletionNotice;
+use render_protocol::{BrushRenderCommand, BufferTileCoordinate};
+use renderer::{BrushRenderEnqueueError, MergeCompletionNotice};
 use tiles::{
     BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, MergePlanTileOp, TileAtlasStore,
     TileKey, TileMergeEngine, TileMergeError,
@@ -265,6 +266,111 @@ impl AppCore {
             Err(RuntimeError::SurfaceError(err)) => Err(err),
             Err(other) => {
                 panic!("unexpected runtime error during render: {other:?}")
+            }
+        }
+    }
+
+    /// Enqueue a brush render command.
+    ///
+    /// This is a partial migration: GPU enqueue goes through runtime,
+    /// but business logic (tile allocation, merge orchestration) stays in AppCore.
+    pub fn enqueue_brush_render_command(
+        &mut self,
+        command: BrushRenderCommand,
+    ) -> Result<(), BrushRenderEnqueueError> {
+        match &command {
+            BrushRenderCommand::BeginStroke(begin) => {
+                // GPU enqueue through runtime
+                self.runtime
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .map_err(BrushRenderEnqueueError::from)?;
+
+                // Business logic: preview buffer management
+                // TODO: migrate set_preview_buffer_and_rebind to AppCore
+                // For now, this method is not yet migrated
+
+                Ok(())
+            }
+
+            BrushRenderCommand::AllocateBufferTiles(allocate) => {
+                // Tile allocation (AppCore business logic)
+                self.brush_buffer_tile_keys
+                    .write()
+                    .unwrap_or_else(|_| {
+                        panic!("brush buffer tile key registry write lock poisoned")
+                    })
+                    .allocate_tiles(
+                        allocate.stroke_session_id,
+                        allocate.tiles.clone(),
+                        self.runtime.brush_buffer_store(),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "failed to allocate brush buffer tiles for stroke {}: {error}",
+                            allocate.stroke_session_id
+                        )
+                    });
+
+                // Get tile bindings
+                let tile_bindings = self
+                    .brush_buffer_tile_keys
+                    .read()
+                    .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"))
+                    .tile_bindings_for_stroke(allocate.stroke_session_id);
+
+                // Bind tiles through runtime
+                self.runtime
+                    .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
+
+                // GC eviction handling
+                // TODO: migrate drain_tile_gc_evictions to AppCore
+
+                // GPU enqueue through runtime
+                self.runtime
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .map_err(BrushRenderEnqueueError::from)?;
+
+                Ok(())
+            }
+
+            BrushRenderCommand::MergeBuffer(merge) => {
+                // Merge orchestration (AppCore business logic)
+                if self.disable_merge_for_debug {
+                    // Debug mode: skip merge submission
+                    self.brush_buffer_tile_keys
+                        .write()
+                        .unwrap_or_else(|_| {
+                            panic!("brush buffer tile key registry write lock poisoned")
+                        })
+                        .release_stroke_on_merge_failed(
+                            merge.stroke_session_id,
+                            self.runtime.brush_buffer_store(),
+                        );
+                    // TODO: migrate clear_preview_buffer_and_rebind
+                    self.brush_execution_feedback_queue.push_back(
+                        BrushExecutionMergeFeedback::MergeApplied {
+                            stroke_session_id: merge.stroke_session_id,
+                        },
+                    );
+                } else {
+                    // TODO: migrate enqueue_stroke_merge_submission
+                    // For now, this path is not yet migrated
+                }
+
+                // GPU enqueue through runtime
+                self.runtime
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .map_err(BrushRenderEnqueueError::from)?;
+
+                Ok(())
+            }
+
+            // Other commands: direct passthrough to runtime
+            _ => {
+                self.runtime
+                    .execute(RuntimeCommand::EnqueueBrushCommand { command: &command })
+                    .map_err(BrushRenderEnqueueError::from)?;
+                Ok(())
             }
         }
     }

@@ -3,7 +3,7 @@
 /// Defines the command/receipt interface between AppCore and GpuRuntime.
 /// Commands are coarse-grained: one command per major operation.
 use render_protocol::{BrushRenderCommand, RenderTreeSnapshot};
-use renderer::MergeCompletionNotice;
+use renderer::{BrushRenderEnqueueError, MergeCompletionNotice};
 use view::ViewTransform;
 
 /// Coarse-grained commands from AppCore to GpuRuntime.
@@ -28,6 +28,9 @@ pub enum RuntimeCommand<'a> {
     /// Enqueue brush render commands.
     EnqueueBrushCommands { commands: &'a [BrushRenderCommand] },
 
+    /// Enqueue a single brush render command.
+    EnqueueBrushCommand { command: &'a BrushRenderCommand },
+
     /// Poll merge completion notices from renderer.
     PollMergeNotices { frame_id: u64 },
 }
@@ -46,6 +49,9 @@ pub enum RuntimeReceipt {
 
     /// Brush commands enqueued.
     BrushCommandsEnqueued { dab_count: u64 },
+
+    /// Single brush command enqueued.
+    BrushCommandEnqueued,
 
     /// Merge notices polled.
     MergeNotices { notices: Vec<MergeCompletionNotice> },
@@ -82,5 +88,14 @@ impl From<wgpu::SurfaceError> for RuntimeError {
 impl From<renderer::BrushRenderEnqueueError> for RuntimeError {
     fn from(err: renderer::BrushRenderEnqueueError) -> Self {
         RuntimeError::BrushEnqueueError(err)
+    }
+}
+
+impl From<RuntimeError> for BrushRenderEnqueueError {
+    fn from(err: RuntimeError) -> Self {
+        match err {
+            RuntimeError::BrushEnqueueError(e) => e,
+            other => panic!("unexpected runtime error in brush enqueue: {other:?}"),
+        }
     }
 }
