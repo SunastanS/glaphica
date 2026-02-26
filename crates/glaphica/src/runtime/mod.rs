@@ -179,9 +179,17 @@ impl GpuRuntime {
 
     /// Get a mutable reference to the renderer.
     ///
-    /// Use with caution - prefer command interface for mutations.
-    pub fn renderer_mut(&mut self) -> &mut Renderer {
+    /// INTERNAL ONLY: Do not call from AppCore. Use specific wrapper methods instead.
+    pub(crate) fn renderer_mut(&mut self) -> &mut Renderer {
         &mut self.renderer
+    }
+
+    /// Drain view operations before rendering.
+    ///
+    /// This is the intended interface for AppCore to drain view ops
+    /// without exposing the renderer mutable reference.
+    pub fn drain_view_ops(&mut self) {
+        self.renderer.drain_view_ops();
     }
 
     /// Get the atlas store.
@@ -202,12 +210,5 @@ impl GpuRuntime {
     ) {
         self.renderer
             .bind_brush_buffer_tiles(stroke_session_id, tile_bindings);
-    }
-
-    /// Drain view operations before rendering.
-    ///
-    /// This is a runtime-level operation that must be called before presenting.
-    pub fn drain_view_ops(&mut self) {
-        self.renderer.drain_view_ops();
     }
 }

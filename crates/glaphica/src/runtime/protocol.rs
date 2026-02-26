@@ -142,9 +142,12 @@ impl From<RuntimeError> for renderer::BrushRenderEnqueueError {
             other => {
                 // KNOWN LIMITATION (Phase 2): This panic indicates a logic bug.
                 // TODO(Phase 3): Extend BrushRenderEnqueueError to wrap RuntimeError.
-                debug_assert!(false, "unexpected runtime error in brush enqueue: {other:?}");
+                debug_assert!(
+                    false,
+                    "unexpected runtime error in brush enqueue: {other:?}"
+                );
                 panic!("unexpected runtime error in brush enqueue: {other:?}")
-            },
+            }
         }
     }
 }

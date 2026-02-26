@@ -1,151 +1,136 @@
-c572a00 — Phase 2 Step 1-3：引入 AppCore + GpuRuntime 骨架
 
-你做了什么（结构方向）
+我按你更新后的“Phase 2 审查意见响应”逐条对照 **GitHub 上已 push 的内容**做了复核（重点看了 `223d8d0`、`88dc371` 以及相关 runtime/protocol 代码）。结论是：**你文档里有一部分状态与代码现状不一致**，需要把“完成/部分完成”的表格修正一下；同时你新增的 `AppCoreError` 方向整体可行，但建议你调整几处设计细节，让 Phase 2 的后续迁移更顺滑。
 
-新增 app_core/ 与 runtime/，并把“业务逻辑 vs GPU 资源”作为模块边界（AppCore 不直接持有 GPU 资源，靠 runtime command 通信）。commit message 也明确“先搭架子，不迁移方法”。
+---
 
-AppCore 里开始集中：document、tile_merge_engine、brush_buffer_tile_keys 等业务态。
+## 1) ✅ RuntimeCommand lifetime：确实已完成（并且是高质量落地）
 
-GpuRuntime 里集中：renderer、view_sender、atlas_store、brush_buffer_store、surface_size 等 GPU/渲染态，并提供 execute() 命令入口。
+你在 `223d8d0` 里把 **command 持有数据**写进了 protocol 设计注释，并把 `Resize/EnqueueBrush*` 彻底改成 owned data，确实解决了 lifetime 传播问题。([GitHub][1])
+这块可以在“总体进展”里明确标记为 **Closed**。
 
-lib.rs 里仍保留旧的 GpuState 作为临时 facade，注释标明 Phase 2 会 split。
+---
 
-做得好的点
+## 2) ⚠️ 你文档里写“GpuRuntime 分层泄漏 ✅ 完成（添加 drain_view_ops 方法）”——我在代码里没看到
 
-**“先平移接口形状，再迁移实现”**是正确的重构节奏：先让新架构可编译、可接线，然后再逐条迁路径。
+在 `223d8d0` 的 `crates/glaphica/src/runtime/mod.rs` 里：
 
-GpuRuntime::execute() 这种“粗粒度命令 + receipt”的桥接方式，很适合你目前“单线程主线程同步执行”的阶段：迁移成本低、可逐步替换。
+* 仍然存在 `pub fn renderer_mut(&mut self) -> &mut Renderer`，并且注释是“Use with caution - prefer command interface”。([GitHub][2])
+* **没有看到**你文档里提到的 `GpuRuntime::drain_view_ops()` 显式方法；现在 drain 是在 `execute(PresentFrame)` 内直接 `self.renderer.drain_view_ops()`。([GitHub][2])
 
-我建议尽早补的护栏（否则后续会越迁越痛）
+所以这一项目前应当在文档里标成：
 
-分层泄漏风险：runtime 暴露 renderer 可变引用
-你后续在 AppCore::render() 里用到了 runtime.renderer_mut().drain_view_ops()（后续 commit 里出现），这说明 runtime 还在对上层泄漏内部对象。建议尽早把这类操作变成 runtime 的显式命令/方法（例如 RuntimeCommand::DrainViewOps 或 GpuRuntime::drain_view_ops()），避免 AppCore “绕开命令接口”。（这个点在 a4684f0 更明显）
+* **“仍有泄漏点：renderer_mut 仍是 pub”**（至少不应算完成）
+* 如果你的确另外有一个 commit 添加了 `drain_view_ops()`，请把 commit hash 写进文档；否则就是“文档超前于代码”。
 
-共享资源双持有的契约要写清楚
-你现在的设计是：AppCore 也持有 atlas store / brush buffer registry 的 Arc（用于 merge 逻辑），同时 GpuRuntime 也持有对应 Arc（用于 GPU 更新）。这没问题，但要写清楚哪些操作必须在 runtime 执行、哪些可在 AppCore 执行、以及“读写时序”约束（尤其是 tile 分配/回收与 GPU drain 的先后）。否则之后引入多线程时会踩一致性坑。
+**我建议的最小修复（10 分钟级别）**
 
-a4684f0 — Step 4A：把 render/present 路径接到 runtime command
+* 把 `renderer_mut` 降级为 `pub(crate)` 或删除（如果已无调用点）。
+* 补一个显式 wrapper：`pub fn drain_view_ops(&mut self)`，给 AppCore 用，不要直接拿 renderer mut。
 
-你做了什么
+---
 
-AppCore::render() 里通过 RuntimeCommand::PresentFrame { frame_id } 调 runtime，并匹配 RuntimeReceipt::FramePresented。
+## 3) ⚠️ 你文档里写“brush 错误转换 ✅ 部分完成（添加 debug_assert 防护）”——我在 protocol 里仍看到 panic
 
-做得好的点
+在 `223d8d0` 的 `runtime/protocol.rs` 里，仍存在：
 
-这是一次“路径级迁移”的正确示范：上层开始只关心“我要 present 一帧”，把具体 GPU 工作放进 runtime。
+* `impl From<RuntimeError> for renderer::BrushRenderEnqueueError { ... other => panic!(...) }`
+* 以及 `MergeSubmitError / MergePollError` 同样的 `panic!` downcast ([GitHub][1])
 
-主要问题：错误处理策略现在会让重构期调试更难
+也就是说：**不仅 brush 没消掉 panic，merge submit/poll 也同样存在。**
+这项在“总体进展”里应该是：**未完成**（或者“仍存在风险：panic downcast 三处未处理”），不适合标为“部分完成”。
 
-你在 render 路径里对“意外 receipt / 意外 error”使用了 panic!。
-重构期这样做短期省事，但会带来两个长期问题：
+**我建议的更稳的解法（比加 `Runtime(RuntimeError)` 更干净）**
+不要再做 `From<RuntimeError> for X` 这种“会被误用成无条件 downcast”的 impl。改成显式 helper：
 
-上层无法区分“可恢复错误 vs 逻辑 bug”（例如 TileDrain 失败现在直接 panic）；
+```rust
+impl RuntimeError {
+    pub fn into_brush_enqueue(self) -> Result<renderer::BrushRenderEnqueueError, RuntimeError> { ... }
+    pub fn into_merge_submit(self) -> Result<renderer::MergeSubmitError, RuntimeError> { ... }
+    pub fn into_merge_poll(self) -> Result<renderer::MergePollError, RuntimeError> { ... }
+}
+```
 
-当你把更多路径迁入 runtime 后，panic 位置会越来越“远离真实原因”。
+调用点自己决定：上抛 / log + debug_assert / 转 AppCoreError。这样 **不会把未来新增 RuntimeError variant 变成隐藏地雷**。
 
-建议改法（保持你现在的架构，不增加太多复杂度）
+---
 
-把 GpuRuntime::execute(PresentFrame) 的返回类型直接设计成 Result<(), PresentError> 或 Result<FramePresentedReceipt, PresentError>，避免上层再 match receipt。
+## 4) ✅ AppCoreError：你说 “Phase 1 完成（提交 88dc371）”——这点属实，但我建议你改两处字段设计
 
-如果你坚持“统一 execute 返回 receipt”，那至少：
+`88dc371` 里确实新增了 `AppCoreError`，并把错误分成 LogicBug / Recoverable / Unrecoverable 三类，整体方向 OK。([GitHub][3])
 
-AppCore::render() 不要 panic “unexpected receipt”，而是 Err(wgpu::SurfaceError::Lost) 之类不合适；更好的做法是引入一个 AppCoreError::UnexpectedReceipt 并向上传递（或 log + debug_assert）。
+但我建议你对两个 variant 立刻调整（否则 Phase 2 方法迁移时会后悔）：
 
-renderer::PresentError::TileDrain 这种强逻辑错误可以用 debug_assert! + 传递一个 RuntimeError::InvariantViolation，不要 panic 在业务层。
+### A) `UnexpectedReceipt` 现在记录的是 `received_receipt: &'static str`
 
-5109431 — 修测试缺失 import（修复型提交）
+这会导致你排查问题时信息不足。建议改成：
 
-你做了什么
+* `received: RuntimeReceipt`（或至少 `received_kind: RuntimeReceiptKind` + 可选 debug payload）
 
-只是在 tests 里补齐 RenderDataResolver / FrameState / DirtyStateStore / FrameSync / LayerDirtyVersion 等 import，没有改测试逻辑。
+因为 receipt 往往携带关键字段（比如 submission ids / notices 数量），光一个静态字符串不够。
 
-建议
+### B) `UnexpectedErrorVariant { error: String }`
 
-这种提交很干净；如果你后续会频繁做“重构导致 tests 编译不过”，建议把“修编译”与“迁移逻辑”继续保持分离（你现在就是这么做的）。
+这个有点像“把类型系统退化成字符串”。更好的是：
 
-8c55eb4 — 更新重构文档（Phase 2 进度）
+* `error: RuntimeError`（或 `Box<dyn Error + Send + Sync>`，但建议优先 RuntimeError）
 
-你做了什么
+否则你后续要么丢掉上下文，要么到处 `.to_string()`。
 
-文档记录 Phase 2 的拆分、Step 1-3 完成、Step 4A 状态、设计决策与 next steps。
+---
 
-建议
+## 5) 你文档中的“共享 Arc 资源时序约束”建议改写（避免误导）
 
-很有价值。建议再加一张“迁移清单表”：每条路径（render/resize/brush/merge/gc 等）目前处于 Old(GpuState) / New(AppCore+Runtime) / Hybrid 的哪一档，并写明“最后要删掉的临时代码点”。这能显著降低你自己未来回看时的认知成本。
+你草案里写的：
 
-bd3f875 — Step 4B：resize 路径迁移到 runtime command（并把 view_transform 作为参数）
+> “GPU drain 必须在 tile 释放之后”
 
-你做了什么
+这句话非常容易把实现引向“先 free 再 drain”的方向，从逻辑上更危险。更稳妥的契约表述应当是：
 
-RuntimeCommand::Resize 增加 view_transform: &ViewTransform；AppCore::resize() 调用 .execute(RuntimeCommand::Resize { width, height, view_transform: &self.view_transform })。
+* **TileKey/slot 的生命周期必须覆盖所有可能引用它的 renderer/op 被消费完成之前**
+* 如果要提前回收 slot，必须依赖 **generation/epoch** 防止 ABA
 
-commit message 说明：为 runtime 访问导出 push_view_state() 为 pub(crate)，并保留 GpuState::resize() fallback。
+这点建议你尽早更新进 `tiles_model_runtime_refactor_guide.md`，否则未来并发化时会踩坑。
 
-做得好的点
+---
 
-resize 是“高频但语义清晰”的路径，很适合作为第二条迁移示例。
+# 对你三个开放问题的答复
 
-我比较担心的点（接口形状）
+### 1) AppCoreError 分类是否合理？
 
-命令里携带引用（&ViewTransform）会把 lifetime 传染到整个 command 系统
-你现在的 RuntimeCommand 明显已经变成带 lifetime 的 enum（在 9e7c69e 里能看到 RuntimeCommand<'a>），这会让后续所有 command/receipt 的组合复杂度上升。
+合理。三层分类能帮助你在迁移期明确“该不该 panic”。但记得：**LogicBug 不等于“可以 panic”，更推荐 debug_assert + 返回错误**（你设计里也写了这点，保持一致就行）。([GitHub][3])
 
-如果 runtime 在 execute() 内同步使用这个引用然后立刻返回，那技术上是可行的；但它会迫使你未来更多命令也走“借用输入”的风格，最终容易演化成“到处都是泛型 lifetime”。
+### 2) 迁移优先级是否合适？
 
-resize 里 unwrap_or_else(panic!)
-现在 AppCore::resize() 直接 panic。
-这会让窗口 resize 这种“外部输入触发”的路径变得脆弱（尤其是在 wgpu surface 重建/丢失的边界情况下）。
+`resize -> render -> 其他` 这个顺序可以。
+但我会把 **“消灭 protocol 里的 panic downcast（brush/merge submit/merge poll）”** 提到更前面，因为它是“未来新增错误 variant 就可能炸”的结构性隐患。([GitHub][1])
 
-建议改法（尽量小改）
+### 3) 是否有更好的错误处理方式？
 
-把 view_transform 变成 runtime 内部状态（runtime 提供 set_view_transform(ViewTransform) 或 RuntimeCommand::SetViewTransform { .. }），Resize 不再携带引用。
+对你现在的结构（AppCore + Runtime 同线程同步执行），最实用的是：
 
-AppCore::resize() 返回 Result<(), RuntimeError/AppCoreError>，至少把 panic 移到顶层应用层，而不是 core 层。
+* Runtime：`Result<RuntimeReceipt, RuntimeError>`
+* AppCore：`Result<_, AppCoreError>`（`From<RuntimeError>` 即可，不要 downcast panic）
+* 顶层 event loop：根据 `AppCoreError` 的类别决定恢复策略（Surface Lost/Outdated → resize/reconfigure；OutOfMemory/PresentFatal → fatal）
 
-9e7c69e — Step 4C：brush 路径部分迁移（新增单条 enqueue 命令）
+---
 
-你做了什么
+# 建议你把“总体进展表”修正为下面这样（基于我看到的代码）
 
-在 protocol 中新增 EnqueueBrushCommand { command: &'a BrushRenderCommand }，并新增 receipt BrushCommandEnqueued。
+* ✅ RuntimeCommand lifetime：完成
+* 🟡 AppCore panic：Phase 1（类型定义）完成，方法迁移未做（符合你描述）
+* ❌ GpuRuntime 分层泄漏：**未完成**（`renderer_mut` 仍 pub；未见 `drain_view_ops` wrapper）([GitHub][2])
+* ❌ brush 错误转换：**未完成**（仍有 panic downcast，且 merge submit/poll 同样）([GitHub][1])
+* 文档项（契约/清单表）：我这次没有直接打开对应 doc 文件内容核对（你没给具体链接/commit），如果你把文件路径对应的 commit hash/链接贴出来，我可以继续逐段 review。
 
-runtime 侧处理该命令：enqueue_brush_render_command(command.clone())。
+---
 
-AppCore 在 brush 路径里开始通过 runtime 绑定 tiles、enqueue brush command；merge 相关仍有 TODO 保留未迁移段。
+如果你希望我给“最小补丁计划”，我建议拆成 2 个很小的 commit：
 
-增加 From<RuntimeError> for BrushRenderEnqueueError，但对非 BrushEnqueueError 的情况直接 panic。
+1. **protocol 去 panic downcast**（三处 `impl From<RuntimeError> for X` 全删，替换成显式 helper）
+2. **runtime 收口 renderer_mut**（降级可见性 + 增加必要 wrapper，例如 `drain_view_ops()`）
 
-做得好的点
+这两步都不需要你先把 AppCore 方法签名改成 Result，但能立刻把“隐性炸点”和“边界腐蚀”止住。
 
-你把 brush 的“GPU enqueue”先抽出来迁走，而把“merge orchestration（业务）”留在 AppCore，这个切割方向是对的：GPU enqueue 属于 runtime；merge 的决策/调度属于 core。
-
-关键问题（建议优先修）
-
-RuntimeCommand<'a> + &BrushRenderCommand 但 runtime 又 clone()
-这意味着：你承受了 lifetime 复杂度，但并没有真正避免拷贝（因为最终还是 clone）。
-更合理的两种选择：
-
-要么命令就直接拥有数据：EnqueueBrushCommand { command: BrushRenderCommand }；
-
-要么用 Arc<BrushRenderCommand> / Cow（如果你真的想减少 clone 成本）。
-
-错误转换里 panic!("unexpected runtime error...")
-这会把“新增命令后 runtime 未来扩展的错误类型”变成潜在崩溃点。
-建议：让 BrushRenderEnqueueError 能表达 “RuntimeError::Other(...)” 或至少包一层 BrushRenderEnqueueError::Runtime(RuntimeError)，不要 panic。
-
-brush 路径里存在重复/兜底分支看起来像“无差别 enqueue”
-你现在的 match 结构里有 _ => { self.runtime.execute(EnqueueBrushCommand { ... }) } 这种“其他命令也 enqueue brush”的兜底分支（从 diff 片段看确实如此）。
-这在重构期容易作为临时 glue，但建议尽快把匹配写成穷尽式：哪些 brush command 支持，哪些明确 unimplemented!/todo!/return Err，避免未来加入新分支时“悄悄走错路径”。
-
-总体评价与下一步优先级（按“阻止技术债扩散”排序）
-
-尽快把 RuntimeCommand 的借用/lifetime 从公共接口里拿掉（Resize/Brush 都已经把 lifetime 传染开了）。现在改成本最低。
-
-把 core 层的 panic 收口：
-
-render/resize/brush 这些“外部输入触发”的路径尽量 Result；
-
-真的不可恢复的不变量用 debug_assert! + 结构化错误上抛。
-
-减少分层泄漏：避免 AppCore 直接拿到 renderer 可变引用；让 runtime 提供明确动作接口。
-
-把“共享 Arc 资源”的一致性约束写进文档（你已经开始维护 refactor guide 了，很适合把契约补齐）。
+[1]: https://raw.githubusercontent.com/SunastanS/glaphica/223d8d0/crates/glaphica/src/runtime/protocol.rs "raw.githubusercontent.com"
+[2]: https://raw.githubusercontent.com/SunastanS/glaphica/223d8d0/crates/glaphica/src/runtime/mod.rs "raw.githubusercontent.com"
+[3]: https://github.com/SunastanS/glaphica/commit/88dc371 "refactor: Add AppCoreError unified error type (Phase 2 error handling… · SunastanS/glaphica@88dc371 · GitHub"
