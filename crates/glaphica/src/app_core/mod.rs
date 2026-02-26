@@ -588,7 +588,7 @@ pub enum AppCoreError {
         command: &'static str,
         receipt_type: &'static str,
         /// Optional receipt debug payload (use format!("{:?}", receipt) at call site)
-        receipt_debug: String,
+        receipt_debug: Option<String>,
     },
 
     /// Unexpected error variant in error conversion.
@@ -643,7 +643,7 @@ impl std::fmt::Display for AppCoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppCoreError::UnexpectedReceipt { command, receipt_type, receipt_debug } => {
-                write!(f, "unexpected receipt '{}' for command '{}': {}", receipt_type, command, receipt_debug)
+                write!(f, "unexpected receipt '{}' for command '{}': {}", receipt_type, command, receipt_debug.as_deref().unwrap_or("no debug info"))
             }
             AppCoreError::UnexpectedErrorVariant { context, error } => {
                 write!(f, "unexpected error variant in {}: {:?}", context, error)

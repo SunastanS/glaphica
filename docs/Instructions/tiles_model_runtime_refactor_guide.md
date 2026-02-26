@@ -768,3 +768,26 @@ let bindings = self.brush_buffer_tile_keys
 **Phase 2 状态**: ✅ 核心完成，遗留技术债已记录  
 **文档版本**: 2.0 (Phase 2 complete)  
 **最后更新**: 2026-02-27
+
+### 14.5 生命周期与安全契约（重要）
+
+**Tile 生命周期规则**:
+
+1. **Tile 的释放/复用不得早于所有可能引用该 tile 的 renderer/op 被消费完成**
+   - 这是 use-after-free 防护的关键
+   - GPU drain 完成后才能安全释放 tile key
+
+2. **若要复用 slot，必须依赖 generation/epoch 防 ABA**
+   - TileKey 编码包含 generation 字段
+   - 严禁在 GPU 可能仍持有引用时复用 slot
+
+3. **共享 Arc 资源的访问约束**:
+   - ✅ 只读访问（resolve）可并发
+   - ⚠️ 写操作（allocate/release）需同步
+   - ❌ 禁止在 GPU operation in-flight 时修改底层资源
+
+**实现建议**:
+- 使用引用计数跟踪 in-flight GPU operations
+- drain() 后等待 completion 再释放
+- generation 编码防止 stale reference
+

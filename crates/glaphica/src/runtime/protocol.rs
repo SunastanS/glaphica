@@ -139,6 +139,7 @@ impl From<renderer::MergePollError> for RuntimeError {
 impl RuntimeError {
     /// Convert to BrushRenderEnqueueError if possible.
     /// Returns Err(self) if the variant doesn't match.
+    #[must_use]
     pub fn into_brush_enqueue(self) -> Result<renderer::BrushRenderEnqueueError, Self> {
         match self {
             RuntimeError::BrushEnqueueError(e) => Ok(e),
@@ -148,6 +149,7 @@ impl RuntimeError {
 
     /// Convert to MergeSubmitError if possible.
     /// Returns Err(self) if the variant doesn't match.
+    #[must_use]
     pub fn into_merge_submit(self) -> Result<renderer::MergeSubmitError, Self> {
         match self {
             RuntimeError::MergeSubmit(e) => Ok(e),
@@ -157,6 +159,7 @@ impl RuntimeError {
 
     /// Convert to MergePollError if possible.
     /// Returns Err(self) if the variant doesn't match.
+    #[must_use]
     pub fn into_merge_poll(self) -> Result<renderer::MergePollError, Self> {
         match self {
             RuntimeError::MergePoll(e) => Ok(e),
