@@ -572,3 +572,131 @@ impl AppCore {
         Ok(())
     }
 }
+
+/// AppCore operation errors.
+///
+/// Classification:
+/// - **LogicBug** variants: Should never occur in production. Use `debug_assert!`
+///   in addition to returning the error for debuggability.
+/// - **Recoverable** variants: Expected failures that callers can handle.
+/// - **Unrecoverable** variants: Fatal errors where recovery is impossible.
+#[derive(Debug)]
+pub enum AppCoreError {
+    // === Logic Bugs (indicate programming errors) ===
+    /// Unexpected receipt type for command.
+    UnexpectedReceipt {
+        command: &'static str,
+        received_receipt: &'static str,
+    },
+
+    /// Unexpected error variant in error conversion.
+    UnexpectedErrorVariant {
+        context: &'static str,
+        error: String,
+    },
+
+    /// Tile allocation failed due to logic error (not resource exhaustion).
+    TileAllocationLogicError {
+        stroke_session_id: u64,
+        reason: String,
+    },
+
+    /// Renderer notice missing for completion.
+    MissingRendererNotice {
+        receipt_id: StrokeExecutionReceiptId,
+        notice_id: tiles::TileMergeCompletionNoticeId,
+    },
+
+    // === Recoverable Errors ===
+    /// Runtime command failed.
+    Runtime(RuntimeError),
+
+    /// Brush render command enqueue failed.
+    BrushEnqueue(BrushRenderEnqueueError),
+
+    /// Merge operation failed.
+    Merge(MergeBridgeError),
+
+    /// Surface operation failed (can be recovered by resize/recreate).
+    Surface(wgpu::SurfaceError),
+
+    /// Resize operation failed.
+    Resize {
+        width: u32,
+        height: u32,
+        reason: String,
+    },
+
+    // === Unrecoverable Errors ===
+    /// GPU resource failure during present.
+    PresentFatal {
+        source: tiles::TileGpuDrainError,
+    },
+
+    /// Out of memory.
+    OutOfMemory,
+}
+
+impl std::fmt::Display for AppCoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppCoreError::UnexpectedReceipt { command, received_receipt } => {
+                write!(f, "unexpected receipt '{}' for command '{}'", received_receipt, command)
+            }
+            AppCoreError::UnexpectedErrorVariant { context, error } => {
+                write!(f, "unexpected error variant in {}: {}", context, error)
+            }
+            AppCoreError::TileAllocationLogicError { stroke_session_id, reason } => {
+                write!(f, "tile allocation logic error for stroke {}: {}", stroke_session_id, reason)
+            }
+            AppCoreError::MissingRendererNotice { receipt_id, notice_id } => {
+                write!(f, "missing renderer notice for receipt {:?} notice {:?}", receipt_id, notice_id)
+            }
+            AppCoreError::Runtime(err) => write!(f, "runtime error: {:?}", err),
+            AppCoreError::BrushEnqueue(err) => write!(f, "brush enqueue error: {:?}", err),
+            AppCoreError::Merge(err) => write!(f, "merge error: {:?}", err),
+            AppCoreError::Surface(err) => write!(f, "surface error: {:?}", err),
+            AppCoreError::Resize { width, height, reason } => {
+                write!(f, "resize to {}x{} failed: {}", width, height, reason)
+            }
+            AppCoreError::PresentFatal { source } => {
+                write!(f, "fatal present error: {:?}", source)
+            }
+            AppCoreError::OutOfMemory => write!(f, "out of memory"),
+        }
+    }
+}
+
+impl std::error::Error for AppCoreError {}
+
+// Ensure error types are thread-safe for future threading model
+unsafe impl Send for AppCoreError {}
+unsafe impl Sync for AppCoreError {}
+
+// From implementations for external errors
+impl From<RuntimeError> for AppCoreError {
+    fn from(err: RuntimeError) -> Self {
+        AppCoreError::Runtime(err)
+    }
+}
+
+impl From<BrushRenderEnqueueError> for AppCoreError {
+    fn from(err: BrushRenderEnqueueError) -> Self {
+        AppCoreError::BrushEnqueue(err)
+    }
+}
+
+impl From<MergeBridgeError> for AppCoreError {
+    fn from(err: MergeBridgeError) -> Self {
+        AppCoreError::Merge(err)
+    }
+}
+
+impl From<wgpu::SurfaceError> for AppCoreError {
+    fn from(err: wgpu::SurfaceError) -> Self {
+        match err {
+            wgpu::SurfaceError::OutOfMemory => AppCoreError::OutOfMemory,
+            other => AppCoreError::Surface(other),
+        }
+    }
+}
