@@ -1,5 +1,8 @@
+pub mod app_core;
 pub mod driver_bridge;
+pub mod runtime;
 
+use app_core::AppCore;
 use brush_execution::BrushExecutionMergeFeedback;
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +29,7 @@ use tiles::{
     TileImageApplyError, TileKey, TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError,
     TilesBusinessResult, apply_tile_key_mappings,
 };
+use model::TILE_IMAGE;
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -348,6 +352,10 @@ impl MergeTileStore for MergeStores {
     }
 }
 
+/// GpuState - main GPU state holder.
+///
+/// TODO(Phase 2): This will be split into AppCore + GpuRuntime.
+/// For now, we keep the existing structure to maintain compatibility.
 pub struct GpuState {
     renderer: Renderer,
     view_sender: ViewOpSender,
