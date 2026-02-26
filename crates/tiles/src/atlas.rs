@@ -13,6 +13,7 @@ mod group_preview;
 #[cfg(feature = "atlas-gpu")]
 mod layer_pixel_storage;
 
+// REMOVE
 #[derive(Debug, Clone, Copy)]
 pub struct TileAtlasConfig {
     pub max_layers: u32,

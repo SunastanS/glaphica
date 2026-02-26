@@ -4,13 +4,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::time::Instant;
 
+use model::TILE_STRIDE;
 use render_protocol::{
     BlendMode, ExecutionStatus, GpuMergeOp, GpuTileRef, MergeAuditMeta, MergeErrorContext,
     MergeExecutionResult, MergeOpStage, MergePlanMeta, ReceiptProgress, ReceiptTerminalState,
     RendererSubmissionId, StrokeExecutionFailure, StrokeExecutionReceipt, StrokeExecutionReceiptId,
     SubmissionReport,
 };
-use tiles::TILE_STRIDE;
 
 use crate::Renderer;
 

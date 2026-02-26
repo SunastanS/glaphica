@@ -7,12 +7,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 
+use model::{TILE_IMAGE, TILE_STRIDE};
 use render_protocol::{
-    BRUSH_DAB_CHUNK_CAPACITY, BrushControlAck, BrushControlCommand, BrushProgramActivation,
-    BrushProgramKey, BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin,
-    BufferTileCoordinate, ReferenceSetUpsert,
+    BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramKey,
+    BrushProgramUpsert, BrushRenderCommand, BrushStrokeBegin, BufferTileCoordinate,
+    ReferenceSetUpsert, BRUSH_DAB_CHUNK_CAPACITY,
 };
-use tiles::{DirtySinceResult, TILE_SIZE, TILE_STRIDE, TileAddress, TileAtlasLayout, TileKey};
+use tiles::{DirtySinceResult, TileAddress, TileAtlasLayout, TileKey};
 
 use crate::{
     BrushControlError, BrushRenderEnqueueError, CompositeEmission, CompositeNodePlan,
@@ -141,10 +142,10 @@ fn mark_dirty_from_tile_history(
                     );
                 }
                 for (tile_x, tile_y) in query.dirty_tiles.iter_dirty_tiles() {
-                    let min_x = tile_x.saturating_mul(TILE_SIZE) as i32;
-                    let min_y = tile_y.saturating_mul(TILE_SIZE) as i32;
-                    let max_x = tile_x.saturating_add(1).saturating_mul(TILE_SIZE) as i32;
-                    let max_y = tile_y.saturating_add(1).saturating_mul(TILE_SIZE) as i32;
+                    let min_x = tile_x.saturating_mul(TILE_IMAGE) as i32;
+                    let min_y = tile_y.saturating_mul(TILE_IMAGE) as i32;
+                    let max_x = tile_x.saturating_add(1).saturating_mul(TILE_IMAGE) as i32;
+                    let max_y = tile_y.saturating_add(1).saturating_mul(TILE_IMAGE) as i32;
                     frame_state.dirty_state_store.mark_layer_rect(
                         *layer_id,
                         crate::DirtyRect {
@@ -872,16 +873,16 @@ impl Renderer {
             .expect("brush command encoder must exist");
 
         for tile in dirty_tiles.iter() {
-            let min_x = tile.tile_x.saturating_mul(TILE_SIZE as i32);
-            let min_y = tile.tile_y.saturating_mul(TILE_SIZE as i32);
+            let min_x = tile.tile_x.saturating_mul(TILE_IMAGE as i32);
+            let min_y = tile.tile_y.saturating_mul(TILE_IMAGE as i32);
             let max_x = tile
                 .tile_x
                 .saturating_add(1)
-                .saturating_mul(TILE_SIZE as i32);
+                .saturating_mul(TILE_IMAGE as i32);
             let max_y = tile
                 .tile_y
                 .saturating_add(1)
-                .saturating_mul(TILE_SIZE as i32);
+                .saturating_mul(TILE_IMAGE as i32);
             if self.frame_state.dirty_state_store.mark_layer_rect(
                 target_layer_id,
                 crate::DirtyRect {
@@ -949,7 +950,7 @@ impl Renderer {
         if DEFAULT_BRUSH_RADIUS_PIXELS < 0 {
             panic!("brush radius must be non-negative");
         }
-        let tile_size_f32 = TILE_SIZE as f32;
+        let tile_size_f32 = TILE_IMAGE as f32;
         let radius = DEFAULT_BRUSH_RADIUS_PIXELS as f32;
         let min_tile_x = Self::tile_index_for_canvas_value(canvas_x - radius, tile_size_f32);
         let max_tile_x = Self::tile_index_for_canvas_value(canvas_x + radius, tile_size_f32);
@@ -1401,17 +1402,13 @@ impl Renderer {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
+    use model::{TILE_GUTTER, TILE_IMAGE, TILE_STRIDE};
     use render_protocol::{BlendMode, ImageHandle, RenderNodeSnapshot};
     use slotmap::KeyData;
-    use tiles::{
-        TILE_GUTTER, TILE_STRIDE, TileAddress, TileAtlasLayout, TileDirtyBitset, TileDirtyQuery,
-    };
+    use tiles::{TileAddress, TileAtlasLayout, TileDirtyBitset, TileDirtyQuery};
 
     use super::{assert_brush_dab_write_region_in_slot, mark_dirty_from_tile_history};
-    use crate::{
-        DirtyRectMask, DirtyStateStore, FrameState, FrameSync, LayerDirtyVersion,
-        RenderDataResolver, TILE_SIZE,
-    };
+    use crate::DirtyRectMask;
 
     #[derive(Default)]
     struct HistoryResolver {
@@ -1421,7 +1418,7 @@ mod tests {
 
     impl RenderDataResolver for HistoryResolver {
         fn document_size(&self) -> (u32, u32) {
-            (TILE_SIZE * 4, TILE_SIZE * 4)
+            (TILE_IMAGE * 4, TILE_IMAGE * 4)
         }
 
         fn visit_image_tiles(
@@ -1506,8 +1503,8 @@ mod tests {
             .iter()
             .map(|rect| {
                 (
-                    u32::try_from(rect.min_x).expect("min x non-negative") / TILE_SIZE,
-                    u32::try_from(rect.min_y).expect("min y non-negative") / TILE_SIZE,
+                    u32::try_from(rect.min_x).expect("min x non-negative") / TILE_IMAGE,
+                    u32::try_from(rect.min_y).expect("min y non-negative") / TILE_IMAGE,
                 )
             })
             .collect::<HashSet<_>>();

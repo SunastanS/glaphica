@@ -2,14 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use model::TILE_IMAGE;
 use render_protocol::{
     BlendMode, ImageHandle, LayerId, RenderNodeSnapshot, RenderTreeSnapshot, StrokeSessionId,
 };
 use slotmap::SlotMap;
-use tiles::{DirtySinceResult, TILE_SIZE, TileDirtyBitset, TileDirtyQuery, TileImage, TileKey};
+use tiles::{DirtySinceResult, TileDirtyBitset, TileDirtyQuery, TileImage, TileKey};
 
 #[cfg(test)]
-use tiles::{TileKeyMapping, apply_tile_key_mappings};
+use tiles::{apply_tile_key_mappings, TileKeyMapping};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayerNodeId(u64);
@@ -723,11 +724,11 @@ impl Document {
     }
 
     fn tiles_per_row(&self) -> u32 {
-        self.size_x.div_ceil(TILE_SIZE)
+        self.size_x.div_ceil(TILE_IMAGE)
     }
 
     fn tiles_per_column(&self) -> u32 {
-        self.size_y.div_ceil(TILE_SIZE)
+        self.size_y.div_ceil(TILE_IMAGE)
     }
 
     fn full_layer_dirty_tiles(&self) -> TileDirtyBitset {

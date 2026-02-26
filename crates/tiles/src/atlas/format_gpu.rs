@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use crate::atlas::TileAtlasFormat;
 use crate::{
-    TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAtlasCreateError, TileAtlasUsage, TileGpuDrainError,
+    TILE_GUTTER, TILE_IMAGE, TILE_STRIDE, TileAtlasCreateError, TileAtlasUsage, TileGpuDrainError,
 };
 
 use super::format_core::{
@@ -409,7 +409,7 @@ fn expand_tile_rgba8_with_gutter(content_bytes: &[u8]) -> Vec<u8> {
 
     let stride = TILE_STRIDE as usize;
     let gutter = TILE_GUTTER as usize;
-    let content = TILE_SIZE as usize;
+    let content = TILE_IMAGE as usize;
     let row_bytes = content * 4;
     let mut expanded = vec![0u8; (TILE_STRIDE as usize) * (TILE_STRIDE as usize) * 4];
 

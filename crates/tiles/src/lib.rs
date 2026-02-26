@@ -4,9 +4,8 @@ use std::fmt;
 use bitvec::prelude::{BitVec, Lsb0};
 use render_protocol::BufferTileCoordinate;
 
-pub const TILE_SIZE: u32 = 128;
-pub const TILE_GUTTER: u32 = 1;
-pub const TILE_STRIDE: u32 = TILE_SIZE + TILE_GUTTER * 2;
+pub use model::{TILE_STRIDE, TILE_GUTTER, TILE_IMAGE, TILE_IMAGE_ORIGIN};
+
 pub const DEFAULT_MAX_LAYERS: u32 = 4;
 pub const TILES_PER_ROW: u32 = 32;
 pub const ATLAS_SIZE: u32 = TILES_PER_ROW * TILE_STRIDE;
@@ -15,7 +14,7 @@ pub const ATLAS_OCCUPANCY_WORDS: usize = (TILES_PER_ATLAS as usize).div_ceil(64)
 
 const INDEX_SHARDS: usize = 64;
 
-mod model;
+mod tile_key_encoding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey(u64);
@@ -402,8 +401,8 @@ impl<K> VirtualImage<K> {
     }
 
     pub fn new(size_x: u32, size_y: u32) -> Result<Self, VirtualImageError> {
-        let tiles_per_row = size_x.div_ceil(TILE_SIZE);
-        let tiles_per_column = size_y.div_ceil(TILE_SIZE);
+        let tiles_per_row = size_x.div_ceil(TILE_IMAGE);
+        let tiles_per_column = size_y.div_ceil(TILE_IMAGE);
         let tile_count = (tiles_per_row as usize)
             .checked_mul(tiles_per_column as usize)
             .ok_or(VirtualImageError::TileCountOverflow)?;
@@ -487,8 +486,8 @@ impl<K> VirtualImage<K> {
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or(VirtualImageError::OutputByteCountOverflow)?;
         let mut out = vec![0u8; out_len];
-        let tile_row_bytes = (TILE_SIZE as usize) * 4;
-        let expected_tile_len = (TILE_SIZE as usize) * tile_row_bytes;
+        let tile_row_bytes = (TILE_IMAGE as usize) * 4;
+        let expected_tile_len = (TILE_IMAGE as usize) * tile_row_bytes;
 
         for tile_y in 0..self.tiles_per_column {
             for tile_x in 0..self.tiles_per_row {
@@ -503,15 +502,15 @@ impl<K> VirtualImage<K> {
                     return Err(VirtualImageError::TileBytesLengthMismatch);
                 }
 
-                let dst_x0 = (tile_x * TILE_SIZE) as usize;
-                let dst_y0 = (tile_y * TILE_SIZE) as usize;
-                for row in 0..(TILE_SIZE as usize) {
+                let dst_x0 = (tile_x * TILE_IMAGE) as usize;
+                let dst_y0 = (tile_y * TILE_IMAGE) as usize;
+                for row in 0..(TILE_IMAGE as usize) {
                     let dst_y = dst_y0 + row;
                     if dst_y >= self.size_y as usize {
                         break;
                     }
                     let copy_pixels =
-                        (TILE_SIZE as usize).min((self.size_x as usize).saturating_sub(dst_x0));
+                        (TILE_IMAGE as usize).min((self.size_x as usize).saturating_sub(dst_x0));
                     let copy_bytes = copy_pixels * 4;
                     let src = &tile[(row * tile_row_bytes)..(row * tile_row_bytes + copy_bytes)];
                     let dst_offset = (dst_y * (self.size_x as usize) + dst_x0) * 4;
@@ -701,8 +700,8 @@ impl std::error::Error for TileImageApplyError {}
 
 impl TileImage {
     pub fn new(size_x: u32, size_y: u32) -> Result<Self, VirtualImageError> {
-        let tiles_per_row = size_x.div_ceil(TILE_SIZE);
-        let tiles_per_column = size_y.div_ceil(TILE_SIZE);
+        let tiles_per_row = size_x.div_ceil(TILE_IMAGE);
+        let tiles_per_column = size_y.div_ceil(TILE_IMAGE);
         let tile_count = (tiles_per_row as usize)
             .checked_mul(tiles_per_column as usize)
             .ok_or(VirtualImageError::TileCountOverflow)?;
@@ -858,6 +857,7 @@ pub fn apply_tile_key_mappings(
     Ok(())
 }
 
+// WDF the shit of brush leaks into tiles, all codes below should be deleted
 #[derive(Debug, Default)]
 pub struct BrushBufferTileRegistry {
     tiles_by_stroke: HashMap<u64, HashMap<BufferTileCoordinate, TileKey>>,

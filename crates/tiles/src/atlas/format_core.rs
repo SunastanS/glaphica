@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use crate::atlas::{TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
-use crate::{TILE_SIZE, TileIngestError};
+use crate::{TILE_IMAGE, TileIngestError};
 
 pub trait TileFormatSpec {
     const PAYLOAD_KIND: TilePayloadKind;
@@ -135,5 +135,5 @@ impl TilePayloadSpec for R8UintSpec {
 }
 
 pub(crate) fn rgba8_tile_len() -> usize {
-    (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4
+    (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4
 }

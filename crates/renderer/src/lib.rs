@@ -23,9 +23,10 @@ use render_protocol::{
 };
 use tiles::{
     DirtySinceResult, GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
-    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAddress,
+    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_STRIDE, TileAddress,
     TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImage, TileKey,
 };
+use model::TILE_IMAGE;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -57,7 +58,7 @@ impl TileTextureManagerGpu {
             atlas_height: layout.atlas_height as f32,
             tiles_per_row: layout.tiles_per_row,
             tiles_per_column: layout.tiles_per_column,
-            tile_size: TILE_SIZE as f32,
+            tile_size: TILE_IMAGE as f32,
             tile_stride: TILE_STRIDE as f32,
             tile_gutter: TILE_GUTTER as f32,
             _padding0: 0.0,
@@ -712,10 +713,10 @@ fn dirty_rect_to_tile_coords(dirty_rect: DirtyRect) -> HashSet<TileCoord> {
         return HashSet::new();
     }
 
-    let start_tile_x = min_x / TILE_SIZE;
-    let start_tile_y = min_y / TILE_SIZE;
-    let end_tile_x = max_x.saturating_sub(1) / TILE_SIZE;
-    let end_tile_y = max_y.saturating_sub(1) / TILE_SIZE;
+    let start_tile_x = min_x / TILE_IMAGE;
+    let start_tile_y = min_y / TILE_IMAGE;
+    let end_tile_x = max_x.saturating_sub(1) / TILE_IMAGE;
+    let end_tile_y = max_y.saturating_sub(1) / TILE_IMAGE;
 
     let mut tiles = HashSet::new();
     for tile_y in start_tile_y..=end_tile_y {

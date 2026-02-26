@@ -6,15 +6,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use model::TILE_IMAGE;
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_SIZE, TILE_STRIDE, TileImage, TileKey};
+use tiles::{TileImage, TileKey, TILE_STRIDE};
 
 use crate::{
-    BlendMode, DrawPassContext, GroupTargetCacheEntry, LeafDrawCacheKey, Renderer,
-    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode,
-    build_group_tile_draw_instances, tile_coord_from_draw_instance,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
+    GroupTargetCacheEntry, LeafDrawCacheKey, Renderer, TileCompositeSpace, TileCoord,
+    TileDrawInstance, TileInstanceGpu, ViewportMode,
 };
 
 static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -53,8 +54,8 @@ impl Renderer {
         if document_width == 0 || document_height == 0 {
             panic!("document size must be positive");
         }
-        let tiles_per_row = document_width.div_ceil(TILE_SIZE);
-        let tiles_per_column = document_height.div_ceil(TILE_SIZE);
+        let tiles_per_row = document_width.div_ceil(TILE_IMAGE);
+        let tiles_per_column = document_height.div_ceil(TILE_IMAGE);
 
         // Clamp to document bounds first, so wildly-panned views don't create huge sets.
         let min_x = min_x.clamp(0.0, document_width as f32);
@@ -62,10 +63,10 @@ impl Renderer {
         let max_x = max_x.clamp(0.0, document_width as f32);
         let max_y = max_y.clamp(0.0, document_height as f32);
 
-        let min_tile_x = (min_x / (TILE_SIZE as f32)).floor() as i32;
-        let min_tile_y = (min_y / (TILE_SIZE as f32)).floor() as i32;
-        let max_tile_x = (max_x / (TILE_SIZE as f32)).floor() as i32;
-        let max_tile_y = (max_y / (TILE_SIZE as f32)).floor() as i32;
+        let min_tile_x = (min_x / (TILE_IMAGE as f32)).floor() as i32;
+        let min_tile_y = (min_y / (TILE_IMAGE as f32)).floor() as i32;
+        let max_tile_x = (max_x / (TILE_IMAGE as f32)).floor() as i32;
+        let max_tile_y = (max_y / (TILE_IMAGE as f32)).floor() as i32;
 
         let min_tile_x = min_tile_x.clamp(0, tiles_per_row.saturating_sub(1) as i32) as u32;
         let min_tile_y = min_tile_y.clamp(0, tiles_per_column.saturating_sub(1) as i32) as u32;

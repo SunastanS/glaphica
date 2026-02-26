@@ -1787,7 +1787,7 @@ mod tests {
         atlas_layout: tiles::TileAtlasLayout,
         address: TileAddress,
     ) -> Vec<u8> {
-        let buffer_size = (tiles::TILE_SIZE as u64) * (tiles::TILE_SIZE as u64) * 4;
+        let buffer_size = (TILE_IMAGE as u64) * (TILE_IMAGE as u64) * 4;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("glaphica.tests.readback"),
             size: buffer_size,
@@ -1814,13 +1814,13 @@ mod tests {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(tiles::TILE_SIZE * 4),
-                    rows_per_image: Some(tiles::TILE_SIZE),
+                    bytes_per_row: Some(TILE_IMAGE * 4),
+                    rows_per_image: Some(TILE_IMAGE),
                 },
             },
             wgpu::Extent3d {
-                width: tiles::TILE_SIZE,
-                height: tiles::TILE_SIZE,
+                width: TILE_IMAGE,
+                height: TILE_IMAGE,
                 depth_or_array_layers: 1,
             },
         );

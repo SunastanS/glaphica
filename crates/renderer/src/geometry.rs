@@ -3,8 +3,8 @@
 //! This module computes clip matrices, cache extents, and tile-grid dimensions
 //! derived from document size.
 
+use model::{TILE_IMAGE, TILE_STRIDE};
 use render_protocol::TransformMatrix4x4;
-use tiles::{TILE_SIZE, TILE_STRIDE};
 
 pub(super) fn document_clip_matrix_from_size(
     document_width: u32,
@@ -44,10 +44,10 @@ pub(super) fn group_cache_extent_from_document_size(
         group_tile_grid_from_document_size(document_width, document_height);
     wgpu::Extent3d {
         width: tiles_per_row
-            .checked_mul(TILE_SIZE)
+            .checked_mul(TILE_IMAGE)
             .expect("group cache width overflow"),
         height: tiles_per_column
-            .checked_mul(TILE_SIZE)
+            .checked_mul(TILE_IMAGE)
             .expect("group cache height overflow"),
         depth_or_array_layers: 1,
     }
@@ -79,7 +79,7 @@ pub(super) fn group_tile_grid_from_document_size(
         "document size must be positive"
     );
     (
-        document_width.div_ceil(TILE_SIZE),
-        document_height.div_ceil(TILE_SIZE),
+        document_width.div_ceil(TILE_IMAGE),
+        document_height.div_ceil(TILE_IMAGE),
     )
 }

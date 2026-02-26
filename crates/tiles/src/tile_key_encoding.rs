@@ -3,8 +3,7 @@
 // 1. The position of a tile in image layout -> TileKey
 // 2. TileKey -> the position of a tile in atlas backend
 // We move the relatively simple one (1) to crates/model/src/lib.rs
-use model::TILE_STRIDE;
-use std::ops::BitOr;
+use crate::TILE_STRIDE;
 
 // REFRACTORING:
 // - use meaningful TileKey
@@ -15,9 +14,9 @@ const SLOT_BITS: u64 = 32;
 const GEN_BITS: u64 = 24;
 const BACKEND_BITS: u64 = 8;
 
-const SLOT_SHIFT: u64 = (1 << SLOT_BITS) - 1;
-const GEN_SHIFT: u64 = SLOT_SHIFT + SLOT_BITS;
-const BACKEND_SHIFT: u64 = GEN_SHIFT + GEN_BITS;
+const SLOT_SHIFT: u64 = 0;
+const GEN_SHIFT: u64 = SLOT_BITS;
+const BACKEND_SHIFT: u64 = SLOT_BITS + GEN_BITS;
 
 const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 const GEN_MASK: u64 = (1 << GEN_BITS) - 1;

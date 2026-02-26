@@ -226,7 +226,7 @@ fn cached_leaf_partial_replace_keeps_index_consistent() {
             TileDrawInstance {
                 blend_mode: BlendMode::Normal,
                 tile: TileInstanceGpu {
-                    document_x: TILE_SIZE as f32,
+                    document_x: TILE_IMAGE as f32,
                     document_y: 0.0,
                     atlas_layer: 0.0,
                     tile_index: 0,
@@ -260,7 +260,7 @@ struct DirtyPropagationResolver {
 
 impl RenderDataResolver for DirtyPropagationResolver {
     fn document_size(&self) -> (u32, u32) {
-        (TILE_SIZE, TILE_SIZE)
+        (TILE_IMAGE, TILE_IMAGE)
     }
 
     fn visit_image_tiles(
@@ -317,7 +317,7 @@ fn resolve_layer_dirty_rect_masks_uses_resolver_propagation_hook() {
             vec![DirtyRect {
                 min_x: 0,
                 min_y: 0,
-                max_x: (TILE_SIZE as i32) * 2,
+                max_x: (TILE_IMAGE as i32) * 2,
                 max_y: 1,
             }],
         )]),
@@ -332,7 +332,7 @@ fn resolve_layer_dirty_rect_masks_uses_resolver_propagation_hook() {
         Some(DirtyRectMask::Rects(rects)) if rects == &vec![DirtyRect {
             min_x: 0,
             min_y: 0,
-            max_x: (TILE_SIZE as i32) * 2,
+            max_x: (TILE_IMAGE as i32) * 2,
             max_y: 1,
         }]
     ));
@@ -373,7 +373,7 @@ struct FakeResolver {
 
 impl RenderDataResolver for FakeResolver {
     fn document_size(&self) -> (u32, u32) {
-        (TILE_SIZE, TILE_SIZE)
+        (TILE_IMAGE, TILE_IMAGE)
     }
 
     fn visit_image_tiles(
@@ -432,7 +432,7 @@ struct FakeBrushBufferResolver {
 
 impl RenderDataResolver for FakeBrushBufferResolver {
     fn document_size(&self) -> (u32, u32) {
-        (TILE_SIZE, TILE_SIZE)
+        (TILE_IMAGE, TILE_IMAGE)
     }
 
     fn visit_image_tiles(
@@ -538,8 +538,8 @@ fn build_leaf_tile_draw_instances_supports_brush_buffer_source() {
     assert_eq!(resolver.visit_calls.get(), 1);
     assert_eq!(resolver.resolve_calls.get(), 1);
     assert_eq!(draw_instances.len(), 1);
-    assert_eq!(draw_instances[0].tile.document_x, (5 * TILE_SIZE) as f32);
-    assert_eq!(draw_instances[0].tile.document_y, (7 * TILE_SIZE) as f32);
+    assert_eq!(draw_instances[0].tile.document_x, (5 * TILE_IMAGE) as f32);
+    assert_eq!(draw_instances[0].tile.document_y, (7 * TILE_IMAGE) as f32);
     assert_eq!(draw_instances[0].tile.atlas_layer, 3.0);
     assert_eq!(draw_instances[0].tile.tile_index, 11);
 }
@@ -609,10 +609,10 @@ fn collect_node_tile_masks_marks_ancestors_of_dirty_leaf_only() {
     let layer_dirty_rect_masks = HashMap::from([(
         12u64,
         DirtyRectMask::Rects(vec![DirtyRect {
-            min_x: TILE_SIZE as i32,
-            min_y: (2 * TILE_SIZE) as i32,
-            max_x: (TILE_SIZE as i32) + 1,
-            max_y: (2 * TILE_SIZE) as i32 + 1,
+            min_x: TILE_IMAGE as i32,
+            min_y: (2 * TILE_IMAGE) as i32,
+            max_x: (TILE_IMAGE as i32) + 1,
+            max_y: (2 * TILE_IMAGE) as i32 + 1,
         }]),
     )]);
     let dirty_nodes =
@@ -636,7 +636,7 @@ fn collect_node_tile_masks_promotes_group_to_full_at_threshold() {
         DirtyRectMask::Rects(vec![DirtyRect {
             min_x: 0,
             min_y: 0,
-            max_x: (2 * TILE_SIZE) as i32,
+            max_x: (2 * TILE_IMAGE) as i32,
             max_y: 1,
         }]),
     )]);
@@ -659,10 +659,10 @@ fn collect_node_tile_masks_keeps_partial_group_below_threshold() {
     let layer_dirty_rect_masks = HashMap::from([(
         1u64,
         DirtyRectMask::Rects(vec![DirtyRect {
-            min_x: (3 * TILE_SIZE) as i32,
-            min_y: (2 * TILE_SIZE) as i32,
-            max_x: (3 * TILE_SIZE) as i32 + 1,
-            max_y: (2 * TILE_SIZE) as i32 + 1,
+            min_x: (3 * TILE_IMAGE) as i32,
+            min_y: (2 * TILE_IMAGE) as i32,
+            max_x: (3 * TILE_IMAGE) as i32 + 1,
+            max_y: (2 * TILE_IMAGE) as i32 + 1,
         }]),
     )]);
     let dirty_nodes =
@@ -746,8 +746,8 @@ fn dirty_rect_to_tile_coords_handles_half_open_bounds() {
     let dirty_rect = DirtyRect {
         min_x: 0,
         min_y: 0,
-        max_x: TILE_SIZE as i32,
-        max_y: TILE_SIZE as i32,
+        max_x: TILE_IMAGE as i32,
+        max_y: TILE_IMAGE as i32,
     };
     let tiles = dirty_rect_to_tile_coords(dirty_rect);
     assert_eq!(
@@ -759,9 +759,9 @@ fn dirty_rect_to_tile_coords_handles_half_open_bounds() {
     );
 
     let dirty_rect = DirtyRect {
-        min_x: TILE_SIZE as i32,
+        min_x: TILE_IMAGE as i32,
         min_y: 0,
-        max_x: (TILE_SIZE as i32) + 1,
+        max_x: (TILE_IMAGE as i32) + 1,
         max_y: 1,
     };
     let tiles = dirty_rect_to_tile_coords(dirty_rect);
@@ -820,15 +820,15 @@ fn document_clip_matrix_alone_would_stretch_on_wide_surface() {
 
 #[test]
 fn group_cache_extent_rounds_up_to_tile_boundaries() {
-    let extent = group_cache_extent_from_document_size(TILE_SIZE + 7, TILE_SIZE * 2 + 1);
-    assert_eq!(extent.width, TILE_SIZE * 2);
-    assert_eq!(extent.height, TILE_SIZE * 3);
+    let extent = group_cache_extent_from_document_size(TILE_IMAGE + 7, TILE_IMAGE * 2 + 1);
+    assert_eq!(extent.width, TILE_IMAGE * 2);
+    assert_eq!(extent.height, TILE_IMAGE * 3);
     assert_eq!(extent.depth_or_array_layers, 1);
 }
 
 #[test]
 fn group_cache_slot_extent_uses_tile_stride() {
-    let extent = group_cache_slot_extent_from_document_size(TILE_SIZE + 7, TILE_SIZE * 2 + 1);
+    let extent = group_cache_slot_extent_from_document_size(TILE_IMAGE + 7, TILE_IMAGE * 2 + 1);
     assert_eq!(extent.width, TILE_STRIDE * 2);
     assert_eq!(extent.height, TILE_STRIDE * 3);
     assert_eq!(extent.depth_or_array_layers, 1);
@@ -837,7 +837,7 @@ fn group_cache_slot_extent_uses_tile_stride() {
 #[test]
 fn group_tile_grid_rounds_up_to_tile_boundaries() {
     let (tiles_per_row, tiles_per_column) =
-        group_tile_grid_from_document_size(TILE_SIZE + 7, TILE_SIZE * 2 + 1);
+        group_tile_grid_from_document_size(TILE_IMAGE + 7, TILE_IMAGE * 2 + 1);
     assert_eq!(tiles_per_row, 2);
     assert_eq!(tiles_per_column, 3);
 }
@@ -1030,7 +1030,7 @@ fn solid_tile(color: [f32; 4]) -> Vec<u8> {
         float_channel_to_u8(color[3]),
     ];
 
-    let mut bytes = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
+    let mut bytes = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
     for index in (0..bytes.len()).step_by(4) {
         bytes[index] = pixel[0];
         bytes[index + 1] = pixel[1];
@@ -1281,8 +1281,8 @@ fn composite_tile_mapping_renders_quadrant_image_exactly() {
             .await
             .expect("request test device");
 
-        let tile_size = TILE_SIZE;
-        assert_eq!(tile_size, 128, "test assumes TILE_SIZE=128");
+        let tile_size = TILE_IMAGE;
+        assert_eq!(tile_size, 128, "test assumes TILE_IMAGE=128");
         let tile_stride = TILE_STRIDE;
         assert!(
             tile_stride >= tile_size,
@@ -1828,8 +1828,8 @@ fn composite_tile_mapping_survives_nested_group_cache_levels() {
             .await
             .expect("request test device");
 
-        let tile_size = TILE_SIZE;
-        assert_eq!(tile_size, 128, "test assumes TILE_SIZE=128");
+        let tile_size = TILE_IMAGE;
+        assert_eq!(tile_size, 128, "test assumes TILE_IMAGE=128");
         let tile_stride = TILE_STRIDE;
 
         let content_width = 256u32;

@@ -5,8 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use model::TILE_IMAGE;
 use render_protocol::{BlendMode, ImageSource};
-use tiles::{GroupTileAtlasStore, TILE_SIZE, TileImage, TileKey};
+use tiles::{GroupTileAtlasStore, TileImage, TileKey};
 
 use crate::{
     CachedLeafDraw, DirtyTileMask, RenderDataResolver, TileCoord, TileDrawInstance, TileInstanceGpu,
@@ -31,10 +32,10 @@ pub(crate) fn build_leaf_tile_draw_instances(
                 )
             });
         let document_x = tile_x
-            .checked_mul(TILE_SIZE)
+            .checked_mul(TILE_IMAGE)
             .expect("tile x position overflow") as f32;
         let document_y = tile_y
-            .checked_mul(TILE_SIZE)
+            .checked_mul(TILE_IMAGE)
             .expect("tile y position overflow") as f32;
 
         draw_instances.push(TileDrawInstance {
@@ -80,10 +81,10 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
                 )
             });
         let document_x = tile_x
-            .checked_mul(TILE_SIZE)
+            .checked_mul(TILE_IMAGE)
             .expect("tile x position overflow") as f32;
         let document_y = tile_y
-            .checked_mul(TILE_SIZE)
+            .checked_mul(TILE_IMAGE)
             .expect("tile y position overflow") as f32;
 
         draw_instances.push(TileDrawInstance {
@@ -132,10 +133,10 @@ pub(crate) fn build_group_tile_draw_instances(
                 .resolve(tile_key)
                 .expect("group tile key must resolve to atlas address");
             let document_x = tile_x
-                .checked_mul(TILE_SIZE)
+                .checked_mul(TILE_IMAGE)
                 .expect("group tile x position overflow") as f32;
             let document_y = tile_y
-                .checked_mul(TILE_SIZE)
+                .checked_mul(TILE_IMAGE)
                 .expect("group tile y position overflow") as f32;
             TileDrawInstance {
                 blend_mode: blend,
@@ -153,8 +154,8 @@ pub(crate) fn build_group_tile_draw_instances(
 
 pub(crate) fn tile_coord_from_draw_instance(instance: &TileDrawInstance) -> TileCoord {
     TileCoord {
-        tile_x: (instance.tile.document_x as u32) / TILE_SIZE,
-        tile_y: (instance.tile.document_y as u32) / TILE_SIZE,
+        tile_x: (instance.tile.document_x as u32) / TILE_IMAGE,
+        tile_y: (instance.tile.document_y as u32) / TILE_IMAGE,
     }
 }
 

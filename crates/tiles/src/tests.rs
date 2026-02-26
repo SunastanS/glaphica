@@ -61,7 +61,7 @@ fn read_tile_rgba8(
     texture: &wgpu::Texture,
     address: TileAddress,
 ) -> Vec<u8> {
-    let buffer_size = (TILE_SIZE as u64) * (TILE_SIZE as u64) * 4;
+    let buffer_size = (TILE_IMAGE as u64) * (TILE_IMAGE as u64) * 4;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile readback"),
         size: buffer_size,
@@ -83,13 +83,13 @@ fn read_tile_rgba8(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(TILE_SIZE * 4),
-                rows_per_image: Some(TILE_SIZE),
+                bytes_per_row: Some(TILE_IMAGE * 4),
+                rows_per_image: Some(TILE_IMAGE),
             },
         },
         wgpu::Extent3d {
-            width: TILE_SIZE,
-            height: TILE_SIZE,
+            width: TILE_IMAGE,
+            height: TILE_IMAGE,
             depth_or_array_layers: 1,
         },
     );
@@ -178,7 +178,7 @@ fn read_tile_r32float(
     texture: &wgpu::Texture,
     address: TileAddress,
 ) -> Vec<f32> {
-    let buffer_size = (TILE_SIZE as u64) * (TILE_SIZE as u64) * 4;
+    let buffer_size = (TILE_IMAGE as u64) * (TILE_IMAGE as u64) * 4;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile r32float readback"),
         size: buffer_size,
@@ -200,13 +200,13 @@ fn read_tile_r32float(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(TILE_SIZE * 4),
-                rows_per_image: Some(TILE_SIZE),
+                bytes_per_row: Some(TILE_IMAGE * 4),
+                rows_per_image: Some(TILE_IMAGE),
             },
         },
         wgpu::Extent3d {
-            width: TILE_SIZE,
-            height: TILE_SIZE,
+            width: TILE_IMAGE,
+            height: TILE_IMAGE,
             depth_or_array_layers: 1,
         },
     );
@@ -240,9 +240,9 @@ fn read_tile_r8uint(
     texture: &wgpu::Texture,
     address: TileAddress,
 ) -> Vec<u8> {
-    let row_bytes = TILE_SIZE as usize;
+    let row_bytes = TILE_IMAGE as usize;
     let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
-    let buffer_size = (padded_row_bytes as u64) * (TILE_SIZE as u64);
+    let buffer_size = (padded_row_bytes as u64) * (TILE_IMAGE as u64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile r8uint readback"),
         size: buffer_size,
@@ -265,12 +265,12 @@ fn read_tile_r8uint(
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded_row_bytes as u32),
-                rows_per_image: Some(TILE_SIZE),
+                rows_per_image: Some(TILE_IMAGE),
             },
         },
         wgpu::Extent3d {
-            width: TILE_SIZE,
-            height: TILE_SIZE,
+            width: TILE_IMAGE,
+            height: TILE_IMAGE,
             depth_or_array_layers: 1,
         },
     );
@@ -289,8 +289,8 @@ fn read_tile_r8uint(
         .expect("map callback recv")
         .expect("map tile readback");
     let mapped = slice.get_mapped_range();
-    let mut tile = vec![0u8; row_bytes * (TILE_SIZE as usize)];
-    for row in 0..(TILE_SIZE as usize) {
+    let mut tile = vec![0u8; row_bytes * (TILE_IMAGE as usize)];
+    for row in 0..(TILE_IMAGE as usize) {
         let source_start = row * padded_row_bytes;
         let source_end = source_start + row_bytes;
         let destination_start = row * row_bytes;
@@ -303,7 +303,7 @@ fn read_tile_r8uint(
 }
 
 fn source_texel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
-    let index = ((y as usize) * (TILE_SIZE as usize) + (x as usize)) * 4;
+    let index = ((y as usize) * (TILE_IMAGE as usize) + (x as usize)) * 4;
     [
         bytes[index],
         bytes[index + 1],
@@ -354,10 +354,10 @@ fn ingest_tile_should_define_gutter_pixels_from_edge_texels() {
         },
     );
 
-    let mut bytes = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
-    for y in 0..TILE_SIZE {
-        for x in 0..TILE_SIZE {
-            let index = ((y as usize) * (TILE_SIZE as usize) + (x as usize)) * 4;
+    let mut bytes = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
+    for y in 0..TILE_IMAGE {
+        for x in 0..TILE_IMAGE {
+            let index = ((y as usize) * (TILE_IMAGE as usize) + (x as usize)) * 4;
             bytes[index] = (x % 251) as u8;
             bytes[index + 1] = (y % 251) as u8;
             bytes[index + 2] = ((x + y) % 251) as u8;
@@ -366,7 +366,7 @@ fn ingest_tile_should_define_gutter_pixels_from_edge_texels() {
     }
 
     let key = store
-        .ingest_tile(TILE_SIZE, TILE_SIZE, &bytes)
+        .ingest_tile(TILE_IMAGE, TILE_IMAGE, &bytes)
         .expect("ingest tile")
         .expect("non-empty tile");
     let address = store.resolve(key).expect("resolve key");
@@ -378,9 +378,9 @@ fn ingest_tile_should_define_gutter_pixels_from_edge_texels() {
     let atlas_tile_origin_y = address.tile_y() * tile_stride;
 
     let source_top_left = source_texel(&bytes, 0, 0);
-    let source_top_right = source_texel(&bytes, TILE_SIZE - 1, 0);
-    let source_bottom_left = source_texel(&bytes, 0, TILE_SIZE - 1);
-    let source_bottom_right = source_texel(&bytes, TILE_SIZE - 1, TILE_SIZE - 1);
+    let source_top_right = source_texel(&bytes, TILE_IMAGE - 1, 0);
+    let source_bottom_left = source_texel(&bytes, 0, TILE_IMAGE - 1);
+    let source_bottom_right = source_texel(&bytes, TILE_IMAGE - 1, TILE_IMAGE - 1);
 
     assert_eq!(
         read_texel_rgba8(
@@ -482,13 +482,13 @@ fn ingest_tile_enqueues_upload_and_writes_after_drain() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_store(&device, TileAtlasConfig::default());
 
-    let mut bytes = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
+    let mut bytes = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
     bytes[0] = 9;
     bytes[1] = 8;
     bytes[2] = 7;
     bytes[3] = 6;
     let key = store
-        .ingest_tile(TILE_SIZE, TILE_SIZE, &bytes)
+        .ingest_tile(TILE_IMAGE, TILE_IMAGE, &bytes)
         .expect("ingest tile")
         .expect("non-empty tile");
     let address = store.resolve(key).expect("resolve key");
@@ -504,15 +504,15 @@ fn ingest_image_rgba8_strided_keeps_sparse_tiles() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_store(&device, TileAtlasConfig::default());
 
-    let size_x = TILE_SIZE + 1;
-    let size_y = TILE_SIZE + 1;
+    let size_x = TILE_IMAGE + 1;
+    let size_y = TILE_IMAGE + 1;
     let row_bytes = size_x * 4;
     let bytes_per_row = row_bytes + 8;
     let required_len =
         (bytes_per_row as usize) * ((size_y as usize).saturating_sub(1)) + (row_bytes as usize);
     let mut bytes = vec![0u8; required_len];
-    let pixel_x = TILE_SIZE;
-    let pixel_y = TILE_SIZE;
+    let pixel_x = TILE_IMAGE;
+    let pixel_y = TILE_IMAGE;
     let index = (pixel_y as usize) * (bytes_per_row as usize) + (pixel_x as usize) * 4;
     bytes[index] = 1;
 
@@ -706,7 +706,7 @@ fn clear_tile_set_fails_without_partial_clear_enqueue() {
     let kept_key = keys[0];
     let released_key = keys[1];
     let kept_address = store.resolve(kept_key).expect("resolve kept key");
-    let tile_bytes = vec![1u8; (TILE_SIZE as usize) * (TILE_SIZE as usize)];
+    let tile_bytes = vec![1u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize)];
 
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -718,12 +718,12 @@ fn clear_tile_set_fails_without_partial_clear_enqueue() {
         &tile_bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(TILE_SIZE),
-            rows_per_image: Some(TILE_SIZE),
+            bytes_per_row: Some(TILE_IMAGE),
+            rows_per_image: Some(TILE_IMAGE),
         },
         wgpu::Extent3d {
-            width: TILE_SIZE,
-            height: TILE_SIZE,
+            width: TILE_IMAGE,
+            height: TILE_IMAGE,
             depth_or_array_layers: 1,
         },
     );
@@ -771,7 +771,7 @@ fn clear_tile_set_skips_stale_targets_after_release_and_reuse() {
         .expect("drain after stale clear");
     assert_eq!(tile_count, 1);
 
-    let tile_bytes = vec![7u8; (TILE_SIZE as usize) * (TILE_SIZE as usize)];
+    let tile_bytes = vec![7u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize)];
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: gpu.texture(),
@@ -782,12 +782,12 @@ fn clear_tile_set_skips_stale_targets_after_release_and_reuse() {
         &tile_bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(TILE_SIZE),
-            rows_per_image: Some(TILE_SIZE),
+            bytes_per_row: Some(TILE_IMAGE),
+            rows_per_image: Some(TILE_IMAGE),
         },
         wgpu::Extent3d {
-            width: TILE_SIZE,
-            height: TILE_SIZE,
+            width: TILE_IMAGE,
+            height: TILE_IMAGE,
             depth_or_array_layers: 1,
         },
     );
@@ -828,10 +828,10 @@ fn stale_upload_is_skipped_after_release_and_reuse() {
         },
     );
 
-    let mut bytes = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
+    let mut bytes = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
     bytes[0] = 255;
     let old_key = store
-        .ingest_tile(TILE_SIZE, TILE_SIZE, &bytes)
+        .ingest_tile(TILE_IMAGE, TILE_IMAGE, &bytes)
         .expect("ingest old tile")
         .expect("old tile key");
     let old_address = store.resolve(old_key).expect("resolve old key");
@@ -1114,12 +1114,12 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
         &ones,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(TILE_SIZE * 4),
-            rows_per_image: Some(TILE_SIZE),
+            bytes_per_row: Some(TILE_IMAGE * 4),
+            rows_per_image: Some(TILE_IMAGE),
         },
         wgpu::Extent3d {
-            width: TILE_SIZE,
-            height: TILE_SIZE,
+            width: TILE_IMAGE,
+            height: TILE_IMAGE,
             depth_or_array_layers: 1,
         },
     );
@@ -1215,7 +1215,7 @@ fn tile_address_layout_aware_helpers_support_square_atlas() {
 
 #[test]
 fn virtual_image_iter_tiles_skips_empty_and_preserves_tile_coordinates() {
-    let mut image = VirtualImage::<u8>::new(TILE_SIZE * 2, TILE_SIZE * 2).expect("new image");
+    let mut image = VirtualImage::<u8>::new(TILE_IMAGE * 2, TILE_IMAGE * 2).expect("new image");
     image.set_tile(1, 0, 7).expect("set tile 1,0");
     image.set_tile(0, 1, 9).expect("set tile 0,1");
 
