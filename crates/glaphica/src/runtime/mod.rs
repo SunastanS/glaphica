@@ -167,6 +167,11 @@ impl GpuRuntime {
         self.surface_size
     }
 
+    /// Get the view sender.
+    pub fn view_sender(&self) -> &ViewOpSender {
+        &self.view_sender
+    }
+
     /// Get a reference to the renderer.
     ///
     /// This is for read-only access. For mutations, use `execute()` with commands.

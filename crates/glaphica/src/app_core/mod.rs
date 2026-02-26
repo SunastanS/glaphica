@@ -201,6 +201,11 @@ impl AppCore {
         &self.runtime
     }
 
+    /// Get the view sender from runtime.
+    pub fn view_sender(&self) -> &renderer::ViewOpSender {
+        self.runtime.view_sender()
+    }
+
     /// Get a mutable reference to the GPU runtime.
     pub fn runtime_mut(&mut self) -> &mut GpuRuntime {
         &mut self.runtime
@@ -219,6 +224,18 @@ impl AppCore {
     /// Get the brush buffer tile keys.
     pub fn brush_buffer_tile_keys(&self) -> &Arc<RwLock<BrushBufferTileRegistry>> {
         &self.brush_buffer_tile_keys
+    }
+
+    /// Get a mutable reference to the brush buffer tile keys.
+    pub fn brush_buffer_tile_keys_mut(&mut self) -> &mut Arc<RwLock<BrushBufferTileRegistry>> {
+        &mut self.brush_buffer_tile_keys
+    }
+
+    /// Get the brush execution feedback queue.
+    pub fn brush_execution_feedback_queue_mut(
+        &mut self,
+    ) -> &mut VecDeque<BrushExecutionMergeFeedback> {
+        &mut self.brush_execution_feedback_queue
     }
 
     /// Get the atlas store from runtime.
