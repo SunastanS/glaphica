@@ -3,3 +3,4 @@
 Cargo.lock
 howmany-report.txt
 .aider*
+test_model
