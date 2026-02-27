@@ -8,21 +8,32 @@ use std::sync::Arc;
 
 use brush_execution::BrushExecutionMergeFeedback;
 use document::Document;
-use crate::protocol::{InputRingSample, SubmitWaterline, ExecutedBatchWaterline, CompleteWaterline, GpuFeedbackFrame};
+use protocol::{InputRingSample, SubmitWaterline, ExecutedBatchWaterline, CompleteWaterline, GpuFeedbackFrame};
 use tiles::{
     BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, TileAtlasStore, TileMergeEngine,
     TileMergeError, TilesBusinessResult,
 };
+use crate::app_core::MergeStores;
 use view::ViewTransform;
 
 use crate::runtime::{RuntimeCommand, RuntimeReceipt, RuntimeError};
 
 /// Engine waterlines (received from main thread via feedback)
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct EngineWaterlines {
     pub submit: SubmitWaterline,
     pub executed: ExecutedBatchWaterline,
     pub complete: CompleteWaterline,
+}
+
+impl Default for EngineWaterlines {
+    fn default() -> Self {
+        Self {
+            submit: SubmitWaterline(0),
+            executed: ExecutedBatchWaterline(0),
+            complete: CompleteWaterline(0),
+        }
+    }
 }
 
 /// Engine Core - business logic running on engine thread.
@@ -34,10 +45,7 @@ pub struct EngineCore {
     pub document: Document,
     
     // Merge engine
-    pub tile_merge_engine: TileMergeEngine<(
-        Arc<TileAtlasStore>,
-        Arc<GenericR32FloatTileAtlasStore>,
-    )>,
+    pub tile_merge_engine: TileMergeEngine<MergeStores>,
     
     // Brush state
     pub brush_buffer_tile_keys: BrushBufferTileRegistry,
@@ -66,10 +74,7 @@ impl EngineCore {
     /// Create a new EngineCore from existing components.
     pub fn new(
         document: Document,
-        tile_merge_engine: TileMergeEngine<(
-            Arc<TileAtlasStore>,
-            Arc<GenericR32FloatTileAtlasStore>,
-        )>,
+        tile_merge_engine: TileMergeEngine<MergeStores>,
         brush_buffer_tile_keys: BrushBufferTileRegistry,
         view_transform: ViewTransform,
     ) -> Self {
