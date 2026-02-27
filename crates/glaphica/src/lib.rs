@@ -3,6 +3,7 @@ pub mod driver_bridge;
 pub mod runtime;
 
 use app_core::AppCore;
+use app_core::AppCoreError;
 use brush_execution::BrushExecutionMergeFeedback;
 
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,7 @@ use tiles::{
 };
 
 use view::ViewTransform;
+use model::TILE_IMAGE;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -936,39 +938,18 @@ impl GpuState {
         state
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
-        let width = new_size.width.max(1);
-        let height = new_size.height.max(1);
-        if self.core.runtime().surface_size().width == width && self.core.runtime().surface_size().height == height {
-            return;
-        }
-
-        self.core.runtime_mut().set_surface_size(PhysicalSize::new(width, height));
-        self.core.runtime_mut().renderer_mut().resize(width, height);
-        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
+    /// Resize the surface.
+    ///
+    /// Phase 2.5-B: Now returns Result for error propagation.
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), AppCoreError> {
+        self.core.resize(new_size)
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        // TODO(Phase 2 Step 4A): Migrated to AppCore - temporary direct implementation
-        // Uncomment when AppCore is fully integrated:
-        // self.core.render()
-        
-        // Current direct implementation (to be removed after migration)
-        self.core.runtime_mut().renderer_mut().drain_view_ops();
-
-        let frame_id = *self.core.runtime_mut().next_frame_id_mut();
-        let current_frame_id = *self.core.runtime_mut().next_frame_id_mut();
-        *self.core.runtime_mut().next_frame_id_mut() = current_frame_id
-            .checked_add(1)
-            .expect("frame id overflow");
-
-        match self.core.runtime_mut().renderer_mut().present_frame(frame_id) {
-            Ok(()) => Ok(()),
-            Err(PresentError::Surface(error)) => Err(error),
-            Err(PresentError::TileDrain(error)) => {
-                panic!("tile atlas drain failed during present: {error}")
-            }
-        }
+    /// Render a frame.
+    ///
+    /// Phase 2.5-B: Now delegates to AppCore with unified error handling.
+    pub fn render(&mut self) -> Result<(), AppCoreError> {
+        self.core.render()
     }
 
     pub fn set_brush_command_quota(&self, max_commands: u32) {

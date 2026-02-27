@@ -307,35 +307,39 @@ impl AppCore {
     }
     /// Resize the surface.
     ///
-    /// This is migrated to use the runtime command interface.
-    /// 
-    /// TODO(Phase 2 Method Migration): Change return type to Result<(), AppCoreError>
-    /// Currently returns () for backward compatibility with GpuState wrapper.
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
+    /// Phase 2.5-B: Now returns Result for error propagation.
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), AppCoreError> {
         let width = new_size.width.max(1);
         let height = new_size.height.max(1);
 
         // Skip if unchanged
         let current_size = self.runtime.surface_size();
         if current_size.width == width && current_size.height == height {
-            return;
+            return Ok(());
         }
 
         // Execute resize command via runtime
-        // TODO: Propagate error instead of panicking
         self.runtime
             .execute(RuntimeCommand::Resize {
                 width,
                 height,
                 view_transform: self.view_transform.clone(),
             })
-            .unwrap_or_else(|err| panic!("resize command failed: {err:?}"));
+            .map_err(|err| AppCoreError::Resize {
+                width,
+                height,
+                reason: format!("{:?}", err),
+            })?;
+        
+        Ok(())
     }
 
     /// Render a frame.
     ///
     /// This is the main render path, migrated to use the runtime command interface.
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    /// 
+    /// Phase 2.5-B: Now returns Result<(), AppCoreError> for unified error handling.
+    pub fn render(&mut self) -> Result<(), AppCoreError> {
         // Drain view operations before presenting
         self.runtime.drain_view_ops();
 
@@ -349,18 +353,29 @@ impl AppCore {
         {
             Ok(RuntimeReceipt::FramePresented { .. }) => Ok(()),
             Ok(_) => {
-                // Other receipts are unexpected for PresentFrame command
-                panic!("unexpected receipt for PresentFrame command")
+                // Logic bug: unexpected receipt
+                debug_assert!(false, "unexpected receipt for PresentFrame command");
+                Err(AppCoreError::UnexpectedReceipt {
+                    command: "PresentFrame",
+                    receipt_type: "non-FramePresented",
+                    receipt_debug: None,
+                })
             }
             Err(RuntimeError::PresentError(e)) => match e {
-                renderer::PresentError::Surface(err) => Err(err),
+                renderer::PresentError::Surface(err) => Err(AppCoreError::Surface(err)),
                 renderer::PresentError::TileDrain(error) => {
-                    panic!("tile atlas drain failed during present: {error}")
+                    // Fatal: GPU resource failure
+                    Err(AppCoreError::PresentFatal { source: error })
                 }
             },
-            Err(RuntimeError::SurfaceError(err)) => Err(err),
+            Err(RuntimeError::SurfaceError(err)) => Err(AppCoreError::Surface(err)),
             Err(other) => {
-                panic!("unexpected runtime error during render: {other:?}")
+                // Logic bug: unexpected error variant
+                debug_assert!(false, "unexpected runtime error during render");
+                Err(AppCoreError::UnexpectedErrorVariant {
+                    context: "render",
+                    error: other,
+                })
             }
         }
     }

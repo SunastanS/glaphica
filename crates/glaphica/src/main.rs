@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use glaphica::app_core::AppCoreError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -569,7 +570,12 @@ impl App {
 
     fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.resize(new_size);
+            if let Err(err) = gpu.resize(new_size) {
+                // Phase 2.5-B: Handle resize errors
+                // According to design: no degraded mode, either success or panic
+                // For resize, we log the error but don't panic (window can still function)
+                eprintln!("[error] resize failed: {:?}", err);
+            }
         }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
@@ -779,21 +785,34 @@ impl App {
 
         match render_result {
             Ok(()) => {}
-            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+            Err(AppCoreError::Surface(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost)) => {
                 if let Some(window) = self.window.as_ref() {
-                    gpu.resize(window.inner_size());
+                    // Attempt recovery by resizing
+                    if let Err(err) = gpu.resize(window.inner_size()) {
+                        eprintln!("[error] resize recovery failed: {:?}", err);
+                    } else {
+                        window.request_redraw();
+                    }
+                }
+            }
+            Err(AppCoreError::Surface(wgpu::SurfaceError::Timeout)) => {
+                if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
             }
-            Err(wgpu::SurfaceError::Timeout) => {
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
+            Err(AppCoreError::OutOfMemory | AppCoreError::PresentFatal { .. }) => {
+                // Fatal errors - exit
                 event_loop.exit();
             }
-            Err(_) => {
+            Err(AppCoreError::UnexpectedReceipt { .. } | AppCoreError::UnexpectedErrorVariant { .. }) => {
+                // Logic bugs - log and continue for debugging
+                eprintln!("[error] render logic bug: {:?}", render_result);
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            Err(other) => {
+                eprintln!("[error] render failed: {:?}", other);
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
@@ -823,13 +842,23 @@ impl App {
             let render_result = gpu.render();
             if let Err(error) = render_result {
                 match error {
-                    wgpu::SurfaceError::OutOfMemory => {
+                    AppCoreError::OutOfMemory => {
                         panic!("out of memory while flushing brush pipeline lifecycle")
                     }
-                    wgpu::SurfaceError::Outdated
-                    | wgpu::SurfaceError::Lost
-                    | wgpu::SurfaceError::Timeout
-                    | wgpu::SurfaceError::Other => {}
+                    AppCoreError::PresentFatal { .. } => {
+                        // Fatal error during flush - panic
+                        panic!("fatal present error while flushing brush pipeline lifecycle: {:?}", error)
+                    }
+                    // Recoverable errors - continue
+                    AppCoreError::Surface(_)
+                    | AppCoreError::UnexpectedReceipt { .. }
+                    | AppCoreError::UnexpectedErrorVariant { .. }
+                    | AppCoreError::Runtime(_)
+                    | AppCoreError::BrushEnqueue(_)
+                    | AppCoreError::Merge(_)
+                    | AppCoreError::Resize { .. }
+                    | AppCoreError::TileAllocationLogicError { .. }
+                    | AppCoreError::MissingRendererNotice { .. } => {}
                 }
             }
             gpu.process_renderer_merge_completions(frame_sequence_id)
