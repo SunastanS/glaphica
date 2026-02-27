@@ -22,15 +22,15 @@ pub enum RuntimeCommand {
     /// Present a frame and drain tile operations.
     PresentFrame { frame_id: u64 },
 
-    /// Resize the surface (runtime version, no handshake).
-    ResizeRuntime {
+    /// Resize the surface (with view_transform).
+    Resize {
         width: u32,
         height: u32,
         view_transform: ViewTransform,
     },
 
-    /// Resize with handshake (for Phase 4 initialization).
-    Resize {
+    /// Resize with handshake (for Phase 4 initialization, no view_transform).
+    ResizeHandshake {
         width: u32,
         height: u32,
         ack_sender: Sender<Result<(), RuntimeError>>,
@@ -69,11 +69,11 @@ pub enum RuntimeReceipt {
     /// Frame presented successfully.
     FramePresented { executed_tile_count: usize },
 
-    /// Surface resized (runtime version).
-    ResizedRuntime,
-
-    /// Surface resized with handshake.
+    /// Surface resized.
     Resized,
+
+    /// Surface resized (handshake ack).
+    ResizeHandshakeAck,
 
     /// Initialization completed.
     InitComplete,
