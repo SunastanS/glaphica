@@ -1517,12 +1517,16 @@ impl GpuState {
     }
 
     fn apply_gc_evicted_batch(&mut self, retain_id: u64, key_count: usize) {
+        let mut gc_evicted_batches_total = self.core.gc_evicted_batches_total();
+        let mut gc_evicted_keys_total = self.core.gc_evicted_keys_total();
         apply_gc_evicted_batch_state(
-            &mut self.core.gc_evicted_batches_total(),
-            &mut self.core.gc_evicted_keys_total(),
+            &mut gc_evicted_batches_total,
+            &mut gc_evicted_keys_total,
             retain_id,
             key_count,
         );
+        *self.core.gc_evicted_batches_total_mut() = gc_evicted_batches_total;
+        *self.core.gc_evicted_keys_total_mut() = gc_evicted_keys_total;
         eprintln!(
             "tiles gc evicted retain batch: retain_id={} key_count={} total_batches={} total_keys={}",
             retain_id, key_count, self.core.gc_evicted_batches_total(), self.core.gc_evicted_keys_total()
