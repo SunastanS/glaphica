@@ -100,11 +100,6 @@ impl EngineCore {
 
     /// Process feedback from main thread
     pub fn process_feedback(&mut self, frame: GpuFeedbackFrame<RuntimeReceipt, RuntimeError>) {
-        // Store last waterlines for monotonicity check
-        let last_submit = self.waterlines.submit;
-        let last_executed = self.waterlines.executed;
-        let last_complete = self.waterlines.complete;
-
         // 1. Update waterlines (max merge - monotonic guarantee)
         self.waterlines.submit = self.waterlines.submit.max(frame.submit_waterline);
         self.waterlines.executed = self.waterlines.executed.max(frame.executed_batch_waterline);

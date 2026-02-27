@@ -1,8 +1,16 @@
-// REFACTORING:
-// There are two kinds of search work
-// 1. The position of a tile in image layout -> TileKey
-// 2. TileKey -> the position of a tile in atlas backend
-// We move the relatively simple one (1) to crates/model/src/lib.rs
+//! TileKey encoding scheme (draft implementation).
+//!
+//! This module contains a draft implementation of encoded TileKey.
+//! Not yet integrated into the main codebase.
+//!
+//! REFACTORING:
+//! There are two kinds of search work
+//! 1. The position of a tile in image layout -> TileKey
+//! 2. TileKey -> the position of a tile in atlas backend
+//! We move the relatively simple one (1) to crates/model/src/lib.rs
+
+#![allow(dead_code)]
+
 use crate::TILE_STRIDE;
 
 // REFRACTORING:
@@ -81,7 +89,7 @@ impl Pow2U16 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AtlasLayout {
+pub(crate) struct AtlasLayout {
     tiles_per_edge: Pow2U16,
     array_layers: Pow2U16,
 }
@@ -122,7 +130,7 @@ pub enum AtlasTier {
 }
 
 impl AtlasTier {
-    pub const fn layout(self) -> AtlasLayout {
+    pub(crate) const fn layout(self) -> AtlasLayout {
         match self {
             AtlasTier::Tiny10 => AtlasLayout {
                 tiles_per_edge: Pow2U16::new(32),
