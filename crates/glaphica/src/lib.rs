@@ -32,6 +32,7 @@ use tiles::{
 };
 
 use view::ViewTransform;
+use model::TILE_IMAGE;
  // Used in tests
 use winit::dpi::PhysicalSize;
 use winit::window::Window;

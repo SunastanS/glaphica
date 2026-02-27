@@ -5,6 +5,8 @@
 ///
 /// Design note: Commands own their data (no lifetime parameters) to keep
 /// the command interface simple and avoid lifetime propagation.
+use std::sync::mpsc::Sender;
+
 use render_protocol::{
     BrushRenderCommand, MergeAuditMeta, MergeExecutionResult, RenderTreeSnapshot,
     StrokeExecutionReceiptId,
@@ -20,12 +22,27 @@ pub enum RuntimeCommand {
     /// Present a frame and drain tile operations.
     PresentFrame { frame_id: u64 },
 
-    /// Resize the surface.
-    Resize {
+    /// Resize the surface (runtime version, no handshake).
+    ResizeRuntime {
         width: u32,
         height: u32,
         view_transform: ViewTransform,
     },
+
+    /// Resize with handshake (for Phase 4 initialization).
+    Resize {
+        width: u32,
+        height: u32,
+        ack_sender: Sender<Result<(), RuntimeError>>,
+    },
+
+    /// Initialize with handshake (for Phase 4 startup).
+    Init {
+        ack_sender: Sender<Result<(), RuntimeError>>,
+    },
+
+    /// Shutdown engine thread (explicit handshake).
+    Shutdown { reason: String },
 
     /// Bind a new render tree.
     BindRenderTree {
@@ -52,8 +69,17 @@ pub enum RuntimeReceipt {
     /// Frame presented successfully.
     FramePresented { executed_tile_count: usize },
 
-    /// Surface resized.
+    /// Surface resized (runtime version).
+    ResizedRuntime,
+
+    /// Surface resized with handshake.
     Resized,
+
+    /// Initialization completed.
+    InitComplete,
+
+    /// Shutdown acknowledged.
+    ShutdownAck { reason: String },
 
     /// Render tree bound.
     RenderTreeBound,
@@ -103,6 +129,18 @@ pub enum RuntimeError {
 
     /// Merge poll failed.
     MergePoll(renderer::MergePollError),
+
+    /// Shutdown requested.
+    ShutdownRequested { reason: String },
+
+    /// Engine thread disconnected.
+    EngineThreadDisconnected,
+
+    /// Feedback queue timeout (release mode graceful degradation).
+    FeedbackQueueTimeout,
+
+    /// Handshake timeout.
+    HandshakeTimeout { operation: &'static str },
 }
 
 impl From<renderer::PresentError> for RuntimeError {
