@@ -61,7 +61,9 @@ fn read_tile_rgba8(
     texture: &wgpu::Texture,
     address: TileAddress,
 ) -> Vec<u8> {
-    let buffer_size = (TILE_IMAGE as u64) * (TILE_IMAGE as u64) * 4;
+    let row_bytes = TILE_IMAGE as usize * 4;
+    let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+    let buffer_size = (padded_row_bytes as u64) * (TILE_IMAGE as u64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile readback"),
         size: buffer_size,
@@ -83,7 +85,7 @@ fn read_tile_rgba8(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(TILE_IMAGE * 4),
+                bytes_per_row: Some(padded_row_bytes as u32),
                 rows_per_image: Some(TILE_IMAGE),
             },
         },
@@ -178,7 +180,9 @@ fn read_tile_r32float(
     texture: &wgpu::Texture,
     address: TileAddress,
 ) -> Vec<f32> {
-    let buffer_size = (TILE_IMAGE as u64) * (TILE_IMAGE as u64) * 4;
+    let row_bytes = TILE_IMAGE as usize * 4;
+    let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+    let buffer_size = (padded_row_bytes as u64) * (TILE_IMAGE as u64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("tile r32float readback"),
         size: buffer_size,
@@ -200,7 +204,7 @@ fn read_tile_r32float(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(TILE_IMAGE * 4),
+                bytes_per_row: Some(padded_row_bytes as u32),
                 rows_per_image: Some(TILE_IMAGE),
             },
         },
@@ -1103,7 +1107,15 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
     let key = store.allocate().expect("allocate key");
     let address = store.resolve(key).expect("resolve key");
 
-    let ones = vec![1u8; rgba8_tile_len()];
+    let row_bytes_w = TILE_IMAGE as usize * 4;
+    let padded_row_bytes_w = row_bytes_w.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+    let mut ones = vec![0u8; padded_row_bytes_w * TILE_IMAGE as usize];
+    for row in 0..TILE_IMAGE as usize {
+        for col in 0..TILE_IMAGE as usize {
+            let dst = row * padded_row_bytes_w + col * 4;
+            ones[dst..dst+4].copy_from_slice(&[1u8; 4]);
+        }
+    }
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: gpu.texture(),
@@ -1114,7 +1126,7 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
         &ones,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(TILE_IMAGE * 4),
+            bytes_per_row: Some(padded_row_bytes_w as u32),
             rows_per_image: Some(TILE_IMAGE),
         },
         wgpu::Extent3d {
