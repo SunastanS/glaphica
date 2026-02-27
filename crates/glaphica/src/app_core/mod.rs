@@ -320,7 +320,7 @@ impl AppCore {
 
         // Execute resize command via runtime
         self.runtime
-            .execute(RuntimeCommand::Resize {
+            .execute(RuntimeCommand::ResizeRuntime {
                 width,
                 height,
                 view_transform: self.view_transform.clone(),

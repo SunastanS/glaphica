@@ -77,7 +77,7 @@ impl GpuRuntime {
                 }
             }
 
-            RuntimeCommand::Resize {
+            RuntimeCommand::ResizeRuntime {
                 width,
                 height,
                 view_transform,
@@ -85,7 +85,30 @@ impl GpuRuntime {
                 self.renderer.resize(width, height);
                 self.surface_size = PhysicalSize::new(width, height);
                 crate::push_view_state(&self.view_sender, &view_transform, self.surface_size);
+                Ok(RuntimeReceipt::ResizedRuntime)
+            }
+            
+            RuntimeCommand::Resize { width, height, ack_sender } => {
+                // Handshake resize (for Phase 4 initialization)
+                self.renderer.resize(width, height);
+                self.surface_size = PhysicalSize::new(width, height);
+                // Note: view_transform not available in handshake version
+                // Caller should handle view_transform separately
+                let _ = ack_sender.send(Ok(()));
                 Ok(RuntimeReceipt::Resized)
+            }
+            
+            RuntimeCommand::Init { ack_sender } => {
+                // Handshake init (for Phase 4 startup)
+                // For now, just acknowledge
+                let _ = ack_sender.send(Ok(()));
+                Ok(RuntimeReceipt::InitComplete)
+            }
+            
+            RuntimeCommand::Shutdown { reason } => {
+                // Shutdown command
+                eprintln!("[shutdown] {}", reason);
+                Ok(RuntimeReceipt::ShutdownAck { reason })
             }
 
             RuntimeCommand::BindRenderTree { .. } => {

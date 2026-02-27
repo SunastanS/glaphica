@@ -2,18 +2,20 @@
 ///
 /// Business logic core running on the engine thread.
 /// Owned exclusively by the engine thread (no Arc/RwLock needed).
+
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use brush_execution::BrushExecutionMergeFeedback;
 use document::Document;
-use protocol::{CompleteWaterline, ExecutedBatchWaterline, InputRingSample, SubmitWaterline};
+use crate::protocol::{InputRingSample, SubmitWaterline, ExecutedBatchWaterline, CompleteWaterline, GpuFeedbackFrame};
 use tiles::{
     BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, TileAtlasStore, TileMergeEngine,
     TileMergeError, TilesBusinessResult,
 };
 use view::ViewTransform;
 
-use crate::runtime::{RuntimeCommand, RuntimeError, RuntimeReceipt};
+use crate::runtime::{RuntimeCommand, RuntimeReceipt, RuntimeError};
 
 /// Engine waterlines (received from main thread via feedback)
 #[derive(Debug, Clone, Copy, Default)]
@@ -24,36 +26,38 @@ pub struct EngineWaterlines {
 }
 
 /// Engine Core - business logic running on engine thread.
-///
+/// 
 /// This struct is owned exclusively by the engine thread,
 /// so fields do NOT need Arc/RwLock.
 pub struct EngineCore {
     // Document owned exclusively by engine thread
     pub document: Document,
-
+    
     // Merge engine
-    pub tile_merge_engine:
-        TileMergeEngine<(Arc<TileAtlasStore>, Arc<GenericR32FloatTileAtlasStore>)>,
-
+    pub tile_merge_engine: TileMergeEngine<(
+        Arc<TileAtlasStore>,
+        Arc<GenericR32FloatTileAtlasStore>,
+    )>,
+    
     // Brush state
     pub brush_buffer_tile_keys: BrushBufferTileRegistry,
-
+    
     // View state
     pub view_transform: ViewTransform,
-
+    
     // GC state
     pub gc_evicted_batches_total: u64,
     pub gc_evicted_keys_total: u64,
-
+    
     // Brush execution feedback queue
     pub brush_execution_feedback_queue: VecDeque<BrushExecutionMergeFeedback>,
-
+    
     // Waterlines (received from main thread via feedback)
     pub waterlines: EngineWaterlines,
-
+    
     // Pending commands (generated from business logic)
     pub pending_commands: Vec<RuntimeCommand>,
-
+    
     // Shutdown flag
     pub shutdown_requested: bool,
 }
@@ -82,67 +86,58 @@ impl EngineCore {
             shutdown_requested: false,
         }
     }
-
+    
     /// Process an input sample (brush stroke, etc.)
     pub fn process_input_sample(&mut self, sample: &InputRingSample) {
         // TODO: Implement brush session logic
         // For now, this is a placeholder
         let _ = sample;
     }
-
+    
     /// Process feedback from main thread
     pub fn process_feedback(
-        &mut self,
-        frame: protocol::GpuFeedbackFrame<RuntimeReceipt, RuntimeError>,
+        &mut self, 
+        frame: GpuFeedbackFrame<RuntimeReceipt, RuntimeError>
     ) {
         // Store last waterlines for monotonicity check
         let last_submit = self.waterlines.submit;
         let last_executed = self.waterlines.executed;
         let last_complete = self.waterlines.complete;
-
+        
         // 1. Update waterlines (max merge - monotonic guarantee)
         self.waterlines.submit = self.waterlines.submit.max(frame.submit_waterline);
         self.waterlines.executed = self.waterlines.executed.max(frame.executed_batch_waterline);
         self.waterlines.complete = self.waterlines.complete.max(frame.complete_waterline);
-
+        
         // 2. Debug: assert monotonicity
         #[cfg(debug_assertions)]
         {
-            assert!(
-                frame.submit_waterline >= last_submit,
-                "submit waterline regression"
-            );
-            assert!(
-                frame.executed_batch_waterline >= last_executed,
-                "executed waterline regression"
-            );
-            assert!(
-                frame.complete_waterline >= last_complete,
-                "complete waterline regression"
-            );
+            assert!(frame.submit_waterline >= last_submit, "submit waterline regression");
+            assert!(frame.executed_batch_waterline >= last_executed, "executed waterline regression");
+            assert!(frame.complete_waterline >= last_complete, "complete waterline regression");
         }
-
+        
         // 3. Process receipts
         for receipt in frame.receipts.iter() {
             self.apply_receipt(receipt);
         }
-
+        
         // 4. Process errors
         for error in frame.errors.iter() {
             self.handle_error(error);
         }
-
+        
         // 5. Safe-to-release decisions based on complete_waterline
         self.gc_evict_before_waterline(self.waterlines.complete);
     }
-
+    
     /// Apply a receipt (merge completion, etc.)
     fn apply_receipt(&mut self, receipt: &RuntimeReceipt) {
         match receipt {
             RuntimeReceipt::InitComplete => {
                 eprintln!("[engine] init complete");
             }
-            RuntimeReceipt::ResizeComplete => {
+            RuntimeReceipt::Resized => {
                 eprintln!("[engine] resize complete");
             }
             RuntimeReceipt::ShutdownAck { reason } => {
@@ -152,7 +147,7 @@ impl EngineCore {
             _ => {}
         }
     }
-
+    
     /// Handle an error from main thread
     fn handle_error(&mut self, error: &RuntimeError) {
         match error {
@@ -166,7 +161,7 @@ impl EngineCore {
             }
         }
     }
-
+    
     /// GC eviction based on complete waterline
     fn gc_evict_before_waterline(&mut self, _waterline: CompleteWaterline) {
         // TODO: Implement GC logic based on waterline

@@ -19,5 +19,10 @@ view = { path = "../view" }
 window_replay = { path = "../window_replay" }
 wgpu = "28.0.0"
 winit = "0.30.12"
+engine = { path = "../engine" }
+protocol = { path = "../protocol" }
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+rtrb = "0.3"
 
 [dev-dependencies]
