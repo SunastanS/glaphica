@@ -1,6 +1,7 @@
 pub mod engine_core;
 pub mod engine_bridge;
 pub mod sample_source;
+pub mod phase4_test_utils;
 pub mod app_core;
 pub mod driver_bridge;
 pub mod runtime;
