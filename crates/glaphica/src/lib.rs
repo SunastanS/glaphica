@@ -30,13 +30,12 @@ use renderer::{
 use tiles::{
     BrushBufferTileRegistry, DirtySinceResult, GenericR32FloatTileAtlasStore,
     GenericTileAtlasConfig, MergeAuditRecord, MergePlanRequest, MergePlanTileOp, MergeTileStore,
-    TileAddress, TileAllocError, TileAtlasFormat, TileAtlasStore, TileAtlasUsage,
+    TileAddress, TileAtlasFormat, TileAtlasStore, TileAtlasUsage,
     TileImageApplyError, TileKey, TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError,
     TilesBusinessResult, apply_tile_key_mappings,
 };
 
 use view::ViewTransform;
-use model::TILE_IMAGE;
  // Used in tests
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -322,46 +321,12 @@ impl RenderDataResolver for DocumentRenderDataResolver {
     }
 }
 
-#[derive(Clone, Debug)]
-struct MergeStores {
-    layer_store: Arc<TileAtlasStore>,
-    stroke_store: Arc<GenericR32FloatTileAtlasStore>,
-}
-
-impl MergeTileStore for MergeStores {
-    fn allocate(&self) -> Result<TileKey, TileAllocError> {
-        self.layer_store.allocate()
-    }
-
-    fn release(&self, key: TileKey) -> bool {
-        self.layer_store.release(key)
-    }
-
-    fn resolve(&self, key: TileKey) -> Option<TileAddress> {
-        self.layer_store.resolve(key)
-    }
-
-    fn resolve_stroke(&self, key: TileKey) -> Option<TileAddress> {
-        self.stroke_store.resolve(key)
-    }
-
-    fn mark_keys_active(&self, keys: &[TileKey]) {
-        self.layer_store.mark_keys_active(keys);
-    }
-
-    fn retain_keys_new_batch(&self, keys: &[TileKey]) -> u64 {
-        self.layer_store.retain_keys_new_batch(keys)
-    }
-}
-
 /// GpuState - main GPU state holder.
 ///
 /// Phase 2.5: Delegates all business logic to AppCore.
 /// GpuState is now a thin facade over AppCore.
 pub struct GpuState {
     core: AppCore,
-    #[cfg(debug_assertions)]
-    last_bound_render_tree: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,12 +470,12 @@ impl GpuState {
             let invariants_enabled = Self::render_tree_invariants_enabled();
             let next = Self::check_render_tree_semantics_invariants(
                 reason,
-                self.last_bound_render_tree,
+                self.core.last_bound_render_tree(),
                 snapshot,
                 trace_enabled,
                 invariants_enabled,
             );
-            self.last_bound_render_tree = Some(next);
+            self.core.set_last_bound_render_tree(Some(next));
         }
         #[cfg(not(debug_assertions))]
         {
@@ -934,8 +899,6 @@ impl GpuState {
         
         let mut state = Self {
             core,
-            #[cfg(debug_assertions)]
-            last_bound_render_tree: None,
         };
         state.note_bound_render_tree("startup", &initial_snapshot_for_trace);
         eprintln!("[startup] initial render tree bound");
@@ -1649,6 +1612,7 @@ fn apply_gc_evicted_batch_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::TILE_IMAGE;
 
     fn snapshot_with_source(revision: u64, source: ImageSource) -> RenderTreeSnapshot {
         RenderTreeSnapshot {

@@ -7,7 +7,6 @@ use crate::sample_source::SampleSource;
 
 pub struct FakeGpuRuntime {
     execute_count: Arc<AtomicUsize>,
-    resize_count: Arc<AtomicUsize>,
     present_count: Arc<AtomicUsize>,
     should_fail: Arc<AtomicBool>,
     _fail_message: String,
@@ -15,21 +14,19 @@ pub struct FakeGpuRuntime {
 
 pub struct FakeGpuRuntimeStats {
     pub execute_count: Arc<AtomicUsize>,
-    pub resize_count: Arc<AtomicUsize>,
     pub present_count: Arc<AtomicUsize>,
 }
 
 impl FakeGpuRuntime {
     pub fn new() -> (Self, FakeGpuRuntimeStats) {
         let exec = Arc::new(AtomicUsize::new(0));
-        let resize = Arc::new(AtomicUsize::new(0));
         let present = Arc::new(AtomicUsize::new(0));
         let should_fail = Arc::new(AtomicBool::new(false));
         let runtime = Self {
-            execute_count: exec.clone(), resize_count: resize.clone(), present_count: present.clone(),
+            execute_count: exec.clone(), present_count: present.clone(),
             should_fail: should_fail.clone(), _fail_message: String::from("injected failure"),
         };
-        let stats = FakeGpuRuntimeStats { execute_count: exec, resize_count: resize, present_count: present };
+        let stats = FakeGpuRuntimeStats { execute_count: exec, present_count: present };
         (runtime, stats)
     }
 

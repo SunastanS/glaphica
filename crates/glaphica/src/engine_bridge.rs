@@ -1,13 +1,14 @@
-use std::sync::Arc;
 /// Engine Bridge module.
 ///
 /// Manages cross-thread communication between main thread (GPU) and engine thread (business).
 /// Owned by the main thread.
-use std::thread::{self, JoinHandle};
+#[cfg(not(debug_assertions))]
+use std::thread;
+use std::thread::JoinHandle;
+#[cfg(not(debug_assertions))]
 use std::time::Duration;
 
 use rtrb::PopError;
-use rtrb::PushError;
 
 use engine::{create_thread_channels, EngineThreadChannels, MainThreadChannels};
 use protocol::{
@@ -243,7 +244,7 @@ impl EngineBridge {
         &mut self,
         cmd: RuntimeCommand,
         receipts: &mut Vec<RuntimeReceipt>,
-        errors: &mut Vec<RuntimeError>,
+        _errors: &mut Vec<RuntimeError>,
     ) -> Result<(), RuntimeError> {
         match cmd {
             RuntimeCommand::Shutdown { reason } => {
@@ -255,8 +256,8 @@ impl EngineBridge {
             }
 
             RuntimeCommand::ResizeHandshake {
-                width,
-                height,
+                width: _,
+                height: _,
                 ack_sender,
             } => {
                 self.waterlines.submit_waterline.0 += 1;
@@ -266,8 +267,8 @@ impl EngineBridge {
             }
 
             RuntimeCommand::Resize {
-                width,
-                height,
+                width: _,
+                height: _,
                 view_transform: _,
             } => {
                 self.waterlines.submit_waterline.0 += 1;
@@ -302,7 +303,7 @@ impl EngineBridge {
         &mut self,
         cmd: RuntimeCommand,
         receipts: &mut Vec<RuntimeReceipt>,
-        errors: &mut Vec<RuntimeError>,
+        _errors: &mut Vec<RuntimeError>,
         mut execute: F,
     ) -> Result<(), RuntimeError>
     where
@@ -318,8 +319,8 @@ impl EngineBridge {
             }
 
             RuntimeCommand::ResizeHandshake {
-                width,
-                height,
+                width: _,
+                height: _,
                 ack_sender,
             } => {
                 self.waterlines.submit_waterline.0 += 1;
@@ -329,8 +330,8 @@ impl EngineBridge {
             }
 
             RuntimeCommand::Resize {
-                width,
-                height,
+                width: _,
+                height: _,
                 view_transform: _,
             } => {
                 self.waterlines.submit_waterline.0 += 1;

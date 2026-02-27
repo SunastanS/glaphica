@@ -238,6 +238,18 @@ impl AppCore {
         &mut self.brush_execution_feedback_queue
     }
 
+    /// Update last bound render tree (debug assertions only).
+    #[cfg(debug_assertions)]
+    pub fn set_last_bound_render_tree(&mut self, value: Option<(u64, u64)>) {
+        self.last_bound_render_tree = value;
+    }
+
+    /// Get last bound render tree (debug assertions only).
+    #[cfg(debug_assertions)]
+    pub fn last_bound_render_tree(&self) -> Option<(u64, u64)> {
+        self.last_bound_render_tree
+    }
+
     /// Get the atlas store from runtime.
     pub fn atlas_store(&self) -> &Arc<TileAtlasStore> {
         self.runtime.atlas_store()
@@ -330,14 +342,14 @@ impl AppCore {
                 height,
                 reason: format!("{:?}", err),
             })?;
-        
+
         Ok(())
     }
 
     /// Render a frame.
     ///
     /// This is the main render path, migrated to use the runtime command interface.
-    /// 
+    ///
     /// Phase 2.5-B: Now returns Result<(), AppCoreError> for unified error handling.
     pub fn render(&mut self) -> Result<(), AppCoreError> {
         // Drain view operations before presenting
@@ -392,8 +404,14 @@ impl AppCore {
             BrushRenderCommand::BeginStroke(_begin) => {
                 // GPU enqueue through runtime
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
+                    .execute(RuntimeCommand::EnqueueBrushCommand {
+                        command: command.clone(),
+                    })
+                    .map_err(|e| {
+                        e.into_brush_enqueue().unwrap_or_else(|other| {
+                            panic!("unexpected runtime error in brush enqueue: {:?}", other)
+                        })
+                    })?;
 
                 // Business logic: preview buffer management
                 // TODO: migrate set_preview_buffer_and_rebind to AppCore
@@ -437,8 +455,14 @@ impl AppCore {
 
                 // GPU enqueue through runtime
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
+                    .execute(RuntimeCommand::EnqueueBrushCommand {
+                        command: command.clone(),
+                    })
+                    .map_err(|e| {
+                        e.into_brush_enqueue().unwrap_or_else(|other| {
+                            panic!("unexpected runtime error in brush enqueue: {:?}", other)
+                        })
+                    })?;
 
                 Ok(())
             }
@@ -469,8 +493,14 @@ impl AppCore {
 
                 // GPU enqueue through runtime
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
+                    .execute(RuntimeCommand::EnqueueBrushCommand {
+                        command: command.clone(),
+                    })
+                    .map_err(|e| {
+                        e.into_brush_enqueue().unwrap_or_else(|other| {
+                            panic!("unexpected runtime error in brush enqueue: {:?}", other)
+                        })
+                    })?;
 
                 Ok(())
             }
@@ -478,8 +508,14 @@ impl AppCore {
             // Other commands: direct passthrough to runtime
             _ => {
                 self.runtime
-                    .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
-                    .map_err(|e| e.into_brush_enqueue().unwrap_or_else(|other| panic!("unexpected runtime error in brush enqueue: {:?}", other)))?;
+                    .execute(RuntimeCommand::EnqueueBrushCommand {
+                        command: command.clone(),
+                    })
+                    .map_err(|e| {
+                        e.into_brush_enqueue().unwrap_or_else(|other| {
+                            panic!("unexpected runtime error in brush enqueue: {:?}", other)
+                        })
+                    })?;
                 Ok(())
             }
         }
@@ -499,7 +535,9 @@ impl AppCore {
             .runtime
             .execute(RuntimeCommand::ProcessMergeCompletions { frame_id })
             .map_err(|err| {
-                MergeBridgeError::RendererSubmit(err.into_merge_submit().unwrap_or_else(|other| panic!("unexpected runtime error in merge submit: {:?}", other)))
+                MergeBridgeError::RendererSubmit(err.into_merge_submit().unwrap_or_else(|other| {
+                    panic!("unexpected runtime error in merge submit: {:?}", other)
+                }))
             })?;
 
         let RuntimeReceipt::MergeCompletionsProcessed {
@@ -664,9 +702,7 @@ pub enum AppCoreError {
 
     // === Unrecoverable Errors ===
     /// GPU resource failure during present.
-    PresentFatal {
-        source: tiles::TileGpuDrainError,
-    },
+    PresentFatal { source: tiles::TileGpuDrainError },
 
     /// Out of memory.
     OutOfMemory,
@@ -675,23 +711,51 @@ pub enum AppCoreError {
 impl std::fmt::Display for AppCoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AppCoreError::UnexpectedReceipt { command, receipt_type, receipt_debug } => {
-                write!(f, "unexpected receipt '{}' for command '{}': {}", receipt_type, command, receipt_debug.as_deref().unwrap_or("no debug info"))
+            AppCoreError::UnexpectedReceipt {
+                command,
+                receipt_type,
+                receipt_debug,
+            } => {
+                write!(
+                    f,
+                    "unexpected receipt '{}' for command '{}': {}",
+                    receipt_type,
+                    command,
+                    receipt_debug.as_deref().unwrap_or("no debug info")
+                )
             }
             AppCoreError::UnexpectedErrorVariant { context, error } => {
                 write!(f, "unexpected error variant in {}: {:?}", context, error)
             }
-            AppCoreError::TileAllocationLogicError { stroke_session_id, reason } => {
-                write!(f, "tile allocation logic error for stroke {}: {}", stroke_session_id, reason)
+            AppCoreError::TileAllocationLogicError {
+                stroke_session_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "tile allocation logic error for stroke {}: {}",
+                    stroke_session_id, reason
+                )
             }
-            AppCoreError::MissingRendererNotice { receipt_id, notice_id } => {
-                write!(f, "missing renderer notice for receipt {:?} notice {:?}", receipt_id, notice_id)
+            AppCoreError::MissingRendererNotice {
+                receipt_id,
+                notice_id,
+            } => {
+                write!(
+                    f,
+                    "missing renderer notice for receipt {:?} notice {:?}",
+                    receipt_id, notice_id
+                )
             }
             AppCoreError::Runtime(err) => write!(f, "runtime error: {:?}", err),
             AppCoreError::BrushEnqueue(err) => write!(f, "brush enqueue error: {:?}", err),
             AppCoreError::Merge(err) => write!(f, "merge error: {:?}", err),
             AppCoreError::Surface(err) => write!(f, "surface error: {:?}", err),
-            AppCoreError::Resize { width, height, reason } => {
+            AppCoreError::Resize {
+                width,
+                height,
+                reason,
+            } => {
                 write!(f, "resize to {}x{} failed: {}", width, height, reason)
             }
             AppCoreError::PresentFatal { source } => {

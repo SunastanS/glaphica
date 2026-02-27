@@ -210,22 +210,20 @@ impl RuntimeError {
 // MergeItem implementations for RuntimeReceipt and RuntimeError
 // Required for GpuFeedbackMergeState
 
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 impl MergeItem for RuntimeReceipt {
     type MergeKey = ReceiptMergeKey;
-    
+
     fn merge_key(&self) -> Self::MergeKey {
         match self {
-            RuntimeReceipt::FramePresented { executed_tile_count } => {
-                ReceiptMergeKey::FramePresented(*executed_tile_count)
-            }
+            RuntimeReceipt::FramePresented {
+                executed_tile_count,
+            } => ReceiptMergeKey::FramePresented(*executed_tile_count),
             RuntimeReceipt::Resized => ReceiptMergeKey::Resized,
             RuntimeReceipt::ResizeHandshakeAck => ReceiptMergeKey::ResizeHandshakeAck,
             RuntimeReceipt::InitComplete => ReceiptMergeKey::InitComplete,
-            RuntimeReceipt::ShutdownAck { reason } => {
-                ReceiptMergeKey::ShutdownAck(reason.clone())
-            }
+            RuntimeReceipt::ShutdownAck { reason } => ReceiptMergeKey::ShutdownAck(reason.clone()),
             RuntimeReceipt::RenderTreeBound => ReceiptMergeKey::RenderTreeBound,
             RuntimeReceipt::BrushCommandsEnqueued { dab_count } => {
                 ReceiptMergeKey::BrushCommandsEnqueued(*dab_count)
@@ -241,7 +239,7 @@ impl MergeItem for RuntimeReceipt {
 
 impl MergeItem for RuntimeError {
     type MergeKey = ErrorMergeKey;
-    
+
     fn merge_key(&self) -> Self::MergeKey {
         match self {
             RuntimeError::PresentError(_) => ErrorMergeKey::PresentError,
@@ -285,4 +283,3 @@ pub enum ErrorMergeKey {
     FeedbackQueueTimeout,
     HandshakeTimeout,
 }
-
