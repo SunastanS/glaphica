@@ -120,6 +120,12 @@ pub struct AppCore {
     /// Brush buffer tile key registry.
     brush_buffer_tile_keys: Arc<RwLock<BrushBufferTileRegistry>>,
 
+    /// Layer atlas store (CPU-side allocation).
+    atlas_store: Arc<TileAtlasStore>,
+
+    /// Brush buffer store (CPU-side allocation).
+    brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+
     /// View transform state.
     view_transform: ViewTransform,
 
@@ -132,9 +138,6 @@ pub struct AppCore {
     /// GC statistics.
     gc_evicted_batches_total: u64,
     gc_evicted_keys_total: u64,
-
-    /// GPU runtime (command interface).
-    runtime: GpuRuntime,
 
     /// Debug flag: disable merge for debugging.
     disable_merge_for_debug: bool,
@@ -153,8 +156,9 @@ impl AppCore {
         document: Arc<RwLock<Document>>,
         tile_merge_engine: TileMergeEngine<MergeStores>,
         brush_buffer_tile_keys: Arc<RwLock<BrushBufferTileRegistry>>,
+        atlas_store: Arc<TileAtlasStore>,
+        brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
         view_transform: ViewTransform,
-        runtime: GpuRuntime,
         disable_merge_for_debug: bool,
         perf_log_enabled: bool,
         next_frame_id: u64,
@@ -163,8 +167,9 @@ impl AppCore {
             document,
             tile_merge_engine,
             brush_buffer_tile_keys,
+            atlas_store,
+            brush_buffer_store,
             view_transform,
-            runtime,
             brush_execution_feedback_queue: VecDeque::new(),
             next_frame_id,
             gc_evicted_batches_total: 0,
@@ -194,21 +199,6 @@ impl AppCore {
     /// Get a mutable reference to the view transform.
     pub fn view_transform_mut(&mut self) -> &mut ViewTransform {
         &mut self.view_transform
-    }
-
-    /// Get the GPU runtime.
-    pub fn runtime(&self) -> &GpuRuntime {
-        &self.runtime
-    }
-
-    /// Get the view sender from runtime.
-    pub fn view_sender(&self) -> &renderer::ViewOpSender {
-        self.runtime.view_sender()
-    }
-
-    /// Get a mutable reference to the GPU runtime.
-    pub fn runtime_mut(&mut self) -> &mut GpuRuntime {
-        &mut self.runtime
     }
 
     /// Get the tile merge engine.
@@ -252,22 +242,17 @@ impl AppCore {
 
     /// Get the atlas store from runtime.
     pub fn atlas_store(&self) -> &Arc<TileAtlasStore> {
-        self.runtime.atlas_store()
+        &self.atlas_store
     }
 
     /// Get the brush buffer store from runtime.
     pub fn brush_buffer_store(&self) -> &Arc<GenericR32FloatTileAtlasStore> {
-        self.runtime.brush_buffer_store()
+        &self.brush_buffer_store
     }
 
     /// Check if merge work is pending.
     pub fn has_pending_merge_work(&self) -> bool {
         self.tile_merge_engine.has_pending_work()
-    }
-
-    /// Get the next frame ID from runtime.
-    pub fn next_frame_id(&mut self) -> u64 {
-        self.runtime.next_frame_id()
     }
 
     /// Get and increment the frame ID.
@@ -278,19 +263,6 @@ impl AppCore {
             .checked_add(1)
             .expect("frame id overflow");
         id
-    }
-
-    /// Get the surface size from runtime.
-    pub fn surface_size(&self) -> PhysicalSize<u32> {
-        self.runtime.surface_size()
-    }
-
-    /// Execute a runtime command.
-    pub fn execute_runtime(
-        &mut self,
-        command: RuntimeCommand,
-    ) -> Result<RuntimeReceipt, RuntimeError> {
-        self.runtime.execute(command)
     }
 
     /// Check if merge is disabled for debug.
@@ -320,18 +292,22 @@ impl AppCore {
     /// Resize the surface.
     ///
     /// Phase 2.5-B: Now returns Result for error propagation.
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), AppCoreError> {
+    pub fn resize(
+        &mut self,
+        runtime: &mut GpuRuntime,
+        new_size: PhysicalSize<u32>,
+    ) -> Result<(), AppCoreError> {
         let width = new_size.width.max(1);
         let height = new_size.height.max(1);
 
         // Skip if unchanged
-        let current_size = self.runtime.surface_size();
+        let current_size = runtime.surface_size();
         if current_size.width == width && current_size.height == height {
             return Ok(());
         }
 
         // Execute resize command via runtime
-        self.runtime
+        runtime
             .execute(RuntimeCommand::Resize {
                 width,
                 height,
@@ -351,18 +327,15 @@ impl AppCore {
     /// This is the main render path, migrated to use the runtime command interface.
     ///
     /// Phase 2.5-B: Now returns Result<(), AppCoreError> for unified error handling.
-    pub fn render(&mut self) -> Result<(), AppCoreError> {
+    pub fn render(&mut self, runtime: &mut GpuRuntime) -> Result<(), AppCoreError> {
         // Drain view operations before presenting
-        self.runtime.drain_view_ops();
+        runtime.drain_view_ops();
 
         // Get next frame ID
         let frame_id = self.get_next_frame_id();
 
         // Execute present command via runtime
-        match self
-            .runtime
-            .execute(RuntimeCommand::PresentFrame { frame_id })
-        {
+        match runtime.execute(RuntimeCommand::PresentFrame { frame_id }) {
             Ok(RuntimeReceipt::FramePresented { .. }) => Ok(()),
             Ok(_) => {
                 // Logic bug: unexpected receipt
@@ -398,12 +371,13 @@ impl AppCore {
     /// but business logic (tile allocation, merge orchestration) stays in AppCore.
     pub fn enqueue_brush_render_command(
         &mut self,
+        runtime: &mut GpuRuntime,
         command: BrushRenderCommand,
     ) -> Result<(), BrushRenderEnqueueError> {
         match &command {
             BrushRenderCommand::BeginStroke(_begin) => {
                 // GPU enqueue through runtime
-                self.runtime
+                runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand {
                         command: command.clone(),
                     })
@@ -430,7 +404,7 @@ impl AppCore {
                     .allocate_tiles(
                         allocate.stroke_session_id,
                         allocate.tiles.clone(),
-                        self.runtime.brush_buffer_store(),
+                        runtime.brush_buffer_store(),
                     )
                     .unwrap_or_else(|error| {
                         panic!(
@@ -447,14 +421,14 @@ impl AppCore {
                     .tile_bindings_for_stroke(allocate.stroke_session_id);
 
                 // Bind tiles through runtime
-                self.runtime
+                runtime
                     .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
 
                 // GC eviction handling
                 // TODO: migrate drain_tile_gc_evictions to AppCore
 
                 // GPU enqueue through runtime
-                self.runtime
+                runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand {
                         command: command.clone(),
                     })
@@ -478,7 +452,7 @@ impl AppCore {
                         })
                         .release_stroke_on_merge_failed(
                             merge.stroke_session_id,
-                            self.runtime.brush_buffer_store(),
+                            runtime.brush_buffer_store(),
                         );
                     // TODO: migrate clear_preview_buffer_and_rebind
                     self.brush_execution_feedback_queue.push_back(
@@ -492,7 +466,7 @@ impl AppCore {
                 }
 
                 // GPU enqueue through runtime
-                self.runtime
+                runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand {
                         command: command.clone(),
                     })
@@ -507,7 +481,7 @@ impl AppCore {
 
             // Other commands: direct passthrough to runtime
             _ => {
-                self.runtime
+                runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand {
                         command: command.clone(),
                     })
@@ -526,13 +500,13 @@ impl AppCore {
     /// This is the main merge processing path, migrated to use the runtime command interface.
     pub fn process_renderer_merge_completions(
         &mut self,
+        runtime: &mut GpuRuntime,
         frame_id: u64,
     ) -> Result<(), MergeBridgeError> {
         let perf_started = Instant::now();
 
         // Step 1: GPU side - submit and poll via runtime command
-        let receipt = self
-            .runtime
+        let receipt = runtime
             .execute(RuntimeCommand::ProcessMergeCompletions { frame_id })
             .map_err(|err| {
                 MergeBridgeError::RendererSubmit(err.into_merge_submit().unwrap_or_else(|other| {

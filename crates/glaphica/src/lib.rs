@@ -322,14 +322,12 @@ impl RenderDataResolver for DocumentRenderDataResolver {
 }
 
 /// Execution mode for Phase 4 transition.
-///
-/// Currently a simple enum flag - runtime is still held by AppCore.
-/// TODO: Step E4 - move runtime from AppCore to GpuExecMode
-#[derive(Debug)]
 pub enum GpuExecMode {
-    /// Single-threaded mode: commands execute immediately on current thread
-    SingleThread,
-    
+    /// Single-threaded mode: commands execute immediately on current thread.
+    SingleThread {
+        runtime: crate::runtime::GpuRuntime,
+    },
+
     /// Threaded mode (Phase 4, TODO): EngineBridge handles cross-thread communication
     Threaded,
 }
@@ -344,7 +342,6 @@ pub enum GpuExecMode {
 /// - Threaded: EngineBridge handles cross-thread communication (TODO)
 pub struct GpuState {
     core: AppCore,
-    #[allow(dead_code)] // Phase 4 TODO: use exec_mode for routing
     exec_mode: GpuExecMode,
 }
 
@@ -379,6 +376,20 @@ pub enum MergeBridgeError {
 }
 
 impl GpuState {
+    fn runtime(&self) -> &crate::runtime::GpuRuntime {
+        match &self.exec_mode {
+            GpuExecMode::SingleThread { runtime } => runtime,
+            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+        }
+    }
+
+    fn runtime_mut(&mut self) -> &mut crate::runtime::GpuRuntime {
+        match &mut self.exec_mode {
+            GpuExecMode::SingleThread { runtime } => runtime,
+            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+        }
+    }
+
     fn required_device_features() -> wgpu::Features {
         wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
     }
@@ -624,7 +635,7 @@ impl GpuState {
         let submission = self.core.tile_merge_engine_mut()
             .submit_merge_plan(request)
             .unwrap_or_else(|error| panic!("submit merge plan failed: {error:?}"));
-        self.core.runtime_mut().renderer_mut()
+        self.runtime_mut().renderer_mut()
             .enqueue_planned_merge(
                 submission.renderer_submit_payload.receipt,
                 submission.renderer_submit_payload.gpu_merge_ops,
@@ -652,7 +663,7 @@ impl GpuState {
             document.render_tree_snapshot()
         };
         self.note_bound_render_tree("preview_set", &render_tree);
-        self.core.runtime().view_sender()
+        self.runtime().view_sender()
             .send(RenderOp::BindRenderTree(render_tree))
             .expect("send updated render tree after preview set");
     }
@@ -669,7 +680,7 @@ impl GpuState {
             document.render_tree_snapshot()
         };
         self.note_bound_render_tree("preview_clear", &render_tree);
-        self.core.runtime().view_sender()
+        self.runtime().view_sender()
             .send(RenderOp::BindRenderTree(render_tree))
             .expect("send updated render tree after preview clear");
     }
@@ -898,29 +909,28 @@ impl GpuState {
         let runtime = crate::runtime::GpuRuntime::new(
             renderer,
             view_sender,
-            atlas_store,
-            brush_buffer_store,
+            Arc::clone(&atlas_store),
+            Arc::clone(&brush_buffer_store),
             size,
             0, // next_frame_id
         );
         
-        // Create AppCore with runtime and business components
+        // Create AppCore with business components
         let core = AppCore::new(
             document,
             tile_merge_engine,
             brush_buffer_tile_keys,
+            atlas_store,
+            brush_buffer_store,
             view_transform,
-            runtime,
             disable_merge_for_debug,
             perf_log_enabled,
             0, // next_frame_id
         );
         
-        // Phase 4: For now, keep runtime in AppCore, exec_mode is just a flag
-        // TODO: Step E4 - move runtime from AppCore to GpuExecMode
         let mut state = Self {
             core,
-            exec_mode: GpuExecMode::SingleThread,
+            exec_mode: GpuExecMode::SingleThread { runtime },
         };
         state.note_bound_render_tree("startup", &initial_snapshot_for_trace);
         eprintln!("[startup] initial render tree bound");
@@ -932,31 +942,39 @@ impl GpuState {
     ///
     /// Phase 2.5-B: Now returns Result for error propagation.
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), AppCoreError> {
-        self.core.resize(new_size)
+        let core = &mut self.core;
+        match &mut self.exec_mode {
+            GpuExecMode::SingleThread { runtime } => core.resize(runtime, new_size),
+            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+        }
     }
 
     /// Render a frame.
     ///
     /// Phase 2.5-B: Now delegates to AppCore with unified error handling.
     pub fn render(&mut self) -> Result<(), AppCoreError> {
-        self.core.render()
+        let core = &mut self.core;
+        match &mut self.exec_mode {
+            GpuExecMode::SingleThread { runtime } => core.render(runtime),
+            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+        }
     }
 
     pub fn set_brush_command_quota(&self, max_commands: u32) {
-        self.core.runtime().view_sender()
+        self.runtime().view_sender()
             .send(RenderOp::SetBrushCommandQuota { max_commands })
             .expect("send brush command quota");
     }
 
     pub fn take_latest_gpu_timing_report(&mut self) -> Option<FrameGpuTimingReport> {
-        self.core.runtime_mut().renderer_mut().take_latest_gpu_timing_report()
+        self.runtime_mut().renderer_mut().take_latest_gpu_timing_report()
     }
 
     pub fn apply_brush_control_command(
         &mut self,
         command: BrushControlCommand,
     ) -> Result<BrushControlAck, BrushControlError> {
-        self.core.runtime_mut().renderer_mut().apply_brush_control_command(command)
+        self.runtime_mut().renderer_mut().apply_brush_control_command(command)
     }
 
     pub fn enqueue_brush_render_command(
@@ -965,7 +983,7 @@ impl GpuState {
     ) -> Result<(), BrushRenderEnqueueError> {
         match command {
             BrushRenderCommand::BeginStroke(begin) => {
-                self.core.runtime_mut().renderer_mut()
+                self.runtime_mut().renderer_mut()
                     .enqueue_brush_render_command(BrushRenderCommand::BeginStroke(begin))?;
                 self.set_preview_buffer_and_rebind(begin.target_layer_id, begin.stroke_session_id);
                 Ok(())
@@ -991,10 +1009,10 @@ impl GpuState {
                     .read()
                     .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"))
                     .tile_bindings_for_stroke(allocate.stroke_session_id);
-                self.core.runtime_mut().renderer_mut()
+                self.runtime_mut().renderer_mut()
                     .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
                 self.drain_tile_gc_evictions();
-                self.core.runtime_mut().renderer_mut()
+                self.runtime_mut().renderer_mut()
                     .enqueue_brush_render_command(BrushRenderCommand::AllocateBufferTiles(allocate))
             }
             BrushRenderCommand::MergeBuffer(merge) => {
@@ -1021,19 +1039,19 @@ impl GpuState {
                         merge.target_layer_id,
                     );
                 }
-                self.core.runtime_mut().renderer_mut()
+                self.runtime_mut().renderer_mut()
                     .enqueue_brush_render_command(BrushRenderCommand::MergeBuffer(merge))
             }
-            other => self.core.runtime_mut().renderer_mut().enqueue_brush_render_command(other),
+            other => self.runtime_mut().renderer_mut().enqueue_brush_render_command(other),
         }
     }
 
     pub fn pending_brush_dab_count(&self) -> u64 {
-        self.core.runtime().renderer().pending_brush_dab_count()
+        self.runtime().renderer().pending_brush_dab_count()
     }
 
     pub fn pending_brush_command_count(&self) -> u64 {
-        self.core.runtime().renderer().pending_brush_command_count()
+        self.runtime().renderer().pending_brush_command_count()
     }
 
     pub fn semantic_state_digest(&self) -> GpuSemanticStateDigest {
@@ -1055,7 +1073,7 @@ impl GpuState {
             document_revision,
             render_tree_revision,
             render_tree_semantic_hash,
-            pending_brush_command_count: self.core.runtime().renderer().pending_brush_command_count(),
+            pending_brush_command_count: self.runtime().renderer().pending_brush_command_count(),
             has_pending_merge_work: self.core.tile_merge_engine().has_pending_work(),
         }
     }
@@ -1069,10 +1087,10 @@ impl GpuState {
         frame_id: u64,
     ) -> Result<(), MergeBridgeError> {
         let perf_started = Instant::now();
-        let submission_report = self.core.runtime_mut().renderer_mut()
+        let submission_report = self.runtime_mut().renderer_mut()
             .submit_pending_merges(frame_id, u32::MAX)
             .map_err(MergeBridgeError::RendererSubmit)?;
-        let renderer_notices = self.core.runtime_mut().renderer_mut()
+        let renderer_notices = self.runtime_mut().renderer_mut()
             .poll_completion_notices(frame_id)
             .map_err(MergeBridgeError::RendererPoll)?;
         if self.core.perf_log_enabled() {
@@ -1120,7 +1138,7 @@ impl GpuState {
                 },
             )?;
 
-            self.core.runtime_mut().renderer_mut()
+            self.runtime_mut().renderer_mut()
                 .ack_merge_result(renderer_notice)
                 .map_err(MergeBridgeError::RendererAck)?;
             self.core.tile_merge_engine_mut()
@@ -1171,7 +1189,7 @@ impl GpuState {
         &mut self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<(), MergeBridgeError> {
-        self.core.runtime_mut().renderer_mut()
+        self.runtime_mut().renderer_mut()
             .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Finalized)
             .map_err(MergeBridgeError::RendererFinalize)?;
         self.core.tile_merge_engine_mut()
@@ -1183,7 +1201,7 @@ impl GpuState {
         &mut self,
         receipt_id: StrokeExecutionReceiptId,
     ) -> Result<(), MergeBridgeError> {
-        self.core.runtime_mut().renderer_mut()
+        self.runtime_mut().renderer_mut()
             .ack_receipt_terminal_state(receipt_id, ReceiptTerminalState::Aborted)
             .map_err(MergeBridgeError::RendererFinalize)?;
         self.core.tile_merge_engine_mut()
@@ -1204,14 +1222,14 @@ impl GpuState {
         self.core.view_transform_mut()
             .pan_by(delta_x, delta_y)
             .unwrap_or_else(|error| panic!("pan canvas failed: {error:?}"));
-        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
+        push_view_state(&self.runtime().view_sender(), &self.core.view_transform(), self.runtime().surface_size());
     }
 
     pub fn rotate_canvas(&mut self, delta_radians: f32) {
         self.core.view_transform_mut()
             .rotate_by(delta_radians)
             .unwrap_or_else(|error| panic!("rotate canvas failed: {error:?}"));
-        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
+        push_view_state(&self.runtime().view_sender(), &self.core.view_transform(), self.runtime().surface_size());
     }
 
     pub fn zoom_canvas_about_viewport_point(
@@ -1223,7 +1241,7 @@ impl GpuState {
         self.core.view_transform_mut()
             .zoom_about_point(zoom_factor, viewport_x, viewport_y)
             .unwrap_or_else(|error| panic!("zoom canvas failed: {error:?}"));
-        push_view_state(&self.core.runtime().view_sender(), &self.core.view_transform(), self.core.runtime().surface_size());
+        push_view_state(&self.runtime().view_sender(), &self.core.view_transform(), self.runtime().surface_size());
     }
 
     pub fn screen_to_canvas_point(&self, screen_x: f32, screen_y: f32) -> (f32, f32) {
@@ -1292,7 +1310,7 @@ impl GpuState {
                             dirty_tiles.len(),
                         );
                     }
-                    let atlas_store = Arc::clone(&self.core.runtime().atlas_store());
+                    let atlas_store = Arc::clone(&self.runtime().atlas_store());
                     let document_apply_result: Result<
                         Option<RenderTreeSnapshot>,
                         MergeBridgeError,
@@ -1379,7 +1397,7 @@ impl GpuState {
                     };
                     if let Some(render_tree) = render_tree {
                         self.note_bound_render_tree("merge_apply", &render_tree);
-                        self.core.runtime().view_sender()
+                        self.runtime().view_sender()
                             .send(RenderOp::BindRenderTree(render_tree))
                             .expect("send updated render tree after merge");
                     }
@@ -1453,7 +1471,7 @@ impl GpuState {
                     };
                     if let Some(render_tree) = render_tree {
                         self.note_bound_render_tree("merge_abort", &render_tree);
-                        self.core.runtime().view_sender()
+                        self.runtime().view_sender()
                             .send(RenderOp::BindRenderTree(render_tree))
                             .expect("send updated render tree after merge abort");
                     }
