@@ -15,6 +15,32 @@ pub trait SampleSource {
     fn drain_batch(&mut self, output: &mut Vec<InputRingSample>, budget: usize);
 }
 
+/// Phase 4: No-op sample source (temporary implementation for testing).
+///
+/// Always returns empty samples. Used during Phase 4 transition
+/// before Phase 4.5 enables the actual input ring buffer.
+pub struct NoOpSampleSource;
+
+impl NoOpSampleSource {
+    /// Create a new NoOpSampleSource.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NoOpSampleSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SampleSource for NoOpSampleSource {
+    fn drain_batch(&mut self, _output: &mut Vec<InputRingSample>, _budget: usize) {
+        // No-op: never produce any samples
+        // This is intentional for Phase 4 testing
+    }
+}
+
 /// Phase 4: Simple channel-based sample source.
 pub struct ChannelSampleSource {
     receiver: crossbeam_channel::Receiver<InputRingSample>,
@@ -39,7 +65,3 @@ impl SampleSource for ChannelSampleSource {
         }
     }
 }
-
-// Phase 4.5: Ring buffer sample source (future)
-// pub struct RingSampleSource { ... }
-// impl SampleSource for RingSampleSource { ... }

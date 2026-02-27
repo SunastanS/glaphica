@@ -100,6 +100,10 @@ impl EngineCore {
 
     /// Process feedback from main thread
     pub fn process_feedback(&mut self, frame: GpuFeedbackFrame<RuntimeReceipt, RuntimeError>) {
+        // Debug: store old waterlines for monotonicity check
+        #[cfg(debug_assertions)]
+        let old_waterlines = self.waterlines;
+
         // 1. Update waterlines (max merge - monotonic guarantee)
         self.waterlines.submit = self.waterlines.submit.max(frame.submit_waterline);
         self.waterlines.executed = self.waterlines.executed.max(frame.executed_batch_waterline);
@@ -109,15 +113,15 @@ impl EngineCore {
         #[cfg(debug_assertions)]
         {
             assert!(
-                frame.submit_waterline >= last_submit,
+                frame.submit_waterline >= old_waterlines.submit,
                 "submit waterline regression"
             );
             assert!(
-                frame.executed_batch_waterline >= last_executed,
+                frame.executed_batch_waterline >= old_waterlines.executed,
                 "executed waterline regression"
             );
             assert!(
-                frame.complete_waterline >= last_complete,
+                frame.complete_waterline >= old_waterlines.complete,
                 "complete waterline regression"
             );
         }

@@ -2,9 +2,35 @@
 ///
 /// Manages cross-thread communication between main thread (GPU) and engine thread (business).
 /// Owned by the main thread.
-#[cfg(not(debug_assertions))]
-use std::thread;
-use std::thread::JoinHandle;
+///
+/// # Phase 4 Invariants (DO NOT VIOLATE)
+///
+/// 1. **EXECUTION BOUNDARY**:
+///    - Engine thread: produce `RuntimeCommand`, consume `GpuFeedbackFrame`
+///    - Main thread:   consume `RuntimeCommand`, produce `GpuFeedbackFrame`
+///    - GPU execution (present/resize) MUST run on main thread (wgpu requirement)
+///
+/// 2. **FEEDBACK DRAIN BUDGET**:
+///    - `render()`: drain before + after `dispatch_frame()` (budget=64)
+///    - `resize()`/`init()`: drain_until(waterline >= expected) with timeout
+///    - `shutdown()`: drain with budget=256 until `ShutdownAck` received
+///
+/// 3. **WATERLINE MONOTONICITY**:
+///    - `executed_batch_waterline` increments on EVERY `dispatch_frame()` call
+///    - even if no commands executed (empty frame)
+///    - feedback merge uses `max()` for all waterlines
+///
+/// 4. **SHUTDOWN SEMANTICS**:
+///    - Shutdown command generates `ShutdownAck` receipt BEFORE returning `Err`
+///    - Feedback with `ShutdownAck` MUST be pushed before `engine_loop` exits
+///    - Main thread must `dispatch_frame()` at least once after shutdown request
+///
+/// 5. **LOCK BOUNDARY**:
+///    - `brush_buffer_tile_keys` read lock MUST NOT cross command boundary
+///    - clone bindings before sending to engine thread
+///    - no lock held while waiting for channel operations
+///
+use std::thread::{self, JoinHandle};
 #[cfg(not(debug_assertions))]
 use std::time::Duration;
 
