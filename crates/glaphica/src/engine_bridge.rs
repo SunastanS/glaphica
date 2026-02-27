@@ -1,3 +1,5 @@
+#[cfg(not(debug_assertions))]
+use std::thread;
 /// Engine Bridge module.
 ///
 /// Manages cross-thread communication between main thread (GPU) and engine thread (business).
@@ -35,7 +37,7 @@
 ///    - Feedback frame contains receipts/errors/waterlines that must not be lost
 ///    - This applies to ALL error paths in dispatch_frame()
 ///
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 #[cfg(not(debug_assertions))]
 use std::time::Duration;
 

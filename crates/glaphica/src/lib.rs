@@ -326,12 +326,22 @@ impl RenderDataResolver for DocumentRenderDataResolver {
 /// Phase 2.5: Delegates all business logic to AppCore.
 /// GpuState is now a thin facade over AppCore.
 ///
-/// Phase 4 TODO: Will use GpuExecMode to switch between single-threaded and threaded execution.
-/// Currently runtime is held by AppCore.
+/// Phase 4: Uses GpuExecMode to switch between single-threaded and threaded execution.
+/// - SingleThread: execute commands immediately on current thread (current implementation)
+/// - Threaded: EngineBridge handles cross-thread communication (Phase 4 TODO)
+#[derive(Debug)]
+pub enum GpuExecMode {
+    /// Single-threaded mode: execute commands immediately on current thread
+    SingleThread,
+    
+    /// Threaded mode (Phase 4, TODO): EngineBridge handles cross-thread communication
+    Threaded,
+}
+
 pub struct GpuState {
     core: AppCore,
-    // Phase 4 TODO: Add exec_mode: GpuExecMode
-    // This requires moving runtime from AppCore to GpuExecMode
+    #[allow(dead_code)] // Phase 4 TODO: initialize and use
+    exec_mode: GpuExecMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -902,8 +912,10 @@ impl GpuState {
             0, // next_frame_id
         );
         
+        // Phase 4: Start with SingleThread mode (existing behavior)
         let mut state = Self {
             core,
+            exec_mode: GpuExecMode::SingleThread,
         };
         state.note_bound_render_tree("startup", &initial_snapshot_for_trace);
         eprintln!("[startup] initial render tree bound");
