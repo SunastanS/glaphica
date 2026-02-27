@@ -211,7 +211,7 @@ pub enum BrushRenderEnqueueError {
 | 问题 | 优先级 | 状态 | 备注 |
 |------|--------|------|------|
 | RuntimeCommand lifetime | 🔴 高 | ✅ 完成 | 最关键的架构问题已解决 |
-| AppCore panic 处理 | 🔴 高 | ✅ Phase 1 完成 | AppCoreError 类型已添加，待方法迁移 |
+| AppCore panic 处理 | 🔴 高 | ✅ Phase 2 完成 | AppCoreError + resize()/render() Result 化 |
 | GpuRuntime 分层泄漏 | 🟡 中 | ✅ 完成 | renderer_mut() → pub(crate), 添加 drain_view_ops() |
 | brush 错误转换 | 🟡 中 | ✅ 完成 | 移除 panic downcast，改用 into_* helpers |
 | 共享资源契约 | 🟡 中 | ✅ 完成 | 文档已补充 |

@@ -740,8 +740,8 @@ let bindings = self.brush_buffer_tile_keys
 
 | 路径 | 当前状态 | 目标状态 | 待删除代码 |
 |------|----------|----------|------------|
-| render/present | Hybrid | ✅ AppCore+Runtime | GpuState::render() 直接实现 |
-| resize | Hybrid | ✅ AppCore+Runtime | GpuState::resize() 直接实现 |
+| render/present | ✅ Complete | AppCore+Runtime | None (fully delegated) |
+| resize | ✅ Complete | AppCore+Runtime | None (fully delegated) |
 | brush enqueue | Hybrid | ⚠️ AppCore+Runtime (部分) | GpuState::enqueue_brush_render_command() 业务逻辑 |
 | merge polling | Hybrid | ✅ AppCore+Runtime | GpuState::process_renderer_merge_completions() GPU 调用 |
 | GC eviction | Old | - | 保留在 GpuState（低优先级） |
@@ -751,6 +751,7 @@ let bindings = self.brush_buffer_tile_keys
 - **Old**: 完全在 GpuState 直接实现
 - **Hybrid**: AppCore 有实现，GpuState 也有（过渡期）
 - **AppCore+Runtime**: 完成迁移，GpuState 仅 facade 委托
+- **Complete**: 完全迁移，包括 Result 错误处理
 
 ### 14.5 下一步建议
 
