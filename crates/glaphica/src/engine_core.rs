@@ -68,6 +68,9 @@ pub struct EngineCore {
     
     // Shutdown flag
     pub shutdown_requested: bool,
+    
+    // Channel to send commands to main thread
+    // Note: NOT owned by EngineCore, passed separately to engine_loop
 }
 
 impl EngineCore {
@@ -171,4 +174,75 @@ impl EngineCore {
     fn gc_evict_before_waterline(&mut self, _waterline: CompleteWaterline) {
         // TODO: Implement GC logic based on waterline
     }
+}
+
+/// Run the engine thread main loop.
+/// 
+/// This function:
+/// 1. Drains input samples (brush strokes, etc.)
+/// 2. Processes business logic (generates RuntimeCommands)
+/// 3. Sends commands to main thread via channel
+/// 4. Drains feedback frames from main thread
+/// 5. Merges feedback using mailbox merge
+/// 6. Applies merged feedback to engine state
+/// 7. Checks for shutdown conditions
+/// 
+/// Returns when shutdown is requested or channel is disconnected.
+use engine::EngineThreadChannels;
+
+pub fn engine_loop(
+    mut core: EngineCore,
+    mut channels: EngineThreadChannels<RuntimeCommand, RuntimeReceipt, RuntimeError>,
+    mut sample_source: impl crate::sample_source::SampleSource,
+) {
+    let mut samples_buffer = Vec::with_capacity(1024);
+    let mut feedback_merge_state = protocol::GpuFeedbackMergeState::<RuntimeReceipt, RuntimeError>::default();
+    let mut pending_feedback: Option<protocol::GpuFeedbackFrame<RuntimeReceipt, RuntimeError>> = None;
+    
+    loop {
+        // 1. Drain input samples (Phase 4: channel, Phase 4.5: ring)
+        sample_source.drain_batch(&mut samples_buffer, 1024);
+        
+        // 2. Process business logic (brush, merge, etc.)
+        for sample in &samples_buffer {
+            core.process_input_sample(sample);
+        }
+        
+        // 3. Send GPU commands (based on processed input)
+        // Note: commands are generated in core.pending_commands by process_input_sample
+        for cmd in core.pending_commands.drain(..) {
+            match channels.gpu_command_sender.push(protocol::GpuCmdMsg::Command(cmd)) {
+                Ok(()) => {}
+                Err(rtrb::PushError::Full(_)) => {
+                    // Command queue full - skip this frame's commands
+                    // (feedback will still be processed)
+                    break;
+                }
+            }
+        }
+        
+        // 4. Drain and merge feedback (mailbox merge)
+        while let Ok(frame) = channels.gpu_feedback_receiver.pop() {
+            pending_feedback = Some(match pending_feedback.take() {
+                None => frame,
+                Some(current) => {
+                    protocol::GpuFeedbackFrame::merge_mailbox(current, frame, &mut feedback_merge_state)
+                }
+            });
+        }
+        
+        // 5. Apply merged feedback
+        if let Some(frame) = pending_feedback.take() {
+            core.process_feedback(frame);
+        }
+        
+        // 6. Check shutdown
+        if core.shutdown_requested {
+            // Engine loop exiting - channels will be disconnected
+            // Main thread will detect disconnection and join this thread
+            break;
+        }
+    }
+    
+    eprintln!("[engine] engine_loop exiting");
 }
