@@ -151,6 +151,8 @@ struct App {
     input_trace_replay: Option<InputTraceReplay>,
     output_trace_recorder: Option<OutputTraceRecorder>,
     brush_trace_enabled: bool,
+    /// Fatal error flag - set when render encounters fatal error
+    fatal_error_seen: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -675,6 +677,13 @@ impl App {
     }
 
     fn render_frame(&mut self, event_loop: &ActiveEventLoop) {
+        // Check for fatal error from previous frame
+        if self.fatal_error_seen {
+            eprintln!("[fatal] exiting due to previous render fatal error");
+            event_loop.exit();
+            return;
+        }
+        
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -801,7 +810,8 @@ impl App {
                 }
             }
             Err(AppCoreError::OutOfMemory | AppCoreError::PresentFatal { .. }) => {
-                // Fatal errors - exit
+                // Fatal errors - set flag and exit
+                self.fatal_error_seen = true;
                 event_loop.exit();
             }
             Err(AppCoreError::UnexpectedReceipt { .. } | AppCoreError::UnexpectedErrorVariant { .. }) => {
@@ -844,9 +854,10 @@ impl App {
             if let Err(error) = render_result {
                 match error {
                     AppCoreError::OutOfMemory | AppCoreError::PresentFatal { .. } => {
-                        // Fatal error - log and stop flushing (main loop will handle exit)
+                        // Fatal error - log, set flag, and stop flushing
                         eprintln!("[fatal] render error during flush: {:?}", error);
-                        break; // Stop flushing, let main loop handle fatal error
+                        self.fatal_error_seen = true;
+                        break; // Stop flushing, main loop will exit on next frame
                     }
                     // Recoverable errors - continue flushing
                     AppCoreError::Surface(_)
