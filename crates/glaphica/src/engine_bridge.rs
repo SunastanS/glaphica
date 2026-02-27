@@ -78,7 +78,11 @@ impl EngineBridge {
 
 impl Drop for EngineBridge {
     fn drop(&mut self) {
-        // Engine thread will detect channel disconnection and shutdown
+        // Abandonment-based shutdown:
+        // - Dropping MainThreadChannels disconnects the command sender
+        // - Engine thread detects disconnection and exits
+        // NOTE: For explicit shutdown, call engine_core.shutdown_requested = true
+        // before dropping EngineBridge
         if let Some(handle) = self.engine_thread.take() {
             handle.join()
                 .unwrap_or_else(|err| eprintln!("[error] engine thread panic: {:?}", err));
