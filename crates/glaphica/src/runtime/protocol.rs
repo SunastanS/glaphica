@@ -286,14 +286,3 @@ pub enum ErrorMergeKey {
     HandshakeTimeout,
 }
 
-/// MergeKey design rationale for RuntimeError:
-/// 
-/// Errors are merged using a "last-wins" policy within the same error category.
-/// This is appropriate for:
-/// - Transient errors (FeedbackQueueTimeout, HandshakeTimeout) - only the latest matters
-/// - Fatal errors (EngineThreadDisconnected) - one occurrence is enough to trigger shutdown
-/// 
-/// NOTE: Fatal errors (PresentError, SurfaceError) use distinct keys per error type,
-/// ensuring they are not accidentally merged away. If multiple distinct fatal errors
-/// occur, only the last one will be present in the merged frame - this is acceptable
-/// since any fatal error should trigger shutdown.

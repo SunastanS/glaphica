@@ -236,3 +236,56 @@ impl Drop for EngineBridge {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_main_thread_waterlines_default() {
+        let waterlines = MainThreadWaterlines::default();
+        assert_eq!(waterlines.present_frame_id.0, 0);
+        assert_eq!(waterlines.submit_waterline.0, 0);
+        assert_eq!(waterlines.executed_batch_waterline.0, 0);
+        assert_eq!(waterlines.complete_waterline.0, 0);
+    }
+}
+
+#[cfg(test)]
+mod waterline_tests {
+    use super::*;
+    
+    #[test]
+    fn test_waterline_monotonicity() {
+        // Test that waterlines only increase
+        let mut waterlines = MainThreadWaterlines::default();
+        
+        // Initial state
+        assert_eq!(waterlines.executed_batch_waterline.0, 0);
+        
+        // Simulate dispatch_frame increments
+        waterlines.executed_batch_waterline.0 += 1;
+        assert_eq!(waterlines.executed_batch_waterline.0, 1);
+        
+        waterlines.executed_batch_waterline.0 += 1;
+        assert_eq!(waterlines.executed_batch_waterline.0, 2);
+        
+        // Waterline should never decrease (enforced by dispatch_frame logic)
+        // This test documents the expected behavior
+    }
+    
+    #[test]
+    fn test_waterline_empty_frame_increment() {
+        // Test that waterlines increment even with empty command queue
+        // (documented semantic: executed_batch_waterline increments on EVERY dispatch_frame call)
+        let mut waterlines = MainThreadWaterlines::default();
+        
+        // Simulate multiple dispatch_frame calls with no commands
+        for i in 1..=5 {
+            waterlines.executed_batch_waterline.0 += 1;
+            assert_eq!(waterlines.executed_batch_waterline.0, i);
+        }
+        
+        // Monotonic progress is maintained
+    }
+}

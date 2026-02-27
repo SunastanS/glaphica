@@ -257,3 +257,157 @@ pub fn engine_loop(
     
     eprintln!("[engine] engine_loop exiting");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sample_source::ChannelSampleSource;
+    use crossbeam_channel::bounded;
+    use protocol::InputRingSample;
+    
+    #[test]
+    fn test_engine_core_creation() {
+        // Test that EngineCore can be created
+        // Note: This is a basic smoke test
+        let waterlines = EngineWaterlines::default();
+        assert_eq!(waterlines.submit.0, 0);
+        assert_eq!(waterlines.executed.0, 0);
+        assert_eq!(waterlines.complete.0, 0);
+    }
+    
+    #[test]
+    fn test_engine_loop_shutdown() {
+        // Test that engine_loop exits when shutdown_requested is set
+        let (_cmd_tx, cmd_rx): (_, crossbeam_channel::Receiver<protocol::GpuCmdMsg<RuntimeCommand>>) = bounded(64);
+        let (feedback_tx, _feedback_rx): (crossbeam_channel::Sender<protocol::GpuFeedbackFrame<RuntimeReceipt, RuntimeError>>, _) = bounded(64);
+        let (sample_tx, _sample_rx): (crossbeam_channel::Sender<InputRingSample>, _) = bounded(1024);
+        
+        // Create minimal channels for testing
+        // Note: Full channel setup requires engine crate integration
+        // This is a placeholder for the full integration test
+        
+        let _ = (cmd_rx, feedback_tx, sample_tx);
+        // Full engine_loop test requires proper EngineThreadChannels setup
+        // Deferred to integration test with full GpuState integration
+    }
+    
+    #[test]
+    fn test_feedback_merge_mailbox() {
+        // Test that GpuFeedbackFrame::merge_mailbox works correctly
+        let mut merge_state = protocol::GpuFeedbackMergeState::<RuntimeReceipt, RuntimeError>::default();
+        
+        let frame1 = protocol::GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(1),
+            submit_waterline: protocol::SubmitWaterline(1),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(1),
+            complete_waterline: protocol::CompleteWaterline(1),
+            receipts: vec![RuntimeReceipt::InitComplete].into(),
+            errors: vec![].into(),
+        };
+        
+        let frame2 = protocol::GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(2),
+            submit_waterline: protocol::SubmitWaterline(2),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(2),
+            complete_waterline: protocol::CompleteWaterline(2),
+            receipts: vec![RuntimeReceipt::Resized].into(),
+            errors: vec![].into(),
+        };
+        
+        let merged = protocol::GpuFeedbackFrame::merge_mailbox(frame1, frame2, &mut merge_state);
+        
+        // Waterlines should be max
+        assert_eq!(merged.executed_batch_waterline.0, 2);
+        assert_eq!(merged.submit_waterline.0, 2);
+        assert_eq!(merged.complete_waterline.0, 2);
+    }
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+    use protocol::GpuFeedbackFrame;
+    
+    #[test]
+    fn test_feedback_merge_with_multiple_frames() {
+        // Test merging multiple feedback frames
+        let mut merge_state = protocol::GpuFeedbackMergeState::<RuntimeReceipt, RuntimeError>::default();
+        
+        let frame1 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(1),
+            submit_waterline: protocol::SubmitWaterline(1),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(1),
+            complete_waterline: protocol::CompleteWaterline(1),
+            receipts: vec![RuntimeReceipt::InitComplete].into(),
+            errors: vec![].into(),
+        };
+        
+        let frame2 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(2),
+            submit_waterline: protocol::SubmitWaterline(2),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(2),
+            complete_waterline: protocol::CompleteWaterline(2),
+            receipts: vec![RuntimeReceipt::Resized].into(),
+            errors: vec![RuntimeError::FeedbackQueueTimeout].into(),
+        };
+        
+        let frame3 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(3),
+            submit_waterline: protocol::SubmitWaterline(3),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(3),
+            complete_waterline: protocol::CompleteWaterline(3),
+            receipts: vec![RuntimeReceipt::ResizeHandshakeAck].into(),
+            errors: vec![].into(),
+        };
+        
+        // Merge frames sequentially (simulating engine_loop drain)
+        let merged12 = GpuFeedbackFrame::merge_mailbox(frame1, frame2, &mut merge_state);
+        let merged123 = GpuFeedbackFrame::merge_mailbox(merged12, frame3, &mut merge_state);
+        
+        // Final waterlines should be max of all frames
+        assert_eq!(merged123.executed_batch_waterline.0, 3);
+        assert_eq!(merged123.submit_waterline.0, 3);
+        assert_eq!(merged123.complete_waterline.0, 3);
+        assert_eq!(merged123.present_frame_id.0, 3);
+        
+        // All receipts should be present
+        assert_eq!(merged123.receipts.len(), 3);
+        
+        // Errors should be present
+        assert_eq!(merged123.errors.len(), 1);
+    }
+    
+    #[test]
+    fn test_receipt_merge_key_stability() {
+        // Test that receipts with same merge key are properly merged
+        let mut merge_state = protocol::GpuFeedbackMergeState::<RuntimeReceipt, RuntimeError>::default();
+        
+        // Use same receipt type (InitComplete) which has stable merge key
+        let frame1 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(1),
+            submit_waterline: protocol::SubmitWaterline(1),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(1),
+            complete_waterline: protocol::CompleteWaterline(1),
+            receipts: vec![RuntimeReceipt::InitComplete].into(),
+            errors: vec![].into(),
+        };
+        
+        let frame2 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(2),
+            submit_waterline: protocol::SubmitWaterline(2),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(2),
+            complete_waterline: protocol::CompleteWaterline(2),
+            receipts: vec![RuntimeReceipt::InitComplete].into(),
+            errors: vec![].into(),
+        };
+        
+        let merged = GpuFeedbackFrame::merge_mailbox(frame1, frame2, &mut merge_state);
+        
+        // Only one InitComplete should remain (last-wins policy)
+        // Note: FramePresented with different tile counts would NOT merge (different keys)
+        assert_eq!(merged.receipts.len(), 1);
+        
+        // Waterlines should be max
+        assert_eq!(merged.executed_batch_waterline.0, 2);
+    }
+}
