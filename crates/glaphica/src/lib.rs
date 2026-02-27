@@ -321,26 +321,30 @@ impl RenderDataResolver for DocumentRenderDataResolver {
     }
 }
 
-/// GpuState - main GPU state holder.
+/// Execution mode for Phase 4 transition.
 ///
-/// Phase 2.5: Delegates all business logic to AppCore.
-/// GpuState is now a thin facade over AppCore.
-///
-/// Phase 4: Uses GpuExecMode to switch between single-threaded and threaded execution.
-/// - SingleThread: execute commands immediately on current thread (current implementation)
-/// - Threaded: EngineBridge handles cross-thread communication (Phase 4 TODO)
+/// Currently a simple enum flag - runtime is still held by AppCore.
+/// TODO: Step E4 - move runtime from AppCore to GpuExecMode
 #[derive(Debug)]
 pub enum GpuExecMode {
-    /// Single-threaded mode: execute commands immediately on current thread
+    /// Single-threaded mode: commands execute immediately on current thread
     SingleThread,
     
     /// Threaded mode (Phase 4, TODO): EngineBridge handles cross-thread communication
     Threaded,
 }
 
+/// GpuState - main GPU state holder.
+///
+/// Phase 2.5: Delegates all business logic to AppCore.
+/// GpuState is now a thin facade over AppCore.
+///
+/// Phase 4: Uses GpuExecMode to switch between single-threaded and threaded execution.
+/// - SingleThread: execute commands immediately on current thread (current)
+/// - Threaded: EngineBridge handles cross-thread communication (TODO)
 pub struct GpuState {
     core: AppCore,
-    #[allow(dead_code)] // Phase 4 TODO: initialize and use
+    #[allow(dead_code)] // Phase 4 TODO: use exec_mode for routing
     exec_mode: GpuExecMode,
 }
 
@@ -912,7 +916,8 @@ impl GpuState {
             0, // next_frame_id
         );
         
-        // Phase 4: Start with SingleThread mode (existing behavior)
+        // Phase 4: For now, keep runtime in AppCore, exec_mode is just a flag
+        // TODO: Step E4 - move runtime from AppCore to GpuExecMode
         let mut state = Self {
             core,
             exec_mode: GpuExecMode::SingleThread,
