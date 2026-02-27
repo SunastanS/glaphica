@@ -440,6 +440,9 @@ impl GpuState {
             .get_or_init(|| std::env::var_os("GLAPHICA_PERF_LOG").is_some_and(|value| value != "0"))
     }
 
+    // Phase 4 TODO: Add drain_feedback_and_apply method
+    // This requires careful design of feedback path between main/engine threads
+
     fn brush_trace_enabled() -> bool {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
@@ -981,6 +984,10 @@ impl GpuState {
     /// Resize the surface.
     ///
     /// Phase 2.5-B: Now returns Result for error propagation.
+    ///
+    /// Phase 4: In threaded mode, this injects a Resize command and dispatches it.
+    /// The actual resize is applied asynchronously by the engine thread.
+    /// TODO: Add synchronization to wait for resize completion (waterline-based)
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), AppCoreError> {
         let core = &mut self.core;
         match &mut self.exec_mode {
@@ -988,24 +995,26 @@ impl GpuState {
             GpuExecMode::Threaded { bridge } => {
                 let width = new_size.width.max(1);
                 let height = new_size.height.max(1);
-                let runtime = bridge
+                // Phase 4 TODO: We shouldn't need runtime in bridge for threaded mode
+                // The surface size check should happen differently
+                let _runtime = bridge
                     .gpu_runtime
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("threaded mode requires gpu runtime in bridge"));
-                let current_size = runtime.surface_size();
-                if current_size.width == width && current_size.height == height {
-                    return Ok(());
-                }
-                bridge.enqueue_main_thread_command(crate::runtime::RuntimeCommand::Resize {
+                    .as_ref();
+                bridge.enqueue_main_thread_command(crate::runtime::RuntimeCommand::ResizeHandshake {
                     width,
                     height,
-                    view_transform: core.view_transform().clone(),
+                    // TODO: Need to handle ack properly in threaded mode
+                    ack_sender: {
+                        let (tx, _rx) = std::sync::mpsc::channel();
+                        tx
+                    },
                 });
                 bridge.dispatch_frame().map_err(|error| AppCoreError::Resize {
                     width,
                     height,
                     reason: format!("{:?}", error),
                 })?;
+                // Phase 4 TODO: Drain feedback and wait for waterline to advance
                 Ok(())
             }
         }
@@ -1716,6 +1725,9 @@ fn apply_gc_evicted_batch_state(
         .checked_add(u64::try_from(key_count).expect("gc key count exceeds u64"))
         .expect("gc evicted key counter overflow");
 }
+
+#[cfg(test)]
+mod phase4_threaded_tests;
 
 #[cfg(test)]
 mod tests {
