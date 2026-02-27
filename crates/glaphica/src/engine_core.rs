@@ -201,6 +201,8 @@ pub fn engine_loop(
     
     loop {
         // 1. Drain input samples (Phase 4: channel, Phase 4.5: ring)
+        // Clear buffer first to avoid duplicate processing
+        samples_buffer.clear();
         sample_source.drain_batch(&mut samples_buffer, 1024);
         
         // 2. Process business logic (brush, merge, etc.)
@@ -241,6 +243,15 @@ pub fn engine_loop(
             // Engine loop exiting - channels will be disconnected
             // Main thread will detect disconnection and join this thread
             break;
+        }
+        
+        // 7. Idle detection: yield if no work was done
+        // This prevents busy-waiting and reduces CPU usage
+        if samples_buffer.is_empty() 
+            && pending_feedback.is_none() 
+            && core.pending_commands.is_empty() 
+        {
+            std::thread::yield_now();
         }
     }
     
