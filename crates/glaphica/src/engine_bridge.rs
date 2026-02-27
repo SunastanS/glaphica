@@ -40,7 +40,7 @@ impl Default for MainThreadWaterlines {
 /// Engine Bridge - manages cross-thread communication.
 pub struct EngineBridge {
     pub main_channels: MainThreadChannels<RuntimeCommand, RuntimeReceipt, RuntimeError>,
-    pub gpu_runtime: GpuRuntime,
+    pub gpu_runtime: Option<GpuRuntime>,
     pub waterlines: MainThreadWaterlines,
     pub engine_thread: Option<JoinHandle<()>>,
 }
@@ -69,10 +69,47 @@ impl EngineBridge {
 
         Self {
             main_channels,
-            gpu_runtime,
+            gpu_runtime: Some(gpu_runtime),
             waterlines: MainThreadWaterlines::default(),
             engine_thread: Some(engine_thread),
         }
+    }
+
+    /// Create EngineBridge for testing with custom executor (no real GpuRuntime needed).
+    /// Returns (EngineBridge, EngineThreadChannels).
+    pub fn new_for_test_with_executor<F>(
+        command_capacity: usize,
+        feedback_capacity: usize,
+        _executor_marker: F, // Only used for type inference
+    ) -> (
+        Self,
+        EngineThreadChannels<RuntimeCommand, RuntimeReceipt, RuntimeError>,
+    )
+    where
+        F: FnMut(RuntimeCommand) -> Result<RuntimeReceipt, RuntimeError>,
+    {
+        let main_channels;
+        let engine_channels;
+        {
+            let result = create_thread_channels::<RuntimeCommand, RuntimeReceipt, RuntimeError>(
+                1024, // input_ring_capacity (not used in tests)
+                64,   // input_control_capacity
+                command_capacity,
+                feedback_capacity,
+            );
+            main_channels = result.0;
+            engine_channels = result.1;
+        }
+
+        // GpuRuntime is None - tests call dispatch_frame_with_executor which bypasses it
+        let bridge = Self {
+            main_channels,
+            gpu_runtime: None,
+            waterlines: MainThreadWaterlines::default(),
+            engine_thread: None,
+        };
+
+        (bridge, engine_channels)
     }
 
     /// Create EngineBridge for testing without spawning engine thread.
@@ -100,7 +137,7 @@ impl EngineBridge {
 
         let bridge = Self {
             main_channels,
-            gpu_runtime,
+            gpu_runtime: Some(gpu_runtime),
             waterlines: MainThreadWaterlines::default(),
             engine_thread: None,
         };
@@ -112,13 +149,24 @@ impl EngineBridge {
     pub fn dispatch_frame(&mut self) -> Result<(), RuntimeError> {
         let mut receipts = Vec::new();
         let mut errors = Vec::new();
+        let mut shutdown_reason = None;
 
         // 1. Drain commands (with budget)
         const COMMAND_BUDGET: usize = 256;
         for _ in 0..COMMAND_BUDGET {
+            if shutdown_reason.is_some() {
+                break;
+            }
+
             match self.main_channels.gpu_command_receiver.pop() {
                 Ok(GpuCmdMsg::Command(cmd)) => {
-                    self.execute_command(cmd, &mut receipts, &mut errors)?;
+                    match self.execute_command(cmd, &mut receipts, &mut errors) {
+                        Ok(()) => {}
+                        Err(RuntimeError::ShutdownRequested { reason }) => {
+                            shutdown_reason = Some(reason);
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 Err(PopError::Empty) => break,
             }
@@ -129,6 +177,11 @@ impl EngineBridge {
 
         // 3. Push feedback frame
         self.push_feedback_frame(receipts, errors)?;
+
+        // 4. Return Shutdown error after feedback is pushed
+        if let Some(reason) = shutdown_reason {
+            return Err(RuntimeError::ShutdownRequested { reason });
+        }
 
         Ok(())
     }
@@ -141,18 +194,31 @@ impl EngineBridge {
     {
         let mut receipts = Vec::new();
         let mut errors = Vec::new();
+        let mut shutdown_reason = None;
 
         // 1. Drain commands (with budget)
         const COMMAND_BUDGET: usize = 256;
         for _ in 0..COMMAND_BUDGET {
+            if shutdown_reason.is_some() {
+                break;
+            } // Stop processing after Shutdown
+
             match self.main_channels.gpu_command_receiver.pop() {
                 Ok(GpuCmdMsg::Command(cmd)) => {
-                    self.execute_command_with_executor(
+                    // Don't use `?` - collect receipts/errors and handle Shutdown specially
+                    match self.execute_command_with_executor(
                         cmd,
                         &mut receipts,
                         &mut errors,
                         &mut execute,
-                    )?;
+                    ) {
+                        Ok(()) => {}
+                        Err(RuntimeError::ShutdownRequested { reason }) => {
+                            shutdown_reason = Some(reason);
+                            // Continue to push feedback with ShutdownAck receipt
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 Err(PopError::Empty) => break,
             }
@@ -161,8 +227,13 @@ impl EngineBridge {
         // 2. Update waterlines
         self.waterlines.executed_batch_waterline.0 += 1;
 
-        // 3. Push feedback frame
+        // 3. Push feedback frame (even on Shutdown - receipts/errors must not be lost)
         self.push_feedback_frame(receipts, errors)?;
+
+        // 4. Return Shutdown error after feedback is pushed
+        if let Some(reason) = shutdown_reason {
+            return Err(RuntimeError::ShutdownRequested { reason });
+        }
 
         Ok(())
     }
@@ -213,13 +284,13 @@ impl EngineBridge {
 
             RuntimeCommand::PresentFrame { frame_id } => {
                 self.waterlines.present_frame_id = PresentFrameId(frame_id);
-                let receipt = self.gpu_runtime.execute(cmd)?;
+                let receipt = self.gpu_runtime.as_mut().unwrap().execute(cmd)?;
                 receipts.push(receipt);
                 Ok(())
             }
 
             _ => {
-                let receipt = self.gpu_runtime.execute(cmd)?;
+                let receipt = self.gpu_runtime.as_mut().unwrap().execute(cmd)?;
                 receipts.push(receipt);
                 Ok(())
             }
