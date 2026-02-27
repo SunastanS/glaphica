@@ -101,6 +101,9 @@ impl EngineBridge {
         }
         
         // 2. Update waterlines
+        // SEMANTIC: executed_batch_waterline increments on EVERY dispatch_frame call,
+        // regardless of whether any commands were executed. This ensures monotonic
+        // progress tracking even for empty frames.
         self.waterlines.executed_batch_waterline.0 += 1;
         
         // 3. Push feedback frame (MUST SUCCEED - protocol invariant)
@@ -118,9 +121,11 @@ impl EngineBridge {
     ) -> Result<(), RuntimeError> {
         match cmd {
             RuntimeCommand::Shutdown { reason } => {
-                // Acknowledge shutdown (don't send feedback, just log)
+                // Send feedback before shutdown to ensure receipts/errors are not lost
+                receipts.push(RuntimeReceipt::ShutdownAck { reason: reason.clone() });
                 eprintln!("[shutdown] {}", reason);
-                // Note: receipts/errors will be sent in the next dispatch_frame iteration
+                // Push feedback with shutdown ack, then return error
+                // Caller should handle ShutdownRequested by stopping render loop
                 return Err(RuntimeError::ShutdownRequested { reason })
             }
             
@@ -165,7 +170,7 @@ impl EngineBridge {
     /// 
     /// Phase 4 Q2 strategy (feedback queue full):
     /// - Debug: panic on full (fail-fast, protocol violation)
-    /// - Release: timeout blocking with graceful degradation
+    /// - Release: retry with timeout, avoid clone by reusing frame
     fn push_feedback_frame(
         &mut self,
         receipts: Vec<RuntimeReceipt>,
@@ -180,7 +185,7 @@ impl EngineBridge {
             errors: errors.into(),
         };
         
-        // Q2 strategy: Debug panic + Release timeout
+        // Q2 strategy: Debug panic + Release retry with timeout
         #[cfg(debug_assertions)]
         {
             self.main_channels.gpu_feedback_sender.push(frame)
@@ -189,15 +194,26 @@ impl EngineBridge {
         
         #[cfg(not(debug_assertions))]
         {
-            // Release: timeout blocking (5ms)
+            // Release: retry with 5ms total timeout, avoid clone
+            use rtrb::PushError;
             let timeout = Duration::from_millis(5);
+            let start = std::time::Instant::now();
+            let mut frame = frame;
+            
             loop {
-                match self.main_channels.gpu_feedback_sender.push(frame.clone()) {
+                match self.main_channels.gpu_feedback_sender.push(frame) {
                     Ok(()) => break,
-                    Err(PushError::Full(_)) => {
-                        thread::sleep(timeout);
-                        // After timeout, trigger shutdown
-                        return Err(RuntimeError::FeedbackQueueTimeout);
+                    Err(PushError::Full(f)) => {
+                        // Get frame back to retry without clone
+                        frame = f;
+                        
+                        // Check timeout
+                        if start.elapsed() > timeout {
+                            return Err(RuntimeError::FeedbackQueueTimeout);
+                        }
+                        
+                        // Brief sleep before retry
+                        thread::sleep(Duration::from_millis(1));
                     }
                 }
             }
