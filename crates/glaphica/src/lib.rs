@@ -4,7 +4,7 @@ pub mod runtime;
 
 use app_core::AppCore;
 use brush_execution::BrushExecutionMergeFeedback;
-use std::collections::VecDeque;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -29,7 +29,7 @@ use tiles::{
     TileImageApplyError, TileKey, TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError,
     TilesBusinessResult, apply_tile_key_mappings,
 };
-use model::TILE_IMAGE;
+
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;

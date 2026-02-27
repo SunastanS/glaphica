@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use brush_execution::BrushExecutionMergeFeedback;
 use document::{Document, DocumentMergeError};
-use render_protocol::{BrushRenderCommand, BufferTileCoordinate, StrokeExecutionReceiptId};
-use renderer::{BrushRenderEnqueueError, MergeCompletionNotice};
+use render_protocol::{BrushRenderCommand, StrokeExecutionReceiptId};
+use renderer::BrushRenderEnqueueError;
 use tiles::{
     BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, TileAtlasStore, TileMergeEngine,
     TileMergeError, TilesBusinessResult,
@@ -374,7 +374,7 @@ impl AppCore {
         command: BrushRenderCommand,
     ) -> Result<(), BrushRenderEnqueueError> {
         match &command {
-            BrushRenderCommand::BeginStroke(begin) => {
+            BrushRenderCommand::BeginStroke(_begin) => {
                 // GPU enqueue through runtime
                 self.runtime
                     .execute(RuntimeCommand::EnqueueBrushCommand { command: command.clone() })
@@ -535,7 +535,7 @@ impl AppCore {
 
         for notice in completion_notices {
             let notice_key = (notice.notice_id, notice.receipt_id);
-            let renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
+            let _renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
                 MergeBridgeError::MissingRendererNotice {
                     receipt_id: notice.receipt_id,
                     notice_id: notice.notice_id,
