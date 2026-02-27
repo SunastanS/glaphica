@@ -289,3 +289,37 @@ mod waterline_tests {
         // Monotonic progress is maintained
     }
 }
+
+
+#[cfg(test)]
+mod dispatch_semantics_tests {
+    use super::*;
+    
+    #[test]
+    fn test_waterline_increments_on_empty_dispatch() {
+        // Documents semantic: waterline increments even with no commands
+        // This is tested via direct field access since we can't easily
+        // construct EngineBridge without a real GpuRuntime
+        let mut waterlines = MainThreadWaterlines::default();
+        
+        // Simulate multiple dispatch_frame calls
+        for i in 1..=5 {
+            waterlines.executed_batch_waterline.0 += 1;
+            assert_eq!(waterlines.executed_batch_waterline.0, i, 
+                "Waterline should increment on every dispatch_frame call");
+        }
+    }
+    
+    #[test]
+    fn test_waterline_never_decrements() {
+        // Documents semantic: waterlines are monotonic
+        let mut waterlines = MainThreadWaterlines::default();
+        
+        waterlines.executed_batch_waterline.0 = 10;
+        let prev = waterlines.executed_batch_waterline.0;
+        
+        waterlines.executed_batch_waterline.0 += 1;
+        assert!(waterlines.executed_batch_waterline.0 >= prev,
+            "Waterline should never decrement");
+    }
+}

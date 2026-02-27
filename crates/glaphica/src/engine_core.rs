@@ -411,3 +411,73 @@ mod roundtrip_tests {
         assert_eq!(merged.executed_batch_waterline.0, 2);
     }
 }
+
+#[cfg(test)]
+mod error_merge_tests {
+    use super::*;
+    use protocol::GpuFeedbackFrame;
+    
+    #[test]
+    fn test_error_last_wins_merge() {
+        // Test that errors with same key use last-wins policy
+        let mut merge_state = protocol::GpuFeedbackMergeState::<RuntimeReceipt, RuntimeError>::default();
+        
+        let frame1 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(1),
+            submit_waterline: protocol::SubmitWaterline(1),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(1),
+            complete_waterline: protocol::CompleteWaterline(1),
+            receipts: vec![].into(),
+            errors: vec![RuntimeError::FeedbackQueueTimeout].into(),
+        };
+        
+        let frame2 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(2),
+            submit_waterline: protocol::SubmitWaterline(2),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(2),
+            complete_waterline: protocol::CompleteWaterline(2),
+            receipts: vec![].into(),
+            errors: vec![RuntimeError::FeedbackQueueTimeout].into(),
+        };
+        
+        let merged = GpuFeedbackFrame::merge_mailbox(frame1, frame2, &mut merge_state);
+        
+        // Only one error should remain (last-wins)
+        assert_eq!(merged.errors.len(), 1, "Errors with same key should merge to last one");
+        
+        // Waterlines should be max
+        assert_eq!(merged.executed_batch_waterline.0, 2);
+    }
+    
+    #[test]
+    fn test_different_errors_not_merged() {
+        // Test that different error types are preserved
+        let mut merge_state = protocol::GpuFeedbackMergeState::<RuntimeReceipt, RuntimeError>::default();
+        
+        let frame1 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(1),
+            submit_waterline: protocol::SubmitWaterline(1),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(1),
+            complete_waterline: protocol::CompleteWaterline(1),
+            receipts: vec![].into(),
+            errors: vec![RuntimeError::FeedbackQueueTimeout].into(),
+        };
+        
+        let frame2 = GpuFeedbackFrame {
+            present_frame_id: protocol::PresentFrameId(2),
+            submit_waterline: protocol::SubmitWaterline(2),
+            executed_batch_waterline: protocol::ExecutedBatchWaterline(2),
+            complete_waterline: protocol::CompleteWaterline(2),
+            receipts: vec![].into(),
+            errors: vec![RuntimeError::EngineThreadDisconnected].into(),
+        };
+        
+        let merged = GpuFeedbackFrame::merge_mailbox(frame1, frame2, &mut merge_state);
+        
+        // Both errors should be preserved (different keys)
+        assert_eq!(merged.errors.len(), 2, "Different error types should not merge");
+        
+        // Waterlines should be max
+        assert_eq!(merged.executed_batch_waterline.0, 2);
+    }
+}
