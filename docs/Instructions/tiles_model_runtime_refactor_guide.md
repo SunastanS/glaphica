@@ -1,5 +1,30 @@
 # Tiles / Model / Runtime 重构指导方案
 
+## 0. As-built 现状摘要（2026-02-27 更新）
+
+**当前完成阶段**: Phase 2.5 + Phase 3 cleanup ✅
+
+| 阶段 | 状态 | 备注 |
+|------|------|------|
+| Phase 1: 模型统一 | ✅ 完成 | 常量统一到 `model` crate |
+| Phase 2: 架构拆分 | ✅ 完成 | AppCore + GpuRuntime 建立 |
+| Phase 2.5-A: GpuState 集成 | ✅ 完成 | 结构委托完成 |
+| Phase 2.5-B: 错误处理升级 | ✅ 完成 | resize/render Result 化 |
+| Phase 3: 清理与收口 | ✅ 完成 | fatal error flag + warnings 压缩 |
+| Phase 4: 真通道 | ⏳ 未开始 | 待单线程稳定后启动 |
+
+**主流程入口**: `GpuState` (facade) → `AppCore` → `GpuRuntime` (命令接口)
+
+**剩余 Hybrid 路径**:
+- brush enqueue (部分迁移)
+- merge polling (部分迁移)
+
+**技术债**:
+- 2 dead_code warnings (可接受)
+- 1 test failure (Phase 1 遗留 GPU alignment 问题)
+
+---
+
 ## 1. 目标与约束
 
 本方案用于指导当前 `crates/tiles` 破坏性重构，目标分为两条主线：
@@ -8,6 +33,11 @@
 2. 分离关注点，引入轻量主线程 `runtime` 管理 GPU 资源，并通过 `crates/protocol` 风格通信连接主体业务与 runtime。
 
 本方案基于当前代码现状，不是抽象蓝图。
+
+**Phase 编号规则**:
+- 主阶段：Phase 0 ~ Phase 5（见第 5 节）
+- 插入轮次：使用 `Phase X.Y` 标注（如 Phase 2.5-A/B）
+- 本文档中的"Phase 3"如无特别说明，指 Phase 5（清理与收口）
 
 ## 2. 当前现状与核心问题
 
@@ -218,14 +248,17 @@
 
 ## 6. 关键设计决策清单（必须先拍板）
 
-1. `TileKey` 最终形态是 opaque 还是编码 key。 -> 编码 Key
-2. tile 几何最终是否采用 `stride=128`（对应 image 126+gutter）或保留当前 130。 -> 换用 126 + 2
-3. runtime 命令枚举放在：
-   - 方案 A: `glaphica` 内部模块。
-   - 方案 B: 新建 `crates/runtime_protocol`。 -> 方案 B
-4. `merge_submission` 的归属：
-   - 继续在 `tiles`（推荐，保持领域语义集中）。
-   - 迁入 runtime（不推荐，会污染业务边界）。
+1. **`TileKey` 编码方案**
+   - **语义决策**: 采用编码 key（backend + generation + slot）✅
+   - **落地决策**: `tile_key_encoding.rs` 实现状态 = **Implemented (draft), Not integrated**
+   - **集成触发条件**: Phase 4 真通道前必须接入（避免双路径维护）
+   - **当前状态**: 草稿代码已标记 `#[allow(dead_code)]`，未接入主链路
+
+2. **tile 几何方案**: 换用 126 + 2（`stride=128`，对应 image 126+gutter）✅
+
+3. **runtime 命令枚举位置**: 方案 B (`glaphica` 内部模块) ✅
+
+4. **`merge_submission` 归属**: 继续在 `tiles`（保持领域语义集中）✅
 
 ## 7. 协议与协作规则
 
@@ -738,20 +771,27 @@ let bindings = self.brush_buffer_tile_keys
 
 ### 14.4 迁移状态清单
 
-| 路径 | 当前状态 | 目标状态 | 待删除代码 |
-|------|----------|----------|------------|
-| render/present | ✅ Complete | AppCore+Runtime | None (fully delegated) |
-| resize | ✅ Complete | AppCore+Runtime | None (fully delegated) |
-| brush enqueue | Hybrid | ⚠️ AppCore+Runtime (部分) | GpuState::enqueue_brush_render_command() 业务逻辑 |
-| merge polling | Hybrid | ✅ AppCore+Runtime | GpuState::process_renderer_merge_completions() GPU 调用 |
-| GC eviction | Old | - | 保留在 GpuState（低优先级） |
-| canvas 操作 | Old | - | 保留在 GpuState（低优先级） |
+| 路径 | 当前状态 | Canonical 入口 | 待删除代码 |
+|------|----------|-------------|------------|
+| render/present | ✅ Complete | GpuState → AppCore | None (fully delegated) |
+| resize | ✅ Complete | GpuState → AppCore | None (fully delegated) |
+| brush enqueue | Hybrid | GpuState (主流程) | GpuState::enqueue_brush_render_command() 业务逻辑 |
+| merge polling | Hybrid | GpuState (主流程) | GpuState::process_renderer_merge_completions() GPU 调用 |
+| GC eviction | Old | GpuState | 保留在 GpuState（低优先级） |
+| canvas 操作 | Old | GpuState | 保留在 GpuState（低优先级） |
 
 **状态说明**:
 - **Old**: 完全在 GpuState 直接实现
 - **Hybrid**: AppCore 有实现，GpuState 也有（过渡期）
+  - **DoD**: Hybrid 状态必须保证"主流程只走一条路径"（Canonical 列），另一条只用于回滚或暂存
+  - 必须有显式 TODO/feature flag 控制
 - **AppCore+Runtime**: 完成迁移，GpuState 仅 facade 委托
 - **Complete**: 完全迁移，包括 Result 错误处理
+
+**Canonical 入口定义**:
+- 当前生产代码实际调用的路径
+- 测试覆盖的主要路径
+- 错误处理已统一的路径
 
 ### 14.5 下一步建议
 
@@ -774,21 +814,43 @@ let bindings = self.brush_buffer_tile_keys
 
 **Tile 生命周期规则**:
 
-1. **Tile 的释放/复用不得早于所有可能引用该 tile 的 renderer/op 被消费完成**
-   - 这是 use-after-free 防护的关键
-   - GPU drain 完成后才能安全释放 tile key
+1. **Tile 的释放/复用不得早于所有可能引用该 tile 的 GPU work 完成**
+   - **禁止条件**: 当存在任何 *in-flight* GPU work 可能引用某 tile/slot 时，不允许执行 `release/reuse`
+   - **允许条件**: 仅当 runtime 已确认相关 work 的 **completion** 后，才允许释放/复用
+   - **实现**: 使用 fence/notice/receipt 作为完成确认点
 
-2. **若要复用 slot，必须依赖 generation/epoch 防 ABA**
-   - TileKey 编码包含 generation 字段
+2. **completion 的明确定义**
+   - **completion notice** = runtime 观察到 GPU work 对某次 submission 的完成（或至少对 tile 生命周期安全的完成点）
+   - **产生者**: Renderer (GPU executor) 或 Tiles GPU executor
+   - **生效资源**: tile atlas / brush buffer
+   - **同步点**: `submission -> completion notice -> ack -> finalize/abort`（Phase 0 冻结不变量）
+   
+3. **若要复用 slot，必须依赖 generation/epoch 防 ABA**
+   - TileKey 编码包含 generation 字段（语义决策 ✅）
+   - **执行要求**: generation 校验必须在 resolve/bind 边界执行
    - 严禁在 GPU 可能仍持有引用时复用 slot
 
-3. **共享 Arc 资源的访问约束**:
+4. **共享 Arc 资源的访问约束**:
    - ✅ 只读访问（resolve）可并发
    - ⚠️ 写操作（allocate/release）需同步
    - ❌ 禁止在 GPU operation in-flight 时修改底层资源
 
+5. **锁不跨命令边界**（新增）
+   - **brush_buffer_tile_keys**: 读锁持有时间必须短，仅覆盖 "计算 bindings / clone bindings 数据结构"
+   - **命令执行**: 不持锁 - 发给 runtime 的 payload 必须是 owned/clone 后的数据
+   - ❌ 禁止跨命令持有锁（避免 Phase 4 真通道死锁）
+
+6. **Token 单调递增**（新增）
+   - 每次提交 GPU work 产生一个 monotonically increasing token（frame_id 或 submission_id）
+   - completion notice 必须携带 token
+   - 释放/复用必须验证 token 已完成
+
+**Phase 4 警示**:
+- `drain 完成` 不等于 `GPU completion` - drain 可能只是下发到 staging buffer
+- 真通道实现时必须明确：completion notice 对应的是 GPU queue completion，而非 CPU 命令提交
+
 **实现建议**:
-- 使用引用计数跟踪 in-flight GPU operations
-- drain() 后等待 completion 再释放
-- generation 编码防止 stale reference
+- 使用引用计数 + fence 跟踪 in-flight GPU operations
+- completion notice 处理后等待 fence signal 再释放
+- generation 编码 + resolve 时校验防止 stale reference
 
