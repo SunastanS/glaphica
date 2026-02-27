@@ -328,8 +328,10 @@ pub enum GpuExecMode {
         runtime: crate::runtime::GpuRuntime,
     },
 
-    /// Threaded mode (Phase 4, TODO): EngineBridge handles cross-thread communication
-    Threaded,
+    /// Threaded mode: EngineBridge handles cross-thread communication.
+    Threaded {
+        bridge: crate::engine_bridge::EngineBridge,
+    },
 }
 
 /// GpuState - main GPU state holder.
@@ -379,14 +381,31 @@ impl GpuState {
     fn runtime(&self) -> &crate::runtime::GpuRuntime {
         match &self.exec_mode {
             GpuExecMode::SingleThread { runtime } => runtime,
-            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+            GpuExecMode::Threaded { .. } => {
+                panic!("runtime direct access is invalid in threaded execution mode")
+            }
         }
     }
 
     fn runtime_mut(&mut self) -> &mut crate::runtime::GpuRuntime {
         match &mut self.exec_mode {
             GpuExecMode::SingleThread { runtime } => runtime,
-            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+            GpuExecMode::Threaded { .. } => {
+                panic!("runtime direct mutation is invalid in threaded execution mode")
+            }
+        }
+    }
+
+    fn map_render_runtime_error(err: crate::runtime::RuntimeError) -> AppCoreError {
+        match err {
+            crate::runtime::RuntimeError::PresentError(renderer::PresentError::Surface(err)) => {
+                AppCoreError::Surface(err)
+            }
+            crate::runtime::RuntimeError::PresentError(renderer::PresentError::TileDrain(source)) => {
+                AppCoreError::PresentFatal { source }
+            }
+            crate::runtime::RuntimeError::SurfaceError(err) => AppCoreError::Surface(err),
+            other => AppCoreError::Runtime(other),
         }
     }
 
@@ -945,7 +964,29 @@ impl GpuState {
         let core = &mut self.core;
         match &mut self.exec_mode {
             GpuExecMode::SingleThread { runtime } => core.resize(runtime, new_size),
-            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+            GpuExecMode::Threaded { bridge } => {
+                let width = new_size.width.max(1);
+                let height = new_size.height.max(1);
+                let runtime = bridge
+                    .gpu_runtime
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("threaded mode requires gpu runtime in bridge"));
+                let current_size = runtime.surface_size();
+                if current_size.width == width && current_size.height == height {
+                    return Ok(());
+                }
+                bridge.enqueue_main_thread_command(crate::runtime::RuntimeCommand::Resize {
+                    width,
+                    height,
+                    view_transform: core.view_transform().clone(),
+                });
+                bridge.dispatch_frame().map_err(|error| AppCoreError::Resize {
+                    width,
+                    height,
+                    reason: format!("{:?}", error),
+                })?;
+                Ok(())
+            }
         }
     }
 
@@ -956,7 +997,9 @@ impl GpuState {
         let core = &mut self.core;
         match &mut self.exec_mode {
             GpuExecMode::SingleThread { runtime } => core.render(runtime),
-            GpuExecMode::Threaded => panic!("threaded execution mode is not implemented"),
+            GpuExecMode::Threaded { bridge } => bridge
+                .dispatch_frame()
+                .map_err(Self::map_render_runtime_error),
         }
     }
 

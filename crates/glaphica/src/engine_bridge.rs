@@ -1,5 +1,6 @@
 #[cfg(not(debug_assertions))]
 use std::thread;
+use std::collections::VecDeque;
 /// Engine Bridge module.
 ///
 /// Manages cross-thread communication between main thread (GPU) and engine thread (business).
@@ -77,6 +78,7 @@ pub struct EngineBridge {
     pub gpu_runtime: Option<GpuRuntime>,
     pub waterlines: MainThreadWaterlines,
     pub engine_thread: Option<JoinHandle<()>>,
+    pub main_thread_injected_commands: VecDeque<RuntimeCommand>,
 }
 
 impl EngineBridge {
@@ -106,6 +108,7 @@ impl EngineBridge {
             gpu_runtime: Some(gpu_runtime),
             waterlines: MainThreadWaterlines::default(),
             engine_thread: Some(engine_thread),
+            main_thread_injected_commands: VecDeque::new(),
         }
     }
 
@@ -141,6 +144,7 @@ impl EngineBridge {
             gpu_runtime: None,
             waterlines: MainThreadWaterlines::default(),
             engine_thread: None,
+            main_thread_injected_commands: VecDeque::new(),
         };
 
         (bridge, engine_channels)
@@ -174,6 +178,7 @@ impl EngineBridge {
             gpu_runtime: Some(gpu_runtime),
             waterlines: MainThreadWaterlines::default(),
             engine_thread: None,
+            main_thread_injected_commands: VecDeque::new(),
         };
 
         (bridge, engine_channels)
@@ -190,6 +195,17 @@ impl EngineBridge {
         for _ in 0..COMMAND_BUDGET {
             if shutdown_reason.is_some() {
                 break;
+            }
+
+            if let Some(cmd) = self.main_thread_injected_commands.pop_front() {
+                match self.execute_command(cmd, &mut receipts, &mut errors) {
+                    Ok(()) => {}
+                    Err(RuntimeError::ShutdownRequested { reason }) => {
+                        shutdown_reason = Some(reason);
+                    }
+                    Err(e) => return Err(e),
+                }
+                continue;
             }
 
             match self.main_channels.gpu_command_receiver.pop() {
@@ -237,6 +253,22 @@ impl EngineBridge {
                 break;
             } // Stop processing after Shutdown
 
+            if let Some(cmd) = self.main_thread_injected_commands.pop_front() {
+                match self.execute_command_with_executor(
+                    cmd,
+                    &mut receipts,
+                    &mut errors,
+                    &mut execute,
+                ) {
+                    Ok(()) => {}
+                    Err(RuntimeError::ShutdownRequested { reason }) => {
+                        shutdown_reason = Some(reason);
+                    }
+                    Err(e) => return Err(e),
+                }
+                continue;
+            }
+
             match self.main_channels.gpu_command_receiver.pop() {
                 Ok(GpuCmdMsg::Command(cmd)) => {
                     // Don't use `?` - collect receipts/errors and handle Shutdown specially
@@ -270,6 +302,14 @@ impl EngineBridge {
         }
 
         Ok(())
+    }
+
+    /// Inject a command from main thread directly into the dispatch queue.
+    ///
+    /// This is used by transitional paths where main thread still initiates
+    /// commands but execution must flow through bridge dispatch semantics.
+    pub fn enqueue_main_thread_command(&mut self, command: RuntimeCommand) {
+        self.main_thread_injected_commands.push_back(command);
     }
 
     /// Execute a single command.
