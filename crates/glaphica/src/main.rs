@@ -840,16 +840,15 @@ impl App {
                 self.brush_trace_enabled,
             );
             let render_result = gpu.render();
+            // Fatal errors in flush are logged; main loop will catch them on next render
             if let Err(error) = render_result {
                 match error {
-                    AppCoreError::OutOfMemory => {
-                        panic!("out of memory while flushing brush pipeline lifecycle")
+                    AppCoreError::OutOfMemory | AppCoreError::PresentFatal { .. } => {
+                        // Fatal error - log and stop flushing (main loop will handle exit)
+                        eprintln!("[fatal] render error during flush: {:?}", error);
+                        break; // Stop flushing, let main loop handle fatal error
                     }
-                    AppCoreError::PresentFatal { .. } => {
-                        // Fatal error during flush - panic
-                        panic!("fatal present error while flushing brush pipeline lifecycle: {:?}", error)
-                    }
-                    // Recoverable errors - continue
+                    // Recoverable errors - continue flushing
                     AppCoreError::Surface(_)
                     | AppCoreError::UnexpectedReceipt { .. }
                     | AppCoreError::UnexpectedErrorVariant { .. }

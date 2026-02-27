@@ -20,7 +20,7 @@ use render_protocol::{
 };
 use renderer::{
     BrushControlError, BrushRenderEnqueueError, FrameGpuTimingReport, MergeAckError,
-    MergeCompletionNotice, MergeFinalizeError, MergePollError, MergeSubmitError, PresentError,
+    MergeCompletionNotice, MergeFinalizeError, MergePollError, MergeSubmitError,
     RenderDataResolver, Renderer, ViewOpSender,
 };
 use tiles::{
@@ -32,7 +32,7 @@ use tiles::{
 };
 
 use view::ViewTransform;
-use model::TILE_IMAGE;
+use model::TILE_IMAGE; // Used in tests
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 

@@ -550,7 +550,7 @@ impl AppCore {
 
         for notice in completion_notices {
             let notice_key = (notice.notice_id, notice.receipt_id);
-            let _renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
+            let _ = renderer_notice_by_key.remove(&notice_key).ok_or(
                 MergeBridgeError::MissingRendererNotice {
                     receipt_id: notice.receipt_id,
                     notice_id: notice.notice_id,
