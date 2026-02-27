@@ -378,6 +378,27 @@ pub enum MergeBridgeError {
 }
 
 impl GpuState {
+    pub fn into_threaded<F>(self, spawn_engine: F) -> Self
+    where
+        F: FnOnce(
+            engine::EngineThreadChannels<
+                crate::runtime::RuntimeCommand,
+                crate::runtime::RuntimeReceipt,
+                crate::runtime::RuntimeError,
+            >,
+        ) -> std::thread::JoinHandle<()>,
+    {
+        let runtime = match self.exec_mode {
+            GpuExecMode::SingleThread { runtime } => runtime,
+            GpuExecMode::Threaded { .. } => panic!("gpu state is already in threaded mode"),
+        };
+        let bridge = crate::engine_bridge::EngineBridge::new(runtime, spawn_engine);
+        Self {
+            core: self.core,
+            exec_mode: GpuExecMode::Threaded { bridge },
+        }
+    }
+
     fn runtime(&self) -> &crate::runtime::GpuRuntime {
         match &self.exec_mode {
             GpuExecMode::SingleThread { runtime } => runtime,
