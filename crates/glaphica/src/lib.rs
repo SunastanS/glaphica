@@ -1764,7 +1764,9 @@ mod tests {
         atlas_layout: tiles::TileAtlasLayout,
         address: TileAddress,
     ) -> Vec<u8> {
-        let buffer_size = (TILE_IMAGE as u64) * (TILE_IMAGE as u64) * 4;
+        let row_bytes = (TILE_IMAGE * 4) as usize;
+        let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+        let buffer_size = (padded_row_bytes as u64) * (TILE_IMAGE as u64);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("glaphica.tests.readback"),
             size: buffer_size,
@@ -1791,7 +1793,7 @@ mod tests {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(TILE_IMAGE * 4),
+                    bytes_per_row: Some(padded_row_bytes as u32),
                     rows_per_image: Some(TILE_IMAGE),
                 },
             },
@@ -1817,7 +1819,15 @@ mod tests {
             .expect("map tile readback");
         let tile = slice.get_mapped_range().to_vec();
         buffer.unmap();
-        tile
+        
+        // Remove padding from each row to get actual pixel data
+        let mut result = Vec::with_capacity(row_bytes * TILE_IMAGE as usize);
+        for row in 0..TILE_IMAGE as usize {
+            let row_start = row * padded_row_bytes;
+            let row_end = row_start + row_bytes;
+            result.extend_from_slice(&tile[row_start..row_end]);
+        }
+        result
     }
 
     #[test]
