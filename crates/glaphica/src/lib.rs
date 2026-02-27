@@ -325,8 +325,13 @@ impl RenderDataResolver for DocumentRenderDataResolver {
 ///
 /// Phase 2.5: Delegates all business logic to AppCore.
 /// GpuState is now a thin facade over AppCore.
+///
+/// Phase 4 TODO: Will use GpuExecMode to switch between single-threaded and threaded execution.
+/// Currently runtime is held by AppCore.
 pub struct GpuState {
     core: AppCore,
+    // Phase 4 TODO: Add exec_mode: GpuExecMode
+    // This requires moving runtime from AppCore to GpuExecMode
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

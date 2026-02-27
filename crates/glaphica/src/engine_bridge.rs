@@ -30,6 +30,11 @@
 ///    - clone bindings before sending to engine thread
 ///    - no lock held while waiting for channel operations
 ///
+/// 6. **FEEDBACK BEFORE ERROR**:
+///    - Any error that stops dispatch (including ShutdownRequested) MUST first push feedback
+///    - Feedback frame contains receipts/errors/waterlines that must not be lost
+///    - This applies to ALL error paths in dispatch_frame()
+///
 use std::thread::{self, JoinHandle};
 #[cfg(not(debug_assertions))]
 use std::time::Duration;
