@@ -27,15 +27,15 @@
 **Plans:** 2 plans
 
 Plans:
-- [ ] 04-01-PLAN.md — Add dependencies and define RuntimeReceipt/RuntimeError types
+- [x] 04-01-PLAN.md — Add dependencies and define RuntimeReceipt/RuntimeError types
 - [ ] 04-02-PLAN.md — Instantiate channels in GpuState::new()
 
 **Requirements:**
-- [ ] CHAN-01: Add engine/protocol dependencies
-- [ ] CHAN-02: Define RuntimeReceipt enum
-- [ ] CHAN-03: Define RuntimeError enum  
+- [x] CHAN-01: Add engine/protocol dependencies
+- [x] CHAN-02: Define RuntimeReceipt enum
+- [x] CHAN-03: Define RuntimeError enum  
 - [ ] CHAN-04: Instantiate channels in GpuState::new()
-- [ ] CHAN-05: Add true_threading feature flag
+- [x] CHAN-05: Add true_threading feature flag
 
 **Success Criteria:**
 1. `Cargo.toml` includes `engine` and `protocol` dependencies
@@ -178,3 +178,4 @@ Plans:
 
 *Roadmap created: 2026-02-28*
 *Restructured: 2026-02-28 — Phase 4 sub-phases (4.1–4.4)*
+*Updated: 2026-02-28 — Plan 04-01 complete (CHAN-01, CHAN-02, CHAN-03, CHAN-05)*
