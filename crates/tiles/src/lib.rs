@@ -14,7 +14,8 @@ pub const ATLAS_OCCUPANCY_WORDS: usize = (TILES_PER_ATLAS as usize).div_ceil(64)
 
 const INDEX_SHARDS: usize = 64;
 
-pub use tile_key_encoding::{BackendId, GenerationId, SlotId, TileKey, AtlasTier};
+pub use atlas::{AtlasTier, TierAtlasLayout};
+pub use tile_key_encoding::{BackendId, GenerationId, SlotId, TileKey};
 
 mod tile_key_encoding;
 

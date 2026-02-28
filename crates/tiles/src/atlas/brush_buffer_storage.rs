@@ -13,13 +13,11 @@ use super::format::{
     TileGpuCreateValidator, TileGpuOpAdapter, TilePayloadSpec, TileUploadFormatSpec,
 };
 use super::gpu;
-use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
+use super::{AtlasTier, GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeGenericTileAtlasConfig {
-    pub max_layers: u32,
-    pub tiles_per_row: u32,
-    pub tiles_per_column: u32,
+    pub tier: AtlasTier,
     pub format: TileAtlasFormat,
     pub usage: TileAtlasUsage,
     pub payload_kind: TilePayloadKind,
@@ -28,9 +26,7 @@ pub struct RuntimeGenericTileAtlasConfig {
 impl Default for RuntimeGenericTileAtlasConfig {
     fn default() -> Self {
         Self {
-            max_layers: GenericTileAtlasConfig::default().max_layers,
-            tiles_per_row: GenericTileAtlasConfig::default().tiles_per_row,
-            tiles_per_column: GenericTileAtlasConfig::default().tiles_per_column,
+            tier: GenericTileAtlasConfig::default().tier,
             format: Rgba8Spec::FORMAT,
             usage: GenericTileAtlasConfig::default().usage,
             payload_kind: TilePayloadKind::Rgba8,
@@ -41,9 +37,7 @@ impl Default for RuntimeGenericTileAtlasConfig {
 impl From<RuntimeGenericTileAtlasConfig> for GenericTileAtlasConfig {
     fn from(value: RuntimeGenericTileAtlasConfig) -> Self {
         Self {
-            max_layers: value.max_layers,
-            tiles_per_row: value.tiles_per_row,
-            tiles_per_column: value.tiles_per_column,
+            tier: value.tier,
             usage: value.usage,
         }
     }
@@ -265,9 +259,7 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
         Self::with_config(
             device,
             GenericTileAtlasConfig {
-                max_layers: GenericTileAtlasConfig::default().max_layers,
-                tiles_per_row: GenericTileAtlasConfig::default().tiles_per_row,
-                tiles_per_column: GenericTileAtlasConfig::default().tiles_per_column,
+                tier: GenericTileAtlasConfig::default().tier,
                 usage,
             },
         )
@@ -281,9 +273,10 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
         let layout = core::AtlasLayout::from_config(gpu::core_config_from_generic(config))?;
         F::validate_gpu_create(device, config.usage)?;
 
+        let tier_layout = config.tier.layout();
         let (op_sender, op_queue) = core::TileOpQueue::new();
         let cpu = Arc::new(
-            core::TileAtlasCpu::new(core::next_backend_id(), config.max_layers, layout)
+            core::TileAtlasCpu::new(core::next_backend_id(), tier_layout.max_layers(), layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
         let atlas_usage = gpu::core_usage_from_public(config.usage);
@@ -291,7 +284,7 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
         let (texture, view) = gpu::create_atlas_texture_and_array_view(
             device,
             layout,
-            config.max_layers,
+            tier_layout.max_layers(),
             gpu::atlas_format_to_wgpu(F::FORMAT),
             gpu::atlas_usage_to_wgpu(config.usage),
             "tiles.atlas.array",

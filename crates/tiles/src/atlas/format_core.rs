@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use crate::atlas::{TileAtlasFormat, TileAtlasUsage, TilePayloadKind};
-use crate::{TILE_IMAGE, TileIngestError};
+use crate::{TileIngestError, TILE_IMAGE};
 
 pub trait TileFormatSpec {
     const PAYLOAD_KIND: TilePayloadKind;

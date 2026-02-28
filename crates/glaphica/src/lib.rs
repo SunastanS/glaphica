@@ -895,9 +895,7 @@ impl GpuState {
             GenericR32FloatTileAtlasStore::with_config(
                 &device,
                 GenericTileAtlasConfig {
-                    max_layers: GenericTileAtlasConfig::default().max_layers,
-                    tiles_per_row: GenericTileAtlasConfig::default().tiles_per_row,
-                    tiles_per_column: GenericTileAtlasConfig::default().tiles_per_column,
+                    tier: GenericTileAtlasConfig::default().tier,
                     usage: TileAtlasUsage::TEXTURE_BINDING
                         | TileAtlasUsage::STORAGE_BINDING
                         | TileAtlasUsage::COPY_DST

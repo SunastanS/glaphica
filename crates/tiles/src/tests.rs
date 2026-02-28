@@ -319,22 +319,15 @@ fn source_texel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
 fn supports_r32float_storage(device: &wgpu::Device) -> bool {
     GenericR32FloatTileAtlasStore::with_config(
         device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC
-                | TileAtlasUsage::STORAGE_BINDING,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     )
     .is_ok()
 }
 
 #[test]
-fn config_default_max_layers_is_four() {
+fn config_default_uses_medium15_tier() {
     let config = TileAtlasConfig::default();
-    assert_eq!(config.max_layers, 4);
+    assert_eq!(config.tier, AtlasTier::Medium15);
 }
 
 #[test]
@@ -352,10 +345,7 @@ fn ingest_tile_should_define_gutter_pixels_from_edge_texels() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
 
     let mut bytes = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
@@ -454,7 +444,7 @@ fn release_is_cpu_only_and_dirty_triggers_clear_on_reuse() {
     let (store, gpu) = create_store(
         &device,
         TileAtlasConfig {
-            max_layers: 1,
+            tier: AtlasTier::Tiny10,
             usage: TileAtlasUsage::COPY_DST
                 | TileAtlasUsage::COPY_SRC
                 | TileAtlasUsage::TEXTURE_BINDING,
@@ -525,10 +515,13 @@ fn ingest_image_rgba8_strided_keeps_sparse_tiles() {
         .expect("ingest image");
     assert_eq!(image.tiles_per_row(), 2);
     assert_eq!(image.tiles_per_column(), 2);
-    assert_eq!(image.get_tile(0, 0), Ok(None));
-    assert_eq!(image.get_tile(1, 0), Ok(None));
-    assert_eq!(image.get_tile(0, 1), Ok(None));
-    assert!(image.get_tile(1, 1).expect("get tile").is_some());
+    
+    // Sparse tiles return EMPTY key (not Option)
+    use model::EmptyKey;
+    assert_eq!(*image.get_tile_at(0, 0).expect("get tile"), TileKey::EMPTY);
+    assert_eq!(*image.get_tile_at(1, 0).expect("get tile"), TileKey::EMPTY);
+    assert_eq!(*image.get_tile_at(0, 1).expect("get tile"), TileKey::EMPTY);
+    assert!(*image.get_tile_at(1, 1).expect("get tile") != TileKey::EMPTY);
 
     let tile_count = gpu.drain_and_execute(&queue).expect("drain");
     assert_eq!(tile_count, 1);
@@ -539,10 +532,7 @@ fn max_layers_limits_total_capacity() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
 
     for _ in 0..TILES_PER_ATLAS {
@@ -556,13 +546,7 @@ fn generic_allocator_keys_are_unique() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let key0 = store.allocate().expect("allocate key0");
@@ -575,13 +559,7 @@ fn generic_allocator_release_reuses_address() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let key0 = store.allocate().expect("allocate key0");
@@ -598,13 +576,7 @@ fn generic_allocator_capacity_is_bounded_by_layers() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     for _ in 0..TILES_PER_ATLAS {
@@ -618,13 +590,7 @@ fn generic_tile_set_reserve_resolve_release_lifecycle() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let set = store.reserve_tile_set(3).expect("reserve tile set");
@@ -646,13 +612,7 @@ fn generic_tile_set_rejects_duplicate_adopt_keys() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let key = store.allocate().expect("allocate key");
@@ -665,23 +625,11 @@ fn generic_tile_set_enforces_store_ownership() {
     let (device, _queue) = create_device_queue();
     let (store_a, _gpu_a) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
     let (store_b, _gpu_b) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let set = store_a.reserve_tile_set(1).expect("reserve tile set");
@@ -696,13 +644,7 @@ fn clear_tile_set_fails_without_partial_clear_enqueue() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let set = store.reserve_tile_set(2).expect("reserve tile set");
@@ -750,13 +692,7 @@ fn clear_tile_set_skips_stale_targets_after_release_and_reuse() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let set = store.reserve_tile_set(1).expect("reserve tile set");
@@ -805,13 +741,7 @@ fn clear_tile_set_reports_total_executed_tile_count() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let set = store.reserve_tile_set(2).expect("reserve tile set");
@@ -826,10 +756,7 @@ fn stale_upload_is_skipped_after_release_and_reuse() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
 
     let mut bytes = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
@@ -859,13 +786,7 @@ fn release_tile_set_fails_without_partial_release() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let set = store.reserve_tile_set(2).expect("reserve tile set");
@@ -888,7 +809,7 @@ fn runtime_factory_rejects_payload_format_mismatch() {
     let create = RuntimeGenericTileAtlasStore::with_config(
         &device,
         RuntimeGenericTileAtlasConfig {
-            max_layers: 1,
+            tier: AtlasTier::Tiny10,
             payload_kind: TilePayloadKind::R32Float,
             format: TileAtlasFormat::R8Uint,
             usage: TileAtlasUsage::TEXTURE_BINDING
@@ -910,7 +831,7 @@ fn runtime_factory_r8uint_allocate_clear_and_drain() {
     let (store, gpu) = RuntimeGenericTileAtlasStore::with_config(
         &device,
         RuntimeGenericTileAtlasConfig {
-            max_layers: 1,
+            tier: AtlasTier::Tiny10,
             payload_kind: TilePayloadKind::R8Uint,
             format: TileAtlasFormat::R8Uint,
             usage: TileAtlasUsage::TEXTURE_BINDING
@@ -936,13 +857,7 @@ fn r32float_config_validation_catches_invalid_format_and_usage() {
 
     let missing_storage = GenericR32FloatTileAtlasStore::with_config(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
     assert!(matches!(
         missing_storage,
@@ -955,11 +870,7 @@ fn r32float_storage_only_usage_is_allowed() {
     let (device, _queue) = create_device_queue();
     let create = GenericR32FloatTileAtlasStore::with_config(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::STORAGE_BINDING,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     if supports_r32float_storage(&device) {
@@ -981,11 +892,7 @@ fn r32float_storage_only_clear_fails_fast_at_drain() {
 
     let (store, gpu) = GenericR32FloatTileAtlasStore::with_config(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::STORAGE_BINDING,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     )
     .expect("create storage-only r32float atlas");
 
@@ -1004,7 +911,7 @@ fn group_atlas_requires_copy_dst_and_texture_binding_usage() {
     let missing_copy_dst = GroupTileAtlasStore::with_config(
         &device,
         TileAtlasConfig {
-            max_layers: 1,
+            tier: AtlasTier::Tiny10,
             usage: TileAtlasUsage::TEXTURE_BINDING,
             ..TileAtlasConfig::default()
         },
@@ -1017,7 +924,7 @@ fn group_atlas_requires_copy_dst_and_texture_binding_usage() {
     let missing_texture_binding = GroupTileAtlasStore::with_config(
         &device,
         TileAtlasConfig {
-            max_layers: 1,
+            tier: AtlasTier::Tiny10,
             usage: TileAtlasUsage::COPY_DST,
             ..TileAtlasConfig::default()
         },
@@ -1034,14 +941,7 @@ fn r32float_allocate_resolve_release_lifecycle() {
     if !supports_r32float_storage(&device) {
         let create = GenericR32FloatTileAtlasStore::with_config(
             &device,
-            GenericTileAtlasConfig {
-                max_layers: 1,
-                usage: TileAtlasUsage::TEXTURE_BINDING
-                    | TileAtlasUsage::COPY_DST
-                    | TileAtlasUsage::COPY_SRC
-                    | TileAtlasUsage::STORAGE_BINDING,
-                ..GenericTileAtlasConfig::default()
-            },
+            GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
         );
         assert!(matches!(
             create,
@@ -1052,14 +952,7 @@ fn r32float_allocate_resolve_release_lifecycle() {
 
     let (store, _gpu) = create_generic_store_r32f(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC
-                | TileAtlasUsage::STORAGE_BINDING,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let key = store.allocate().expect("allocate key");
@@ -1076,14 +969,7 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
     if !supports_r32float_storage(&device) {
         let create = GenericR32FloatTileAtlasStore::with_config(
             &device,
-            GenericTileAtlasConfig {
-                max_layers: 1,
-                usage: TileAtlasUsage::TEXTURE_BINDING
-                    | TileAtlasUsage::COPY_DST
-                    | TileAtlasUsage::COPY_SRC
-                    | TileAtlasUsage::STORAGE_BINDING,
-                ..GenericTileAtlasConfig::default()
-            },
+            GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
         );
         assert!(matches!(
             create,
@@ -1094,14 +980,7 @@ fn r32float_clear_enqueues_and_zeroes_tile() {
 
     let (store, gpu) = create_generic_store_r32f(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC
-                | TileAtlasUsage::STORAGE_BINDING,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let key = store.allocate().expect("allocate key");
@@ -1148,13 +1027,7 @@ fn r8uint_create_and_allocate_release_path() {
     let (device, queue) = create_device_queue();
     let (store, gpu) = create_generic_store_r8u(
         &device,
-        GenericTileAtlasConfig {
-            max_layers: 1,
-            usage: TileAtlasUsage::TEXTURE_BINDING
-                | TileAtlasUsage::COPY_DST
-                | TileAtlasUsage::COPY_SRC,
-            ..GenericTileAtlasConfig::default()
-        },
+        GenericTileAtlasConfig { tier: AtlasTier::Tiny10, usage: TileAtlasUsage::TEXTURE_BINDING | TileAtlasUsage::COPY_DST | TileAtlasUsage::COPY_SRC | TileAtlasUsage::STORAGE_BINDING },
     );
 
     let key = store.allocate().expect("allocate key");
@@ -1225,41 +1098,15 @@ fn tile_address_layout_aware_helpers_support_square_atlas() {
     assert!((v - (content_y as f32 / layout.atlas_height as f32)).abs() < 1e-6);
 }
 
-#[test]
-#[ignore = "VirtualImage removed - test helper deprecated"]
-fn virtual_image_iter_tiles_skips_empty_and_preserves_tile_coordinates() {
-    let mut image = VirtualImage::<u8>::new(TILE_IMAGE * 2, TILE_IMAGE * 2).expect("new image");
-    image.set_tile(1, 0, 7).expect("set tile 1,0");
-    image.set_tile(0, 1, 9).expect("set tile 0,1");
-
-    let tiles: Vec<(u32, u32, u8)> = image
-        .iter_tiles()
-        .map(|(tile_x, tile_y, value)| (tile_x, tile_y, *value))
-        .collect();
-
-    assert_eq!(tiles, vec![(1, 0, 7), (0, 1, 9)]);
-}
-
-#[test]
-#[ignore = "VirtualImage removed - export_rgba8 test helper deprecated"]
-fn new_export_is_transparent_black() {
-    let image = VirtualImage::<u8>::new(17, 9).expect("new image");
-    let bytes = image
-        .export_rgba8(|_key| panic!("no tiles to load"))
-        .expect("export");
-    assert_eq!(bytes.len(), 17 * 9 * 4);
-    assert!(bytes.iter().all(|&byte| byte == 0));
-}
+// NOTE: VirtualImage tests removed - VirtualImage type no longer exists
+// See git history if these test patterns need to be restored with new APIs
 
 #[test]
 fn force_release_all_keys_releases_allocated_tiles_and_is_idempotent() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
 
     let key0 = store.allocate().expect("allocate key0");
@@ -1284,12 +1131,7 @@ fn gc_eviction_batches_are_reported_via_store_drain() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            tiles_per_row: 2,
-            tiles_per_column: 2,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
 
     let key0 = store.allocate().expect("allocate key0");
@@ -1322,10 +1164,7 @@ fn brush_buffer_registry_releases_tiles_on_merge_failed() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
     let mut registry = BrushBufferTileRegistry::default();
 
@@ -1354,10 +1193,7 @@ fn brush_buffer_registry_applies_retained_eviction() {
     let (device, _queue) = create_device_queue();
     let (store, _gpu) = create_store(
         &device,
-        TileAtlasConfig {
-            max_layers: 1,
-            ..TileAtlasConfig::default()
-        },
+        TileAtlasConfig::tiny10(),
     );
     let mut registry = BrushBufferTileRegistry::default();
 

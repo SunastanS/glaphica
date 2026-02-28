@@ -976,7 +976,7 @@ pub(in crate::atlas) fn tile_coords_from_index_with_row(
 #[cfg(test)]
 mod tests {
     use super::{AtlasLayout, TileAtlasCpu};
-    use crate::{TileAllocError, TILE_STRIDE};
+    use crate::{BackendId, TileAllocError, TILE_STRIDE};
 
     fn test_layout(tiles_per_row: u32, tiles_per_column: u32) -> AtlasLayout {
         let tiles_per_atlas = tiles_per_row

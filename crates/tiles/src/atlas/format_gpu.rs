@@ -2,11 +2,11 @@ use std::sync::OnceLock;
 
 use crate::atlas::TileAtlasFormat;
 use crate::{
-    TILE_GUTTER, TILE_IMAGE, TILE_STRIDE, TileAtlasCreateError, TileAtlasUsage, TileGpuDrainError,
+    TileAtlasCreateError, TileAtlasUsage, TileGpuDrainError, TILE_GUTTER, TILE_IMAGE, TILE_STRIDE,
 };
 
 use super::format_core::{
-    Bgra8Spec, Bgra8SrgbSpec, R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec,
+    Bgra8Spec, Bgra8SrgbSpec, R32FloatSpec, R8UintSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec,
 };
 use crate::atlas::gpu;
 

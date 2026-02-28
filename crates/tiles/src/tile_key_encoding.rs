@@ -1,15 +1,10 @@
-//! TileKey encoding scheme (draft implementation).
-//!
-//! This module contains a draft implementation of encoded TileKey.
-//! Not yet integrated into the main codebase.
+//! TileKey encoding scheme.
 //!
 //! REFACTORING:
 //! There are two kinds of search work
 //! 1. The position of a tile in image layout -> TileKey
 //! 2. TileKey -> the position of a tile in atlas backend
 //! We move the relatively simple one (1) to crates/model/src/lib.rs
-
-pub use crate::TILE_STRIDE;
 
 // REFRACTORING:
 // - use meaningful TileKey
@@ -69,91 +64,4 @@ impl TileKey {
 
 impl model::EmptyKey for TileKey {
     const EMPTY: Self = TileKey(0);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Pow2U16(u16);
-
-impl Pow2U16 {
-    pub const fn new(value: u16) -> Self {
-        assert!(value != 0 && (value & (value - 1)) == 0);
-        Pow2U16(value)
-    }
-    pub const fn get(self) -> u16 {
-        self.0
-    }
-    pub const fn get_u32(self) -> u32 {
-        self.0 as u32
-    }
-    pub const fn log2(self) -> u32 {
-        self.0.trailing_zeros()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AtlasLayout {
-    tiles_per_edge: Pow2U16,
-    array_layers: Pow2U16,
-}
-
-impl AtlasLayout {
-    pub const fn atlas_edge_px(self) -> u32 {
-        self.tiles_per_edge.get_u32() * TILE_STRIDE
-    }
-    pub const fn tiles_per_layer(self) -> u32 {
-        let n = self.tiles_per_edge.get_u32();
-        n * n
-    }
-    pub const fn capacity_tiles(self) -> u32 {
-        self.tiles_per_layer() * self.array_layers.get_u32()
-    }
-
-    pub const fn x_bits(self) -> u32 {
-        self.tiles_per_edge.log2()
-    }
-    pub const fn y_bits(self) -> u32 {
-        self.tiles_per_edge.log2()
-    }
-    pub const fn layer_bits(self) -> u32 {
-        self.array_layers.log2()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtlasTier {
-    // we don't want users to know about how the tiles layout
-    // the only need to know how much tiles they can get from a backend
-    // here the numbers should be pow2
-    Tiny10, //2^10 tiles in a backend
-    Small12,
-    Medium15,
-    Large17,
-    Huge18,
-}
-
-impl AtlasTier {
-    pub(crate) const fn layout(self) -> AtlasLayout {
-        match self {
-            AtlasTier::Tiny10 => AtlasLayout {
-                tiles_per_edge: Pow2U16::new(32),
-                array_layers: Pow2U16::new(1),
-            },
-            AtlasTier::Small12 => AtlasLayout {
-                tiles_per_edge: Pow2U16::new(32),
-                array_layers: Pow2U16::new(4),
-            },
-            AtlasTier::Medium15 => AtlasLayout {
-                tiles_per_edge: Pow2U16::new(64),
-                array_layers: Pow2U16::new(8),
-            },
-            AtlasTier::Large17 => AtlasLayout {
-                tiles_per_edge: Pow2U16::new(128),
-                array_layers: Pow2U16::new(8),
-            },
-            AtlasTier::Huge18 => AtlasLayout {
-                tiles_per_edge: Pow2U16::new(128),
-                array_layers: Pow2U16::new(16),
-            },
-        }
-    }
 }

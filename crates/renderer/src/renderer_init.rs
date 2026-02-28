@@ -5,23 +5,23 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 
 use render_protocol::TransformMatrix4x4;
 use tiles::{
     GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore, GroupTileAtlasStore,
-    TILE_STRIDE, TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat, TileAtlasGpuArray,
-    TileAtlasStore, TileAtlasUsage,
+    TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat, TileAtlasGpuArray, TileAtlasStore,
+    TileAtlasUsage, TILE_STRIDE,
 };
 use wgpu::util::DeviceExt;
 
 use crate::{
-    BrushDabWriteGpu, BrushDabWriteMetaGpu, BrushWorkState, CacheState, DataState, DirtyStateStore,
-    FrameState, FrameSync, GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState,
-    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX,
-    INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer,
-    TileCompositePipelines, TileInstanceGpu, TileTextureManagerGpu, ViewState,
-    create_composite_pipeline, multiply_blend_state,
+    create_composite_pipeline, multiply_blend_state, BrushDabWriteGpu, BrushDabWriteMetaGpu,
+    BrushWorkState, CacheState, DataState, DirtyStateStore, FrameState, FrameSync,
+    GpuFrameTimingSlot, GpuFrameTimingSlotState, GpuFrameTimingState, GpuState,
+    GroupTargetCacheEntry, InputState, RenderDataResolver, Renderer, TileCompositePipelines,
+    TileInstanceGpu, TileTextureManagerGpu, ViewState, GPU_TIMING_SLOTS, IDENTITY_MATRIX,
+    INITIAL_TILE_INSTANCE_CAPACITY,
 };
 
 impl Renderer {
@@ -340,14 +340,13 @@ impl Renderer {
         let (group_tile_store, group_tile_atlas) = GroupTileAtlasStore::with_config(
             &device,
             TileAtlasConfig {
-                max_layers: 2,
+                tier: tiles::AtlasTier::Small12, // 4 layers for group operations
                 format: tile_atlas.format(),
                 usage: Self::tile_atlas_usage_from_wgpu(
                     wgpu::TextureUsages::TEXTURE_BINDING
                         | wgpu::TextureUsages::COPY_DST
                         | wgpu::TextureUsages::COPY_SRC,
                 ),
-                ..TileAtlasConfig::default()
             },
         )
         .expect("create group tile atlas");
