@@ -61,6 +61,11 @@ Plans:
 
 **Goal:** Implement runtime thread that consumes commands and produces feedback
 
+**Plans:** 1 plan
+
+Plans:
+- [ ] 04-02-PLAN.md — Create runtime thread spawn, command loop, feedback production, shutdown
+
 **Requirements:**
 - LOOP-01: Create runtime thread spawn function
 - LOOP-02: Implement command consumption loop
