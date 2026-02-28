@@ -3,7 +3,7 @@
 **Project:** Glaphica Tiles/Model/Runtime Refactoring
 **Phase 4 Goal:** Integrate `engine + protocol` channels for two-thread architecture
 **Created:** 2026-02-28
-**Last Updated:** 2026-02-28 — Phase 4.2 COMPLETE
+**Last Updated:** 2026-02-28 — Phase 4.3 BLOCKED (gap identified)
 
 **Architecture:** Two-thread design
 - **Main thread**: Runs `GpuRuntime` (GPU operations) - must remain lightweight
@@ -106,13 +106,24 @@ Plans:
 
 **Architecture:** AppCore runs on the engine thread, sending commands to GpuRuntime on the main thread.
 
+**Status:** ⚠️ BLOCKED (2026-02-28)
+
+**Blocker:** Infrastructure complete (Phases 4.1 & 4.2), but AppCore has NOT been migrated to use channels. Current implementation uses direct `runtime.execute()` calls.
+
+**See:** `.planning/phases/04-03-appcore-migration/04-03-VERIFICATION.md` for detailed gap analysis.
+
+**Plans:** 1 plan
+
+Plans:
+- [ ] 04-03-PLAN.md — Migrate AppCore to channel-based communication (BLOCKED)
+
 **Requirements:**
-- CMD-01: Migrate render()/present() path
-- CMD-02: Migrate resize() path
-- CMD-03: Migrate brush enqueue path
-- CMD-04: Migrate merge polling path
-- CMD-05: Implement feedback processing
-- TEST-02: All 47 renderer tests pass in two-thread mode
+- [ ] CMD-01: Migrate render()/present() path
+- [ ] CMD-02: Migrate resize() path
+- [ ] CMD-03: Migrate brush enqueue path
+- [ ] CMD-04: Migrate merge polling path
+- [ ] CMD-05: Implement feedback processing
+- [ ] TEST-02: All 47 renderer tests pass in two-thread mode
 
 **Success Criteria:**
 1. `AppCore::render()` sends `RuntimeCommand::PresentFrame` and waits for feedback
@@ -128,6 +139,26 @@ Plans:
 - Feedback processing in main loop: drain feedback queue before next frame
 - Maintain existing behavior: no functional changes, only communication mechanism changes
 - Feature flag allows fallback to single-threaded dispatcher
+
+**Gap Analysis (2026-02-28):**
+
+| Component | Expected | Current | Status |
+|-----------|----------|---------|--------|
+| EngineCore::process_feedback() | Consume GpuFeedbackFrame | Implemented | ✅ |
+| engine_loop() | Drain channels | Implemented | ✅ |
+| Waterline tracking | Update from feedback | Implemented | ✅ |
+| AppCore channel fields | gpu_command_sender, gpu_feedback_receiver | NOT PRESENT | ❌ |
+| AppCore::render() | Send via channel | Uses runtime.execute() | ❌ |
+| AppCore::resize() | Send via channel | Uses runtime.execute() | ❌ |
+| Brush/merge operations | Send via channel | Uses runtime.execute() | ❌ |
+
+**Recommended Actions:**
+1. Replan Phase 4.3 into smaller sub-phases:
+   - 4.3a: Add channel fields to AppCore
+   - 4.3b: Migrate render/resize paths
+   - 4.3c: Migrate brush/merge paths
+   - 4.3d: Integration testing
+2. Or defer if single-threaded mode is sufficient for current needs
 
 ---
 
