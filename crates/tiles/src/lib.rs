@@ -14,16 +14,9 @@ pub const ATLAS_OCCUPANCY_WORDS: usize = (TILES_PER_ATLAS as usize).div_ceil(64)
 
 const INDEX_SHARDS: usize = 64;
 
-// REFRACTORING DRAFT (Phase 1): TileKey encoding scheme - not yet integrated
-#[allow(dead_code)]
+pub use tile_key_encoding::{BackendId, GenerationId, SlotId, TileKey, AtlasTier};
+
 mod tile_key_encoding;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TileKey(u64);
-
-impl model::EmptyKey for TileKey {
-    const EMPTY: Self = TileKey(0);
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileSetId(u64);
@@ -167,8 +160,12 @@ impl TileSetHandle {
 }
 
 #[cfg(feature = "test-helpers")]
-pub fn test_tile_key(raw: u64) -> TileKey {
-    TileKey(raw)
+pub fn test_tile_key(backend: u8, generation: u32, slot: u32) -> TileKey {
+    TileKey::new(
+        tile_key_encoding::BackendId(backend),
+        tile_key_encoding::GenerationId(generation),
+        tile_key_encoding::SlotId(slot),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

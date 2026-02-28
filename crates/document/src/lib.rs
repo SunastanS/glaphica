@@ -1476,8 +1476,8 @@ mod tests {
         );
     }
 
-    fn test_tile_key(raw: u64) -> TileKey {
-        tiles::test_tile_key(raw)
+    fn test_tile_key(slot: u32) -> TileKey {
+        tiles::test_tile_key(0, 0, slot)
     }
 
     fn first_leaf_image_handle(document: &Document) -> ImageHandle {

@@ -9,7 +9,7 @@ use crate::{
 use super::core;
 pub use super::core::EvictedRetainBatch;
 use super::format::{
-    Bgra8Spec, Bgra8SrgbSpec, R8UintSpec, R32FloatSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec,
+    Bgra8Spec, Bgra8SrgbSpec, R32FloatSpec, R8UintSpec, Rgba8Spec, Rgba8SrgbSpec, TileFormatSpec,
     TileGpuCreateValidator, TileGpuOpAdapter, TilePayloadSpec, TileUploadFormatSpec,
 };
 use super::gpu;
@@ -283,7 +283,7 @@ impl<F: TileFormatSpec + TileGpuCreateValidator + TileGpuOpAdapter> GenericTileA
 
         let (op_sender, op_queue) = core::TileOpQueue::new();
         let cpu = Arc::new(
-            core::TileAtlasCpu::new(config.max_layers, layout)
+            core::TileAtlasCpu::new(core::next_backend_id(), config.max_layers, layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
         let atlas_usage = gpu::core_usage_from_public(config.usage);

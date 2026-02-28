@@ -5,7 +5,7 @@ use crate::{
     TileSetHandle,
 };
 
-use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage, core, gpu};
+use super::{core, gpu, GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
 
 #[derive(Debug)]
 pub struct GroupTileAtlasStore {
@@ -49,7 +49,7 @@ impl GroupTileAtlasStore {
         ))?;
 
         let cpu = Arc::new(
-            core::TileAtlasCpu::new(config.max_layers, layout)
+            core::TileAtlasCpu::new(core::next_backend_id(), config.max_layers, layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
         let (texture, view) = gpu::create_atlas_texture_and_array_view(

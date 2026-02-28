@@ -97,6 +97,10 @@ impl tiles::MergeTileStore for MergeStores {
         self.layer_store.resolve(key)
     }
 
+    fn resolve_stroke(&self, key: tiles::TileKey) -> Option<tiles::TileAddress> {
+        self.stroke_store.resolve(key)
+    }
+
     fn mark_keys_active(&self, keys: &[tiles::TileKey]) {
         self.layer_store.mark_keys_active(keys)
     }
@@ -431,8 +435,7 @@ impl AppCore {
                     .tile_bindings_for_stroke(allocate.stroke_session_id);
 
                 // Bind tiles through runtime
-                runtime
-                    .bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
+                runtime.bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
 
                 // GC eviction handling
                 // TODO: migrate drain_tile_gc_evictions to AppCore

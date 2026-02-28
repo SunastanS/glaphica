@@ -9,9 +9,7 @@
 //! 2. TileKey -> the position of a tile in atlas backend
 //! We move the relatively simple one (1) to crates/model/src/lib.rs
 
-#![allow(dead_code)]
-
-use crate::TILE_STRIDE;
+pub use crate::TILE_STRIDE;
 
 // REFRACTORING:
 // - use meaningful TileKey
@@ -30,17 +28,17 @@ const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 const GEN_MASK: u64 = (1 << GEN_BITS) - 1;
 const BACKEND_MASK: u64 = (1 << BACKEND_BITS) - 1;
 
-#[derive(Debug, Copy, Clone)]
-struct BackendId(u8);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct BackendId(pub u8);
 
-#[derive(Debug, Copy, Clone)]
-struct GenerationId(u32);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct GenerationId(pub u32);
 
-#[derive(Debug, Copy, Clone)]
-struct SlotId(u32);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SlotId(pub u32);
 
-#[derive(Debug, Copy, Clone)]
-struct TileKey(u64);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct TileKey(u64);
 
 impl TileKey {
     /// TileKey:
@@ -67,6 +65,10 @@ impl TileKey {
     pub fn slot(&self) -> SlotId {
         SlotId(((self.0 >> SLOT_SHIFT) & SLOT_MASK) as u32)
     }
+}
+
+impl model::EmptyKey for TileKey {
+    const EMPTY: Self = TileKey(0);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
