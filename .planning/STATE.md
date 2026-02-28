@@ -28,9 +28,7 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 - 80a534b refactor(tiles): replace TileKey with encoded key scheme (backend+generation+slot)
 
 **Known Issues:**
-- Compilation errors in document crate (TileKey encoding integration incomplete)
-- 21 dead_code warnings (tile_key_encoding.rs draft code)
-- 14 tiles test failures (Phase 1遗留)
+- 14 tiles test failures (Phase 1 遗留) - GPU validation errors, separate from TileKey encoding
 
 ## Next Action
 
