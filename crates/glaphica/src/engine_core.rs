@@ -1,8 +1,9 @@
 /// Engine Core module.
 ///
 /// Business logic core running on the engine thread.
-/// Owned exclusively by the engine thread (no Arc/RwLock needed).
+/// Owned exclusively by the engine thread (no Arc/RwLock needed for exclusive data).
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::app_core::MergeStores;
 use brush_execution::BrushExecutionMergeFeedback;
@@ -10,7 +11,9 @@ use document::Document;
 use protocol::{
     CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, InputRingSample, SubmitWaterline,
 };
-use tiles::{BrushBufferTileRegistry, TileMergeEngine};
+use tiles::{
+    BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, TileAtlasStore, TileMergeEngine,
+};
 use view::ViewTransform;
 
 use crate::runtime::{RuntimeCommand, RuntimeError, RuntimeReceipt};
@@ -36,37 +39,62 @@ impl Default for EngineWaterlines {
 /// Engine Core - business logic running on engine thread.
 ///
 /// This struct is owned exclusively by the engine thread,
-/// so fields do NOT need Arc/RwLock.
+/// so fields do NOT need Arc/RwLock for exclusive data.
+/// However, some GPU-related stores use Arc for sharing with the renderer.
 pub struct EngineCore {
-    // Document owned exclusively by engine thread
+    // === Document owned exclusively by engine thread ===
     pub document: Document,
 
-    // Merge engine
+    // === Merge engine ===
     pub tile_merge_engine: TileMergeEngine<MergeStores>,
 
-    // Brush state
+    // === Brush state ===
     pub brush_buffer_tile_keys: BrushBufferTileRegistry,
 
-    // View state
+    // === View state ===
     pub view_transform: ViewTransform,
 
-    // GC state
+    // === Atlas stores (shared with GPU resources) ===
+    /// Layer atlas store (CPU-side allocation).
+    /// Arc because it's shared with GpuRuntime for GPU operations.
+    pub atlas_store: Arc<TileAtlasStore>,
+
+    /// Brush buffer store (CPU-side allocation).
+    /// Arc because it's shared with GpuRuntime for GPU operations.
+    pub brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+
+    // === GC state ===
     pub gc_evicted_batches_total: u64,
     pub gc_evicted_keys_total: u64,
 
-    // Brush execution feedback queue
+    // === Brush execution feedback queue ===
     pub brush_execution_feedback_queue: VecDeque<BrushExecutionMergeFeedback>,
 
-    // Waterlines (received from main thread via feedback)
+    // === Waterlines (received from main thread via feedback) ===
     pub waterlines: EngineWaterlines,
 
-    // Pending commands (generated from business logic)
+    // === Pending commands (generated from business logic) ===
     pub pending_commands: Vec<RuntimeCommand>,
 
-    // Shutdown flag
+    // === Frame management ===
+    pub next_frame_id: u64,
+
+    // === Debug flags ===
+    /// Debug flag: disable merge for debugging.
+    pub disable_merge_for_debug: bool,
+
+    /// Performance logging enabled.
+    pub perf_log_enabled: bool,
+
+    /// Brush trace logging enabled.
+    pub brush_trace_enabled: bool,
+
+    // === Debug state: last bound render tree (debug assertions only) ===
+    #[cfg(debug_assertions)]
+    pub last_bound_render_tree: Option<(u64, u64)>,
+
+    // === Shutdown flag ===
     pub shutdown_requested: bool,
-    // Channel to send commands to main thread
-    // Note: NOT owned by EngineCore, passed separately to engine_loop
 }
 
 impl EngineCore {
@@ -76,17 +104,30 @@ impl EngineCore {
         tile_merge_engine: TileMergeEngine<MergeStores>,
         brush_buffer_tile_keys: BrushBufferTileRegistry,
         view_transform: ViewTransform,
+        atlas_store: Arc<TileAtlasStore>,
+        brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+        disable_merge_for_debug: bool,
+        perf_log_enabled: bool,
+        brush_trace_enabled: bool,
     ) -> Self {
         Self {
             document,
             tile_merge_engine,
             brush_buffer_tile_keys,
             view_transform,
+            atlas_store,
+            brush_buffer_store,
             gc_evicted_batches_total: 0,
             gc_evicted_keys_total: 0,
             brush_execution_feedback_queue: VecDeque::new(),
             waterlines: EngineWaterlines::default(),
             pending_commands: Vec::new(),
+            next_frame_id: 0,
+            disable_merge_for_debug,
+            perf_log_enabled,
+            brush_trace_enabled,
+            #[cfg(debug_assertions)]
+            last_bound_render_tree: None,
             shutdown_requested: false,
         }
     }
@@ -174,6 +215,185 @@ impl EngineCore {
     /// GC eviction based on complete waterline
     fn gc_evict_before_waterline(&mut self, _waterline: CompleteWaterline) {
         // TODO: Implement GC logic based on waterline
+    }
+
+    // === Accessor methods ===
+
+    /// Get a reference to the document.
+    pub fn document(&self) -> &Document {
+        &self.document
+    }
+
+    /// Get a mutable reference to the document.
+    pub fn document_mut(&mut self) -> &mut Document {
+        &mut self.document
+    }
+
+    /// Get the view transform.
+    pub fn view_transform(&self) -> &ViewTransform {
+        &self.view_transform
+    }
+
+    /// Get a mutable reference to the view transform.
+    pub fn view_transform_mut(&mut self) -> &mut ViewTransform {
+        &mut self.view_transform
+    }
+
+    /// Get the tile merge engine.
+    pub fn tile_merge_engine(&self) -> &TileMergeEngine<MergeStores> {
+        &self.tile_merge_engine
+    }
+
+    /// Get a mutable reference to the tile merge engine.
+    pub fn tile_merge_engine_mut(&mut self) -> &mut TileMergeEngine<MergeStores> {
+        &mut self.tile_merge_engine
+    }
+
+    /// Get the brush buffer tile keys.
+    pub fn brush_buffer_tile_keys(&self) -> &BrushBufferTileRegistry {
+        &self.brush_buffer_tile_keys
+    }
+
+    /// Get a mutable reference to the brush buffer tile keys.
+    pub fn brush_buffer_tile_keys_mut(&mut self) -> &mut BrushBufferTileRegistry {
+        &mut self.brush_buffer_tile_keys
+    }
+
+    /// Get the brush execution feedback queue.
+    pub fn brush_execution_feedback_queue_mut(
+        &mut self,
+    ) -> &mut VecDeque<BrushExecutionMergeFeedback> {
+        &mut self.brush_execution_feedback_queue
+    }
+
+    /// Get the atlas store.
+    pub fn atlas_store(&self) -> &Arc<TileAtlasStore> {
+        &self.atlas_store
+    }
+
+    /// Get the brush buffer store.
+    pub fn brush_buffer_store(&self) -> &Arc<GenericR32FloatTileAtlasStore> {
+        &self.brush_buffer_store
+    }
+
+    /// Check if merge work is pending.
+    pub fn has_pending_merge_work(&self) -> bool {
+        self.tile_merge_engine.has_pending_work()
+    }
+
+    /// Get and increment the frame ID.
+    pub fn get_next_frame_id(&mut self) -> u64 {
+        let id = self.next_frame_id;
+        self.next_frame_id = self
+            .next_frame_id
+            .checked_add(1)
+            .expect("frame id overflow");
+        id
+    }
+
+    /// Check if performance logging is enabled.
+    pub fn perf_log_enabled(&self) -> bool {
+        self.perf_log_enabled
+    }
+
+    /// Check if brush trace logging is enabled.
+    pub fn brush_trace_enabled(&self) -> bool {
+        self.brush_trace_enabled
+    }
+
+    /// Check if merge is disabled for debugging.
+    pub fn disable_merge_for_debug(&self) -> bool {
+        self.disable_merge_for_debug
+    }
+
+    /// Get the total number of GC evicted batches.
+    pub fn gc_evicted_batches_total(&self) -> u64 {
+        self.gc_evicted_batches_total
+    }
+
+    /// Get the total number of GC evicted keys.
+    pub fn gc_evicted_keys_total(&self) -> u64 {
+        self.gc_evicted_keys_total
+    }
+
+    /// Update last bound render tree (debug assertions only).
+    #[cfg(debug_assertions)]
+    pub fn set_last_bound_render_tree(&mut self, value: Option<(u64, u64)>) {
+        self.last_bound_render_tree = value;
+    }
+
+    /// Get last bound render tree (debug assertions only).
+    #[cfg(debug_assertions)]
+    pub fn last_bound_render_tree(&self) -> Option<(u64, u64)> {
+        self.last_bound_render_tree
+    }
+
+    // === Business Logic Methods (migrated from AppCore) ===
+
+    /// Set the active preview buffer for a layer and return the updated render tree snapshot.
+    ///
+    /// Returns `Some(render_tree)` if the render tree was dirty and needs to be rebound.
+    /// Returns `None` if no rebind is needed.
+    pub fn set_preview_buffer(
+        &mut self,
+        layer_id: u64,
+        stroke_session_id: u64,
+    ) -> Option<render_protocol::RenderTreeSnapshot> {
+        self.document
+            .set_active_preview_buffer(layer_id, stroke_session_id)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "set active preview buffer failed: layer_id={} stroke_session_id={} error={error:?}",
+                    layer_id, stroke_session_id
+                )
+            });
+        if !self.document.take_render_tree_cache_dirty() {
+            return None;
+        }
+        Some(self.document.render_tree_snapshot())
+    }
+
+    /// Clear the active preview buffer and return the updated render tree snapshot.
+    ///
+    /// Returns `Some(render_tree)` if the render tree was dirty and needs to be rebound.
+    /// Returns `None` if no rebind is needed.
+    pub fn clear_preview_buffer(
+        &mut self,
+        stroke_session_id: u64,
+    ) -> Option<render_protocol::RenderTreeSnapshot> {
+        let _ = self.document.clear_active_preview_buffer(stroke_session_id);
+        if !self.document.take_render_tree_cache_dirty() {
+            return None;
+        }
+        Some(self.document.render_tree_snapshot())
+    }
+
+    /// Drain tile GC evictions and apply them to the brush buffer tile key registry.
+    ///
+    /// This processes all evicted retain batches from the brush buffer store and
+    /// updates the GC statistics.
+    pub fn drain_tile_gc_evictions(&mut self) {
+        let evicted_batches = self.brush_buffer_store.drain_evicted_retain_batches();
+        for evicted_batch in evicted_batches {
+            self.brush_buffer_tile_keys
+                .apply_retained_eviction(evicted_batch.retain_id, &evicted_batch.keys);
+            self.apply_gc_evicted_batch(evicted_batch.retain_id, evicted_batch.keys.len());
+        }
+    }
+
+    fn apply_gc_evicted_batch(&mut self, retain_id: u64, key_count: usize) {
+        self.gc_evicted_batches_total = self
+            .gc_evicted_batches_total
+            .checked_add(1)
+            .expect("gc evicted batch counter overflow");
+        self.gc_evicted_keys_total = self
+            .gc_evicted_keys_total
+            .checked_add(u64::try_from(key_count).expect("gc key count exceeds u64"))
+            .expect("gc evicted key counter overflow");
+        eprintln!(
+            "tiles gc evicted retain batch: retain_id={} key_count={} total_batches={} total_keys={}",
+            retain_id, key_count, self.gc_evicted_batches_total, self.gc_evicted_keys_total
+        );
     }
 }
 

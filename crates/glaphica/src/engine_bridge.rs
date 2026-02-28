@@ -1,6 +1,6 @@
+use std::collections::VecDeque;
 #[cfg(not(debug_assertions))]
 use std::thread;
-use std::collections::VecDeque;
 /// Engine Bridge module.
 ///
 /// Manages cross-thread communication between main thread (GPU) and engine thread (business).
@@ -82,6 +82,23 @@ pub struct EngineBridge {
 }
 
 impl EngineBridge {
+    /// Create EngineBridge with pre-created channels (for Phase 4 integration).
+    ///
+    /// This allows the caller to extract engine-side channels before bridge construction.
+    pub fn from_channels(
+        gpu_runtime: GpuRuntime,
+        main_channels: MainThreadChannels<RuntimeCommand, RuntimeReceipt, RuntimeError>,
+        engine_thread: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            main_channels,
+            gpu_runtime: Some(gpu_runtime),
+            waterlines: MainThreadWaterlines::default(),
+            engine_thread: Some(engine_thread),
+            main_thread_injected_commands: VecDeque::new(),
+        }
+    }
+
     pub fn new<F>(gpu_runtime: GpuRuntime, spawn_engine: F) -> Self
     where
         F: FnOnce(

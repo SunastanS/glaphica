@@ -332,6 +332,92 @@ impl AppCore {
         self.tile_merge_engine.has_pending_work()
     }
 
+    /// Extract inner document from Arc<RwLock>.
+    /// Panics if there are other references to the Arc.
+    pub fn document_into_inner(self) -> Document {
+        match Arc::try_unwrap(self.document) {
+            Ok(rwlock) => rwlock.into_inner().expect("document RwLock poisoned"),
+            Err(_) => panic!("document Arc has other references"),
+        }
+    }
+
+    /// Extract inner brush buffer tile registry from Arc<RwLock>.
+    /// Panics if there are other references to the Arc.
+    pub fn brush_buffer_tile_keys_into_inner(self) -> BrushBufferTileRegistry {
+        match Arc::try_unwrap(self.brush_buffer_tile_keys) {
+            Ok(rwlock) => rwlock
+                .into_inner()
+                .expect("brush_buffer_tile_keys RwLock poisoned"),
+            Err(_) => panic!("brush_buffer_tile_keys Arc has other references"),
+        }
+    }
+
+    /// Consume AppCore and return components needed for EngineCore.
+    ///
+    /// This is used when transitioning from single-threaded to threaded mode.
+    /// Panics if there are other Arc references to document or brush_buffer_tile_keys.
+    pub fn into_engine_parts(
+        self,
+    ) -> (
+        Document,
+        TileMergeEngine<MergeStores>,
+        BrushBufferTileRegistry,
+        ViewTransform,
+        Arc<TileAtlasStore>,
+        Arc<GenericR32FloatTileAtlasStore>,
+        bool, // disable_merge_for_debug
+        bool, // perf_log_enabled
+        bool, // brush_trace_enabled
+        u64,  // next_frame_id
+    ) {
+        // Destructure self to avoid multiple moves
+        let AppCore {
+            document,
+            tile_merge_engine,
+            brush_buffer_tile_keys,
+            view_transform,
+            atlas_store,
+            brush_buffer_store,
+            disable_merge_for_debug,
+            perf_log_enabled,
+            brush_trace_enabled,
+            next_frame_id,
+            last_bound_render_tree: _,
+            gc_evicted_batches_total: _,
+            gc_evicted_keys_total: _,
+            brush_execution_feedback_queue: _,
+            #[cfg(feature = "true_threading")]
+                gpu_command_sender: _,
+            #[cfg(feature = "true_threading")]
+                gpu_feedback_receiver: _,
+        } = self;
+
+        // Extract document and brush_buffer_tile_keys from Arc<RwLock>
+        let document = match Arc::try_unwrap(document) {
+            Ok(rwlock) => rwlock.into_inner().expect("document RwLock poisoned"),
+            Err(_) => panic!("document Arc has other references"),
+        };
+        let brush_buffer_tile_keys = match Arc::try_unwrap(brush_buffer_tile_keys) {
+            Ok(rwlock) => rwlock
+                .into_inner()
+                .expect("brush_buffer_tile_keys RwLock poisoned"),
+            Err(_) => panic!("brush_buffer_tile_keys Arc has other references"),
+        };
+
+        (
+            document,
+            tile_merge_engine,
+            brush_buffer_tile_keys,
+            view_transform,
+            atlas_store,
+            brush_buffer_store,
+            disable_merge_for_debug,
+            perf_log_enabled,
+            brush_trace_enabled,
+            next_frame_id,
+        )
+    }
+
     /// Get and increment the frame ID.
     pub fn get_next_frame_id(&mut self) -> u64 {
         let id = self.next_frame_id;

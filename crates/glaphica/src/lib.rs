@@ -397,6 +397,10 @@ impl From<app_core::MergeBridgeError> for MergeBridgeError {
 }
 
 impl GpuState {
+    /// Transition to threaded execution mode.
+    ///
+    /// This creates channel infrastructure and passes the engine-side channels to AppCore.
+    /// The spawn_engine closure receives the full EngineThreadChannels for the engine thread.
     pub fn into_threaded<F>(self, spawn_engine: F) -> Self
     where
         F: FnOnce(
@@ -411,7 +415,29 @@ impl GpuState {
             GpuExecMode::SingleThread { runtime } => runtime,
             GpuExecMode::Threaded { .. } => panic!("gpu state is already in threaded mode"),
         };
-        let bridge = crate::engine_bridge::EngineBridge::new(runtime, spawn_engine);
+
+        // Create channels before EngineBridge so we can pass engine channels to AppCore
+        let (main_channels, engine_channels) = engine::create_thread_channels::<
+            crate::runtime::RuntimeCommand,
+            crate::runtime::RuntimeReceipt,
+            crate::runtime::RuntimeError,
+        >(
+            1024, // input_ring_capacity
+            64,   // input_control_capacity
+            256,  // gpu_command_capacity
+            64,   // gpu_feedback_capacity
+        );
+
+        // Spawn the engine thread with engine_channels
+        let engine_thread = spawn_engine(engine_channels);
+
+        // Create EngineBridge with main_channels
+        let bridge = crate::engine_bridge::EngineBridge::from_channels(
+            runtime,
+            main_channels,
+            engine_thread,
+        );
+
         Self {
             core: self.core,
             exec_mode: GpuExecMode::Threaded { bridge },
