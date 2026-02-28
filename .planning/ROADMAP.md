@@ -106,16 +106,17 @@ Plans:
 
 **Architecture:** AppCore runs on the engine thread, sending commands to GpuRuntime on the main thread.
 
-**Status:** ⚠️ BLOCKED (2026-02-28)
-
-**Blocker:** Infrastructure complete (Phases 4.1 & 4.2), but AppCore has NOT been migrated to use channels. Current implementation uses direct `runtime.execute()` calls.
+**Status:** 🔲 GAP CLOSURE PLANNED (2026-02-28)
 
 **See:** `.planning/phases/04-03-appcore-migration/04-03-VERIFICATION.md` for detailed gap analysis.
 
-**Plans:** 1 plan
+**Plans:** 4 plans (gap closure)
 
 Plans:
-- [ ] 04-03-PLAN.md — Migrate AppCore to channel-based communication (BLOCKED)
+- [ ] 04-03-01-PLAN.md — Add channel fields to AppCore (Wave 1)
+- [ ] 04-03-02-PLAN.md — Migrate render/resize paths (Wave 2)
+- [ ] 04-03-03-PLAN.md — Migrate brush/merge paths (Wave 3)
+- [ ] 04-03-04-PLAN.md — Integration testing (Wave 4)
 
 **Requirements:**
 - [ ] CMD-01: Migrate render()/present() path
@@ -152,13 +153,13 @@ Plans:
 | AppCore::resize() | Send via channel | Uses runtime.execute() | ❌ |
 | Brush/merge operations | Send via channel | Uses runtime.execute() | ❌ |
 
-**Recommended Actions:**
-1. Replan Phase 4.3 into smaller sub-phases:
-   - 4.3a: Add channel fields to AppCore
-   - 4.3b: Migrate render/resize paths
-   - 4.3c: Migrate brush/merge paths
-   - 4.3d: Integration testing
-2. Or defer if single-threaded mode is sufficient for current needs
+**Gap Closure Planning (2026-02-28):**
+
+Split into 4 focused plans with sequential dependencies:
+1. 04-03-01: Add channel fields to AppCore
+2. 04-03-02: Migrate render/resize paths
+3. 04-03-03: Migrate brush/merge paths
+4. 04-03-04: Integration testing
 
 ---
 

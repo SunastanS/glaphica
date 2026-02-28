@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: blocked
-last_updated: "2026-02-28T20:30:00.000Z"
+status: ready
+last_updated: "2026-02-28T21:00:00.000Z"
 progress:
   total_phases: 3
   completed_phases: 2
-  total_plans: 3
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 0
 ---
 
 # STATE.md
@@ -21,17 +21,17 @@ See: docs/planning/project.md (updated 2026-02-28)
 - **Main thread**: GPU runtime (`GpuRuntime`) - must remain lightweight
 - **Engine thread**: Engine loop (AppCore, command processing, feedback)
 
-**Current focus:** Phase 4: Two-Thread Architecture (infrastructure complete, integration pending)
+**Current focus:** Phase 4.3: AppCore Migration - Gap Closure Plans Ready
 
 ## Current State
 
-**Active Phase:** Phase 4.3 (AppCore Migration) — BLOCKED (2026-02-28)
+**Active Phase:** Phase 4.3 (AppCore Migration) — READY TO EXECUTE (2026-02-28)
 
 **Phase 4 Goal:** Integrate `engine + protocol` channels to decouple AppCore from GpuRuntime using a two-thread architecture:
 - **Main thread**: Runs `GpuRuntime` (GPU operations)
 - **Engine thread**: Runs engine loop (command processing, feedback production)
 
-**Critical Finding:** Infrastructure exists (Phases 4.1 & 4.2 complete) but AppCore has NOT been migrated to use channels. AppCore still uses direct `runtime.execute()` calls.
+**Status:** Gap closure plans created (4 plans in 4 waves)
 
 **See:** `.planning/phases/04-03-appcore-migration/04-03-VERIFICATION.md` for detailed gap analysis.
 
@@ -60,12 +60,13 @@ See: docs/planning/project.md (updated 2026-02-28)
 
 ## Next Action
 
-Phase 4.3 requires architectural decision:
-1. **Implement migration** - Add channels to AppCore, refactor all GPU operations
-2. **Defer** - Single-threaded mode works, threaded mode can wait
-3. **Replan** - Split Phase 4.3 into smaller, focused plans
+Phase 4.3 gap closure plans ready:
+- 04-03-01: Add channel fields to AppCore (Wave 1)
+- 04-03-02: Migrate render/resize paths (Wave 2)
+- 04-03-03: Migrate brush/merge paths (Wave 3)
+- 04-03-04: Integration testing (Wave 4)
 
-Recommended: Read VERIFICATION.md before proceeding.
+Execute: `/gsd-execute-phase 04-03`
 
 ---
 
