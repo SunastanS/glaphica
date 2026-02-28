@@ -3,38 +3,39 @@
 **Project:** Glaphica Tiles/Model/Runtime Refactoring
 **Phase 4 Goal:** Integrate `engine + protocol` channels for true multi-threaded execution
 **Created:** 2026-02-28
+**Last Updated:** 2026-02-28 — Restructured as Phase 4 sub-phases (4.1–4.4)
 
 ## Overview
 
-**4 phases** | **23 requirements mapped** | All v1 requirements covered ✓
+**Phase 4** with **4 sub-phases** | **23 requirements mapped** | All v1 requirements covered ✓
 
-| # | Phase | Goal | Requirements | Success Criteria |
-|---|-------|------|--------------|------------------|
-| 1 | Channel Infrastructure | Set up channel primitives and types | CHAN-01..05, TEST-01 | Channels instantiated, feature flag works |
-| 2 | Runtime Thread Loop | Implement command consumer and feedback producer | LOOP-01..05 | Runtime thread processes all commands |
-| 3 | AppCore Migration | Migrate AppCore to channel-based communication | CMD-01..05, TEST-02 | All commands sent via channel, feedback consumed |
-| 4 | Safety & Validation | Ensure tile lifetime safety and run tests | SAFE-01..04, TEST-03..04 | All tests pass, no deadlocks, invariants hold |
+| # | Sub-Phase | Goal | Requirements | Success Criteria |
+|---|-----------|------|--------------|------------------|
+| 4.1 | Channel Infrastructure | Set up channel primitives and types | CHAN-01..05, TEST-01 | Channels instantiated, feature flag works |
+| 4.2 | Runtime Thread Loop | Implement command consumer and feedback producer | LOOP-01..05 | Runtime thread processes all commands |
+| 4.3 | AppCore Migration | Migrate AppCore to channel-based communication | CMD-01..05, TEST-02 | All commands sent via channel, feedback consumed |
+| 4.4 | Safety & Validation | Ensure tile lifetime safety and run tests | SAFE-01..04, TEST-03..04 | All tests pass, no deadlocks, invariants hold |
 
 ---
 
 ## Phase Details
 
-### Phase 1: Channel Infrastructure
+### Phase 4.1: Channel Infrastructure
 
 **Goal:** Establish channel infrastructure with proper types and feature flags
 
 **Plans:** 2 plans
 
 Plans:
-- [x] 01-channel-infrastructure-01-PLAN.md — Add dependencies and define RuntimeReceipt/RuntimeError types
-- [x] 02-channel-infrastructure-02-PLAN.md — Instantiate channels in GpuState::new()
+- [ ] 04-01-PLAN.md — Add dependencies and define RuntimeReceipt/RuntimeError types
+- [ ] 04-02-PLAN.md — Instantiate channels in GpuState::new()
 
 **Requirements:**
-- [x] CHAN-01: Add engine/protocol dependencies
-- [x] CHAN-02: Define RuntimeReceipt enum
-- [x] CHAN-03: Define RuntimeError enum  
-- [x] CHAN-04: Instantiate channels in GpuState::new()
-- [x] CHAN-05: Add true_threading feature flag
+- [ ] CHAN-01: Add engine/protocol dependencies
+- [ ] CHAN-02: Define RuntimeReceipt enum
+- [ ] CHAN-03: Define RuntimeError enum  
+- [ ] CHAN-04: Instantiate channels in GpuState::new()
+- [ ] CHAN-05: Add true_threading feature flag
 
 **Success Criteria:**
 1. `Cargo.toml` includes `engine` and `protocol` dependencies
@@ -51,7 +52,7 @@ Plans:
 
 ---
 
-### Phase 2: Runtime Thread Loop
+### Phase 4.2: Runtime Thread Loop
 
 **Goal:** Implement runtime thread that consumes commands and produces feedback
 
@@ -78,7 +79,7 @@ Plans:
 
 ---
 
-### Phase 3: AppCore Migration
+### Phase 4.3: AppCore Migration
 
 **Goal:** Migrate AppCore to send commands via channel and consume feedback
 
@@ -107,7 +108,7 @@ Plans:
 
 ---
 
-### Phase 4: Safety & Validation
+### Phase 4.4: Safety & Validation
 
 **Goal:** Ensure tile lifetime safety invariants and comprehensive testing
 
@@ -136,11 +137,11 @@ Plans:
 
 ---
 
-## Phase 5: Cleanup (Future)
+### Phase 4.5: Cleanup (Future)
 
 **Goal:** Remove feature flag, optimize, and finalize documentation
 
-**Not in current scope** - will be planned after Phase 4 completion.
+**Not in current scope** - will be planned after Phase 4.4 completion.
 
 **Expected Requirements:**
 - Remove `true_threading` feature flag (make default)
@@ -165,15 +166,15 @@ Plans:
 
 ## Dependencies
 
-**Phase 1** → No dependencies (infrastructure only)
+**Phase 4.1** → No dependencies (infrastructure only)
 
-**Phase 2** → Depends on Phase 1 (channel types)
+**Phase 4.2** → Depends on Phase 4.1 (channel types)
 
-**Phase 3** → Depends on Phase 2 (runtime loop ready)
+**Phase 4.3** → Depends on Phase 4.2 (runtime loop ready)
 
-**Phase 4** → Depends on Phase 3 (migration complete, testing possible)
+**Phase 4.4** → Depends on Phase 4.3 (migration complete, testing possible)
 
 ---
 
 *Roadmap created: 2026-02-28*
-*Last updated: 2026-02-28 after initial creation*
+*Restructured: 2026-02-28 — Phase 4 sub-phases (4.1–4.4)*
