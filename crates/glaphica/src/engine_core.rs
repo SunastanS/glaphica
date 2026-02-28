@@ -132,6 +132,44 @@ impl EngineCore {
         }
     }
 
+    /// Create EngineCore from AppCore parts.
+    ///
+    /// This is used when transitioning from single-threaded to threaded mode.
+    /// Takes the components returned by `AppCore::into_engine_parts()`.
+    pub fn from_app_parts(
+        document: Document,
+        tile_merge_engine: TileMergeEngine<MergeStores>,
+        brush_buffer_tile_keys: BrushBufferTileRegistry,
+        view_transform: ViewTransform,
+        atlas_store: Arc<TileAtlasStore>,
+        brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+        disable_merge_for_debug: bool,
+        perf_log_enabled: bool,
+        brush_trace_enabled: bool,
+        next_frame_id: u64,
+    ) -> Self {
+        Self {
+            document,
+            tile_merge_engine,
+            brush_buffer_tile_keys,
+            view_transform,
+            atlas_store,
+            brush_buffer_store,
+            gc_evicted_batches_total: 0,
+            gc_evicted_keys_total: 0,
+            brush_execution_feedback_queue: VecDeque::new(),
+            waterlines: EngineWaterlines::default(),
+            pending_commands: Vec::new(),
+            next_frame_id,
+            disable_merge_for_debug,
+            perf_log_enabled,
+            brush_trace_enabled,
+            #[cfg(debug_assertions)]
+            last_bound_render_tree: None,
+            shutdown_requested: false,
+        }
+    }
+
     /// Process an input sample (brush stroke, etc.)
     pub fn process_input_sample(&mut self, sample: &InputRingSample) {
         // TODO: Implement brush session logic
