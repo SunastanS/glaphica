@@ -3,7 +3,7 @@
 **Project:** Glaphica Tiles/Model/Runtime Refactoring
 **Phase 4 Goal:** Integrate `engine + protocol` channels for true multi-threaded execution
 **Created:** 2026-02-28
-**Last Updated:** 2026-02-28 — Restructured as Phase 4 sub-phases (4.1–4.4)
+**Last Updated:** 2026-02-28 — Phase 4.1 COMPLETE
 
 ## Overview
 
@@ -28,27 +28,32 @@
 
 Plans:
 - [x] 04-01-PLAN.md — Add dependencies and define RuntimeReceipt/RuntimeError types
-- [ ] 04-02-PLAN.md — Instantiate channels in GpuState::new()
+- [x] 04-02-PLAN.md — Instantiate channels in GpuState::new()
 
 **Requirements:**
 - [x] CHAN-01: Add engine/protocol dependencies
 - [x] CHAN-02: Define RuntimeReceipt enum
 - [x] CHAN-03: Define RuntimeError enum  
-- [ ] CHAN-04: Instantiate channels in GpuState::new()
+- [x] CHAN-04: Instantiate channels in GpuState::new()
 - [x] CHAN-05: Add true_threading feature flag
 
 **Success Criteria:**
-1. `Cargo.toml` includes `engine` and `protocol` dependencies
-2. `RuntimeReceipt` enum has variants matching each command type
-3. `RuntimeError` enum covers all failure modes
-4. Channels created with appropriate capacities (input_ring, input_control, gpu_command, gpu_feedback)
-5. Feature flag `true_threading` gates threaded vs single-threaded mode
-6. Code compiles with both feature configurations
+1. ✓ `Cargo.toml` includes `engine` and `protocol` dependencies
+2. ✓ `RuntimeReceipt` enum has variants matching each command type
+3. ✓ `RuntimeError` enum covers all failure modes
+4. ✓ Channels created with appropriate capacities (input_ring=1024, input_control=256, gpu_command=1024, gpu_feedback=256)
+5. ✓ Feature flag `true_threading` gates threaded vs single-threaded mode
+6. ✓ Code compiles with both feature configurations
 
 **Implementation Notes:**
 - Channel capacities: start conservative (e.g., 1024 for commands, 256 for feedback)
 - Use `engine::create_thread_channels::<RuntimeCommand, RuntimeReceipt, RuntimeError>()`
 - Feature flag in `crates/glaphica/Cargo.toml` and conditional compilation in `mod.rs`
+
+**Phase 4.1 Status: COMPLETE (2026-02-28)**
+- All 5 requirements implemented (CHAN-01 through CHAN-05)
+- 2 plans completed with SUMMARY.md created
+- Channel infrastructure ready for Phase 4.2
 
 ---
 

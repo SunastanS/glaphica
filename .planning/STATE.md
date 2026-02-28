@@ -10,17 +10,18 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 
 ## Current State
 
-**Active Phase:** Phase 4.1 (Channel Infrastructure) — Plan 04-01 complete, Plan 04-02 ready
+**Active Phase:** Phase 4.1 (Channel Infrastructure) — COMPLETE (2026-02-28)
 
 **Phase 4 Goal:** Integrate `engine + protocol` channels to decouple AppCore from GpuRuntime, enabling true multi-threaded execution.
 
-**Last Completed:** Phase 4.1 Plan 01 (RuntimeReceipt/RuntimeError types) - 2026-02-28
+**Last Completed:** Phase 4.1 Plan 02 (Channel infrastructure in GpuState) - 2026-02-28
 
 ## Session Context
 
 **Branch:** phase4
 
 **Recent Commits:**
+- 3183796 feat(04-02): add channel infrastructure to GpuState for true threading
 - e99c8d0 feat(04-01): define RuntimeError enum in protocol crate
 - 8e368e2 feat(04-01): define RuntimeReceipt enum in protocol crate
 - 8795d2a feat(04-01): add true_threading feature flag to glaphica
@@ -36,10 +37,8 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 
 ## Next Action
 
-Execute Phase 4.1 Plan 04-02 to instantiate channels in GpuState::new():
-- Create GpuState with engine thread channels
-- Wire up RuntimeReceipt/RuntimeError types to GpuFeedbackFrame
+Phase 4.1 (Channel Infrastructure) COMPLETE. Ready for Phase 4.2 (Runtime thread loop implementation).
 
 ---
 
-*Last updated: 2026-02-28 after completing Plan 04-01*
+*Last updated: 2026-02-28 after completing Plan 04-02*
