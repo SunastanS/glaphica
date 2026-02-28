@@ -11,6 +11,8 @@
 
 **Read `docs/Instructions/coding_guidelines.md` before coding.**
 
+The gsd-tools is at /home/sunastans/.config/opencode/get-shit-done/bin/gsd-tools.cjs
+
 ## Crate-Specific Guidelines
 
 ### render_protocol (`crates/render_protocol/`)

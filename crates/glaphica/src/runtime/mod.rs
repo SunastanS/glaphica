@@ -1,3 +1,4 @@
+pub mod execution;
 /// GPU Runtime module.
 ///
 /// Manages GPU resources and executes rendering commands on the main thread.
@@ -11,6 +12,7 @@ use renderer::{Renderer, ViewOpSender};
 use tiles::{GenericR32FloatTileAtlasStore, TileAtlasStore};
 use winit::dpi::PhysicalSize;
 
+pub use execution::{run_runtime_loop, GpuRuntimeThread};
 pub use protocol::{RuntimeCommand, RuntimeError, RuntimeReceipt};
 
 /// GPU Runtime - manages GPU resources and executes rendering commands.
@@ -96,21 +98,16 @@ impl GpuRuntime {
                 // Handshake resize (for Phase 4 initialization)
                 self.renderer.resize(width, height);
                 self.surface_size = PhysicalSize::new(width, height);
-                // Note: view_transform not available in handshake version
-                // Caller should handle view_transform separately
                 let _ = ack_sender.send(Ok(()));
                 Ok(RuntimeReceipt::ResizeHandshakeAck)
             }
 
             RuntimeCommand::Init { ack_sender } => {
-                // Handshake init (for Phase 4 startup)
-                // For now, just acknowledge
                 let _ = ack_sender.send(Ok(()));
                 Ok(RuntimeReceipt::InitComplete)
             }
 
             RuntimeCommand::Shutdown { reason } => {
-                // Shutdown command
                 eprintln!("[shutdown] {}", reason);
                 Ok(RuntimeReceipt::ShutdownAck { reason })
             }
@@ -150,7 +147,6 @@ impl GpuRuntime {
             }
 
             RuntimeCommand::ProcessMergeCompletions { frame_id } => {
-                // GPU side: submit pending merges and poll completion notices
                 let submission_report = self
                     .renderer
                     .submit_pending_merges(frame_id, u32::MAX)
@@ -161,7 +157,6 @@ impl GpuRuntime {
                     .poll_completion_notices(frame_id)
                     .map_err(RuntimeError::from)?;
 
-                // Convert to protocol types
                 let protocol_notices: Vec<protocol::RendererNotice> = renderer_notices
                     .into_iter()
                     .map(|notice| {
@@ -211,6 +206,7 @@ impl GpuRuntime {
     pub fn next_frame_id_mut(&mut self) -> &mut u64 {
         &mut self.next_frame_id
     }
+
     /// Get the current surface size.
     pub fn surface_size(&self) -> PhysicalSize<u32> {
         self.surface_size
@@ -220,29 +216,23 @@ impl GpuRuntime {
     pub fn set_surface_size(&mut self, size: PhysicalSize<u32>) {
         self.surface_size = size;
     }
+
     /// Get the view sender.
     pub fn view_sender(&self) -> &ViewOpSender {
         &self.view_sender
     }
 
     /// Get a reference to the renderer.
-    ///
-    /// This is for read-only access. For mutations, use `execute()` with commands.
     pub fn renderer(&self) -> &Renderer {
         &self.renderer
     }
 
     /// Get a mutable reference to the renderer.
-    ///
-    /// INTERNAL ONLY: Do not call from AppCore. Use specific wrapper methods instead.
     pub(crate) fn renderer_mut(&mut self) -> &mut Renderer {
         &mut self.renderer
     }
 
     /// Drain view operations before rendering.
-    ///
-    /// This is the intended interface for AppCore to drain view ops
-    /// without exposing the renderer mutable reference.
     pub fn drain_view_ops(&mut self) {
         self.renderer.drain_view_ops();
     }

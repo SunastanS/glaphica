@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-last_updated: "2026-02-28T09:10:54.151Z"
+last_updated: "2026-02-28T09:38:36.387Z"
 progress:
-  total_phases: 1
-  completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_phases: 3
+  completed_phases: 2
+  total_plans: 3
+  completed_plans: 3
 ---
 
 # STATE.md
@@ -23,17 +23,18 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 
 ## Current State
 
-**Active Phase:** Phase 4.1 (Channel Infrastructure) — COMPLETE (2026-02-28)
+**Active Phase:** Phase 4.2 (Runtime Thread Loop) — COMPLETE (2026-02-28)
 
 **Phase 4 Goal:** Integrate `engine + protocol` channels to decouple AppCore from GpuRuntime, enabling true multi-threaded execution.
 
-**Last Completed:** Phase 4.1 Plan 02 (Channel infrastructure in GpuState) - 2026-02-28
+**Last Completed:** Phase 4.2 Plan 04-02 (Runtime thread loop implementation) - 2026-02-28
 
 ## Session Context
 
 **Branch:** phase4
 
 **Recent Commits:**
+- PENDING: feat(04-02): implement runtime thread loop with command consumption and feedback production
 - 3183796 feat(04-02): add channel infrastructure to GpuState for true threading
 - e99c8d0 feat(04-01): define RuntimeError enum in protocol crate
 - 8e368e2 feat(04-01): define RuntimeReceipt enum in protocol crate
@@ -47,10 +48,11 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 
 **Known Issues:**
 - 14 tiles test failures (Phase 1 遗留) - GPU validation errors, separate from TileKey encoding
+- GpuRuntime not Send - prevents true OS thread spawning (future phase)
 
 ## Next Action
 
-Phase 4.1 (Channel Infrastructure) COMPLETE. Ready for Phase 4.2 (Runtime thread loop implementation).
+Phase 4.2 (Runtime Thread Loop) COMPLETE. Infrastructure ready for integration into GpuState main loop. True multi-threading requires GpuRuntime Send refactor in future phase.
 
 ---
 

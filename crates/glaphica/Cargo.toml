@@ -24,6 +24,7 @@ protocol = { path = "../protocol" }
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 rtrb = "0.3"
+smallvec = "1.13"
 
 [features]
 true_threading = []
