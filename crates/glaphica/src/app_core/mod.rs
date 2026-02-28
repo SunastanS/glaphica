@@ -163,10 +163,21 @@ pub struct AppCore {
     /// Debug state: last bound render tree (debug assertions only).
     #[cfg(debug_assertions)]
     last_bound_render_tree: Option<(u64, u64)>,
+
+    /// Channel sender for GPU commands (threaded mode only).
+    /// When present, AppCore sends RuntimeCommand via this channel instead of calling runtime.execute() directly.
+    #[cfg(feature = "true_threading")]
+    gpu_command_sender: Option<rtrb::Producer<protocol::GpuCmdMsg<RuntimeCommand>>>,
+
+    /// Channel receiver for GPU feedback (threaded mode only).
+    /// When present, AppCore receives RuntimeReceipt/RuntimeError via this channel.
+    #[cfg(feature = "true_threading")]
+    gpu_feedback_receiver:
+        Option<rtrb::Consumer<protocol::GpuFeedbackFrame<RuntimeReceipt, RuntimeError>>>,
 }
 
 impl AppCore {
-    /// Create a new AppCore with the given components.
+    /// Create a new AppCore with the given components (single-threaded mode).
     pub fn new(
         document: Arc<RwLock<Document>>,
         tile_merge_engine: TileMergeEngine<MergeStores>,
@@ -195,7 +206,56 @@ impl AppCore {
             brush_trace_enabled,
             #[cfg(debug_assertions)]
             last_bound_render_tree: None,
+            #[cfg(feature = "true_threading")]
+            gpu_command_sender: None,
+            #[cfg(feature = "true_threading")]
+            gpu_feedback_receiver: None,
         }
+    }
+
+    /// Create AppCore with channel communication (threaded mode).
+    #[cfg(feature = "true_threading")]
+    pub fn new_with_channels(
+        document: Arc<RwLock<Document>>,
+        tile_merge_engine: TileMergeEngine<MergeStores>,
+        brush_buffer_tile_keys: Arc<RwLock<BrushBufferTileRegistry>>,
+        atlas_store: Arc<TileAtlasStore>,
+        brush_buffer_store: Arc<GenericR32FloatTileAtlasStore>,
+        view_transform: ViewTransform,
+        disable_merge_for_debug: bool,
+        perf_log_enabled: bool,
+        brush_trace_enabled: bool,
+        next_frame_id: u64,
+        gpu_command_sender: rtrb::Producer<protocol::GpuCmdMsg<RuntimeCommand>>,
+        gpu_feedback_receiver: rtrb::Consumer<
+            protocol::GpuFeedbackFrame<RuntimeReceipt, RuntimeError>,
+        >,
+    ) -> Self {
+        Self {
+            document,
+            tile_merge_engine,
+            brush_buffer_tile_keys,
+            atlas_store,
+            brush_buffer_store,
+            view_transform,
+            brush_execution_feedback_queue: VecDeque::new(),
+            next_frame_id,
+            gc_evicted_batches_total: 0,
+            gc_evicted_keys_total: 0,
+            disable_merge_for_debug,
+            perf_log_enabled,
+            brush_trace_enabled,
+            #[cfg(debug_assertions)]
+            last_bound_render_tree: None,
+            gpu_command_sender: Some(gpu_command_sender),
+            gpu_feedback_receiver: Some(gpu_feedback_receiver),
+        }
+    }
+
+    /// Check if channels are available (threaded mode).
+    #[cfg(feature = "true_threading")]
+    fn has_channels(&self) -> bool {
+        self.gpu_command_sender.is_some() && self.gpu_feedback_receiver.is_some()
     }
 
     /// Get a reference to the document.
