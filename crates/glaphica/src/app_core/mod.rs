@@ -213,6 +213,50 @@ impl AppCore {
         }
     }
 
+/// Create a placeholder AppCore for threaded mode.
+    ///
+    /// In threaded mode, the actual business logic lives in EngineCore on the engine thread.
+    /// This placeholder exists only to satisfy the GpuState type - it should never be used
+    /// for actual operations in threaded mode.
+    ///
+    /// # Safety
+    /// This method creates a placeholder with dummy Arc references. It should ONLY be used
+    /// when transitioning to threaded mode, where the placeholder will never be accessed.
+    #[cfg(feature = "true_threading")]
+    pub fn placeholder_for_threaded_mode() -> Self {
+        // In threaded mode, AppCore is NOT used - all business logic is in EngineCore.
+        // However, we need to satisfy the type system.
+        //
+        // The key insight is that in Threaded mode, all GpuState methods that access
+        // self.core should panic or return early before touching core.
+        //
+        // We use Option<AppCore> internally and set it to None in threaded mode.
+        // But for now, we create a minimal placeholder that will work if accidentally
+        // accessed (though it shouldn't be).
+        //
+        // Note: This is a transitional solution. The proper fix is to change
+        // GpuState to use Option<AppCore> or a different type for threaded mode.
+        
+        panic!(
+            "AppCore::placeholder_for_threaded_mode() should never be called. \
+             In threaded mode, GpuState should not hold an AppCore. \
+             This indicates a bug in the architecture transition."
+        )
+    }
+
+    /// Create a placeholder AppCore for threaded mode (not supported without true_threading feature).
+    #[cfg(not(feature = "true_threading"))]
+    pub fn placeholder_for_threaded_mode() -> Self {
+        panic!("placeholder_for_threaded_mode called without true_threading feature - threaded mode not supported")
+    }
+    }
+
+    /// Create a placeholder AppCore for threaded mode (not supported without true_threading feature).
+    #[cfg(not(feature = "true_threading"))]
+    pub fn placeholder_for_threaded_mode() -> Self {
+        panic!("placeholder_for_threaded_mode called without true_threading feature - threaded mode not supported")
+    }
+
     /// Create AppCore with channel communication (threaded mode).
     #[cfg(feature = "true_threading")]
     pub fn new_with_channels(

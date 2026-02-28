@@ -399,8 +399,14 @@ impl From<app_core::MergeBridgeError> for MergeBridgeError {
 impl GpuState {
     /// Transition to threaded execution mode.
     ///
-    /// This creates channel infrastructure and passes the engine-side channels to AppCore.
-    /// The spawn_engine closure receives the full EngineThreadChannels for the engine thread.
+    /// This creates channel infrastructure and passes the engine-side channels to EngineCore.
+    /// The spawn_engine closure receives the full EngineThreadChannels and EngineCore for the engine thread.
+    ///
+    /// # Architecture Note
+    /// After calling this method:
+    /// - Main thread holds only EngineBridge (lightweight)
+    /// - Engine thread holds EngineCore (business logic)
+    /// - AppCore is consumed and its state migrated to EngineCore
     pub fn into_threaded<F>(self, spawn_engine: F) -> Self
     where
         F: FnOnce(
@@ -409,6 +415,7 @@ impl GpuState {
                 crate::runtime::RuntimeReceipt,
                 crate::runtime::RuntimeError,
             >,
+            crate::engine_core::EngineCore,
         ) -> std::thread::JoinHandle<()>,
     {
         let runtime = match self.exec_mode {
@@ -416,7 +423,7 @@ impl GpuState {
             GpuExecMode::Threaded { .. } => panic!("gpu state is already in threaded mode"),
         };
 
-        // Create channels before EngineBridge so we can pass engine channels to AppCore
+        // Create channels for cross-thread communication
         let (main_channels, engine_channels) = engine::create_thread_channels::<
             crate::runtime::RuntimeCommand,
             crate::runtime::RuntimeReceipt,
@@ -428,8 +435,37 @@ impl GpuState {
             64,   // gpu_feedback_capacity
         );
 
-        // Spawn the engine thread with engine_channels
-        let engine_thread = spawn_engine(engine_channels);
+        // Migrate AppCore state to EngineCore
+        let engine_core = {
+            let (
+                document,
+                tile_merge_engine,
+                brush_buffer_tile_keys,
+                view_transform,
+                atlas_store,
+                brush_buffer_store,
+                disable_merge_for_debug,
+                perf_log_enabled,
+                brush_trace_enabled,
+                next_frame_id,
+            ) = self.core.into_engine_parts();
+            
+            crate::engine_core::EngineCore::from_app_parts(
+                document,
+                tile_merge_engine,
+                brush_buffer_tile_keys,
+                view_transform,
+                atlas_store,
+                brush_buffer_store,
+                disable_merge_for_debug,
+                perf_log_enabled,
+                brush_trace_enabled,
+                next_frame_id,
+            )
+        };
+
+        // Spawn the engine thread with channels and EngineCore
+        let engine_thread = spawn_engine(engine_channels, engine_core);
 
         // Create EngineBridge with main_channels
         let bridge = crate::engine_bridge::EngineBridge::from_channels(
@@ -439,7 +475,7 @@ impl GpuState {
         );
 
         Self {
-            core: self.core,
+            core: AppCore::placeholder_for_threaded_mode(),
             exec_mode: GpuExecMode::Threaded { bridge },
         }
     }
