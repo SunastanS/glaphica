@@ -17,15 +17,19 @@ progress:
 
 See: .planning/PROJECT.md (updated 2026-02-28)
 
-**Core value:** Achieve clean separation between business logic (AppCore) and GPU execution (GpuRuntime) through message-passing channels, enabling future parallelism while maintaining correctness.
+**Core value:** Achieve clean separation between business logic (AppCore) and GPU execution (GpuRuntime) through message-passing channels, using a two-thread architecture:
+- **Main thread**: GPU runtime (`GpuRuntime`) - must remain lightweight
+- **Engine thread**: Engine loop (AppCore, command processing, feedback)
 
-**Current focus:** Phase 4: True Threading (sub-phases 4.1–4.4)
+**Current focus:** Phase 4: Two-Thread Architecture (sub-phases 4.1–4.4)
 
 ## Current State
 
 **Active Phase:** Phase 4.2 (Runtime Thread Loop) — COMPLETE (2026-02-28)
 
-**Phase 4 Goal:** Integrate `engine + protocol` channels to decouple AppCore from GpuRuntime, enabling true multi-threaded execution.
+**Phase 4 Goal:** Integrate `engine + protocol` channels to decouple AppCore from GpuRuntime using a two-thread architecture:
+- **Main thread**: Runs `GpuRuntime` (GPU operations)
+- **Engine thread**: Runs engine loop (command processing, feedback production)
 
 **Last Completed:** Phase 4.2 Plan 04-02 (Runtime thread loop implementation) - 2026-02-28
 
@@ -52,7 +56,7 @@ See: .planning/PROJECT.md (updated 2026-02-28)
 
 ## Next Action
 
-Phase 4.2 (Runtime Thread Loop) COMPLETE. Infrastructure ready for integration into GpuState main loop. True multi-threading requires GpuRuntime Send refactor in future phase.
+Phase 4.2 (Runtime Loop) COMPLETE. Infrastructure ready for integration. GpuRuntime runs on main thread, engine loop runs on engine thread. No Send refactor needed.
 
 ---
 

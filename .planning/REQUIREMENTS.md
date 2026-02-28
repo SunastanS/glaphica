@@ -2,7 +2,9 @@
 
 **Defined:** 2026-02-28
 **Last Updated:** 2026-02-28 — Mapped to sub-phases 4.1–4.4
-**Core Value:** Achieve clean separation between business logic (AppCore) and GPU execution (GpuRuntime) through message-passing channels, enabling future parallelism while maintaining correctness.
+**Core Value:** Achieve clean separation between business logic (AppCore) and GPU execution (GpuRuntime) through message-passing channels, using a two-thread architecture:
+- **Main thread**: GPU runtime (`GpuRuntime`) - must remain lightweight
+- **Engine thread**: Engine loop (AppCore, command processing, feedback)
 
 ## v1 Requirements
 
@@ -16,11 +18,13 @@
 
 ### Runtime Thread Loop (Phase 4.2)
 
-- [ ] **LOOP-01**: Create runtime thread spawn function in `GpuRuntime`
+- [ ] **LOOP-01**: Create runtime loop function in `GpuRuntime` (executes on main thread)
 - [ ] **LOOP-02**: Implement command consumption loop that reads from `gpu_command_receiver`
 - [ ] **LOOP-03**: Implement feedback production that writes to `gpu_feedback_sender`
 - [ ] **LOOP-04**: Handle `GpuCmdMsg::Command(RuntimeCommand)` variants
 - [ ] **LOOP-05**: Implement graceful shutdown mechanism
+
+**Note:** `GpuRuntime` runs on the **main thread**, not a separate OS thread. The engine loop runs on the engine thread.
 
 ### AppCore Command Integration (Phase 4.3)
 
@@ -40,7 +44,7 @@
 ### Testing & Validation (Phase 4.1, 4.3, 4.4)
 
 - [ ] **TEST-01**: All 47 renderer tests pass in single-threaded mode (Phase 4.1)
-- [ ] **TEST-02**: All 47 renderer tests pass in true-threaded mode (Phase 4.3)
+- [ ] **TEST-02**: All 47 renderer tests pass in two-thread mode (Phase 4.3)
 - [ ] **TEST-03**: Add stress test for concurrent command/feedback (Phase 4.4)
 - [ ] **TEST-04**: Verify no deadlocks under sustained load (Phase 4.4)
 

@@ -5,7 +5,13 @@
 
 ## Implementation Approach
 
-Implemented the runtime thread loop infrastructure for GPU command consumption and feedback production. Due to wgpu's requirement that GPU operations (Surface::present, resource creation) must run on the main thread, and GpuRuntime containing non-Send GPU resources, the implementation provides the loop infrastructure without actually spawning a separate OS thread. True multi-threading will be implemented in a future phase when GpuRuntime is made Send or properly wrapped.
+Implemented the runtime loop infrastructure for GPU command consumption and feedback production.
+
+**Architecture Clarification:** The system uses a **two-thread architecture**:
+- **Main thread**: Runs `GpuRuntime` and GPU operations (as required by wgpu)
+- **Engine thread**: Runs the engine loop for command processing and feedback production
+
+The `run_runtime_loop()` function is designed to be called from the main thread. No OS thread spawning is needed for GpuRuntime itself.
 
 ## Thread Loop Structure
 
@@ -76,17 +82,22 @@ All 12 RuntimeCommand variants from protocol.rs:
 
 ### Actual Implementation
 - `run_runtime_loop()` function provided
-- No thread spawned (GpuRuntime is not Send)
-- Caller responsible for running loop on main thread
+- Designed to run on **main thread** (not a separate thread)
 
-### Reason for Deviation
-GpuRuntime contains `Renderer` which holds `Box<dyn RenderDataResolver>` - a non-Send trait object. wgpu requires GPU operations to run on the main thread. Spawning a thread with GpuRuntime would violate Send bounds.
+### Architecture Clarification
+
+The system uses **two threads**:
+1. **Main thread**: `GpuRuntime` executes GPU operations (wgpu requirement)
+2. **Engine thread**: Engine loop processes commands and produces feedback
+
+This was NOT a deviation due to Send constraints—it's the intended architecture.
+`GpuRuntime` should remain on the main thread and be kept lightweight for performance.
 
 ### Future Work
-True threading will be implemented in a subsequent phase by:
-1. Making GpuRuntime Send (refactoring Renderer)
-2. OR wrapping GpuRuntime in Arc<Mutex<>>
-3. OR keeping loop on main thread but restructuring channel ownership
+
+- Keep GpuRuntime lightweight (avoid heavy allocations in command handlers)
+- Consider profiling command handler latency
+- Optimize feedback channel throughput
 
 ## Verification
 
@@ -111,9 +122,9 @@ cargo build -p glaphica --features true_threading
 ## Next Steps
 
 1. Add unit tests for runtime loop (mocked channels)
-2. Integrate runtime loop into GpuState main event loop
-3. Address GpuRuntime Send constraints for true threading
-4. Add performance logging behind `GLAPHICA_PERF_LOG=1` switch
+2. Integrate runtime loop into GpuState main event loop (main thread)
+3. Add performance logging behind `GLAPHICA_PERF_LOG=1` switch
+4. Profile and optimize GpuRuntime command handler latency
 
 ## Links
 

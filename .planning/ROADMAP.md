@@ -1,9 +1,13 @@
 # Roadmap: Glaphica Phase 4 Refactoring
 
 **Project:** Glaphica Tiles/Model/Runtime Refactoring
-**Phase 4 Goal:** Integrate `engine + protocol` channels for true multi-threaded execution
+**Phase 4 Goal:** Integrate `engine + protocol` channels for two-thread architecture
 **Created:** 2026-02-28
 **Last Updated:** 2026-02-28 — Phase 4.2 COMPLETE
+
+**Architecture:** Two-thread design
+- **Main thread**: Runs `GpuRuntime` (GPU operations) - must remain lightweight
+- **Engine thread**: Runs engine loop (AppCore, command processing, feedback)
 
 ## Overview
 
@@ -59,7 +63,9 @@ Plans:
 
 ### Phase 4.2: Runtime Thread Loop
 
-**Goal:** Implement runtime thread that consumes commands and produces feedback
+**Goal:** Implement runtime loop that consumes commands and produces feedback
+
+**Architecture:** `GpuRuntime` runs on the **main thread**. The engine loop runs on the **engine thread**.
 
 **Plans:** 1 plan
 
@@ -67,25 +73,25 @@ Plans:
 - [x] 04-02-PLAN.md — Create runtime thread spawn, command loop, feedback production, shutdown
 
 **Requirements:**
-- LOOP-01: Create runtime thread spawn function
+- LOOP-01: Create runtime loop function (runs on main thread)
 - LOOP-02: Implement command consumption loop
 - LOOP-03: Implement feedback production
 - LOOP-04: Handle all RuntimeCommand variants
 - LOOP-05: Implement graceful shutdown
 
 **Success Criteria:**
-1. `GpuRuntime::spawn_runtime_thread()` creates dedicated thread
+1. `run_runtime_loop()` runs on main thread and processes commands
 2. Command loop uses `gpu_command_receiver.pop()` or drain batch
 3. Feedback sent via `gpu_feedback_sender.push()`
 4. All 12 RuntimeCommand variants handled (PresentFrame, Resize, EnqueueBrushCommands, PollMergeNotices, AckMergeResults, BindRenderTree, etc.)
 5. Shutdown mechanism via InputControlEvent or channel close
-6. Runtime thread panics are caught and reported
 
 **Implementation Notes:**
 - Thread loop structure: `loop { match command_receiver.pop() { ... } }`
 - Consider using `recv_timeout()` for shutdown detection
 - Feedback frame waterline management (submit, executed_batch, complete)
 - Each command execution should produce corresponding receipt or error
+- **GpuRuntime must remain lightweight** - avoid heavy allocations in command handlers
 
 **Phase 4.2 Status: COMPLETE (2026-02-28)**
 - All 5 requirements implemented (LOOP-01 through LOOP-05)
@@ -98,13 +104,15 @@ Plans:
 
 **Goal:** Migrate AppCore to send commands via channel and consume feedback
 
+**Architecture:** AppCore runs on the engine thread, sending commands to GpuRuntime on the main thread.
+
 **Requirements:**
 - CMD-01: Migrate render()/present() path
 - CMD-02: Migrate resize() path
 - CMD-03: Migrate brush enqueue path
 - CMD-04: Migrate merge polling path
 - CMD-05: Implement feedback processing
-- TEST-02: All tests pass in true-threaded mode
+- TEST-02: All 47 renderer tests pass in two-thread mode
 
 **Success Criteria:**
 1. `AppCore::render()` sends `RuntimeCommand::PresentFrame` and waits for feedback
@@ -113,7 +121,7 @@ Plans:
 4. Merge polling uses `RuntimeCommand::PollMergeNotices` with feedback consumption
 5. Feedback channel consumed each frame: `gpu_feedback_receiver.pop()` or drain
 6. Waterline tracking updated from feedback (submit, executed_batch, complete)
-7. All 47 renderer tests pass in true-threaded mode
+7. All 47 renderer tests pass in two-thread mode
 
 **Implementation Notes:**
 - Synchronous commands (resize) vs async commands (render, brush)
