@@ -23,12 +23,18 @@
 
 **Goal:** Establish channel infrastructure with proper types and feature flags
 
+**Plans:** 2 plans
+
+Plans:
+- [x] 01-channel-infrastructure-01-PLAN.md — Add dependencies and define RuntimeReceipt/RuntimeError types
+- [x] 02-channel-infrastructure-02-PLAN.md — Instantiate channels in GpuState::new()
+
 **Requirements:**
-- CHAN-01: Add engine/protocol dependencies
-- CHAN-02: Define RuntimeReceipt enum
-- CHAN-03: Define RuntimeError enum  
-- CHAN-04: Instantiate channels in GpuState::new()
-- CHAN-05: Add true_threading feature flag
+- [x] CHAN-01: Add engine/protocol dependencies
+- [x] CHAN-02: Define RuntimeReceipt enum
+- [x] CHAN-03: Define RuntimeError enum  
+- [x] CHAN-04: Instantiate channels in GpuState::new()
+- [x] CHAN-05: Add true_threading feature flag
 
 **Success Criteria:**
 1. `Cargo.toml` includes `engine` and `protocol` dependencies
