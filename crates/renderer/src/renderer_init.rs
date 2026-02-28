@@ -77,6 +77,29 @@ impl Renderer {
     ) -> (Self, crate::ViewOpSender) {
         let (view_sender, view_receiver) = mpsc::channel();
 
+        // Create thread channels when true_threading feature is enabled.
+        // This happens before Renderer::new() to follow initialization sequence:
+        // Channels → Renderer → Runtime thread
+        #[cfg(feature = "true_threading")]
+        let (main_thread_channels, engine_thread_channels) = {
+            use crate::RuntimeCommand;
+            use engine::create_thread_channels;
+            use protocol::{RuntimeError, RuntimeReceipt};
+
+            // Capacities from CONTEXT.md
+            let input_ring_capacity = 1024;
+            let input_control_capacity = 256;
+            let gpu_command_capacity = 1024;
+            let gpu_feedback_capacity = 256;
+
+            create_thread_channels::<RuntimeCommand, RuntimeReceipt, RuntimeError>(
+                input_ring_capacity,
+                input_control_capacity,
+                gpu_command_capacity,
+                gpu_feedback_capacity,
+            )
+        };
+
         let (merge_device_lost_sender, merge_device_lost_receiver) = mpsc::channel();
         device.set_device_lost_callback(move |reason, message| {
             let _ = merge_device_lost_sender.send((reason, message));
@@ -707,6 +730,11 @@ impl Renderer {
                 merge_scratch_view,
                 merge_device_lost_receiver,
                 merge_uncaptured_error_receiver,
+
+                #[cfg(feature = "true_threading")]
+                main_thread_channels: Some(main_thread_channels),
+                #[cfg(feature = "true_threading")]
+                engine_thread_channels: Some(engine_thread_channels),
             },
             view_state: ViewState {
                 view_matrix: IDENTITY_MATRIX,

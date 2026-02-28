@@ -10,6 +10,11 @@ tiles = { path = "../tiles" }
 model = { path = "../model" }
 wgpu = "28.0.0"
 pollster = "0.4.0"
+engine = { path = "../engine" }
+protocol = { path = "../protocol" }
+
+[features]
+true_threading = []
 
 [dev-dependencies]
 naga = { version = "28.0.0", features = ["wgsl-in"] }

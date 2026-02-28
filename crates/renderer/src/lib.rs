@@ -499,6 +499,17 @@ struct GpuState {
     merge_scratch_view: wgpu::TextureView,
     merge_device_lost_receiver: mpsc::Receiver<(wgpu::DeviceLostReason, String)>,
     merge_uncaptured_error_receiver: mpsc::Receiver<String>,
+
+    /// Channel infrastructure for true threading mode.
+    /// Created when GpuState is initialized with true_threading feature enabled.
+    #[cfg(feature = "true_threading")]
+    main_thread_channels: Option<
+        engine::MainThreadChannels<RuntimeCommand, protocol::RuntimeReceipt, protocol::RuntimeError>,
+    >,
+    #[cfg(feature = "true_threading")]
+    engine_thread_channels: Option<
+        engine::EngineThreadChannels<RuntimeCommand, protocol::RuntimeReceipt, protocol::RuntimeError>,
+    >,
 }
 
 #[repr(C)]
@@ -749,6 +760,18 @@ mod renderer_composite;
 mod renderer_draw_builders;
 
 mod renderer_pipeline;
+
+/// Runtime command type for true threading mode.
+/// Phase 2 will define the complete set of command variants.
+#[cfg(feature = "true_threading")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuntimeCommand {
+    /// Placeholder - Phase 2 will define all variants
+    PresentFrame,
+    Resize,
+    EnqueueBrushCommands,
+    PollMergeNotices,
+}
 
 mod renderer_view_ops;
 
