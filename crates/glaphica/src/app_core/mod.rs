@@ -755,10 +755,6 @@ impl std::fmt::Display for AppCoreError {
 
 impl std::error::Error for AppCoreError {}
 
-// Ensure error types are thread-safe for future threading model
-unsafe impl Send for AppCoreError {}
-unsafe impl Sync for AppCoreError {}
-
 // From implementations for external errors
 impl From<RuntimeError> for AppCoreError {
     fn from(err: RuntimeError) -> Self {
@@ -786,3 +782,13 @@ impl From<wgpu::SurfaceError> for AppCoreError {
         }
     }
 }
+
+// Compile-time verification that AppCoreError is Send + Sync
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+
+    // This will fail to compile if AppCoreError is not Send + Sync
+    const _: () = assert_send::<AppCoreError>();
+    const _: () = assert_sync::<AppCoreError>();
+};
