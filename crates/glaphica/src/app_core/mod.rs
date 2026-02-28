@@ -213,7 +213,7 @@ impl AppCore {
         }
     }
 
-/// Create a placeholder AppCore for threaded mode.
+    /// Create a placeholder AppCore for threaded mode.
     ///
     /// In threaded mode, the actual business logic lives in EngineCore on the engine thread.
     /// This placeholder exists only to satisfy the GpuState type - it should never be used
@@ -236,19 +236,12 @@ impl AppCore {
         //
         // Note: This is a transitional solution. The proper fix is to change
         // GpuState to use Option<AppCore> or a different type for threaded mode.
-        
+
         panic!(
             "AppCore::placeholder_for_threaded_mode() should never be called. \
              In threaded mode, GpuState should not hold an AppCore. \
              This indicates a bug in the architecture transition."
         )
-    }
-
-    /// Create a placeholder AppCore for threaded mode (not supported without true_threading feature).
-    #[cfg(not(feature = "true_threading"))]
-    pub fn placeholder_for_threaded_mode() -> Self {
-        panic!("placeholder_for_threaded_mode called without true_threading feature - threaded mode not supported")
-    }
     }
 
     /// Create a placeholder AppCore for threaded mode (not supported without true_threading feature).

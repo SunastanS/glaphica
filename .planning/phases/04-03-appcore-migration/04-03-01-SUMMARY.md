@@ -1,6 +1,6 @@
 # Phase 04-03-01: AppCore Channel Infrastructure
 
-**Status:** ARCHITECTURAL REVISION IN PROGRESS
+**Status:** IN PROGRESS - Architecture Migration
 
 ---
 
@@ -12,10 +12,10 @@
 主线程 (轻量)                    引擎线程 (业务核心)
 ─────────────                    ─────────────────
 GpuState                         EngineCore
-├── GpuRuntime              →    ├── AppCore (合并后)
-├── EngineBridge            ←    │   ├── Document
-└── (无业务逻辑)                 │   ├── TileMergeEngine
-                                 │   └── BrushBufferTileRegistry
+├── GpuRuntime              →    ├── Document
+├── EngineBridge            ←    ├── TileMergeEngine
+└── (无业务逻辑)                 ├── BrushBufferTileRegistry
+                                 └── ViewTransform
 ```
 
 ---
@@ -30,23 +30,65 @@ GpuState                         EngineCore
 
 **Commit:** 511796d feat(04-03-01): add channel fields and constructors to AppCore
 
+### Task 3 (修订): EngineCore 扩展 ✓
+
+- EngineCore 添加了完整的业务逻辑字段
+- 添加了 `from_app_parts()` 转换方法
+- 支持从 AppCore 迁移状态
+
+**Commit:** c2277fe refactor(04-03): extend EngineCore and add AppCore::into_engine_parts()
+
+### Task 4: AppCore 状态迁移方法 ✓
+
+- 添加了 `AppCore::into_engine_parts()` 方法
+- 支持将 AppCore 状态解构为 EngineCore 所需的组件
+- 使用 destructuring pattern 避免 move 错误
+
+**Commit:** 6ee02d2 refactor(engine): add EngineCore::from_app_parts() for state migration
+
+### Task 5: GpuState::into_threaded() 更新 ✓
+
+- 修改了 `into_threaded()` 签名，接收 EngineCore 参数
+- 使用 `AppCore::into_engine_parts()` 进行状态迁移
+- 添加了 `placeholder_for_threaded_mode()` 作为过渡方案
+
+**Commit:** 60d4920 refactor(04-03): update GpuState::into_threaded() for engine thread migration
+
 ---
 
-## 需要修订的计划
+## 遗留问题
 
-原计划假设 AppCore 留在主线程并使用通道通信。
-现在需要修订为：**将 AppCore 合并到 EngineCore，在引擎线程运行**。
+### GpuState 仍持有 AppCore
 
-### 修订后的任务
+当前 `into_threaded()` 调用 `placeholder_for_threaded_mode()` 会 panic，因为：
 
-**Task 3 (修订): 合并 AppCore 到 EngineCore**
+1. GpuState 结构体仍有 `core: AppCore` 字段
+2. 在线程模式下，这个字段不应该存在
+3. 很多方法直接访问 `self.core`，需要重构
 
-1. EngineCore 应该包含或继承 AppCore 的所有业务逻辑
-2. 主线程的 GpuState 只保留 GpuRuntime + EngineBridge
-3. AppCore 的 render()/resize()/enqueue_brush_render_command() 等方法改为通过通道发送命令
+### 解决方案
+
+需要重构 GpuState：
+
+```rust
+pub struct GpuState {
+    #[cfg(not(feature = "true_threading"))]
+    core: AppCore,
+    
+    exec_mode: GpuExecMode,
+}
+
+// 或者使用 Option:
+pub struct GpuState {
+    core: Option<AppCore>,  // None in threaded mode
+    exec_mode: GpuExecMode,
+}
+```
 
 ---
 
 ## 下一步
 
-需要重新规划 Phase 04-03 的 gap closure 计划以匹配这个架构方向。
+1. 重构 GpuState 以在线程模式下不持有 AppCore
+2. 更新所有访问 `self.core` 的方法以处理两种模式
+3. 确保编译通过且功能正确
