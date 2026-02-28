@@ -579,6 +579,9 @@ pub enum BrushRenderEnqueueError {
         received_layer_id: LayerId,
     },
     BeginWithPendingMerge,
+    MergeError {
+        message: String,
+    },
 }
 
 const IDENTITY_MATRIX: TransformMatrix4x4 = [

@@ -62,6 +62,16 @@ pub enum RuntimeCommand {
 
     /// Process merge completions (coarse-grained: submit + poll + initial processing).
     ProcessMergeCompletions { frame_id: u64 },
+
+    /// Acknowledge merge completion results.
+    AckMergeResults { notices: Vec<MergeCompletionNotice> },
+
+    /// Enqueue planned merge operations.
+    EnqueuePlannedMerge {
+        receipt: render_protocol::StrokeExecutionReceipt,
+        gpu_merge_ops: Vec<render_protocol::GpuMergeOp>,
+        meta: render_protocol::MergePlanMeta,
+    },
 }
 
 /// Receipts returned by GpuRuntime after executing commands.
@@ -99,6 +109,12 @@ pub enum RuntimeReceipt {
         submission_receipt_ids: Vec<StrokeExecutionReceiptId>,
         renderer_notices: Vec<RendererNotice>,
     },
+
+    /// Merge results acknowledged.
+    MergeResultsAcknowledged,
+
+    /// Planned merge enqueued.
+    PlannedMergeEnqueued,
 }
 
 /// Renderer notice for merge completion processing.
@@ -130,6 +146,12 @@ pub enum RuntimeError {
 
     /// Merge poll failed.
     MergePoll(renderer::MergePollError),
+
+    /// Merge ack failed.
+    MergeAck(renderer::MergeAckError),
+
+    /// Merge enqueue failed.
+    MergeEnqueue(renderer::MergeEnqueueError),
 
     /// Shutdown requested.
     ShutdownRequested { reason: String },
@@ -171,6 +193,18 @@ impl From<renderer::MergeSubmitError> for RuntimeError {
 impl From<renderer::MergePollError> for RuntimeError {
     fn from(err: renderer::MergePollError) -> Self {
         RuntimeError::MergePoll(err)
+    }
+}
+
+impl From<renderer::MergeAckError> for RuntimeError {
+    fn from(err: renderer::MergeAckError) -> Self {
+        RuntimeError::MergeAck(err)
+    }
+}
+
+impl From<renderer::MergeEnqueueError> for RuntimeError {
+    fn from(err: renderer::MergeEnqueueError) -> Self {
+        RuntimeError::MergeEnqueue(err)
     }
 }
 
@@ -233,6 +267,8 @@ impl MergeItem for RuntimeReceipt {
             RuntimeReceipt::MergeCompletionsProcessed { .. } => {
                 ReceiptMergeKey::MergeCompletionsProcessed
             }
+            RuntimeReceipt::MergeResultsAcknowledged => ReceiptMergeKey::MergeResultsAcknowledged,
+            RuntimeReceipt::PlannedMergeEnqueued => ReceiptMergeKey::PlannedMergeEnqueued,
         }
     }
 }
@@ -248,6 +284,8 @@ impl MergeItem for RuntimeError {
             RuntimeError::BrushEnqueueError(_) => ErrorMergeKey::BrushEnqueueError,
             RuntimeError::MergeSubmit(_) => ErrorMergeKey::MergeSubmit,
             RuntimeError::MergePoll(_) => ErrorMergeKey::MergePoll,
+            RuntimeError::MergeAck(_) => ErrorMergeKey::MergeAck,
+            RuntimeError::MergeEnqueue(_) => ErrorMergeKey::MergeEnqueue,
             RuntimeError::ShutdownRequested { .. } => ErrorMergeKey::ShutdownRequested,
             RuntimeError::EngineThreadDisconnected => ErrorMergeKey::EngineThreadDisconnected,
             RuntimeError::FeedbackQueueTimeout => ErrorMergeKey::FeedbackQueueTimeout,
@@ -268,6 +306,8 @@ pub enum ReceiptMergeKey {
     BrushCommandEnqueued,
     MergeNotices,
     MergeCompletionsProcessed,
+    MergeResultsAcknowledged,
+    PlannedMergeEnqueued,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -278,6 +318,8 @@ pub enum ErrorMergeKey {
     BrushEnqueueError,
     MergeSubmit,
     MergePoll,
+    MergeAck,
+    MergeEnqueue,
     ShutdownRequested,
     EngineThreadDisconnected,
     FeedbackQueueTimeout,

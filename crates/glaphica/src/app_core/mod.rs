@@ -8,17 +8,25 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use brush_execution::BrushExecutionMergeFeedback;
-use document::{Document, DocumentMergeError};
+use document::{Document, DocumentMergeError, TileCoordinate};
 use render_protocol::{BrushRenderCommand, StrokeExecutionReceiptId};
 use renderer::BrushRenderEnqueueError;
 use tiles::{
-    BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, TileAtlasStore, TileMergeEngine,
-    TileMergeError, TilesBusinessResult,
+    BrushBufferTileRegistry, GenericR32FloatTileAtlasStore, MergePlanRequest, TileAtlasStore,
+    TileMergeEngine, TileMergeError, TilesBusinessResult,
 };
 use view::ViewTransform;
 use winit::dpi::PhysicalSize;
 
 use crate::runtime::{GpuRuntime, RuntimeCommand, RuntimeError, RuntimeReceipt};
+use render_protocol::RenderTreeSnapshot;
+
+/// Stroke tile merge plan for building merge operations.
+#[derive(Debug)]
+pub struct StrokeTileMergePlan {
+    pub layer_id: u64,
+    pub tile_ops: Vec<tiles::MergePlanTileOp>,
+}
 
 /// Merge bridge errors.
 #[derive(Debug)]
@@ -149,6 +157,9 @@ pub struct AppCore {
     /// Performance logging enabled.
     perf_log_enabled: bool,
 
+    /// Brush trace logging enabled.
+    brush_trace_enabled: bool,
+
     /// Debug state: last bound render tree (debug assertions only).
     #[cfg(debug_assertions)]
     last_bound_render_tree: Option<(u64, u64)>,
@@ -165,6 +176,7 @@ impl AppCore {
         view_transform: ViewTransform,
         disable_merge_for_debug: bool,
         perf_log_enabled: bool,
+        brush_trace_enabled: bool,
         next_frame_id: u64,
     ) -> Self {
         Self {
@@ -180,6 +192,7 @@ impl AppCore {
             gc_evicted_keys_total: 0,
             disable_merge_for_debug,
             perf_log_enabled,
+            brush_trace_enabled,
             #[cfg(debug_assertions)]
             last_bound_render_tree: None,
         }
@@ -269,14 +282,14 @@ impl AppCore {
         id
     }
 
-    /// Check if merge is disabled for debug.
-    pub fn merge_disabled(&self) -> bool {
-        self.disable_merge_for_debug
-    }
-
     /// Check if performance logging is enabled.
     pub fn perf_log_enabled(&self) -> bool {
         self.perf_log_enabled
+    }
+
+    /// Check if brush trace logging is enabled.
+    pub fn brush_trace_enabled(&self) -> bool {
+        self.brush_trace_enabled
     }
 
     /// Get the total number of GC evicted batches.
@@ -402,8 +415,7 @@ impl AppCore {
                     })?;
 
                 // Business logic: preview buffer management
-                // TODO: migrate set_preview_buffer_and_rebind to AppCore
-                // For now, this method is not yet migrated
+                // This is now handled by GpuState calling core.set_preview_buffer()
 
                 Ok(())
             }
@@ -438,7 +450,7 @@ impl AppCore {
                 runtime.bind_brush_buffer_tiles(allocate.stroke_session_id, tile_bindings);
 
                 // GC eviction handling
-                // TODO: migrate drain_tile_gc_evictions to AppCore
+                // This is now handled by GpuState calling core.drain_tile_gc_evictions()
 
                 // GPU enqueue through runtime
                 runtime
@@ -467,15 +479,23 @@ impl AppCore {
                             merge.stroke_session_id,
                             runtime.brush_buffer_store(),
                         );
-                    // TODO: migrate clear_preview_buffer_and_rebind
+                    // This is now handled by GpuState calling core.clear_preview_buffer()
                     self.brush_execution_feedback_queue.push_back(
                         BrushExecutionMergeFeedback::MergeApplied {
                             stroke_session_id: merge.stroke_session_id,
                         },
                     );
                 } else {
-                    // TODO: migrate enqueue_stroke_merge_submission
-                    // For now, this path is not yet migrated
+                    // Submit stroke merge to tile merge engine and renderer
+                    self.enqueue_stroke_merge_submission(
+                        runtime,
+                        merge.stroke_session_id,
+                        merge.tx_token,
+                        merge.target_layer_id,
+                    )
+                    .map_err(|e| BrushRenderEnqueueError::MergeError {
+                        message: format!("{:?}", e),
+                    })?;
                 }
 
                 // GPU enqueue through runtime
@@ -511,11 +531,12 @@ impl AppCore {
     /// Process renderer merge completions.
     ///
     /// This is the main merge processing path, migrated to use the runtime command interface.
+    /// Returns the updated render tree snapshot if the render tree was modified.
     pub fn process_renderer_merge_completions(
         &mut self,
         runtime: &mut GpuRuntime,
         frame_id: u64,
-    ) -> Result<(), MergeBridgeError> {
+    ) -> Result<Option<RenderTreeSnapshot>, MergeBridgeError> {
         let perf_started = Instant::now();
 
         // Step 1: GPU side - submit and poll via runtime command
@@ -573,23 +594,41 @@ impl AppCore {
             );
         }
 
-        for notice in completion_notices {
+        // Collect renderer notices to acknowledge
+        let mut notices_to_ack = Vec::with_capacity(completion_notices.len());
+        for notice in &completion_notices {
             let notice_key = (notice.notice_id, notice.receipt_id);
-            let _ = renderer_notice_by_key.remove(&notice_key).ok_or(
+            let renderer_notice = renderer_notice_by_key.remove(&notice_key).ok_or(
                 MergeBridgeError::MissingRendererNotice {
                     receipt_id: notice.receipt_id,
                     notice_id: notice.notice_id,
                 },
             )?;
 
-            // TODO: migrate ack_merge_result to runtime command
-            // For now, direct call is needed
-            // self.renderer.ack_merge_result(renderer_notice)
-            //     .map_err(MergeBridgeError::RendererAck)?;
+            // Convert RendererNotice back to MergeCompletionNotice for ack
+            notices_to_ack.push(renderer::MergeCompletionNotice {
+                receipt_id: renderer_notice.receipt_id,
+                audit_meta: renderer_notice.audit_meta,
+                result: renderer_notice.result,
+            });
 
             self.tile_merge_engine
                 .ack_merge_result(notice.receipt_id, notice.notice_id)
                 .map_err(MergeBridgeError::Tiles)?;
+        }
+
+        // Acknowledge merge results through runtime command
+        if !notices_to_ack.is_empty() {
+            runtime
+                .execute(RuntimeCommand::AckMergeResults {
+                    notices: notices_to_ack,
+                })
+                .map_err(|e| match e {
+                    RuntimeError::MergeAck(ack_err) => MergeBridgeError::RendererAck(ack_err),
+                    _ => MergeBridgeError::RendererAck(renderer::MergeAckError::UnknownReceipt {
+                        receipt_id: StrokeExecutionReceiptId(0),
+                    }),
+                })?;
         }
 
         let business_results = self.tile_merge_engine.drain_business_results();
@@ -616,8 +655,11 @@ impl AppCore {
             );
         }
 
-        // TODO: migrate apply_tiles_business_results to AppCore
-        // TODO: migrate drain_tile_gc_evictions to AppCore
+        // Apply tiles business results
+        let render_tree = self.apply_tiles_business_results(&business_results, frame_id)?;
+
+        // Drain tile GC evictions
+        self.drain_tile_gc_evictions();
 
         if self.perf_log_enabled {
             eprintln!(
@@ -627,7 +669,489 @@ impl AppCore {
             );
         }
 
+        Ok(render_tree)
+    }
+
+    /// Set the active preview buffer for a layer and return the updated render tree snapshot.
+    ///
+    /// Returns `Some(RenderTreeSnapshot)` if the render tree was dirty and needs to be rebound.
+    /// Returns `None` if no rebind is needed.
+    pub fn set_preview_buffer(
+        &mut self,
+        layer_id: u64,
+        stroke_session_id: u64,
+    ) -> Option<RenderTreeSnapshot> {
+        let mut document = self
+            .document
+            .write()
+            .unwrap_or_else(|_| panic!("document write lock poisoned"));
+        document
+            .set_active_preview_buffer(layer_id, stroke_session_id)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "set active preview buffer failed: layer_id={} stroke_session_id={} error={error:?}",
+                    layer_id, stroke_session_id
+                )
+            });
+        if !document.take_render_tree_cache_dirty() {
+            return None;
+        }
+        Some(document.render_tree_snapshot())
+    }
+
+    /// Clear the active preview buffer and return the updated render tree snapshot.
+    ///
+    /// Returns `Some(RenderTreeSnapshot)` if the render tree was dirty and needs to be rebound.
+    /// Returns `None` if no rebind is needed.
+    pub fn clear_preview_buffer(&mut self, stroke_session_id: u64) -> Option<RenderTreeSnapshot> {
+        let mut document = self
+            .document
+            .write()
+            .unwrap_or_else(|_| panic!("document write lock poisoned"));
+        let _ = document.clear_active_preview_buffer(stroke_session_id);
+        if !document.take_render_tree_cache_dirty() {
+            return None;
+        }
+        Some(document.render_tree_snapshot())
+    }
+
+    /// Drain tile GC evictions and apply them to the brush buffer tile key registry.
+    ///
+    /// This processes all evicted retain batches from the brush buffer store and
+    /// updates the GC statistics.
+    pub fn drain_tile_gc_evictions(&mut self) {
+        let evicted_batches = self.brush_buffer_store.drain_evicted_retain_batches();
+        for evicted_batch in evicted_batches {
+            self.brush_buffer_tile_keys
+                .write()
+                .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                .apply_retained_eviction(evicted_batch.retain_id, &evicted_batch.keys);
+            self.apply_gc_evicted_batch(evicted_batch.retain_id, evicted_batch.keys.len());
+        }
+    }
+
+    fn apply_gc_evicted_batch(&mut self, retain_id: u64, key_count: usize) {
+        self.gc_evicted_batches_total = self
+            .gc_evicted_batches_total
+            .checked_add(1)
+            .expect("gc evicted batch counter overflow");
+        self.gc_evicted_keys_total = self
+            .gc_evicted_keys_total
+            .checked_add(u64::try_from(key_count).expect("gc key count exceeds u64"))
+            .expect("gc evicted key counter overflow");
+        eprintln!(
+            "tiles gc evicted retain batch: retain_id={} key_count={} total_batches={} total_keys={}",
+            retain_id, key_count, self.gc_evicted_batches_total, self.gc_evicted_keys_total
+        );
+    }
+
+    /// Apply tiles business results to the document.
+    ///
+    /// This processes business results from the tile merge engine, applying
+    /// finalized merges to the document or handling aborts.
+    ///
+    /// Returns `Ok(Some(RenderTreeSnapshot))` if the render tree was updated.
+    /// Returns `Ok(None)` if no render tree update was needed.
+    /// Returns `Err(MergeBridgeError)` if processing failed.
+    pub fn apply_tiles_business_results(
+        &mut self,
+        business_results: &[TilesBusinessResult],
+        _frame_id: u64,
+    ) -> Result<Option<RenderTreeSnapshot>, MergeBridgeError> {
+        use document::TileCoordinate;
+        use std::collections::HashSet;
+        use tiles::TileKeyMapping;
+
+        let mut final_render_tree: Option<RenderTreeSnapshot> = None;
+
+        for result in business_results {
+            match result {
+                TilesBusinessResult::CanFinalize {
+                    receipt_id,
+                    stroke_session_id,
+                    layer_id,
+                    new_key_mappings,
+                    dirty_tiles,
+                    ..
+                } => {
+                    let apply_started = Instant::now();
+
+                    #[cfg(debug_assertions)]
+                    {
+                        let mut mapping_coords = HashSet::with_capacity(new_key_mappings.len());
+                        for mapping in new_key_mappings {
+                            if !mapping_coords.insert((mapping.tile_x, mapping.tile_y)) {
+                                panic!(
+                                    "duplicate tile coordinate in new_key_mappings: receipt_id={} stroke_session_id={} layer_id={} tile=({}, {})",
+                                    receipt_id.0, stroke_session_id, layer_id, mapping.tile_x, mapping.tile_y
+                                );
+                            }
+                        }
+                        let mut dirty_coords = HashSet::with_capacity(dirty_tiles.len());
+                        for (tile_x, tile_y) in dirty_tiles {
+                            if !dirty_coords.insert((*tile_x, *tile_y)) {
+                                panic!(
+                                    "duplicate tile coordinate in dirty_tiles: receipt_id={} stroke_session_id={} layer_id={} tile=({}, {})",
+                                    receipt_id.0, stroke_session_id, layer_id, tile_x, tile_y
+                                );
+                            }
+                        }
+                        if mapping_coords != dirty_coords {
+                            panic!(
+                                "dirty tile set does not match mapping tile set: receipt_id={} stroke_session_id={} layer_id={} mapping_count={} dirty_count={}",
+                                receipt_id.0, stroke_session_id, layer_id, mapping_coords.len(), dirty_coords.len()
+                            );
+                        }
+                    }
+
+                    if self.perf_log_enabled {
+                        eprintln!(
+                            "[brush_trace] merge_finalize_prepare receipt_id={} stroke_session_id={} layer_id={} mappings={} dirty_tiles={}",
+                            receipt_id.0, stroke_session_id, layer_id, new_key_mappings.len(), dirty_tiles.len(),
+                        );
+                    }
+
+                    let document_apply_result: Result<
+                        Option<RenderTreeSnapshot>,
+                        MergeBridgeError,
+                    > = (|| {
+                        let mut document = self
+                            .document
+                            .write()
+                            .unwrap_or_else(|_| panic!("document write lock poisoned"));
+                        let expected_revision = document.revision();
+                        document
+                            .begin_merge(*layer_id, *stroke_session_id, expected_revision)
+                            .map_err(MergeBridgeError::Document)?;
+                        let image_handle = document
+                            .leaf_image_handle(*layer_id, *stroke_session_id)
+                            .map_err(MergeBridgeError::Document)?;
+                        let existing_image =
+                            document
+                                .image(image_handle)
+                                .ok_or(MergeBridgeError::Document(
+                                    DocumentMergeError::LayerNotFoundInStrokeSession {
+                                        layer_id: *layer_id,
+                                        stroke_session_id: *stroke_session_id,
+                                    },
+                                ))?;
+                        let mut updated_image = (*existing_image).clone();
+
+                        // Apply tile key mappings from brush execution
+                        for mapping in new_key_mappings {
+                            updated_image
+                                .set_tile_at(mapping.tile_x, mapping.tile_y, mapping.new_key)
+                                .map_err(|error| {
+                                    MergeBridgeError::TileImageApply(
+                                        tiles::TileImageApplyError::TileOutOfBounds {
+                                            tile_x: mapping.tile_x,
+                                            tile_y: mapping.tile_y,
+                                        },
+                                    )
+                                })?;
+                        }
+
+                        let layer_dirty_tiles: Vec<TileCoordinate> = dirty_tiles
+                            .iter()
+                            .map(|(tile_x, tile_y)| TileCoordinate {
+                                tile_x: *tile_x,
+                                tile_y: *tile_y,
+                            })
+                            .collect();
+
+                        document
+                            .apply_merge_image(
+                                *layer_id,
+                                *stroke_session_id,
+                                updated_image,
+                                &layer_dirty_tiles,
+                                false,
+                            )
+                            .map_err(MergeBridgeError::Document)?;
+
+                        Ok(if document.take_render_tree_cache_dirty() {
+                            Some(document.render_tree_snapshot())
+                        } else {
+                            None
+                        })
+                    })();
+
+                    let render_tree = match document_apply_result {
+                        Ok(render_tree) => render_tree,
+                        Err(error) => {
+                            self.brush_execution_feedback_queue.push_back(
+                                BrushExecutionMergeFeedback::MergeFailed {
+                                    stroke_session_id: *stroke_session_id,
+                                    message: format!("document merge apply failed: {error:?}"),
+                                },
+                            );
+                            return Err(error);
+                        }
+                    };
+
+                    if render_tree.is_some() {
+                        final_render_tree = render_tree;
+                    }
+
+                    if self.perf_log_enabled {
+                        eprintln!(
+                            "[merge_bridge_perf] merge_finalize receipt_id={} stroke_session_id={} layer_id={} dirty_tiles={} cpu_apply_ms={:.3}",
+                            receipt_id.0, stroke_session_id, layer_id, dirty_tiles.len(),
+                            apply_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+
+                    // Finalize the receipt in the merge engine
+                    self.tile_merge_engine
+                        .finalize_receipt(*receipt_id)
+                        .map_err(MergeBridgeError::Tiles)?;
+
+                    // Retain stroke tiles in brush buffer store
+                    self.brush_buffer_tile_keys
+                        .write()
+                        .unwrap_or_else(|_| {
+                            panic!("brush buffer tile key registry write lock poisoned")
+                        })
+                        .retain_stroke_tiles(*stroke_session_id, self.brush_buffer_store.as_ref());
+
+                    self.brush_execution_feedback_queue.push_back(
+                        BrushExecutionMergeFeedback::MergeApplied {
+                            stroke_session_id: *stroke_session_id,
+                        },
+                    );
+                }
+
+                TilesBusinessResult::RequiresAbort {
+                    receipt_id,
+                    stroke_session_id,
+                    layer_id,
+                    message,
+                    ..
+                } => {
+                    let document_abort_result: Result<
+                        Option<RenderTreeSnapshot>,
+                        MergeBridgeError,
+                    > = (|| {
+                        let mut document = self
+                            .document
+                            .write()
+                            .unwrap_or_else(|_| panic!("document write lock poisoned"));
+                        if document.has_active_merge(*layer_id, *stroke_session_id) {
+                            document
+                                .abort_merge(*layer_id, *stroke_session_id)
+                                .map_err(MergeBridgeError::Document)?;
+                        }
+                        Ok(if document.take_render_tree_cache_dirty() {
+                            Some(document.render_tree_snapshot())
+                        } else {
+                            None
+                        })
+                    })();
+
+                    let render_tree = match document_abort_result {
+                        Ok(render_tree) => render_tree,
+                        Err(error) => {
+                            self.brush_execution_feedback_queue.push_back(
+                                BrushExecutionMergeFeedback::MergeFailed {
+                                    stroke_session_id: *stroke_session_id,
+                                    message: format!("document merge abort failed: {error:?}"),
+                                },
+                            );
+                            return Err(error);
+                        }
+                    };
+
+                    if render_tree.is_some() {
+                        final_render_tree = render_tree;
+                    }
+
+                    // Abort the receipt in the merge engine
+                    self.tile_merge_engine
+                        .abort_receipt(*receipt_id)
+                        .map_err(MergeBridgeError::Tiles)?;
+
+                    // Release stroke tiles on merge failed
+                    self.brush_buffer_tile_keys
+                        .write()
+                        .unwrap_or_else(|_| {
+                            panic!("brush buffer tile key registry write lock poisoned")
+                        })
+                        .release_stroke_on_merge_failed(
+                            *stroke_session_id,
+                            self.brush_buffer_store.as_ref(),
+                        );
+
+                    // Clear preview buffer
+                    if let Some(render_tree) = self.clear_preview_buffer(*stroke_session_id) {
+                        final_render_tree = Some(render_tree);
+                    }
+
+                    self.brush_execution_feedback_queue.push_back(
+                        BrushExecutionMergeFeedback::MergeFailed {
+                            stroke_session_id: *stroke_session_id,
+                            message: format!("merge requires abort: {message}"),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(final_render_tree)
+    }
+
+    /// Enqueue a stroke merge submission.
+    ///
+    /// This builds a merge plan from the stroke buffer tiles and submits it
+    /// to the tile merge engine for orchestration.
+    fn enqueue_stroke_merge_submission(
+        &mut self,
+        runtime: &mut GpuRuntime,
+        stroke_session_id: u64,
+        tx_token: u64,
+        layer_id: u64,
+    ) -> Result<(), MergeBridgeError> {
+        use render_protocol::BlendMode;
+        use std::collections::{HashMap, HashSet};
+        use tiles::{MergePlanRequest, MergePlanTileOp};
+
+        let Some(merge_plan) = self.build_stroke_tile_merge_plan(stroke_session_id, layer_id)
+        else {
+            // No tiles to merge - release stroke and mark as applied
+            self.brush_buffer_tile_keys
+                .write()
+                .unwrap_or_else(|_| panic!("brush buffer tile key registry write lock poisoned"))
+                .release_stroke_on_merge_failed(
+                    stroke_session_id,
+                    self.brush_buffer_store.as_ref(),
+                );
+            self.brush_execution_feedback_queue
+                .push_back(BrushExecutionMergeFeedback::MergeApplied { stroke_session_id });
+            return Ok(());
+        };
+
+        let request =
+            self.build_merge_plan_request_from_plan(stroke_session_id, tx_token, merge_plan);
+        let submission = self
+            .tile_merge_engine
+            .submit_merge_plan(request)
+            .map_err(MergeBridgeError::Tiles)?;
+
+        // Enqueue planned merge to renderer via runtime command
+        runtime
+            .execute(RuntimeCommand::EnqueuePlannedMerge {
+                receipt: submission.renderer_submit_payload.receipt,
+                gpu_merge_ops: submission.renderer_submit_payload.gpu_merge_ops,
+                meta: submission.renderer_submit_payload.meta,
+            })
+            .map_err(|e| match e {
+                RuntimeError::MergeSubmit(submit_err) => {
+                    MergeBridgeError::RendererSubmit(submit_err)
+                }
+                other => MergeBridgeError::RendererSubmit(renderer::MergeSubmitError::ZeroBudget),
+            })?;
+
         Ok(())
+    }
+
+    /// Build a stroke tile merge plan from the stroke buffer tiles.
+    fn build_stroke_tile_merge_plan(
+        &self,
+        stroke_session_id: u64,
+        layer_id: u64,
+    ) -> Option<StrokeTileMergePlan> {
+        use render_protocol::BlendMode;
+        use std::collections::{HashMap, HashSet};
+        use tiles::MergePlanTileOp;
+
+        let document = self
+            .document
+            .read()
+            .unwrap_or_else(|_| panic!("document read lock poisoned"));
+        let layer_image_handle = document
+            .leaf_image_handle(layer_id, stroke_session_id)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "resolve leaf image handle for merge plan failed: layer_id={} stroke_session_id={} error={error:?}",
+                    layer_id, stroke_session_id
+                )
+            });
+        let layer_image = document.image(layer_image_handle).unwrap_or_else(|| {
+            panic!(
+                "layer image handle missing while building merge plan: layer_id={} stroke_session_id={} image_handle={:?}",
+                layer_id, stroke_session_id, layer_image_handle
+            )
+        });
+        let layer_tiles_per_row = layer_image.tiles_per_row();
+        let layer_tiles_per_column = layer_image.tiles_per_column();
+        let mut tile_ops = Vec::new();
+        let mut op_trace_id = 0u64;
+        let mut seen_output_tiles = HashSet::new();
+        let mut stroke_tile_by_key = HashMap::new();
+        let brush_buffer_tile_keys = self
+            .brush_buffer_tile_keys
+            .read()
+            .unwrap_or_else(|_| panic!("brush buffer tile key registry read lock poisoned"));
+        brush_buffer_tile_keys.visit_tiles(stroke_session_id, |tile_coordinate, stroke_buffer_key| {
+            if tile_coordinate.tile_x < 0 || tile_coordinate.tile_y < 0 {
+                return;
+            }
+            let tile_x = u32::try_from(tile_coordinate.tile_x)
+                .expect("positive brush tile x must convert to u32");
+            let tile_y = u32::try_from(tile_coordinate.tile_y)
+                .expect("positive brush tile y must convert to u32");
+            if tile_x >= layer_tiles_per_row || tile_y >= layer_tiles_per_column {
+                return;
+            }
+            if !seen_output_tiles.insert((tile_x, tile_y)) {
+                panic!(
+                    "duplicate output tile in stroke merge plan: stroke_session_id={} layer_id={} tile=({}, {})",
+                    stroke_session_id, layer_id, tile_x, tile_y
+                );
+            }
+            if let Some((previous_tile_x, previous_tile_y)) =
+                stroke_tile_by_key.insert(stroke_buffer_key, (tile_x, tile_y))
+            {
+                if (previous_tile_x, previous_tile_y) != (tile_x, tile_y) {
+                    panic!(
+                        "duplicate stroke buffer key in merge plan: stroke_session_id={} layer_id={} key={:?} first_tile=({}, {}) duplicate_tile=({}, {})",
+                        stroke_session_id, layer_id, stroke_buffer_key, previous_tile_x, previous_tile_y, tile_x, tile_y
+                    );
+                }
+            }
+            let existing_layer_key = document.leaf_tile_key_at(layer_id, tile_x, tile_y);
+            tile_ops.push(MergePlanTileOp {
+                tile_x,
+                tile_y,
+                existing_layer_key,
+                stroke_buffer_key,
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
+                op_trace_id,
+            });
+            op_trace_id = op_trace_id
+                .checked_add(1)
+                .expect("merge op index exceeds u64");
+        });
+        if tile_ops.is_empty() {
+            return None;
+        }
+        Some(StrokeTileMergePlan { layer_id, tile_ops })
+    }
+
+    /// Build a merge plan request from a merge plan.
+    fn build_merge_plan_request_from_plan(
+        &self,
+        stroke_session_id: u64,
+        tx_token: u64,
+        merge_plan: StrokeTileMergePlan,
+    ) -> MergePlanRequest {
+        tiles::MergePlanRequest {
+            stroke_session_id,
+            tx_token,
+            program_revision: None,
+            layer_id: merge_plan.layer_id,
+            tile_ops: merge_plan.tile_ops,
+        }
     }
 }
 

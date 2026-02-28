@@ -87,8 +87,12 @@ impl GpuRuntime {
                 crate::push_view_state(&self.view_sender, &view_transform, self.surface_size);
                 Ok(RuntimeReceipt::Resized)
             }
-            
-            RuntimeCommand::ResizeHandshake { width, height, ack_sender } => {
+
+            RuntimeCommand::ResizeHandshake {
+                width,
+                height,
+                ack_sender,
+            } => {
                 // Handshake resize (for Phase 4 initialization)
                 self.renderer.resize(width, height);
                 self.surface_size = PhysicalSize::new(width, height);
@@ -97,22 +101,24 @@ impl GpuRuntime {
                 let _ = ack_sender.send(Ok(()));
                 Ok(RuntimeReceipt::ResizeHandshakeAck)
             }
-            
+
             RuntimeCommand::Init { ack_sender } => {
                 // Handshake init (for Phase 4 startup)
                 // For now, just acknowledge
                 let _ = ack_sender.send(Ok(()));
                 Ok(RuntimeReceipt::InitComplete)
             }
-            
+
             RuntimeCommand::Shutdown { reason } => {
                 // Shutdown command
                 eprintln!("[shutdown] {}", reason);
                 Ok(RuntimeReceipt::ShutdownAck { reason })
             }
 
-            RuntimeCommand::BindRenderTree { .. } => {
-                // TODO: Implement when migrating bind logic
+            RuntimeCommand::BindRenderTree { snapshot, .. } => {
+                self.view_sender
+                    .send(render_protocol::RenderOp::BindRenderTree(snapshot))
+                    .map_err(|_| RuntimeError::EngineThreadDisconnected)?;
                 Ok(RuntimeReceipt::RenderTreeBound)
             }
 
@@ -135,11 +141,12 @@ impl GpuRuntime {
                 Ok(RuntimeReceipt::BrushCommandEnqueued)
             }
 
-            RuntimeCommand::PollMergeNotices { frame_id: _ } => {
-                // TODO: Implement merge polling when migrating merge logic
-                Ok(RuntimeReceipt::MergeNotices {
-                    notices: Vec::new(),
-                })
+            RuntimeCommand::PollMergeNotices { frame_id } => {
+                let notices = self
+                    .renderer
+                    .poll_completion_notices(frame_id)
+                    .map_err(RuntimeError::from)?;
+                Ok(RuntimeReceipt::MergeNotices { notices })
             }
 
             RuntimeCommand::ProcessMergeCompletions { frame_id } => {
@@ -172,6 +179,23 @@ impl GpuRuntime {
                     submission_receipt_ids: submission_report.receipt_ids,
                     renderer_notices: protocol_notices,
                 })
+            }
+
+            RuntimeCommand::AckMergeResults { notices } => {
+                for notice in notices {
+                    self.renderer.ack_merge_result(notice)?;
+                }
+                Ok(RuntimeReceipt::MergeResultsAcknowledged)
+            }
+
+            RuntimeCommand::EnqueuePlannedMerge {
+                receipt,
+                gpu_merge_ops,
+                meta,
+            } => {
+                self.renderer
+                    .enqueue_planned_merge(receipt, gpu_merge_ops, meta)?;
+                Ok(RuntimeReceipt::PlannedMergeEnqueued)
             }
         }
     }

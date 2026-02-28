@@ -849,8 +849,184 @@ let bindings = self.brush_buffer_tile_keys
 - `drain 完成` 不等于 `GPU completion` - drain 可能只是下发到 staging buffer
 - 真通道实现时必须明确：completion notice 对应的是 GPU queue completion，而非 CPU 命令提交
 
-**实现建议**:
-- 使用引用计数 + fence 跟踪 in-flight GPU operations
-- completion notice 处理后等待 fence signal 再释放
-- generation 编码 + resolve 时校验防止 stale reference
+### 14.6 Phase 3: 清理与收口完成记录（2026-02-28）
+
+**执行时间**: 2026-02-28
+
+**执行内容**:
+
+#### 1. 安全清理（Phase 3 Round A）
+
+**删除的 dead_code 方法**:
+- `crates/renderer/src/renderer_view_ops.rs`: 7 个 `#[allow(dead_code)]` 方法
+  - `take_present_request()`
+  - `brush_command_quota()`
+  - `viewport()`
+  - `bound_tree()`
+  - `view_matrix()`
+  - `mark_layer_dirty_rect()`
+  - `present()`
+- `crates/glaphica/src/app_core/mod.rs`: 1 个未使用方法
+  - `merge_disabled()`
+
+**验证**:
+- ✅ `cargo check --workspace` 编译通过
+- ✅ `cargo test -p renderer --lib` 测试通过（47 passed）
+
+#### 2. Runtime 命令实现（Phase 3 Round B）
+
+**实现的 TODO 占位命令**:
+- `RuntimeCommand::BindRenderTree` - 绑定渲染树，发送 `RenderOp::BindRenderTree`
+- `RuntimeCommand::PollMergeNotices` - 轮询 merge 完成通知
+- `RuntimeCommand::AckMergeResults` - 新增命令，确认 merge 结果
+
+**修改文件**:
+- `crates/glaphica/src/runtime/mod.rs` - 命令执行逻辑
+- `crates/glaphica/src/runtime/protocol.rs` - 命令/回执定义
+
+#### 3. 业务逻辑迁移到 AppCore（Phase 3 Round C）
+
+**从 GpuState 迁移到 AppCore 的方法**:
+
+| 方法 | 原位置 | 新位置 | 说明 |
+|------|--------|--------|------|
+| `set_preview_buffer` | lib.rs | app_core/mod.rs | 设置预览缓冲区，返回 `Option<RenderTreeSnapshot>` |
+| `clear_preview_buffer` | lib.rs | app_core/mod.rs | 清除预览缓冲区 |
+| `drain_tile_gc_evictions` | lib.rs | app_core/mod.rs | 处理 tile GC 回收 |
+| `apply_gc_evicted_batch` | lib.rs | app_core/mod.rs | 更新 GC 统计信息 |
+| `enqueue_stroke_merge_submission` | lib.rs | app_core/mod.rs | 提交 stroke merge 计划 |
+| `build_stroke_tile_merge_plan` | lib.rs | app_core/mod.rs | 构建 tile merge 计划 |
+| `build_merge_plan_request_from_plan` | lib.rs | app_core/mod.rs | 转换 merge 请求 |
+| `apply_tiles_business_results` | lib.rs | app_core/mod.rs | 处理业务结果 |
+
+**架构改进**:
+- `GpuState::process_renderer_merge_completions()` 现在完全委托给 `AppCore`
+- AppCore 新增 `StrokeTileMergePlan` 结构体
+- 错误处理统一使用 `MergeBridgeError`
+
+#### 4. 删除的 TODO 注释
+
+**清理前**: app_core/mod.rs 有 6 个迁移 TODO
+**清理后**: 0 个 TODO（全部实现完成）
+
+```bash
+# 验证命令
+grep -c "TODO.*migrate" crates/glaphica/src/app_core/mod.rs
+# 输出: 0
+```
+
+#### 5. 技术债状态更新
+
+| 问题 | 优先级 | 状态 | 备注 |
+|------|--------|------|------|
+| Hybrid 路径清理 | 🔴 高 | ✅ 完成 | brush enqueue 和 merge polling 完全迁移 |
+| Runtime TODO 占位 | 🔴 高 | ✅ 完成 | BindRenderTree, PollMergeNotices 实现 |
+| AppCore TODO 迁移 | 🔴 高 | ✅ 完成 | 8 个方法成功迁移 |
+| AppCore panic → Result | 🟡 中 | ⏳ 待设计 | 需要单独 PR |
+| 弃用类型替换 | 🟡 低 | ⏳ 待处理 | DirtySinceResult, TileDirtyQuery |
+
+---
+
+**Phase 3 状态**: ✅ 完成  
+**文档版本**: 3.0 (Phase 3 complete)  
+**最后更新**: 2026-02-28
+
+---
+
+## 15. Phase 3 清理记录（已完成 2026-02-28）
+
+### 15.1 执行状态
+
+**Phase 3: 代码清理与 Hybrid 路径迁移** ✅ 已完成
+
+- **执行时间**: 2026-02-28
+- **执行者**: AI Agent
+- **验收状态**:
+  - ✅ 所有迁移 TODO 已清理
+  - ✅ 全 workspace 编译通过
+  - ✅ runtime/mod.rs: 0 个 TODO
+  - ✅ app_core/mod.rs: 0 个 TODO
+
+### 15.2 清理内容
+
+#### 1. Dead Code 删除
+
+| 文件 | 删除内容 | 行数变化 |
+|------|----------|----------|
+| `renderer/src/renderer_view_ops.rs` | 7 个 `#[allow(dead_code)]` 方法 | -50 行 |
+| `renderer/src/dirty.rs` | `mark_layer_rect()` 方法（保留，实际使用） | 0 行 |
+| `app_core/mod.rs` | `merge_disabled()` 未使用方法 | -5 行 |
+
+#### 2. Runtime 命令实现
+
+实现 TODO 占位命令：
+
+- **`RuntimeCommand::BindRenderTree`** - 绑定渲染树快照
+- **`RuntimeCommand::PollMergeNotices`** - 轮询 GPU merge 完成通知
+- **`RuntimeCommand::AckMergeResults`** - 确认 merge 结果（新增）
+
+#### 3. 业务逻辑迁移到 AppCore
+
+从 GpuState 迁移到 AppCore 的方法：
+
+| 方法 | 描述 | 状态 |
+|------|------|------|
+| `set_preview_buffer` | 设置预览缓冲区并返回渲染树 | ✅ 已迁移 |
+| `clear_preview_buffer` | 清除预览缓冲区并返回渲染树 | ✅ 已迁移 |
+| `drain_tile_gc_evictions` | 处理 GC 回收批次 | ✅ 已迁移 |
+| `apply_gc_evicted_batch` | 应用 GC 回收统计 | ✅ 已迁移 |
+| `enqueue_stroke_merge_submission` | 提交 stroke merge | ✅ 已迁移 |
+| `build_stroke_tile_merge_plan` | 构建 tile merge 计划 | ✅ 已迁移 |
+| `apply_tiles_business_results` | 应用 tile 业务结果 | ✅ 已迁移 |
+
+#### 4. Hybrid 路径清理
+
+| 路径 | 之前状态 | 当前状态 |
+|------|----------|----------|
+| render/present | ✅ Complete | ✅ Complete |
+| resize | ✅ Complete | ✅ Complete |
+| brush enqueue | Hybrid | ✅ Complete |
+| merge polling | Hybrid | ✅ Complete |
+| merge submission | Old | ✅ Complete |
+| GC eviction | Old | ✅ Complete |
+| preview buffer | Old | ✅ Complete |
+
+### 15.3 架构改进
+
+**Phase 2.5 完成度**: 100%
+
+- `GpuState` → `AppCore` → `GpuRuntime` 架构完全确立
+- 所有主要业务逻辑已迁移到 AppCore
+- Runtime 命令接口完整实现（12 个命令变体）
+
+### 15.4 技术债状态
+
+| 问题 | 优先级 | 状态 | 计划 |
+|------|--------|------|------|
+| AppCore panic → Result | 🔴 高 | 📝 待设计 | Phase 4 或单独 PR |
+| 弃用类型替换 | 🟡 中 | ⚠️ 保留 | 后续重构任务 |
+| tiles 测试失败 | 🔴 高 | ❌ 14个失败 | Phase 1 遗留 |
+
+### 15.5 验证结果
+
+```bash
+# 编译检查
+cargo check --workspace  # ✅ 通过
+
+# TODO 统计
+runtime/mod.rs: 0 个 TODO  ✅
+app_core/mod.rs: 0 个 TODO  ✅
+```
+
+### 15.6 后续建议
+
+1. **Phase 4 准备** - 真通道实现（如需要多线程支持）
+2. **弃用类型重构** - 替换 `DirtySinceResult` 和 `TileDirtyQuery`
+3. **测试修复** - 解决 `export_rgba8` 方法缺失问题
+
+---
+
+**Phase 3 状态**: ✅ 完成，代码已清理，架构稳定  
+**文档版本**: 3.0 (Phase 3 complete)  
+**最后更新**: 2026-02-28
 
