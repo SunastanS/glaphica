@@ -262,6 +262,33 @@ impl MergeItem for RuntimeReceipt {
     }
 }
 
+/// Runtime error types for command-level failures.
+/// All errors are fatal (fail fast), abstract wgpu details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeError {
+    /// Command type not recognized
+    InvalidCommand { command_type: String },
+    /// Command execution failed
+    CommandFailed { error: String },
+    /// Channel closed unexpectedly
+    ChannelClosed,
+    /// Operation timed out
+    Timeout { operation: String },
+}
+
+impl MergeItem for RuntimeError {
+    type MergeKey = u64;
+
+    fn merge_key(&self) -> Self::MergeKey {
+        match self {
+            RuntimeError::InvalidCommand { command_type } => command_type.len() as u64,
+            RuntimeError::CommandFailed { error } => error.len() as u64,
+            RuntimeError::ChannelClosed => 0,
+            RuntimeError::Timeout { operation } => operation.len() as u64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -448,5 +475,48 @@ mod tests {
         let incoming = RuntimeReceipt::ResourceAllocated { id: 2 };
         RuntimeReceipt::merge_duplicate(&mut existing, incoming);
         assert_eq!(existing, RuntimeReceipt::ResourceAllocated { id: 2 });
+    }
+
+    #[test]
+    fn runtime_error_has_required_traits_and_variants() {
+        use super::{MergeItem, RuntimeError};
+
+        // Test Debug, Clone, PartialEq, Eq
+        let error1 = RuntimeError::InvalidCommand {
+            command_type: "test".to_string(),
+        };
+        let error2 = error1.clone();
+        assert_eq!(error1, error2);
+
+        let error3 = RuntimeError::CommandFailed {
+            error: "failed".to_string(),
+        };
+        assert_ne!(error1, error3);
+
+        let error4 = RuntimeError::ChannelClosed;
+        let error5 = RuntimeError::Timeout {
+            operation: "wait".to_string(),
+        };
+
+        // Test merge_key implementation
+        assert_eq!(error1.merge_key(), 4); // "test".len() as u64
+        assert_eq!(error3.merge_key(), 6); // "failed".len() as u64
+        assert_eq!(error4.merge_key(), 0);
+        assert_eq!(error5.merge_key(), 4); // "wait".len() as u64
+
+        // Test merge_duplicate replaces with newer
+        let mut existing = RuntimeError::InvalidCommand {
+            command_type: "old".to_string(),
+        };
+        let incoming = RuntimeError::InvalidCommand {
+            command_type: "new".to_string(),
+        };
+        RuntimeError::merge_duplicate(&mut existing, incoming);
+        assert_eq!(
+            existing,
+            RuntimeError::InvalidCommand {
+                command_type: "new".to_string()
+            }
+        );
     }
 }
