@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use model::TILE_IMAGE;
 use render_protocol::{BlendMode, ImageSource};
-use tiles::{GroupTileAtlasStore, TileImage, TileKey};
+use tiles::{GroupTileAtlasStore, TileImageOld, TileKey};
 
 use crate::{
     CachedLeafDraw, DirtyTileMask, RenderDataResolver, TileCoord, TileDrawInstance, TileInstanceGpu,
@@ -107,7 +107,7 @@ pub(crate) fn build_leaf_tile_draw_instances_for_tiles(
 }
 
 pub(crate) fn build_group_tile_draw_instances(
-    image: &TileImage,
+    image: &TileImageOld,
     blend: BlendMode,
     tile_store: &GroupTileAtlasStore,
 ) -> Vec<TileDrawInstance> {

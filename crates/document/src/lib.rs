@@ -7,10 +7,10 @@ use render_protocol::{
     BlendMode, ImageHandle, LayerId, RenderNodeSnapshot, RenderTreeSnapshot, StrokeSessionId,
 };
 use slotmap::SlotMap;
-use tiles::{DirtySinceResult, TileDirtyBitset, TileDirtyQuery, TileImage, TileKey};
+use tiles::{DirtySinceResult, TileDirtyBitset, TileDirtyQuery, TileImageOld, TileKey};
 
 #[cfg(test)]
-use tiles::{apply_tile_key_mappings, TileKeyMapping};
+use tiles::{TileKeyMapping, apply_tile_key_mappings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayerNodeId(u64);
@@ -21,7 +21,7 @@ impl LayerNodeId {
 
 pub struct Document {
     layer_tree: LayerTreeNode,
-    images: SlotMap<ImageHandle, Arc<TileImage>>,
+    images: SlotMap<ImageHandle, Arc<TileImageOld>>,
     size_x: u32,
     size_y: u32,
     revision: u64,
@@ -370,7 +370,7 @@ impl Document {
         }
     }
 
-    pub fn image(&self, image_handle: ImageHandle) -> Option<Arc<TileImage>> {
+    pub fn image(&self, image_handle: ImageHandle) -> Option<Arc<TileImageOld>> {
         self.images.get(image_handle).cloned()
     }
 
@@ -400,7 +400,7 @@ impl Document {
         &mut self,
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
-        image: TileImage,
+        image: TileImageOld,
         dirty_tiles: &[TileCoordinate],
         full_layer_dirty: bool,
     ) -> Result<MergeCommitSummary, DocumentMergeError> {
@@ -549,7 +549,11 @@ impl Document {
         id
     }
 
-    pub fn new_layer_root_with_image(&mut self, image: TileImage, blend: BlendMode) -> LayerNodeId {
+    pub fn new_layer_root_with_image(
+        &mut self,
+        image: TileImageOld,
+        blend: BlendMode,
+    ) -> LayerNodeId {
         let id = self.alloc_layer_id();
         self.layer_versions.insert(id.0, 0);
         self.layer_dirty_history.insert(
@@ -694,7 +698,7 @@ impl Document {
 
     fn new_empty_leaf(&mut self) -> (LayerNodeId, LayerTreeNode) {
         let id = self.alloc_layer_id();
-        let image = TileImage::new(self.size_x, self.size_y)
+        let image = TileImageOld::new(self.size_x, self.size_y)
             .unwrap_or_else(|error| panic!("failed to create empty layer image: {error:?}"));
         self.layer_versions.insert(id.0, 0);
         self.layer_dirty_history.insert(
@@ -1175,7 +1179,7 @@ mod tests {
     #[test]
     fn new_layer_root_with_image_uses_provided_image_and_blend() {
         let mut document = Document::new(17, 23);
-        let image = TileImage::new(9, 11).expect("new image");
+        let image = TileImageOld::new(9, 11).expect("new image");
         let id = document.new_layer_root_with_image(image, BlendMode::Multiply);
 
         let node = &document.root()[0];

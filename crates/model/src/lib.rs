@@ -80,7 +80,7 @@ pub trait EmptyKey: Copy + PartialEq {
 // and abandon the origin VirtulImage
 // This struct is named TileImageNew currently
 // and will be changed to TileImage manually after refactoring
-pub struct TileImageNew<K> {
+pub struct TileImage<K> {
     // tiles.len() == layout.max_tiles() == dirty_bits.len()
     layout: ImageLayout,
     tiles: Box<[K]>,
@@ -98,7 +98,7 @@ impl From<ImageLayoutError> for TileImageError {
     }
 }
 
-impl<K: Copy + EmptyKey> TileImageNew<K> {
+impl<K: Copy + EmptyKey> TileImage<K> {
     pub fn new(layout: ImageLayout) -> Self {
         let max_tiles = layout.max_tiles();
         Self {

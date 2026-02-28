@@ -10,12 +10,12 @@ use model::TILE_IMAGE;
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TileImage, TileKey, TILE_STRIDE};
+use tiles::{TILE_STRIDE, TileImageOld, TileKey};
 
 use crate::{
-    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
-    GroupTargetCacheEntry, LeafDrawCacheKey, Renderer, TileCompositeSpace, TileCoord,
-    TileDrawInstance, TileInstanceGpu, ViewportMode,
+    BlendMode, DrawPassContext, GroupTargetCacheEntry, LeafDrawCacheKey, Renderer,
+    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance,
 };
 
 static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -292,7 +292,7 @@ impl Renderer {
         &self,
         cache_extent: wgpu::Extent3d,
     ) -> GroupTargetCacheEntry {
-        let image = TileImage::new(cache_extent.width, cache_extent.height)
+        let image = TileImageOld::new(cache_extent.width, cache_extent.height)
             .unwrap_or_else(|error| panic!("create group virtual image: {error:?}"));
         GroupTargetCacheEntry {
             image,
@@ -313,7 +313,7 @@ impl Renderer {
         self.release_group_cache_entry(entry);
         (
             GroupTargetCacheEntry {
-                image: TileImage::new(cache_extent.width, cache_extent.height)
+                image: TileImageOld::new(cache_extent.width, cache_extent.height)
                     .unwrap_or_else(|error| panic!("resize group virtual image: {error:?}")),
                 draw_instances: Vec::new(),
                 blend: BlendMode::Normal,

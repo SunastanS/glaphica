@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     ImageIngestError, TILE_IMAGE, TileAddress, TileAllocError, TileAtlasCreateError,
-    TileAtlasLayout, TileGpuDrainError, TileImage, TileIngestError, TileKey, TileSetError,
+    TileAtlasLayout, TileGpuDrainError, TileImageOld, TileIngestError, TileKey, TileSetError,
     TileSetHandle, VirtualImage,
 };
 
@@ -344,7 +344,7 @@ impl TileAtlasStore {
         size_y: u32,
         bytes: &[u8],
         bytes_per_row: u32,
-    ) -> Result<TileImage, ImageIngestError> {
+    ) -> Result<TileImageOld, ImageIngestError> {
         let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
         if !self.usage().contains_copy_dst() {
             return Err(ImageIngestError::from(TileIngestError::MissingCopyDstUsage));
@@ -386,7 +386,7 @@ impl TileAtlasStore {
             }
         }
 
-        Ok(TileImage::from_virtual(image))
+        Ok(TileImageOld::from_virtual(image))
     }
 
     fn ingest_subrect_rgba8_as_full_tile(

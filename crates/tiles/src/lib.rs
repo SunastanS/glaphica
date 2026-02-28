@@ -4,7 +4,7 @@ use std::fmt;
 use bitvec::prelude::{BitVec, Lsb0};
 use render_protocol::BufferTileCoordinate;
 
-pub use model::{TILE_STRIDE, TILE_GUTTER, TILE_IMAGE, TILE_IMAGE_ORIGIN};
+pub use model::{TILE_GUTTER, TILE_IMAGE, TILE_IMAGE_ORIGIN, TILE_STRIDE};
 
 pub const DEFAULT_MAX_LAYERS: u32 = 4;
 pub const TILES_PER_ROW: u32 = 32;
@@ -631,7 +631,7 @@ impl TileDirtyBitset {
 }
 
 #[derive(Debug, Clone)]
-pub struct TileImage {
+pub struct TileImageOld {
     image: VirtualImage<TileKey>,
     versions: Vec<u32>,
 }
@@ -700,7 +700,7 @@ impl fmt::Display for TileImageApplyError {
 
 impl std::error::Error for TileImageApplyError {}
 
-impl TileImage {
+impl TileImageOld {
     pub fn new(size_x: u32, size_y: u32) -> Result<Self, VirtualImageError> {
         let tiles_per_row = size_x.div_ceil(TILE_IMAGE);
         let tiles_per_column = size_y.div_ceil(TILE_IMAGE);
@@ -821,7 +821,7 @@ impl TileImage {
 
 #[cfg(feature = "atlas-gpu")]
 pub fn apply_tile_key_mappings(
-    image: &mut TileImage,
+    image: &mut TileImageOld,
     mappings: &[TileKeyMapping],
 ) -> Result<(), TileImageApplyError> {
     let mut seen = HashSet::with_capacity(mappings.len());
