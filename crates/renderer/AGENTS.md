@@ -35,10 +35,10 @@ Be extremely cautious with CPU→GPU ordering:
 - If correctness is uncertain, prefer the safe (possibly slower) ordering first, then optimize.
 
 Reference docs to read when touching GPU submission or merge:
-- `docs/Instructions/debug_playbook.md`
-- `docs/Instructions/wgpu.md`
-- `crates/renderer/DESIGN.md`
-- `crates/renderer/docs/merge_ack_integration.md`
+- `../../docs/guides/debug-playbook.md`
+- `../../docs/guides/wgpu-guide.md`
+- `DESIGN.md`
+- `docs/merge_ack_integration.md`
 
 ## Command-Queue Time Boundaries
 

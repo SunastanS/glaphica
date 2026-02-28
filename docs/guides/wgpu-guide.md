@@ -1,7 +1,7 @@
 # wgpu / WGSL 排查记录
 
 另见：
-- `docs/Instructions/debug_playbook.md`（更偏“渲染树/赃区/缓存/提交语义”的综合排查流程）
+- [debug-playbook.md](debug-playbook.md)（更偏”渲染树/赃区/缓存/提交语义”的综合排查流程）
 
 ## 案例：WGSL 保留字导致管线无效
 

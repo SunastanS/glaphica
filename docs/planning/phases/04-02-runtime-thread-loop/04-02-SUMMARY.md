@@ -128,6 +128,6 @@ cargo build -p glaphica --features true_threading
 
 ## Links
 
-- Plan: `.planning/phases/04-02-runtime-thread-loop/04-02-PLAN.md`
-- Research: `.planning/phases/4.2-runtime-thread-loop/4.2-RESEARCH.md`
+- Plan: `docs/planning/phases/04-02-runtime-thread-loop/04-02-PLAN.md`
+- Research: `docs/planning/phases/4.2-runtime-thread-loop/4.2-RESEARCH.md`
 - Implementation: `crates/glaphica/src/runtime/execution.rs`

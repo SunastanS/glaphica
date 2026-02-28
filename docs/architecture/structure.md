@@ -79,12 +79,13 @@ glaphica/
 │   │   └── Cargo.toml
 │   └── AGENTS.md               # Per-crate agent instructions
 ├── docs/
-│   ├── Instructions/           # Developer guides
-│   │   ├── coding_guidelines.md
-│   │   ├── debug_playbook.md
-│   │   └── wgpu.md
-│   ├── Wiki/                   # Documentation wiki
-│   └── archive/                # Archived docs
+│   ├── guides/               # Developer guides
+│   │   ├── coding-guidelines.md
+│   │   ├── debug-playbook.md
+│   │   └── wgpu-guide.md
+│   ├── architecture/         # Architecture documentation
+│   ├── planning/             # Project planning docs
+│   └── archive/              # Archived docs
 ├── tests/                      # Integration test resources
 │   ├── resources/
 │   └── records/
@@ -249,9 +250,9 @@ glaphica/
 - Contains: Atlas layout, merge engine, execution helpers
 - Note: Most types re-exported from `lib.rs`
 
-**`docs/Instructions/`:**
+**`docs/guides/`:**
 - Purpose: Developer guides for debugging, wgpu, coding standards
-- Contains: `debug_playbook.md`, `wgpu.md`, `coding_guidelines.md`
+- Contains: `debug-playbook.md`, `wgpu-guide.md`, `coding-guidelines.md`
 - Read before: Making significant changes
 
 **`tests/resources/`, `tests/records/`:**

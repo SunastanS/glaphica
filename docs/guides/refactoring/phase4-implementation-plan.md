@@ -849,8 +849,8 @@ fn test_waterline_monotonicity() {
 
 - `crates/protocol/src/lib.rs` - Protocol definitions
 - `crates/engine/src/lib.rs` - Channel factory
-- `docs/Instructions/tiles_model_runtime_refactor_guide.md` - Overall refactor plan
-- `docs/Instructions/app_core_error_design.md` - Error handling design
+- [`tiles-model-runtime.md`](./tiles-model-runtime.md) - Overall refactor plan
+- [`app-core-error-design.md`](./app-core-error-design.md) - Error handling design
 
 ---
 

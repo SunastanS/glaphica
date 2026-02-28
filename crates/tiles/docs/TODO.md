@@ -205,7 +205,7 @@ pub use tiles_gpu::*;
 
 ## 附录：当前决策
 
-根据 `docs/Instructions/tiles_model_runtime_refactor_guide.md` 的决策：
+根据 `docs/guides/refactoring/tiles-model-runtime.md` 的决策：
 
 - **TileKey 编码方案**: 已决策采用编码 key（backend + generation + slot），但尚未集成到主链路
 - **拆分计划状态**: 暂未启动，当前优先级较低

@@ -15,7 +15,7 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-02-28)
+See: docs/planning/project.md (updated 2026-02-28)
 
 **Core value:** Achieve clean separation between business logic (AppCore) and GPU execution (GpuRuntime) through message-passing channels, using a two-thread architecture:
 - **Main thread**: GPU runtime (`GpuRuntime`) - must remain lightweight

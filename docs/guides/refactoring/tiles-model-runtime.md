@@ -237,7 +237,7 @@
 
 1. 删除 `tiles` 中过渡 alias 和重复模型。
 2. 文档更新：
-   - `docs/Instructions/debug_playbook.md`
+   - [`debug-playbook.md`](../debug-playbook.md)
    - `crates/tiles/docs/api.md`
 3. 统一对外入口，避免多路径初始化 atlas/store。
 

@@ -108,5 +108,5 @@ None - no external service configuration required.
 
 ## Self-Check: PASSED
 
-- SUMMARY.md exists at .planning/phases/04-01-channel-infrastructure/
+- SUMMARY.md exists at docs/planning/phases/04-01-channel-infrastructure/
 - All 3 task commits verified in git history

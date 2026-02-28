@@ -627,7 +627,7 @@ mod tests {
 
 ## 9. References
 
-- `docs/Instructions/coding_guidelines.md` - Error propagation guidelines
+- [`coding-guidelines.md`](./coding-guidelines.md) - Error propagation guidelines
 - `crates/renderer/AGENTS.md` - Renderer error handling patterns
 - `crates/renderer/docs/merge_ack_integration.md` - Merge error flow
 - Phase 2 Review Notes - Panic reduction requirements

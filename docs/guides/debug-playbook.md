@@ -3,8 +3,8 @@
 这份文档把近期关于 brush merge、live preview、render tree、tile atlas 的排查经验沉淀成一套可重复的流程与工程规则，目的是让后续类似问题不需要“重走一遍对话”。
 
 本项目已有更细的复盘记录：
-- `docs/debug/brush_merge_duplicate_tiles_2026-02-23.md`
-- `docs/Instructions/wgpu.md`
+- [brush-merge-duplicate-tiles.md](debug/brush-merge-duplicate-tiles.md)
+- [wgpu-guide.md](wgpu-guide.md)
 
 ## 0. 第一原则：先增强可观测性
 
@@ -81,7 +81,7 @@
 - 在一个 `CommandEncoder` 里编码多个 pass，然后只 submit 一次时，如果你在 submit 前多次覆写同一段 buffer，多个 pass 很可能都会读到“最后一次写入”的内容。
 
 典型症状、验证与修复见：
-- `docs/Instructions/wgpu.md`
+- [wgpu-guide.md](wgpu-guide.md)
 
 工程规则（强制）：
 - 禁止：单次 submit 内，多次 `queue.write_buffer(buffer, offset=0, ...)` 覆盖同一段内存，同时 encoder 内存在多个读取该 buffer 的 pass。
