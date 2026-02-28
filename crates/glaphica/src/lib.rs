@@ -32,8 +32,9 @@ use tiles::{
     GenericTileAtlasConfig, MergeAuditRecord, MergePlanRequest, MergePlanTileOp, MergeTileStore,
     TileAddress, TileAtlasFormat, TileAtlasStore, TileAtlasUsage,
     TileImageApplyError, TileKey, TileMergeCompletionNoticeId, TileMergeEngine, TileMergeError,
-    TilesBusinessResult, apply_tile_key_mappings,
+    TilesBusinessResult,
 };
+use model::EmptyKey;
 
 use view::ViewTransform;
  // Used in tests
@@ -80,7 +81,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
             #[cfg(debug_assertions)]
             {
                 if let Some((existing_tile_x, existing_tile_y)) =
-                    tile_coord_by_key.get(&tile_key).copied()
+                    tile_coord_by_key.get(tile_key).copied()
                 {
                     if (existing_tile_x, existing_tile_y) != (tile_x, tile_y) {
                         panic!(
@@ -94,9 +95,9 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                         );
                     }
                 } else {
-                    tile_coord_by_key.insert(tile_key, (tile_x, tile_y));
+                    tile_coord_by_key.insert(*tile_key, (tile_x, tile_y));
                 }
-                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
+                let tile_address = self.atlas_store.resolve(*tile_key).unwrap_or_else(|| {
                     panic!(
                         "image tile key unresolved in debug address uniqueness check: image_handle={:?} tile=({}, {}) key={:?}",
                         image_handle,
@@ -108,7 +109,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 if let Some((existing_key, existing_tile_x, existing_tile_y)) =
                     resolved_address_to_tile.get(&tile_address).copied()
                 {
-                    if existing_key != tile_key {
+                    if existing_key != *tile_key {
                         panic!(
                             "image tile keys resolved to duplicated atlas address: image_handle={:?} first_tile=({}, {}) first_key={:?} second_tile=({}, {}) second_key={:?} address={:?}",
                             image_handle,
@@ -122,10 +123,10 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                         );
                     }
                 } else {
-                    resolved_address_to_tile.insert(tile_address, (tile_key, tile_x, tile_y));
+                    resolved_address_to_tile.insert(tile_address, (*tile_key, tile_x, tile_y));
                 }
             }
-            visitor(tile_x, tile_y, tile_key);
+            visitor(tile_x, tile_y, *tile_key);
         }
     }
 
@@ -234,11 +235,11 @@ impl RenderDataResolver for DocumentRenderDataResolver {
 
         for (tile_x, tile_y) in tile_coords {
             let tile_key = image
-                .get_tile(*tile_x, *tile_y)
+                .get_tile_at(*tile_x, *tile_y)
                 .unwrap_or_else(|error| panic!("tile coordinate lookup failed: {error:?}"));
-            let Some(tile_key) = tile_key else {
+            if EmptyKey::is_empty(*tile_key) {
                 continue;
-            };
+            }
             #[cfg(debug_assertions)]
             {
                 if let Some((existing_tile_x, existing_tile_y)) =
@@ -256,9 +257,9 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                         );
                     }
                 } else {
-                    tile_coord_by_key.insert(tile_key, (*tile_x, *tile_y));
+                    tile_coord_by_key.insert(*tile_key, (*tile_x, *tile_y));
                 }
-                let tile_address = self.atlas_store.resolve(tile_key).unwrap_or_else(|| {
+                let tile_address = self.atlas_store.resolve(*tile_key).unwrap_or_else(|| {
                     panic!(
                         "image tile key unresolved in debug address uniqueness check for coords: image_handle={:?} tile=({}, {}) key={:?}",
                         image_handle,
@@ -270,7 +271,7 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                 if let Some((existing_key, existing_tile_x, existing_tile_y)) =
                     resolved_address_to_tile.get(&tile_address).copied()
                 {
-                    if existing_key != tile_key {
+                    if existing_key != *tile_key {
                         panic!(
                             "image tile keys resolved to duplicated atlas address for coords: image_handle={:?} first_tile=({}, {}) first_key={:?} second_tile=({}, {}) second_key={:?} address={:?}",
                             image_handle,
@@ -284,10 +285,10 @@ impl RenderDataResolver for DocumentRenderDataResolver {
                         );
                     }
                 } else {
-                    resolved_address_to_tile.insert(tile_address, (tile_key, *tile_x, *tile_y));
+                    resolved_address_to_tile.insert(tile_address, (*tile_key, *tile_x, *tile_y));
                 }
             }
-            visitor(*tile_x, *tile_y, tile_key);
+            visitor(*tile_x, *tile_y, *tile_key);
         }
     }
 
@@ -1408,8 +1409,17 @@ impl GpuState {
                                     },
                                 ))?;
                         let mut updated_image = (*existing_image).clone();
-                        apply_tile_key_mappings(&mut updated_image, new_key_mappings)
-                            .map_err(MergeBridgeError::TileImageApply)?;
+                        // Apply tile key mappings from brush execution
+                        for mapping in new_key_mappings {
+                            updated_image
+                                .set_tile_at(mapping.tile_x, mapping.tile_y, mapping.new_key)
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "failed to apply tile key mapping at ({}, {}): {:?}",
+                                        mapping.tile_x, mapping.tile_y, error
+                                    )
+                                });
+                        }
                         let layer_dirty_tiles: Vec<TileCoordinate> = dirty_tiles
                             .iter()
                             .map(|(tile_x, tile_y)| TileCoordinate {
@@ -1438,7 +1448,7 @@ impl GpuState {
                             ),
                         )?;
                         for (tile_x, tile_y, tile_key) in committed_image.iter_tiles() {
-                            if atlas_store.resolve(tile_key).is_none() {
+                            if atlas_store.resolve(*tile_key).is_none() {
                                 panic!(
                                     "merge committed unresolved layer tile key: layer_id={} stroke_session_id={} image_handle={:?} tile=({}, {}) key={:?}",
                                     layer_id,
@@ -1732,7 +1742,7 @@ mod phase4_threaded_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::TILE_IMAGE;
+    use model::{EmptyKey, TILE_IMAGE};
 
     fn snapshot_with_source(revision: u64, source: ImageSource) -> RenderTreeSnapshot {
         RenderTreeSnapshot {

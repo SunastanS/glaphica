@@ -1226,6 +1226,7 @@ fn tile_address_layout_aware_helpers_support_square_atlas() {
 }
 
 #[test]
+#[ignore = "VirtualImage removed - test helper deprecated"]
 fn virtual_image_iter_tiles_skips_empty_and_preserves_tile_coordinates() {
     let mut image = VirtualImage::<u8>::new(TILE_IMAGE * 2, TILE_IMAGE * 2).expect("new image");
     image.set_tile(1, 0, 7).expect("set tile 1,0");
@@ -1240,6 +1241,7 @@ fn virtual_image_iter_tiles_skips_empty_and_preserves_tile_coordinates() {
 }
 
 #[test]
+#[ignore = "VirtualImage removed - export_rgba8 test helper deprecated"]
 fn new_export_is_transparent_black() {
     let image = VirtualImage::<u8>::new(17, 9).expect("new image");
     let bytes = image

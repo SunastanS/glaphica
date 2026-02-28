@@ -21,6 +21,10 @@ mod tile_key_encoding;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey(u64);
 
+impl model::EmptyKey for TileKey {
+    const EMPTY: Self = TileKey(0);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileSetId(u64);
 
@@ -255,13 +259,21 @@ pub enum ImageIngestError {
     BufferTooShort,
     RectOutOfBounds,
     NonTileAligned,
-    Virtual(VirtualImageError),
+    Layout(model::ImageLayoutError),
     Tile(TileIngestError),
 }
 
-impl From<VirtualImageError> for ImageIngestError {
-    fn from(value: VirtualImageError) -> Self {
-        Self::Virtual(value)
+impl From<model::ImageLayoutError> for ImageIngestError {
+    fn from(value: model::ImageLayoutError) -> Self {
+        Self::Layout(value)
+    }
+}
+
+impl From<model::TileImageError> for ImageIngestError {
+    fn from(value: model::TileImageError) -> Self {
+        match value {
+            model::TileImageError::Layout(err) => Self::Layout(err),
+        }
     }
 }
 
@@ -371,160 +383,6 @@ impl fmt::Display for TileGpuDrainError {
 
 impl std::error::Error for TileGpuDrainError {}
 
-#[derive(Debug, Clone, Default)]
-pub struct VirtualImage<K> {
-    size_x: u32,
-    size_y: u32,
-    tiles_per_row: u32,
-    tiles_per_column: u32,
-    tiles: Box<[Option<K>]>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VirtualImageError {
-    TileCountOverflow,
-    TileBytesLengthMismatch,
-    TileIndexOutOfBounds,
-    OutputByteCountOverflow,
-    VersionOverflow,
-}
-
-impl<K> VirtualImage<K> {
-    fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, VirtualImageError> {
-        if tile_x >= self.tiles_per_row || tile_y >= self.tiles_per_column {
-            return Err(VirtualImageError::TileIndexOutOfBounds);
-        }
-
-        let row = (tile_y as usize)
-            .checked_mul(self.tiles_per_row as usize)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
-        row.checked_add(tile_x as usize)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)
-    }
-
-    pub fn new(size_x: u32, size_y: u32) -> Result<Self, VirtualImageError> {
-        let tiles_per_row = size_x.div_ceil(TILE_IMAGE);
-        let tiles_per_column = size_y.div_ceil(TILE_IMAGE);
-        let tile_count = (tiles_per_row as usize)
-            .checked_mul(tiles_per_column as usize)
-            .ok_or(VirtualImageError::TileCountOverflow)?;
-
-        Ok(Self {
-            size_x,
-            size_y,
-            tiles_per_row,
-            tiles_per_column,
-            tiles: {
-                let mut tiles = Vec::new();
-                tiles.resize_with(tile_count, || None);
-                tiles.into_boxed_slice()
-            },
-        })
-    }
-
-    pub fn size_x(&self) -> u32 {
-        self.size_x
-    }
-
-    pub fn size_y(&self) -> u32 {
-        self.size_y
-    }
-
-    pub fn tiles_per_row(&self) -> u32 {
-        self.tiles_per_row
-    }
-
-    pub fn tiles_per_column(&self) -> u32 {
-        self.tiles_per_column
-    }
-
-    pub fn get_tile(&self, tile_x: u32, tile_y: u32) -> Result<Option<&K>, VirtualImageError> {
-        let index = self.tile_index(tile_x, tile_y)?;
-        Ok(self.tiles.get(index).and_then(|value| value.as_ref()))
-    }
-
-    pub(crate) fn set_tile(
-        &mut self,
-        tile_x: u32,
-        tile_y: u32,
-        key: K,
-    ) -> Result<(), VirtualImageError> {
-        let index = self.tile_index(tile_x, tile_y)?;
-        let slot = self
-            .tiles
-            .get_mut(index)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
-        *slot = Some(key);
-        Ok(())
-    }
-
-    pub fn iter_tiles(&self) -> impl Iterator<Item = (u32, u32, &K)> + '_ {
-        self.tiles
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, slot)| {
-                let key = slot.as_ref()?;
-                let tiles_per_row = self.tiles_per_row as usize;
-                let tile_x = (index % tiles_per_row) as u32;
-                let tile_y = (index / tiles_per_row) as u32;
-                Some((tile_x, tile_y, key))
-            })
-    }
-
-    pub fn export_rgba8(
-        &self,
-        mut load_tile: impl FnMut(&K) -> Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, VirtualImageError> {
-        let size_x_usize: usize = self
-            .size_x
-            .try_into()
-            .map_err(|_| VirtualImageError::OutputByteCountOverflow)?;
-        let size_y_usize: usize = self
-            .size_y
-            .try_into()
-            .map_err(|_| VirtualImageError::OutputByteCountOverflow)?;
-        let out_len = size_x_usize
-            .checked_mul(size_y_usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(VirtualImageError::OutputByteCountOverflow)?;
-        let mut out = vec![0u8; out_len];
-        let tile_row_bytes = (TILE_IMAGE as usize) * 4;
-        let expected_tile_len = (TILE_IMAGE as usize) * tile_row_bytes;
-
-        for tile_y in 0..self.tiles_per_column {
-            for tile_x in 0..self.tiles_per_row {
-                let index = (tile_y as usize) * (self.tiles_per_row as usize) + (tile_x as usize);
-                let Some(key) = self.tiles.get(index).and_then(|value| value.as_ref()) else {
-                    continue;
-                };
-                let Some(tile) = load_tile(key) else {
-                    continue;
-                };
-                if tile.len() != expected_tile_len {
-                    return Err(VirtualImageError::TileBytesLengthMismatch);
-                }
-
-                let dst_x0 = (tile_x * TILE_IMAGE) as usize;
-                let dst_y0 = (tile_y * TILE_IMAGE) as usize;
-                for row in 0..(TILE_IMAGE as usize) {
-                    let dst_y = dst_y0 + row;
-                    if dst_y >= self.size_y as usize {
-                        break;
-                    }
-                    let copy_pixels =
-                        (TILE_IMAGE as usize).min((self.size_x as usize).saturating_sub(dst_x0));
-                    let copy_bytes = copy_pixels * 4;
-                    let src = &tile[(row * tile_row_bytes)..(row * tile_row_bytes + copy_bytes)];
-                    let dst_offset = (dst_y * (self.size_x as usize) + dst_x0) * 4;
-                    out[dst_offset..(dst_offset + copy_bytes)].copy_from_slice(src);
-                }
-            }
-        }
-
-        Ok(out)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileDirtyBitset {
     tiles_per_row: u32,
@@ -534,10 +392,10 @@ pub struct TileDirtyBitset {
 }
 
 impl TileDirtyBitset {
-    pub fn new(tiles_per_row: u32, tiles_per_column: u32) -> Result<Self, VirtualImageError> {
+    pub fn new(tiles_per_row: u32, tiles_per_column: u32) -> Result<Self, model::ImageLayoutError> {
         let tile_count = (tiles_per_row as usize)
             .checked_mul(tiles_per_column as usize)
-            .ok_or(VirtualImageError::TileCountOverflow)?;
+            .ok_or(model::ImageLayoutError::TileIndexOutOfBounds)?;
         Ok(Self {
             tiles_per_row,
             tiles_per_column,
@@ -562,39 +420,39 @@ impl TileDirtyBitset {
         self.dirty_count == self.bits.len() && !self.bits.is_empty()
     }
 
-    pub fn set(&mut self, tile_x: u32, tile_y: u32) -> Result<(), VirtualImageError> {
+    pub fn set(&mut self, tile_x: u32, tile_y: u32) -> Result<(), model::ImageLayoutError> {
         let index = self.tile_index(tile_x, tile_y)?;
         let Some(mut slot) = self.bits.get_mut(index) else {
-            return Err(VirtualImageError::TileIndexOutOfBounds);
+            return Err(model::ImageLayoutError::TileIndexOutOfBounds);
         };
         if !*slot {
             *slot = true;
             self.dirty_count = self
                 .dirty_count
                 .checked_add(1)
-                .ok_or(VirtualImageError::TileCountOverflow)?;
+                .ok_or(model::ImageLayoutError::TileIndexOutOfBounds)?;
         }
         Ok(())
     }
 
-    pub fn merge_from(&mut self, other: &TileDirtyBitset) -> Result<(), VirtualImageError> {
+    pub fn merge_from(&mut self, other: &TileDirtyBitset) -> Result<(), model::ImageLayoutError> {
         if self.tiles_per_row != other.tiles_per_row
             || self.tiles_per_column != other.tiles_per_column
             || self.bits.len() != other.bits.len()
         {
-            return Err(VirtualImageError::TileIndexOutOfBounds);
+            return Err(model::ImageLayoutError::TileIndexOutOfBounds);
         }
         for (index, other_bit) in other.bits.iter().by_vals().enumerate() {
             if other_bit {
                 let Some(mut slot) = self.bits.get_mut(index) else {
-                    return Err(VirtualImageError::TileIndexOutOfBounds);
+                    return Err(model::ImageLayoutError::TileIndexOutOfBounds);
                 };
                 if !*slot {
                     *slot = true;
                     self.dirty_count = self
                         .dirty_count
                         .checked_add(1)
-                        .ok_or(VirtualImageError::TileCountOverflow)?;
+                        .ok_or(model::ImageLayoutError::TileIndexOutOfBounds)?;
                 }
             }
         }
@@ -618,30 +476,33 @@ impl TileDirtyBitset {
             })
     }
 
-    fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, VirtualImageError> {
+    fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, model::ImageLayoutError> {
         if tile_x >= self.tiles_per_row || tile_y >= self.tiles_per_column {
-            return Err(VirtualImageError::TileIndexOutOfBounds);
+            return Err(model::ImageLayoutError::TileIndexOutOfBounds);
         }
         let row = (tile_y as usize)
             .checked_mul(self.tiles_per_row as usize)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
+            .ok_or(model::ImageLayoutError::TileIndexOutOfBounds)?;
         row.checked_add(tile_x as usize)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)
+            .ok_or(model::ImageLayoutError::TileIndexOutOfBounds)
     }
 }
 
+#[deprecated(since = "0.2.0", note = "Use TileImage from model crate instead")]
 #[derive(Debug, Clone)]
 pub struct TileImageOld {
-    image: VirtualImage<TileKey>,
-    versions: Vec<u32>,
+    _placeholder: std::marker::PhantomData<TileKey>,
 }
 
+// Deprecated types for backward compatibility
+#[deprecated(since = "0.2.0", note = "Use TileImage from model crate instead")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileDirtyQuery {
     pub latest_version: u64,
     pub dirty_tiles: TileDirtyBitset,
 }
 
+#[deprecated(since = "0.2.0", note = "Will be flattened to use BitVec directly")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirtySinceResult {
     UpToDate,
@@ -699,165 +560,6 @@ impl fmt::Display for TileImageApplyError {
 }
 
 impl std::error::Error for TileImageApplyError {}
-
-impl TileImageOld {
-    pub fn new(size_x: u32, size_y: u32) -> Result<Self, VirtualImageError> {
-        let tiles_per_row = size_x.div_ceil(TILE_IMAGE);
-        let tiles_per_column = size_y.div_ceil(TILE_IMAGE);
-        let tile_count = (tiles_per_row as usize)
-            .checked_mul(tiles_per_column as usize)
-            .ok_or(VirtualImageError::TileCountOverflow)?;
-        Ok(Self {
-            image: VirtualImage::new(size_x, size_y)?,
-            versions: vec![0; tile_count],
-        })
-    }
-
-    pub fn size_x(&self) -> u32 {
-        self.image.size_x()
-    }
-
-    pub fn size_y(&self) -> u32 {
-        self.image.size_y()
-    }
-
-    pub fn tiles_per_row(&self) -> u32 {
-        self.image.tiles_per_row()
-    }
-
-    pub fn tiles_per_column(&self) -> u32 {
-        self.image.tiles_per_column()
-    }
-
-    pub fn get_tile(&self, tile_x: u32, tile_y: u32) -> Result<Option<TileKey>, VirtualImageError> {
-        Ok(self.image.get_tile(tile_x, tile_y)?.copied())
-    }
-
-    pub fn get_tile_version(&self, tile_x: u32, tile_y: u32) -> Result<u32, VirtualImageError> {
-        let index = self.tile_index(tile_x, tile_y)?;
-        Ok(*self
-            .versions
-            .get(index)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?)
-    }
-
-    pub fn set_tile(
-        &mut self,
-        tile_x: u32,
-        tile_y: u32,
-        key: TileKey,
-    ) -> Result<(), VirtualImageError> {
-        self.set_tile_recording(tile_x, tile_y, key)?;
-        Ok(())
-    }
-
-    pub fn iter_tiles(&self) -> impl Iterator<Item = (u32, u32, TileKey)> + '_ {
-        self.image
-            .iter_tiles()
-            .map(|(tile_x, tile_y, key)| (tile_x, tile_y, *key))
-    }
-
-    pub fn export_rgba8(
-        &self,
-        mut load_tile: impl FnMut(TileKey) -> Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, VirtualImageError> {
-        self.image.export_rgba8(|key| load_tile(*key))
-    }
-
-    pub(crate) fn from_virtual(image: VirtualImage<TileKey>) -> Self {
-        let tiles_per_row = image.tiles_per_row();
-        let tiles_per_column = image.tiles_per_column();
-        let tile_count = (tiles_per_row as usize)
-            .checked_mul(tiles_per_column as usize)
-            .unwrap_or_else(|| panic!("tile count overflow for tile image"));
-        let mut tile_image = Self {
-            image,
-            versions: vec![0; tile_count],
-        };
-        for (tile_x, tile_y, _key) in tile_image.image.iter_tiles() {
-            let index = tile_image
-                .tile_index(tile_x, tile_y)
-                .unwrap_or_else(|error| {
-                    panic!("tile index resolution failed for tile image: {error:?}")
-                });
-            if let Some(slot) = tile_image.versions.get_mut(index) {
-                *slot = 1;
-            } else {
-                panic!("tile version slot missing for ({tile_x}, {tile_y})");
-            }
-        }
-        tile_image
-    }
-
-    fn set_tile_recording(
-        &mut self,
-        tile_x: u32,
-        tile_y: u32,
-        key: TileKey,
-    ) -> Result<(), VirtualImageError> {
-        self.image.set_tile(tile_x, tile_y, key)?;
-        let index = self.tile_index(tile_x, tile_y)?;
-        let slot = self
-            .versions
-            .get_mut(index)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
-        *slot = slot
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("tile version overflow at ({tile_x}, {tile_y})"));
-        Ok(())
-    }
-
-    fn tile_index(&self, tile_x: u32, tile_y: u32) -> Result<usize, VirtualImageError> {
-        if tile_x >= self.tiles_per_row() || tile_y >= self.tiles_per_column() {
-            return Err(VirtualImageError::TileIndexOutOfBounds);
-        }
-        let row = (tile_y as usize)
-            .checked_mul(self.tiles_per_row() as usize)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)?;
-        row.checked_add(tile_x as usize)
-            .ok_or(VirtualImageError::TileIndexOutOfBounds)
-    }
-}
-
-#[cfg(feature = "atlas-gpu")]
-pub fn apply_tile_key_mappings(
-    image: &mut TileImageOld,
-    mappings: &[TileKeyMapping],
-) -> Result<(), TileImageApplyError> {
-    let mut seen = HashSet::with_capacity(mappings.len());
-    for mapping in mappings {
-        let coordinate = (mapping.tile_x, mapping.tile_y);
-        if !seen.insert(coordinate) {
-            return Err(TileImageApplyError::DuplicateTileCoordinate {
-                tile_x: mapping.tile_x,
-                tile_y: mapping.tile_y,
-            });
-        }
-        let current = image
-            .get_tile(mapping.tile_x, mapping.tile_y)
-            .map_err(|_| TileImageApplyError::TileOutOfBounds {
-                tile_x: mapping.tile_x,
-                tile_y: mapping.tile_y,
-            })?;
-        if current != mapping.previous_key {
-            return Err(TileImageApplyError::PreviousKeyMismatch {
-                tile_x: mapping.tile_x,
-                tile_y: mapping.tile_y,
-                expected: mapping.previous_key,
-                actual: current,
-            });
-        }
-    }
-    for mapping in mappings {
-        image
-            .set_tile_recording(mapping.tile_x, mapping.tile_y, mapping.new_key)
-            .map_err(|_| TileImageApplyError::TileOutOfBounds {
-                tile_x: mapping.tile_x,
-                tile_y: mapping.tile_y,
-            })?;
-    }
-    Ok(())
-}
 
 // WDF the shit of brush leaks into tiles, all codes below should be deleted
 #[derive(Debug, Default)]

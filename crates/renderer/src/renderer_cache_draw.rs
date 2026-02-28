@@ -6,16 +6,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use model::TILE_IMAGE;
+use model::{EmptyKey, TileImage, TILE_IMAGE};
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_STRIDE, TileImageOld, TileKey};
+use tiles::{TileKey, TILE_STRIDE};
 
 use crate::{
-    BlendMode, DrawPassContext, GroupTargetCacheEntry, LeafDrawCacheKey, Renderer,
-    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode,
-    build_group_tile_draw_instances, tile_coord_from_draw_instance,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
+    GroupTargetCacheEntry, LeafDrawCacheKey, Renderer, TileCompositeSpace, TileCoord,
+    TileDrawInstance, TileInstanceGpu, ViewportMode,
 };
 
 static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -236,7 +236,7 @@ impl Renderer {
         let set = self
             .gpu_state
             .group_tile_store
-            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| tile_key))
+            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| *tile_key))
             .unwrap_or_else(|error| panic!("adopt group cache tile set for release: {error}"));
         self.gpu_state
             .group_tile_store
@@ -292,8 +292,7 @@ impl Renderer {
         &self,
         cache_extent: wgpu::Extent3d,
     ) -> GroupTargetCacheEntry {
-        let image = TileImageOld::new(cache_extent.width, cache_extent.height)
-            .unwrap_or_else(|error| panic!("create group virtual image: {error:?}"));
+        let image = TileImage::from_pixel_size(cache_extent.width, cache_extent.height);
         GroupTargetCacheEntry {
             image,
             draw_instances: Vec::new(),
@@ -306,15 +305,15 @@ impl Renderer {
         entry: GroupTargetCacheEntry,
         cache_extent: wgpu::Extent3d,
     ) -> (GroupTargetCacheEntry, bool) {
-        if entry.image.size_x() == cache_extent.width && entry.image.size_y() == cache_extent.height
+        if entry.image.pixel_size().0 == cache_extent.width
+            && entry.image.pixel_size().1 == cache_extent.height
         {
             return (entry, false);
         }
         self.release_group_cache_entry(entry);
         (
             GroupTargetCacheEntry {
-                image: TileImageOld::new(cache_extent.width, cache_extent.height)
-                    .unwrap_or_else(|error| panic!("resize group virtual image: {error:?}")),
+                image: TileImage::from_pixel_size(cache_extent.width, cache_extent.height),
                 draw_instances: Vec::new(),
                 blend: BlendMode::Normal,
             },
@@ -451,12 +450,12 @@ impl Renderer {
         entry: &mut GroupTargetCacheEntry,
         tile_coord: TileCoord,
     ) -> TileKey {
-        if let Some(existing_key) = entry
+        let existing_key = entry
             .image
-            .get_tile(tile_coord.tile_x, tile_coord.tile_y)
-            .unwrap_or_else(|error| panic!("get group tile key: {error:?}"))
-        {
-            existing_key
+            .get_tile_at(tile_coord.tile_x, tile_coord.tile_y)
+            .unwrap_or_else(|error| panic!("get group tile key: {error:?}"));
+        if !existing_key.is_empty() {
+            *existing_key
         } else {
             let allocated_key = self
                 .gpu_state
@@ -465,7 +464,7 @@ impl Renderer {
                 .unwrap_or_else(|error| panic!("allocate group tile: {error}"));
             entry
                 .image
-                .set_tile(tile_coord.tile_x, tile_coord.tile_y, allocated_key)
+                .set_tile_at(tile_coord.tile_x, tile_coord.tile_y, allocated_key)
                 .unwrap_or_else(|error| panic!("set group tile key: {error:?}"));
             allocated_key
         }

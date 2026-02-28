@@ -1,4 +1,5 @@
 use bitvec::prelude::{BitVec, Lsb0};
+use std::fmt;
 // REFRACTORING:
 // use 126 image + 2 gutter = 128 stride
 // instead of 128 image + 2 gutter = 130 stride
@@ -76,18 +77,29 @@ pub trait EmptyKey: Copy + PartialEq {
     }
 }
 
-// Refactoring: add dirty bit vector to TileImage
-// and abandon the origin VirtulImage
-// This struct is named TileImageNew currently
-// and will be changed to TileImage manually after refactoring
+/// Tile image structure with dirty bit tracking.
+///
+/// Replaces the old TileImageOld + VirtualImage architecture.
+/// Uses BitVec for efficient dirty tile tracking instead of version numbers.
+#[derive(Clone)]
 pub struct TileImage<K> {
-    // tiles.len() == layout.max_tiles() == dirty_bits.len()
     layout: ImageLayout,
     tiles: Box<[K]>,
     dirty_bits: BitVec<usize, Lsb0>,
     dirty_count: usize,
 }
 
+impl<K: std::fmt::Debug> std::fmt::Debug for TileImage<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TileImage")
+            .field("layout", &self.layout)
+            .field("tiles", &self.tiles)
+            .field("dirty_count", &self.dirty_count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileImageError {
     Layout(ImageLayoutError),
 }
@@ -125,5 +137,70 @@ impl<K: Copy + EmptyKey> TileImage<K> {
 
     pub fn iter_dirty_tile_keys(&self) -> impl Iterator<Item = K> {
         self.dirty_bits.iter_ones().map(|index| self.tiles[index])
+    }
+
+    /// Create TileImage from pixel dimensions (compatibility API).
+    pub fn from_pixel_size(size_x: u32, size_y: u32) -> Self
+    where
+        K: EmptyKey,
+    {
+        let layout = ImageLayout::new(size_x, size_y);
+        Self::new(layout)
+    }
+
+    /// Get tile at specific tile coordinates (compatibility API).
+    pub fn get_tile_at(&self, tile_x: u32, tile_y: u32) -> Result<&K, TileImageError> {
+        let pos = TilePos {
+            x: tile_x,
+            y: tile_y,
+        };
+        self.get_tile(pos)
+    }
+
+    /// Set tile at specific tile coordinates (compatibility API).
+    pub fn set_tile_at(&mut self, tile_x: u32, tile_y: u32, key: K) -> Result<(), TileImageError> {
+        let pos = TilePos {
+            x: tile_x,
+            y: tile_y,
+        };
+        self.set_tile(pos, key)
+    }
+
+    /// Iterate over all tiles with their coordinates.
+    pub fn iter_all_tiles(&self) -> impl Iterator<Item = (u32, u32, K)> + '_
+    where
+        K: Copy,
+    {
+        let tiles_per_row = self.layout.tiles_per_row;
+        self.tiles.iter().enumerate().map(move |(i, &key)| {
+            let x = (i % tiles_per_row as usize) as u32;
+            let y = (i / tiles_per_row as usize) as u32;
+            (x, y, key)
+        })
+    }
+
+    /// Get the pixel dimensions of the image.
+    pub fn pixel_size(&self) -> (u32, u32) {
+        (self.layout.size.x, self.layout.size.y)
+    }
+
+    /// Get tiles per row.
+    pub fn tiles_per_row(&self) -> u32 {
+        self.layout.tiles_per_row
+    }
+
+    /// Get tiles per column.
+    pub fn tiles_per_column(&self) -> u32 {
+        self.layout.tiles_per_column
+    }
+
+    /// Iterate over all tiles with their coordinates (compatibility API).
+    pub fn iter_tiles(&self) -> impl Iterator<Item = (u32, u32, &K)> + '_ {
+        let tiles_per_row = self.layout.tiles_per_row as usize;
+        self.tiles.iter().enumerate().filter_map(move |(i, key)| {
+            let x = (i % tiles_per_row) as u32;
+            let y = (i / tiles_per_row) as u32;
+            Some((x, y, key))
+        })
     }
 }

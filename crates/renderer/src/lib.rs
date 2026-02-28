@@ -16,7 +16,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs::OpenOptions, io::Write};
 
-use model::TILE_IMAGE;
+use model::{TILE_IMAGE, TileImage};
 use render_protocol::{
     BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, BufferTileCoordinate, ImageHandle,
     ImageSource, LayerId, ProgramRevision, ReferenceLayerSelection, ReferenceSetId, RenderOp,
@@ -25,7 +25,7 @@ use render_protocol::{
 use tiles::{
     DirtySinceResult, GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
     GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_STRIDE, TileAddress,
-    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImageOld, TileKey,
+    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey,
 };
 
 #[repr(C)]
@@ -181,7 +181,7 @@ struct LeafDrawCacheKey {
 
 #[derive(Debug)]
 struct GroupTargetCacheEntry {
-    image: TileImageOld,
+    image: TileImage<TileKey>,
     draw_instances: Vec<TileDrawInstance>,
     blend: BlendMode,
 }
