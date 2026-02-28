@@ -856,6 +856,21 @@ impl BrushBufferTileRegistry {
 #[cfg(test)]
 pub(crate) use atlas::{rgba8_tile_len, tile_origin};
 
+/// Apply tile key mappings to a TileImage.
+///
+/// This function is used in document tests to simulate the result of a merge operation
+/// by updating tile keys at specific coordinates.
+#[cfg(feature = "atlas-gpu")]
+pub fn apply_tile_key_mappings(
+    image: &mut model::TileImage<TileKey>,
+    mappings: &[TileKeyMapping],
+) -> Result<(), model::TileImageError> {
+    for mapping in mappings {
+        image.set_tile_at(mapping.tile_x, mapping.tile_y, mapping.new_key)?;
+    }
+    Ok(())
+}
+
 mod atlas;
 mod merge_callback;
 #[cfg(feature = "atlas-gpu")]

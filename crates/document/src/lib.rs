@@ -1535,11 +1535,8 @@ mod tests {
         let image = document
             .image(first_leaf_image_handle(&document))
             .expect("resolve image");
-        let key = image
-            .get_tile_at(0, 0)
-            .expect("read tile")
-            .expect("tile should be assigned");
-        assert_eq!(key, test_tile_key(10));
+        let key = image.get_tile_at(0, 0).expect("read tile");
+        assert_eq!(*key, test_tile_key(10));
     }
 
     #[test]
@@ -1680,15 +1677,15 @@ mod tests {
                         tile_x: 0,
                         tile_y: 0,
                         layer_id: layer_id.0,
-                        previous_key: existing_image.get_tile_at(0, 0).expect("read tile"),
-                        new_key: test_tile_key(stroke_session_id + 1),
+                        previous_key: Some(*existing_image.get_tile_at(0, 0).expect("read tile")),
+                        new_key: test_tile_key((stroke_session_id + 1) as u32),
                     },
                     TileKeyMapping {
                         tile_x: 1,
                         tile_y: 0,
                         layer_id: layer_id.0,
-                        previous_key: existing_image.get_tile_at(1, 0).expect("read tile"),
-                        new_key: test_tile_key(stroke_session_id + 2),
+                        previous_key: Some(*existing_image.get_tile_at(1, 0).expect("read tile")),
+                        new_key: test_tile_key((stroke_session_id + 2) as u32),
                     },
                 ],
             )
