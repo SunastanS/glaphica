@@ -1409,16 +1409,19 @@ impl GpuState {
                                     },
                                 ))?;
                         let mut updated_image = (*existing_image).clone();
-                        // Apply tile key mappings from brush execution
+                        // Apply tile key mappings from brush execution.
+                        // Note: if multiple mappings target the same (tile_x, tile_y), the last one wins.
                         for mapping in new_key_mappings {
                             updated_image
                                 .set_tile_at(mapping.tile_x, mapping.tile_y, mapping.new_key)
-                                .unwrap_or_else(|error| {
-                                    panic!(
-                                        "failed to apply tile key mapping at ({}, {}): {:?}",
-                                        mapping.tile_x, mapping.tile_y, error
+                                .map_err(|error| {
+                                    MergeBridgeError::TileImageApply(
+                                        tiles::TileImageApplyError::TileOutOfBounds {
+                                            tile_x: mapping.tile_x,
+                                            tile_y: mapping.tile_y,
+                                        },
                                     )
-                                });
+                                })?;
                         }
                         let layer_dirty_tiles: Vec<TileCoordinate> = dirty_tiles
                             .iter()
