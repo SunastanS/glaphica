@@ -15,5 +15,9 @@ name = "images"
 version = "0.1.0"
 
 [[package]]
+name = "threads"
+version = "0.1.0"
+
+[[package]]
 name = "tiles"
 version = "0.1.0"
