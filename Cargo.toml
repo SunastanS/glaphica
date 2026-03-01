@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/tiles",
+    "crates/atlas",
+    "crates/images",
+    "crates/glaphica-constants",
+]
+
+[workspace.dependencies]
+
+resolver = "3"
