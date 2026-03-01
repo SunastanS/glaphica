@@ -9,6 +9,11 @@ pub enum AtlasBackendError {
     GenerationMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtlasBackendManagerError {
+    TooManyBackends,
+}
+
 pub struct Backend {
     // total_slots = layout.total_slots() = FreeSlotPool::total_slots = generations.len()
     backend_id: BackendId,
@@ -77,6 +82,48 @@ impl Backend {
     pub const fn total_slots(&self) -> u32 {
         self.total_slots
     }
+
+    pub const fn backend_id(&self) -> BackendId {
+        self.backend_id
+    }
+}
+
+#[derive(Default)]
+pub struct BackendManager {
+    backends: Vec<Backend>, //index = backend_id
+}
+
+impl BackendManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_backend(
+        &mut self,
+        layout: AtlasLayout,
+    ) -> Result<BackendId, AtlasBackendManagerError> {
+        let raw_id = u8::try_from(self.backends.len())
+            .map_err(|_| AtlasBackendManagerError::TooManyBackends)?;
+        let backend_id = BackendId::new(raw_id);
+        self.backends.push(Backend::new(layout, backend_id));
+        Ok(backend_id)
+    }
+
+    pub fn backend(&self, backend_id: BackendId) -> Option<&Backend> {
+        self.backends.get(backend_id.raw() as usize)
+    }
+
+    pub fn backend_mut(&mut self, backend_id: BackendId) -> Option<&mut Backend> {
+        self.backends.get_mut(backend_id.raw() as usize)
+    }
+
+    pub fn backend_for_key(&self, key: TileKey) -> Option<&Backend> {
+        self.backend(key.backend())
+    }
+
+    pub fn backend_for_key_mut(&mut self, key: TileKey) -> Option<&mut Backend> {
+        self.backend_mut(key.backend())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -130,7 +177,10 @@ impl FreeSlotPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AtlasBackendError, AtlasLayout, Backend, FreeSlotPool};
+    use super::{
+        AtlasBackendError, AtlasBackendManagerError, AtlasLayout, Backend, BackendManager,
+        FreeSlotPool,
+    };
     use crate::key::BackendId;
 
     #[test]
@@ -187,5 +237,29 @@ mod tests {
         let key = backend0.alloc().unwrap();
         let err = backend1.free(key).unwrap_err();
         assert_eq!(err, AtlasBackendError::WrongBackend);
+    }
+
+    #[test]
+    fn manager_maps_backend_id_and_supports_key_lookup() {
+        let mut manager = BackendManager::new();
+        let backend0 = manager.add_backend(AtlasLayout::Tiny8).unwrap();
+        let _backend1 = manager.add_backend(AtlasLayout::Tiny8).unwrap();
+        assert_eq!(backend0.raw(), 0);
+
+        let key = manager.backend_mut(backend0).unwrap().alloc().unwrap();
+
+        let backend = manager.backend_for_key(key).unwrap();
+        assert_eq!(backend.backend_id().raw(), backend0.raw());
+    }
+
+    #[test]
+    fn manager_rejects_more_than_256_backends() {
+        let mut manager = BackendManager::new();
+        for _ in 0..256 {
+            manager.add_backend(AtlasLayout::Tiny8).unwrap();
+        }
+
+        let err = manager.add_backend(AtlasLayout::Tiny8).unwrap_err();
+        assert_eq!(err, AtlasBackendManagerError::TooManyBackends);
     }
 }
