@@ -1,9 +1,7 @@
 use std::ffi::OsStr;
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use glaphica::app_core::AppCoreError;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use brush_execution::{
     BrushExecutionCommandReceiver, BrushExecutionConfig, BrushExecutionFeedbackSender,
@@ -11,11 +9,19 @@ use brush_execution::{
 };
 use driver::PointerEventPhase;
 use frame_scheduler::{FrameScheduler, FrameSchedulerDecision, FrameSchedulerInput};
-use glaphica::GpuState;
 use glaphica::driver_bridge::{DriverUiBridge, FrameDrainResult, FrameDrainStats};
+use glaphica::{GpuSemanticStateDigest, GpuState};
 use render_protocol::{
     BrushControlAck, BrushControlCommand, BrushProgramActivation, BrushProgramUpsert,
     BrushRenderCommand, ReferenceLayerSelection, ReferenceSetUpsert,
+};
+use replay_protocol::{
+    BrushCommandKind as ReplayBrushCommandKind, BrushExecutionOutput, DriverOutput, MergeAckKind,
+    MergeLifecycleOutput, OutputPayload, OutputPhase, RenderCommandOutput, StateDigestOutput,
+};
+use window_replay::{
+    InputTraceRecorder, InputTraceReplay, OutputTraceRecorder, RecordedInputEventKind,
+    compare_output_files,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -39,191 +45,12 @@ const DEFAULT_BRUSH_ID: u64 = 1;
 const DEFAULT_PROGRAM_REVISION: u64 = 1;
 const DEFAULT_REFERENCE_SET_ID: u64 = 1;
 const DEFAULT_TARGET_LAYER_ID: u64 = 1;
+const REPLAY_TIMELINE_STEP_MICROS: u64 = 16_667;
 const DEFAULT_PROGRAM_WGSL: &str = r#"
 @compute @workgroup_size(1)
 fn main() {
 }
 "#;
-
-#[derive(Debug, Clone)]
-enum RecordedInputEventKind {
-    MouseInput { pressed: bool },
-    CursorMoved { x: f64, y: f64 },
-    MouseWheelLine { vertical_lines: f32 },
-    MouseWheelPixel { delta_y: f64 },
-}
-
-#[derive(Debug, Clone)]
-struct RecordedInputEvent {
-    elapsed_micros: u64,
-    kind: RecordedInputEventKind,
-}
-
-struct InputTraceRecorder {
-    started_at: Instant,
-    writer: BufWriter<File>,
-}
-
-impl InputTraceRecorder {
-    fn from_path(path: PathBuf) -> Self {
-        let file = File::create(&path).unwrap_or_else(|error| {
-            panic!("create input trace file '{}': {error}", path.display())
-        });
-        Self {
-            started_at: Instant::now(),
-            writer: BufWriter::new(file),
-        }
-    }
-
-    fn record(&mut self, kind: RecordedInputEventKind) {
-        let elapsed_micros = self.started_at.elapsed().as_micros();
-        let elapsed_micros = u64::try_from(elapsed_micros)
-            .unwrap_or_else(|_| panic!("input trace timestamp overflow"));
-        let line = match kind {
-            RecordedInputEventKind::MouseInput { pressed } => {
-                format!(
-                    "{elapsed_micros}\tmouse_input\t{}",
-                    if pressed { "1" } else { "0" }
-                )
-            }
-            RecordedInputEventKind::CursorMoved { x, y } => {
-                format!("{elapsed_micros}\tcursor_moved\t{x}\t{y}")
-            }
-            RecordedInputEventKind::MouseWheelLine { vertical_lines } => {
-                format!("{elapsed_micros}\tmouse_wheel_line\t{vertical_lines}")
-            }
-            RecordedInputEventKind::MouseWheelPixel { delta_y } => {
-                format!("{elapsed_micros}\tmouse_wheel_pixel\t{delta_y}")
-            }
-        };
-        writeln!(self.writer, "{line}")
-            .unwrap_or_else(|error| panic!("write input trace event failed: {error}"));
-        self.writer
-            .flush()
-            .unwrap_or_else(|error| panic!("flush input trace event failed: {error}"));
-    }
-}
-
-struct InputTraceReplay {
-    started_at: Instant,
-    events: Vec<RecordedInputEvent>,
-    next_event_index: usize,
-    completion_logged: bool,
-}
-
-impl InputTraceReplay {
-    fn from_path(path: PathBuf) -> Self {
-        let file = File::open(&path)
-            .unwrap_or_else(|error| panic!("open input trace file '{}': {error}", path.display()));
-        let reader = BufReader::new(file);
-        let mut events = Vec::new();
-        for (line_index, line_result) in reader.lines().enumerate() {
-            let line_number = line_index
-                .checked_add(1)
-                .unwrap_or_else(|| panic!("input trace line number overflow"));
-            let line = line_result
-                .unwrap_or_else(|error| panic!("read input trace line {line_number}: {error}"));
-            if line.trim().is_empty() {
-                continue;
-            }
-            events.push(parse_recorded_input_event(&line, line_number));
-        }
-        Self {
-            started_at: Instant::now(),
-            events,
-            next_event_index: 0,
-            completion_logged: false,
-        }
-    }
-
-    fn take_ready_events(&mut self) -> Vec<RecordedInputEventKind> {
-        let elapsed_micros = self.started_at.elapsed().as_micros();
-        let elapsed_micros = u64::try_from(elapsed_micros)
-            .unwrap_or_else(|_| panic!("input replay timestamp overflow"));
-        let mut ready = Vec::new();
-        while self.next_event_index < self.events.len()
-            && self.events[self.next_event_index].elapsed_micros <= elapsed_micros
-        {
-            ready.push(self.events[self.next_event_index].kind.clone());
-            self.next_event_index = self
-                .next_event_index
-                .checked_add(1)
-                .unwrap_or_else(|| panic!("input replay index overflow"));
-        }
-        ready
-    }
-
-    fn is_exhausted(&self) -> bool {
-        self.next_event_index >= self.events.len()
-    }
-
-    fn restart_clock(&mut self) {
-        self.started_at = Instant::now();
-    }
-}
-
-fn parse_recorded_input_event(line: &str, line_number: usize) -> RecordedInputEvent {
-    let fields = line.split('\t').collect::<Vec<_>>();
-    assert!(
-        fields.len() >= 3,
-        "invalid input trace format at line {line_number}: expected at least 3 fields"
-    );
-    let elapsed_micros = fields[0].parse::<u64>().unwrap_or_else(|error| {
-        panic!("invalid input trace timestamp at line {line_number}: {error}")
-    });
-    let kind = match fields[1] {
-        "mouse_input" => {
-            assert!(
-                fields.len() == 3,
-                "invalid mouse_input trace format at line {line_number}"
-            );
-            let pressed = match fields[2] {
-                "1" => true,
-                "0" => false,
-                value => panic!("invalid mouse_input value '{value}' at line {line_number}"),
-            };
-            RecordedInputEventKind::MouseInput { pressed }
-        }
-        "cursor_moved" => {
-            assert!(
-                fields.len() == 4,
-                "invalid cursor_moved trace format at line {line_number}"
-            );
-            let x = fields[2]
-                .parse::<f64>()
-                .unwrap_or_else(|error| panic!("invalid cursor x at line {line_number}: {error}"));
-            let y = fields[3]
-                .parse::<f64>()
-                .unwrap_or_else(|error| panic!("invalid cursor y at line {line_number}: {error}"));
-            RecordedInputEventKind::CursorMoved { x, y }
-        }
-        "mouse_wheel_line" => {
-            assert!(
-                fields.len() == 3,
-                "invalid mouse_wheel_line trace format at line {line_number}"
-            );
-            let vertical_lines = fields[2].parse::<f32>().unwrap_or_else(|error| {
-                panic!("invalid mouse wheel line delta at line {line_number}: {error}")
-            });
-            RecordedInputEventKind::MouseWheelLine { vertical_lines }
-        }
-        "mouse_wheel_pixel" => {
-            assert!(
-                fields.len() == 3,
-                "invalid mouse_wheel_pixel trace format at line {line_number}"
-            );
-            let delta_y = fields[2].parse::<f64>().unwrap_or_else(|error| {
-                panic!("invalid mouse wheel pixel delta at line {line_number}: {error}")
-            });
-            RecordedInputEventKind::MouseWheelPixel { delta_y }
-        }
-        kind => panic!("unknown input trace event kind '{kind}' at line {line_number}"),
-    };
-    RecordedInputEvent {
-        elapsed_micros,
-        kind,
-    }
-}
 
 struct DriverDebugState {
     bridge: DriverUiBridge,
@@ -249,9 +76,10 @@ impl DriverDebugState {
     fn drain_debug_output(
         &mut self,
         frame_sequence_id: u64,
+        trace_enabled: bool,
     ) -> (FrameDrainStats, Vec<driver::FramedSampleChunk>) {
         let FrameDrainResult { stats, chunks } = self.bridge.drain_frame(frame_sequence_id);
-        if stats.has_activity() {
+        if trace_enabled && stats.has_activity() {
             println!(
                 "[driver] frame={} input(total={} down={} move={} up={} cancel={} hover={} handle_us={}) output(chunks={} samples={} discontinuity_chunks={} dropped_before={})",
                 stats.frame_sequence_id,
@@ -268,26 +96,28 @@ impl DriverDebugState {
                 stats.output.dropped_chunk_count_before_total,
             );
         }
-        for framed_chunk in &chunks {
-            let chunk = &framed_chunk.chunk;
-            let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
-            let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
-            let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
-            let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
-            println!(
-                "[driver] chunk frame={} stroke={} samples={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
-                framed_chunk.frame_sequence_id,
-                chunk.stroke_session_id,
-                chunk.sample_count(),
-                chunk.starts_stroke,
-                chunk.ends_stroke,
-                chunk.discontinuity_before,
-                chunk.dropped_chunk_count_before,
-                first_x,
-                first_y,
-                last_x,
-                last_y,
-            );
+        if trace_enabled {
+            for framed_chunk in &chunks {
+                let chunk = &framed_chunk.chunk;
+                let first_x = chunk.canvas_x().first().copied().unwrap_or(0.0);
+                let first_y = chunk.canvas_y().first().copied().unwrap_or(0.0);
+                let last_x = chunk.canvas_x().last().copied().unwrap_or(0.0);
+                let last_y = chunk.canvas_y().last().copied().unwrap_or(0.0);
+                println!(
+                    "[driver] chunk frame={} stroke={} samples={} start={} end={} discontinuity={} dropped_before={} first=({:.2},{:.2}) last=({:.2},{:.2})",
+                    framed_chunk.frame_sequence_id,
+                    chunk.stroke_session_id,
+                    chunk.sample_count(),
+                    chunk.starts_stroke,
+                    chunk.ends_stroke,
+                    chunk.discontinuity_before,
+                    chunk.dropped_chunk_count_before,
+                    first_x,
+                    first_y,
+                    last_x,
+                    last_y,
+                );
+            }
         }
         (stats, chunks)
     }
@@ -315,9 +145,14 @@ struct App {
     brush_execution_receiver: Option<BrushExecutionCommandReceiver>,
     next_driver_frame_sequence_id: u64,
     frame_scheduler: FrameScheduler,
+    output_record_path: Option<PathBuf>,
+    output_compare_path: Option<PathBuf>,
     input_trace_recorder: Option<InputTraceRecorder>,
     input_trace_replay: Option<InputTraceReplay>,
+    output_trace_recorder: Option<OutputTraceRecorder>,
     brush_trace_enabled: bool,
+    /// Fatal error flag - set when render encounters fatal error
+    fatal_error_seen: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -351,8 +186,55 @@ impl App {
         self.window.as_ref().map(|w| w.id())
     }
 
+    fn is_input_replay_active(&self) -> bool {
+        self.input_trace_replay.is_some()
+    }
+
+    fn has_pending_replay_events(&self) -> bool {
+        self.input_trace_replay
+            .as_ref()
+            .is_some_and(InputTraceReplay::has_pending_events)
+    }
+
+    fn should_ignore_live_event_during_replay(event: &WindowEvent) -> bool {
+        matches!(
+            event,
+            WindowEvent::MouseInput { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::Touch { .. }
+        )
+    }
+
     fn update_interaction_mode(&mut self) {
         self.interaction_mode = self.input_modifiers.interaction_mode();
+    }
+
+    fn maybe_compare_recorded_output(&self) {
+        let Some(expected_output_path) = self.output_compare_path.as_ref() else {
+            return;
+        };
+        let actual_output_path = self
+            .output_record_path
+            .as_ref()
+            .unwrap_or_else(|| panic!("output comparison requested without --record-output"));
+        compare_output_files(expected_output_path.as_path(), actual_output_path.as_path())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "semantic output comparison failed: expected='{}' actual='{}' error={error}",
+                    expected_output_path.display(),
+                    actual_output_path.display()
+                )
+            });
+        if self.brush_trace_enabled {
+            println!(
+                "[output_compare] semantic output matched expected trace: expected={} actual={}",
+                expected_output_path.display(),
+                actual_output_path.display()
+            );
+        }
     }
 
     fn maybe_record_input(&mut self, kind: RecordedInputEventKind) {
@@ -370,7 +252,7 @@ impl App {
                 .input_trace_replay
                 .as_mut()
                 .unwrap_or_else(|| panic!("input replay state missing"));
-            replay.take_ready_events()
+            replay.advance_and_take_ready_events(REPLAY_TIMELINE_STEP_MICROS)
         };
         for replay_event in replay_events {
             match replay_event {
@@ -400,15 +282,12 @@ impl App {
                 .input_trace_replay
                 .as_mut()
                 .unwrap_or_else(|| panic!("input replay state missing"));
-            if replay.is_exhausted() && !replay.completion_logged {
-                replay.completion_logged = true;
-                true
-            } else {
-                false
-            }
+            replay.take_completion_notice()
         };
         if should_log_completion {
-            println!("[input_replay] all recorded events have been replayed");
+            if self.brush_trace_enabled {
+                println!("[input_replay] all recorded events have been replayed");
+            }
         }
     }
 }
@@ -441,13 +320,19 @@ impl ApplicationHandler for App {
         self.gpu = Some(gpu);
         if let Some(replay) = self.input_trace_replay.as_mut() {
             replay.restart_clock();
-            println!(
-                "[input_replay] replay started with {} events",
-                replay.events.len()
-            );
+            if self.brush_trace_enabled {
+                println!(
+                    "[input_replay] replay started with {} events",
+                    replay.event_count()
+                );
+                println!("[input_replay] live mouse input is ignored during replay");
+            }
         }
-        if self.input_trace_recorder.is_some() {
+        if self.brush_trace_enabled && self.input_trace_recorder.is_some() {
             println!("[input_record] recording input trace events");
+        }
+        if self.brush_trace_enabled && self.output_trace_recorder.is_some() {
+            println!("[output_record] recording semantic output events");
         }
         self.initialize_brush_execution();
     }
@@ -465,12 +350,17 @@ impl ApplicationHandler for App {
         match &event {
             WindowEvent::CloseRequested => {
                 self.flush_brush_pipeline_lifecycle();
+                self.maybe_compare_recorded_output();
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame(event_loop);
             }
             _ => {}
+        }
+
+        if self.is_input_replay_active() && Self::should_ignore_live_event_during_replay(&event) {
+            return;
         }
 
         self.handle_input_event(&event);
@@ -490,7 +380,8 @@ impl ApplicationHandler for App {
         let should_continue_rendering = self.frame_scheduler.is_active()
             || self.driver_debug.has_active_stroke()
             || pending_brush_commands > 0
-            || gpu.has_pending_merge_work();
+            || gpu.has_pending_merge_work()
+            || self.has_pending_replay_events();
         if should_continue_rendering {
             window.request_redraw();
         }
@@ -518,6 +409,9 @@ impl App {
                 self.handle_keyboard_input(event);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.is_input_replay_active() {
+                    return;
+                }
                 self.handle_mouse_wheel(delta);
             }
             WindowEvent::Resized(new_size) => {
@@ -533,6 +427,11 @@ impl App {
     }
 
     fn handle_pointer_event(&mut self, event: &WindowEvent) {
+        // Replay mode must stay deterministic: ignore live pointer events so OS cursor/focus
+        // changes cannot perturb the recorded stroke stream.
+        if self.is_input_replay_active() {
+            return;
+        }
         match event {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_input(*state, *button);
@@ -673,7 +572,12 @@ impl App {
 
     fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.resize(new_size);
+            if let Err(err) = gpu.resize(new_size) {
+                // Phase 2.5-B: Handle resize errors
+                // According to design: no degraded mode, either success or panic
+                // For resize, we log the error but don't panic (window can still function)
+                eprintln!("[error] resize failed: {:?}", err);
+            }
         }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
@@ -684,11 +588,36 @@ impl App {
         driver_debug: &mut DriverDebugState,
         brush_execution_sender: &mut Option<BrushExecutionSampleSender>,
         brush_execution_receiver: &mut Option<BrushExecutionCommandReceiver>,
+        output_trace_recorder: &mut Option<OutputTraceRecorder>,
         frame_sequence_id: u64,
+        phase: OutputPhase,
         gpu: &mut GpuState,
         brush_trace_enabled: bool,
     ) -> FrameDrainStats {
-        let (frame_stats, sample_chunks) = driver_debug.drain_debug_output(frame_sequence_id);
+        let (frame_stats, sample_chunks) =
+            driver_debug.drain_debug_output(frame_sequence_id, brush_trace_enabled);
+        if let Some(recorder) = output_trace_recorder.as_mut() {
+            for (chunk_index, sample_chunk) in sample_chunks.iter().enumerate() {
+                recorder.record(
+                    frame_sequence_id,
+                    phase,
+                    OutputPayload::Driver(DriverOutput {
+                        stroke_session_id: sample_chunk.chunk.stroke_session_id,
+                        chunk_index: u32::try_from(chunk_index)
+                            .unwrap_or_else(|_| panic!("driver chunk index overflow")),
+                        sample_count: u32::try_from(sample_chunk.chunk.sample_count())
+                            .unwrap_or_else(|_| panic!("driver sample count overflow")),
+                        starts_stroke: sample_chunk.chunk.starts_stroke,
+                        ends_stroke: sample_chunk.chunk.ends_stroke,
+                        discontinuity_before: sample_chunk.chunk.discontinuity_before,
+                        dropped_chunk_count_before: u32::from(
+                            sample_chunk.chunk.dropped_chunk_count_before,
+                        ),
+                        bounds_digest: sample_chunk_bounds_digest(&sample_chunk.chunk),
+                    }),
+                );
+            }
+        }
         if let Some(sender) = brush_execution_sender.as_mut() {
             for sample_chunk in sample_chunks {
                 sender
@@ -705,6 +634,30 @@ impl App {
                         frame_sequence_id,
                         brush_command_kind(&command),
                         brush_command_stroke_session_id(&command),
+                    );
+                }
+                if let Some(recorder) = output_trace_recorder.as_mut() {
+                    recorder.record(
+                        frame_sequence_id,
+                        phase,
+                        OutputPayload::BrushExecution(BrushExecutionOutput {
+                            stroke_session_id: brush_command_stroke_session_id(&command),
+                            command_kind: replay_brush_command_kind(&command),
+                            target_layer_id: brush_command_target_layer_id(&command),
+                            reference_set_id: brush_command_reference_set_id(&command),
+                            payload_digest: brush_command_payload_digest(&command),
+                        }),
+                    );
+                    recorder.record(
+                        frame_sequence_id,
+                        phase,
+                        OutputPayload::RenderCommand(RenderCommandOutput {
+                            stroke_session_id: brush_command_stroke_session_id(&command),
+                            command_kind: replay_brush_command_kind(&command),
+                            tile_count: brush_command_tile_count(&command),
+                            tile_keys_digest: brush_command_tile_keys_digest(&command),
+                            blend_mode: String::from("N/A"),
+                        }),
                     );
                 }
                 gpu.enqueue_brush_render_command(command)
@@ -724,6 +677,13 @@ impl App {
     }
 
     fn render_frame(&mut self, event_loop: &ActiveEventLoop) {
+        // Check for fatal error from previous frame
+        if self.fatal_error_seen {
+            eprintln!("[fatal] exiting due to previous render fatal error");
+            event_loop.exit();
+            return;
+        }
+        
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -736,7 +696,9 @@ impl App {
             &mut self.driver_debug,
             &mut self.brush_execution_sender,
             &mut self.brush_execution_receiver,
+            &mut self.output_trace_recorder,
             frame_sequence_id,
+            OutputPhase::EnqueueBeforeGpu,
             gpu,
             self.brush_trace_enabled,
         );
@@ -756,8 +718,42 @@ impl App {
         let render_result = gpu.render();
         gpu.process_renderer_merge_completions(frame_sequence_id)
             .expect("process renderer merge completions");
+        let merge_feedbacks = gpu.drain_brush_execution_merge_feedbacks();
+        if let Some(recorder) = self.output_trace_recorder.as_mut() {
+            for feedback in &merge_feedbacks {
+                let (stroke_session_id, ack_kind, receipt_terminal_state) = match feedback {
+                    brush_execution::BrushExecutionMergeFeedback::MergeApplied {
+                        stroke_session_id,
+                    } => (
+                        *stroke_session_id,
+                        MergeAckKind::TerminalSuccess,
+                        String::from("Finalized"),
+                    ),
+                    brush_execution::BrushExecutionMergeFeedback::MergeFailed {
+                        stroke_session_id,
+                        message: _,
+                    } => (
+                        *stroke_session_id,
+                        MergeAckKind::TerminalFailure,
+                        String::from("Aborted"),
+                    ),
+                };
+                let merge_request_id = recorder.next_merge_request_id();
+                recorder.record(
+                    frame_sequence_id,
+                    OutputPhase::EnqueueBeforeGpu,
+                    OutputPayload::MergeLifecycle(MergeLifecycleOutput {
+                        stroke_session_id,
+                        merge_request_id,
+                        submit_sequence: frame_sequence_id,
+                        ack_kind,
+                        receipt_terminal_state,
+                    }),
+                );
+            }
+        }
         if let Some(feedback_sender) = self.brush_execution_feedback_sender.as_mut() {
-            for feedback in gpu.drain_brush_execution_merge_feedbacks() {
+            for feedback in merge_feedbacks {
                 feedback_sender
                     .push_feedback(feedback)
                     .expect("send merge feedback into brush execution");
@@ -765,9 +761,31 @@ impl App {
         }
         if let Some(receiver) = self.brush_execution_receiver.as_mut() {
             while let Some(command) = receiver.pop_command() {
+                if let Some(recorder) = self.output_trace_recorder.as_mut() {
+                    recorder.record(
+                        frame_sequence_id,
+                        OutputPhase::EnqueueBeforeGpu,
+                        OutputPayload::RenderCommand(RenderCommandOutput {
+                            stroke_session_id: brush_command_stroke_session_id(&command),
+                            command_kind: replay_brush_command_kind(&command),
+                            tile_count: brush_command_tile_count(&command),
+                            tile_keys_digest: brush_command_tile_keys_digest(&command),
+                            blend_mode: String::from("N/A"),
+                        }),
+                    );
+                }
                 gpu.enqueue_brush_render_command(command)
                     .expect("enqueue brush render command after merge feedback");
             }
+        }
+        if let Some(recorder) = self.output_trace_recorder.as_mut() {
+            record_state_digest_event(
+                recorder,
+                frame_sequence_id,
+                OutputPhase::EnqueueBeforeGpu,
+                gpu.semantic_state_digest(),
+                u32::from(self.driver_debug.has_active_stroke()),
+            );
         }
         self.next_driver_frame_sequence_id = self
             .next_driver_frame_sequence_id
@@ -776,21 +794,35 @@ impl App {
 
         match render_result {
             Ok(()) => {}
-            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+            Err(AppCoreError::Surface(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost)) => {
                 if let Some(window) = self.window.as_ref() {
-                    gpu.resize(window.inner_size());
+                    // Attempt recovery by resizing
+                    if let Err(err) = gpu.resize(window.inner_size()) {
+                        eprintln!("[error] resize recovery failed: {:?}", err);
+                    } else {
+                        window.request_redraw();
+                    }
+                }
+            }
+            Err(AppCoreError::Surface(wgpu::SurfaceError::Timeout)) => {
+                if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
             }
-            Err(wgpu::SurfaceError::Timeout) => {
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
+            Err(AppCoreError::OutOfMemory | AppCoreError::PresentFatal { .. }) => {
+                // Fatal errors - set flag and exit
+                self.fatal_error_seen = true;
                 event_loop.exit();
             }
-            Err(_) => {
+            Err(AppCoreError::UnexpectedReceipt { .. } | AppCoreError::UnexpectedErrorVariant { .. }) => {
+                // Logic bugs - log and continue for debugging
+                eprintln!("[error] render logic bug: {:?}", render_result);
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            Err(other) => {
+                eprintln!("[error] render failed: {:?}", other);
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
@@ -811,27 +843,73 @@ impl App {
                 &mut self.driver_debug,
                 &mut self.brush_execution_sender,
                 &mut self.brush_execution_receiver,
+                &mut self.output_trace_recorder,
                 frame_sequence_id,
+                OutputPhase::FlushQuiescent,
                 gpu,
                 self.brush_trace_enabled,
             );
             let render_result = gpu.render();
+            // Fatal errors in flush are logged; main loop will catch them on next render
             if let Err(error) = render_result {
                 match error {
-                    wgpu::SurfaceError::OutOfMemory => {
-                        panic!("out of memory while flushing brush pipeline lifecycle")
+                    AppCoreError::OutOfMemory | AppCoreError::PresentFatal { .. } => {
+                        // Fatal error - log, set flag, and stop flushing
+                        eprintln!("[fatal] render error during flush: {:?}", error);
+                        self.fatal_error_seen = true;
+                        break; // Stop flushing, main loop will exit on next frame
                     }
-                    wgpu::SurfaceError::Outdated
-                    | wgpu::SurfaceError::Lost
-                    | wgpu::SurfaceError::Timeout
-                    | wgpu::SurfaceError::Other => {}
+                    // Recoverable errors - continue flushing
+                    AppCoreError::Surface(_)
+                    | AppCoreError::UnexpectedReceipt { .. }
+                    | AppCoreError::UnexpectedErrorVariant { .. }
+                    | AppCoreError::Runtime(_)
+                    | AppCoreError::BrushEnqueue(_)
+                    | AppCoreError::Merge(_)
+                    | AppCoreError::Resize { .. }
+                    | AppCoreError::TileAllocationLogicError { .. }
+                    | AppCoreError::MissingRendererNotice { .. } => {}
                 }
             }
             gpu.process_renderer_merge_completions(frame_sequence_id)
                 .expect("process renderer merge completions during lifecycle flush");
             let mut drained_merge_feedback_count = 0u32;
+            let merge_feedbacks = gpu.drain_brush_execution_merge_feedbacks();
+            if let Some(recorder) = self.output_trace_recorder.as_mut() {
+                for feedback in &merge_feedbacks {
+                    let (stroke_session_id, ack_kind, receipt_terminal_state) = match feedback {
+                        brush_execution::BrushExecutionMergeFeedback::MergeApplied {
+                            stroke_session_id,
+                        } => (
+                            *stroke_session_id,
+                            MergeAckKind::TerminalSuccess,
+                            String::from("Finalized"),
+                        ),
+                        brush_execution::BrushExecutionMergeFeedback::MergeFailed {
+                            stroke_session_id,
+                            message: _,
+                        } => (
+                            *stroke_session_id,
+                            MergeAckKind::TerminalFailure,
+                            String::from("Aborted"),
+                        ),
+                    };
+                    let merge_request_id = recorder.next_merge_request_id();
+                    recorder.record(
+                        frame_sequence_id,
+                        OutputPhase::FlushQuiescent,
+                        OutputPayload::MergeLifecycle(MergeLifecycleOutput {
+                            stroke_session_id,
+                            merge_request_id,
+                            submit_sequence: frame_sequence_id,
+                            ack_kind,
+                            receipt_terminal_state,
+                        }),
+                    );
+                }
+            }
             if let Some(feedback_sender) = self.brush_execution_feedback_sender.as_mut() {
-                for feedback in gpu.drain_brush_execution_merge_feedbacks() {
+                for feedback in merge_feedbacks {
                     drained_merge_feedback_count = drained_merge_feedback_count
                         .checked_add(1)
                         .expect("lifecycle flush drained merge feedback count overflow");
@@ -847,9 +925,31 @@ impl App {
                     drained_commands_after_feedback = drained_commands_after_feedback
                         .checked_add(1)
                         .expect("lifecycle flush drained command count overflow");
+                    if let Some(recorder) = self.output_trace_recorder.as_mut() {
+                        recorder.record(
+                            frame_sequence_id,
+                            OutputPhase::FlushQuiescent,
+                            OutputPayload::RenderCommand(RenderCommandOutput {
+                                stroke_session_id: brush_command_stroke_session_id(&command),
+                                command_kind: replay_brush_command_kind(&command),
+                                tile_count: brush_command_tile_count(&command),
+                                tile_keys_digest: brush_command_tile_keys_digest(&command),
+                                blend_mode: String::from("N/A"),
+                            }),
+                        );
+                    }
                     gpu.enqueue_brush_render_command(command)
                         .expect("enqueue brush render command during lifecycle flush");
                 }
+            }
+            if let Some(recorder) = self.output_trace_recorder.as_mut() {
+                record_state_digest_event(
+                    recorder,
+                    frame_sequence_id,
+                    OutputPhase::FlushQuiescent,
+                    gpu.semantic_state_digest(),
+                    u32::from(self.driver_debug.has_active_stroke()),
+                );
             }
 
             let has_activity = frame_stats.has_activity()
@@ -949,12 +1049,17 @@ fn main() {
         startup_image_path: cli_options.startup_image_path,
         driver_debug: DriverDebugState::new(),
         frame_scheduler: FrameScheduler::default(),
+        output_record_path: cli_options.output_record_path.clone(),
+        output_compare_path: cli_options.output_compare_path,
         input_trace_recorder: cli_options
             .input_record_path
             .map(InputTraceRecorder::from_path),
         input_trace_replay: cli_options
             .input_replay_path
             .map(InputTraceReplay::from_path),
+        output_trace_recorder: cli_options
+            .output_record_path
+            .map(|path| OutputTraceRecorder::from_path(path, String::from("interactive"))),
         brush_trace_enabled: brush_trace_enabled(),
         ..App::default()
     };
@@ -966,6 +1071,9 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
         return;
     };
     gpu.set_brush_command_quota(max_commands);
+    if quiet_mode_enabled() {
+        return;
+    }
     let trace_enabled =
         std::env::var_os("GLAPHICA_FRAME_SCHEDULER_TRACE").is_some_and(|value| value != "0");
     let should_log = trace_enabled
@@ -973,8 +1081,7 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
             decision.update_reason,
             Some(frame_scheduler::SchedulerUpdateReason::BrushHotPathActivated)
                 | Some(frame_scheduler::SchedulerUpdateReason::BrushHotPathDeactivated)
-        )
-        || max_commands > 0;
+        );
     if should_log {
         println!(
             "[frame_scheduler] frame={} active={} brush_commands={} reason={:?}",
@@ -987,7 +1094,14 @@ fn apply_frame_scheduler_decision(gpu: &GpuState, decision: FrameSchedulerDecisi
 }
 
 fn brush_trace_enabled() -> bool {
+    if quiet_mode_enabled() {
+        return false;
+    }
     std::env::var_os("GLAPHICA_BRUSH_TRACE").is_some_and(|value| value != "0")
+}
+
+fn quiet_mode_enabled() -> bool {
+    std::env::var_os("GLAPHICA_QUIET").is_some_and(|value| value != "0")
 }
 
 fn brush_command_kind(command: &BrushRenderCommand) -> &'static str {
@@ -1010,20 +1124,183 @@ fn brush_command_stroke_session_id(command: &BrushRenderCommand) -> u64 {
     }
 }
 
+fn replay_brush_command_kind(command: &BrushRenderCommand) -> ReplayBrushCommandKind {
+    match command {
+        BrushRenderCommand::BeginStroke(_) => ReplayBrushCommandKind::BeginStroke,
+        BrushRenderCommand::AllocateBufferTiles(_) => ReplayBrushCommandKind::AllocateBufferTiles,
+        BrushRenderCommand::PushDabChunkF32(_) => ReplayBrushCommandKind::PushDabChunkF32,
+        BrushRenderCommand::EndStroke(_) => ReplayBrushCommandKind::EndStroke,
+        BrushRenderCommand::MergeBuffer(_) => ReplayBrushCommandKind::MergeBuffer,
+    }
+}
+
+fn brush_command_target_layer_id(command: &BrushRenderCommand) -> u64 {
+    match command {
+        BrushRenderCommand::BeginStroke(command) => command.target_layer_id,
+        BrushRenderCommand::MergeBuffer(command) => command.target_layer_id,
+        BrushRenderCommand::AllocateBufferTiles(_)
+        | BrushRenderCommand::PushDabChunkF32(_)
+        | BrushRenderCommand::EndStroke(_) => 0,
+    }
+}
+
+fn brush_command_reference_set_id(command: &BrushRenderCommand) -> u64 {
+    match command {
+        BrushRenderCommand::BeginStroke(command) => command.reference_set_id,
+        BrushRenderCommand::AllocateBufferTiles(_)
+        | BrushRenderCommand::PushDabChunkF32(_)
+        | BrushRenderCommand::EndStroke(_)
+        | BrushRenderCommand::MergeBuffer(_) => 0,
+    }
+}
+
+fn brush_command_tile_count(command: &BrushRenderCommand) -> u32 {
+    match command {
+        BrushRenderCommand::AllocateBufferTiles(command) => u32::try_from(command.tiles.len())
+            .unwrap_or_else(|_| panic!("allocate tile count overflow")),
+        BrushRenderCommand::BeginStroke(_)
+        | BrushRenderCommand::PushDabChunkF32(_)
+        | BrushRenderCommand::MergeBuffer(_)
+        | BrushRenderCommand::EndStroke(_) => 0,
+    }
+}
+
+fn brush_command_tile_keys_digest(command: &BrushRenderCommand) -> String {
+    match command {
+        BrushRenderCommand::AllocateBufferTiles(command) => {
+            let mut signature = String::new();
+            for tile in &command.tiles {
+                signature.push_str(&format!("{}:{},", tile.tile_x, tile.tile_y));
+            }
+            format!("fx:{:016x}", fxhash(&signature))
+        }
+        BrushRenderCommand::BeginStroke(_)
+        | BrushRenderCommand::PushDabChunkF32(_)
+        | BrushRenderCommand::MergeBuffer(_)
+        | BrushRenderCommand::EndStroke(_) => String::from("fx:0000000000000000"),
+    }
+}
+
+fn brush_command_payload_digest(command: &BrushRenderCommand) -> String {
+    let signature = match command {
+        BrushRenderCommand::BeginStroke(command) => format!(
+            "begin:{}:{}:{}:{}:{}",
+            command.stroke_session_id,
+            command.brush_id,
+            command.program_revision,
+            command.reference_set_id,
+            command.target_layer_id
+        ),
+        BrushRenderCommand::AllocateBufferTiles(command) => {
+            let mut tile_signature = String::new();
+            for tile in &command.tiles {
+                tile_signature.push_str(&format!("{}:{},", tile.tile_x, tile.tile_y));
+            }
+            format!(
+                "alloc:{}:{}:{}",
+                command.stroke_session_id,
+                command.tiles.len(),
+                tile_signature
+            )
+        }
+        BrushRenderCommand::PushDabChunkF32(command) => {
+            let first_x = command.canvas_x().first().copied().unwrap_or(0.0);
+            let first_y = command.canvas_y().first().copied().unwrap_or(0.0);
+            let last_x = command.canvas_x().last().copied().unwrap_or(0.0);
+            let last_y = command.canvas_y().last().copied().unwrap_or(0.0);
+            format!(
+                "push:{}:{}:{first_x:.3}:{first_y:.3}:{last_x:.3}:{last_y:.3}",
+                command.stroke_session_id,
+                command.dab_count()
+            )
+        }
+        BrushRenderCommand::MergeBuffer(command) => format!(
+            "merge:{}:{}:{}",
+            command.stroke_session_id, command.tx_token, command.target_layer_id
+        ),
+        BrushRenderCommand::EndStroke(command) => format!("end:{}", command.stroke_session_id),
+    };
+    format!("fx:{:016x}", fxhash(&signature))
+}
+
+fn sample_chunk_bounds_digest(chunk: &driver::SampleChunk) -> String {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (&x, &y) in chunk.canvas_x().iter().zip(chunk.canvas_y().iter()) {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    if chunk.sample_count() == 0 {
+        min_x = 0.0;
+        min_y = 0.0;
+        max_x = 0.0;
+        max_y = 0.0;
+    }
+    let signature = format!(
+        "{}:{:.3}:{:.3}:{:.3}:{:.3}",
+        chunk.sample_count(),
+        min_x,
+        min_y,
+        max_x,
+        max_y
+    );
+    format!("fx:{:016x}", fxhash(&signature))
+}
+
+fn record_state_digest_event(
+    recorder: &mut OutputTraceRecorder,
+    tick: u64,
+    phase: OutputPhase,
+    state_digest: GpuSemanticStateDigest,
+    active_stroke_count: u32,
+) {
+    recorder.record(
+        tick,
+        phase,
+        OutputPayload::StateDigest(StateDigestOutput {
+            document_revision: state_digest.document_revision,
+            render_tree_revision: state_digest.render_tree_revision,
+            render_tree_semantic_hash: format!(
+                "fx:{:016x}",
+                state_digest.render_tree_semantic_hash
+            ),
+            pending_brush_command_count: u32::try_from(state_digest.pending_brush_command_count)
+                .unwrap_or(u32::MAX),
+            active_stroke_count,
+            dirty_tile_set_digest: format!(
+                "merge_pending:{}",
+                if state_digest.has_pending_merge_work {
+                    "1"
+                } else {
+                    "0"
+                }
+            ),
+        }),
+    );
+}
+
 struct CliOptions {
     startup_image_path: Option<PathBuf>,
     input_record_path: Option<PathBuf>,
     input_replay_path: Option<PathBuf>,
+    output_record_path: Option<PathBuf>,
+    output_compare_path: Option<PathBuf>,
 }
 
 fn parse_cli_options() -> CliOptions {
-    let usage = "usage: glaphica [--image <path>] [--record-input <path>] [--replay-input <path>] | [<path>]";
+    let usage = "usage: glaphica [--image <path>] [--record-input <path>] [--replay-input <path>] [--record-output <path>] [--compare-output <path>] | [<path>]";
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
 
     let mut startup_image_path = None;
     let mut positional_image_path = None;
     let mut input_record_path = None;
     let mut input_replay_path = None;
+    let mut output_record_path = None;
+    let mut output_compare_path = None;
     let mut index = 0usize;
 
     while index < args.len() {
@@ -1055,6 +1332,24 @@ fn parse_cli_options() -> CliOptions {
                 "missing path after --replay-input; {usage}"
             );
             input_replay_path = Some(PathBuf::from(&args[index]));
+        } else if current == OsStr::new("--record-output") {
+            index = index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("argument index overflow"));
+            assert!(
+                index < args.len(),
+                "missing path after --record-output; {usage}"
+            );
+            output_record_path = Some(PathBuf::from(&args[index]));
+        } else if current == OsStr::new("--compare-output") {
+            index = index
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("argument index overflow"));
+            assert!(
+                index < args.len(),
+                "missing path after --compare-output; {usage}"
+            );
+            output_compare_path = Some(PathBuf::from(&args[index]));
         } else if current.to_string_lossy().starts_with("--") {
             panic!("unknown option '{}'; {usage}", current.to_string_lossy());
         } else {
@@ -1077,10 +1372,16 @@ fn parse_cli_options() -> CliOptions {
         !(input_record_path.is_some() && input_replay_path.is_some()),
         "cannot use --record-input and --replay-input together; choose one mode"
     );
+    assert!(
+        output_compare_path.is_none() || output_record_path.is_some(),
+        "cannot use --compare-output without --record-output; {usage}"
+    );
 
     CliOptions {
         startup_image_path: startup_image_path.or(positional_image_path),
         input_record_path,
         input_replay_path,
+        output_record_path,
+        output_compare_path,
     }
 }

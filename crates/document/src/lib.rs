@@ -2,14 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use model::{TileImage, TILE_IMAGE};
 use render_protocol::{
     BlendMode, ImageHandle, LayerId, RenderNodeSnapshot, RenderTreeSnapshot, StrokeSessionId,
 };
 use slotmap::SlotMap;
-use tiles::{DirtySinceResult, TILE_SIZE, TileDirtyBitset, TileDirtyQuery, TileImage, TileKey};
+use tiles::{DirtySinceResult, TileDirtyBitset, TileDirtyQuery, TileKey};
 
 #[cfg(test)]
-use tiles::{TileKeyMapping, apply_tile_key_mappings};
+use tiles::{apply_tile_key_mappings, TileKeyMapping};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayerNodeId(u64);
@@ -20,7 +21,7 @@ impl LayerNodeId {
 
 pub struct Document {
     layer_tree: LayerTreeNode,
-    images: SlotMap<ImageHandle, Arc<TileImage>>,
+    images: SlotMap<ImageHandle, Arc<TileImage<TileKey>>>,
     size_x: u32,
     size_y: u32,
     revision: u64,
@@ -369,7 +370,7 @@ impl Document {
         }
     }
 
-    pub fn image(&self, image_handle: ImageHandle) -> Option<Arc<TileImage>> {
+    pub fn image(&self, image_handle: ImageHandle) -> Option<Arc<TileImage<TileKey>>> {
         self.images.get(image_handle).cloned()
     }
 
@@ -395,39 +396,11 @@ impl Document {
             })
     }
 
-    pub(crate) fn replace_leaf_image(
-        &mut self,
-        layer_id: LayerId,
-        stroke_session_id: StrokeSessionId,
-        image: TileImage,
-    ) -> Result<(), DocumentMergeError> {
-        let image_handle = self.leaf_image_handle(layer_id, stroke_session_id)?;
-        let next_layer_version = self
-            .layer_versions
-            .get(&layer_id)
-            .copied()
-            .unwrap_or_else(|| panic!("layer version for {layer_id} is missing"));
-        let next_layer_version = next_layer_version
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("layer version overflow for {layer_id}"));
-        self.layer_versions.insert(layer_id, next_layer_version);
-        let dirty_tiles = self.full_layer_dirty_tiles();
-        self.record_layer_dirty_history(layer_id, next_layer_version, dirty_tiles);
-        if let Some(image_entry) = self.images.get_mut(image_handle) {
-            *image_entry = Arc::new(image);
-            return Ok(());
-        }
-        Err(DocumentMergeError::LayerNotFoundInStrokeSession {
-            layer_id,
-            stroke_session_id,
-        })
-    }
-
     pub fn apply_merge_image(
         &mut self,
         layer_id: LayerId,
         stroke_session_id: StrokeSessionId,
-        image: TileImage,
+        image: TileImage<TileKey>,
         dirty_tiles: &[TileCoordinate],
         full_layer_dirty: bool,
     ) -> Result<MergeCommitSummary, DocumentMergeError> {
@@ -503,12 +476,10 @@ impl Document {
         if tile_x >= image.tiles_per_row() || tile_y >= image.tiles_per_column() {
             return None;
         }
-        image.get_tile(tile_x, tile_y).unwrap_or_else(|error| {
-            panic!(
-                "virtual image query failed for layer {} at ({}, {}): {:?}",
-                layer_id, tile_x, tile_y, error
-            )
-        })
+        match image.get_tile_at(tile_x, tile_y) {
+            Ok(key) => Some(*key),
+            Err(_) => None,
+        }
     }
 
     pub fn layer_dirty_since(
@@ -576,7 +547,11 @@ impl Document {
         id
     }
 
-    pub fn new_layer_root_with_image(&mut self, image: TileImage, blend: BlendMode) -> LayerNodeId {
+    pub fn new_layer_root_with_image(
+        &mut self,
+        image: TileImage<TileKey>,
+        blend: BlendMode,
+    ) -> LayerNodeId {
         let id = self.alloc_layer_id();
         self.layer_versions.insert(id.0, 0);
         self.layer_dirty_history.insert(
@@ -721,8 +696,7 @@ impl Document {
 
     fn new_empty_leaf(&mut self) -> (LayerNodeId, LayerTreeNode) {
         let id = self.alloc_layer_id();
-        let image = TileImage::new(self.size_x, self.size_y)
-            .unwrap_or_else(|error| panic!("failed to create empty layer image: {error:?}"));
+        let image = TileImage::from_pixel_size(self.size_x, self.size_y);
         self.layer_versions.insert(id.0, 0);
         self.layer_dirty_history.insert(
             id.0,
@@ -751,11 +725,11 @@ impl Document {
     }
 
     fn tiles_per_row(&self) -> u32 {
-        self.size_x.div_ceil(TILE_SIZE)
+        self.size_x.div_ceil(TILE_IMAGE)
     }
 
     fn tiles_per_column(&self) -> u32 {
-        self.size_y.div_ceil(TILE_SIZE)
+        self.size_y.div_ceil(TILE_IMAGE)
     }
 
     fn full_layer_dirty_tiles(&self) -> TileDirtyBitset {
@@ -1083,7 +1057,10 @@ mod tests {
     fn contains_brush_buffer_leaf(node: &RenderNodeSnapshot) -> bool {
         match node {
             RenderNodeSnapshot::Leaf { image_source, .. } => {
-                matches!(image_source, render_protocol::ImageSource::BrushBuffer { .. })
+                matches!(
+                    image_source,
+                    render_protocol::ImageSource::BrushBuffer { .. }
+                )
             }
             RenderNodeSnapshot::Group { children, .. } => {
                 children.iter().any(contains_brush_buffer_leaf)
@@ -1189,8 +1166,8 @@ mod tests {
                 let image = document
                     .image(*image_handle)
                     .expect("image handle should resolve");
-                assert_eq!(image.size_x(), 17);
-                assert_eq!(image.size_y(), 23);
+                assert_eq!(image.pixel_size().0, 17);
+                assert_eq!(image.pixel_size().1, 23);
             }
             _ => panic!("expected root child to be leaf"),
         }
@@ -1199,7 +1176,7 @@ mod tests {
     #[test]
     fn new_layer_root_with_image_uses_provided_image_and_blend() {
         let mut document = Document::new(17, 23);
-        let image = TileImage::new(9, 11).expect("new image");
+        let image = TileImage::from_pixel_size(9, 11);
         let id = document.new_layer_root_with_image(image, BlendMode::Multiply);
 
         let node = &document.root()[0];
@@ -1214,8 +1191,8 @@ mod tests {
                 let image = document
                     .image(*image_handle)
                     .expect("image handle should resolve");
-                assert_eq!(image.size_x(), 9);
-                assert_eq!(image.size_y(), 11);
+                assert_eq!(image.pixel_size().0, 9);
+                assert_eq!(image.pixel_size().1, 11);
             }
             _ => panic!("expected root child to be leaf"),
         }
@@ -1402,8 +1379,8 @@ mod tests {
         let image = document
             .image(image_handle)
             .expect("leaf image handle should resolve");
-        assert_eq!(image.size_x(), 8);
-        assert_eq!(image.size_y(), 4);
+        assert_eq!(image.pixel_size().0, 8);
+        assert_eq!(image.pixel_size().1, 4);
     }
 
     #[test]
@@ -1417,13 +1394,14 @@ mod tests {
         let snapshot = document.render_tree_snapshot();
         match snapshot.root.as_ref() {
             RenderNodeSnapshot::Group { children, .. } => match children.first() {
-                Some(RenderNodeSnapshot::Group { blend, children, .. }) => {
+                Some(RenderNodeSnapshot::Group {
+                    blend, children, ..
+                }) => {
                     assert_eq!(*blend, BlendMode::Normal);
                     assert_eq!(children.len(), 2);
                     match &children[0] {
                         RenderNodeSnapshot::Leaf {
-                            image_source:
-                                render_protocol::ImageSource::LayerImage { .. },
+                            image_source: render_protocol::ImageSource::LayerImage { .. },
                             ..
                         } => {}
                         _ => panic!("preview group first child must be layer image leaf"),
@@ -1431,9 +1409,7 @@ mod tests {
                     match &children[1] {
                         RenderNodeSnapshot::Leaf {
                             image_source:
-                                render_protocol::ImageSource::BrushBuffer {
-                                    stroke_session_id,
-                                },
+                                render_protocol::ImageSource::BrushBuffer { stroke_session_id },
                             ..
                         } => assert_eq!(*stroke_session_id, 42),
                         _ => panic!("preview group second child must be brush buffer leaf"),
@@ -1464,8 +1440,7 @@ mod tests {
                     assert_eq!(children.len(), 1);
                     match children.first() {
                         Some(RenderNodeSnapshot::Leaf {
-                            image_source:
-                                render_protocol::ImageSource::LayerImage { .. },
+                            image_source: render_protocol::ImageSource::LayerImage { .. },
                             ..
                         }) => {}
                         _ => panic!("cleared preview must restore plain layer leaf"),
@@ -1501,8 +1476,8 @@ mod tests {
         );
     }
 
-    fn test_tile_key(raw: u64) -> TileKey {
-        tiles::test_tile_key(raw)
+    fn test_tile_key(slot: u32) -> TileKey {
+        tiles::test_tile_key(0, 0, slot)
     }
 
     fn first_leaf_image_handle(document: &Document) -> ImageHandle {
@@ -1560,11 +1535,8 @@ mod tests {
         let image = document
             .image(first_leaf_image_handle(&document))
             .expect("resolve image");
-        let key = image
-            .get_tile(0, 0)
-            .expect("read tile")
-            .expect("tile should be assigned");
-        assert_eq!(key, test_tile_key(10));
+        let key = image.get_tile_at(0, 0).expect("read tile");
+        assert_eq!(*key, test_tile_key(10));
     }
 
     #[test]
@@ -1705,15 +1677,15 @@ mod tests {
                         tile_x: 0,
                         tile_y: 0,
                         layer_id: layer_id.0,
-                        previous_key: existing_image.get_tile(0, 0).expect("read tile"),
-                        new_key: test_tile_key(stroke_session_id + 1),
+                        previous_key: Some(*existing_image.get_tile_at(0, 0).expect("read tile")),
+                        new_key: test_tile_key((stroke_session_id + 1) as u32),
                     },
                     TileKeyMapping {
                         tile_x: 1,
                         tile_y: 0,
                         layer_id: layer_id.0,
-                        previous_key: existing_image.get_tile(1, 0).expect("read tile"),
-                        new_key: test_tile_key(stroke_session_id + 2),
+                        previous_key: Some(*existing_image.get_tile_at(1, 0).expect("read tile")),
+                        new_key: test_tile_key((stroke_session_id + 2) as u32),
                     },
                 ],
             )

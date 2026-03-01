@@ -5,9 +5,13 @@ members = ["crates/brush_execution",
     "crates/driver",
     "crates/frame_scheduler",
     "crates/glaphica",
+    "crates/replay_protocol",
     "crates/render_protocol",
     "crates/renderer",
     "crates/tiles",
+    "crates/window_replay",
     "crates/view",
+    "crates/engine",
+    "crates/protocol", "crates/model",
 ]
 resolver = "3"

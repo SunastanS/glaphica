@@ -5,7 +5,9 @@ use crate::{
     TileSetHandle,
 };
 
-use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage, core, gpu};
+use super::{
+    core, gpu, AtlasTier, GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage,
+};
 
 #[derive(Debug)]
 pub struct GroupTileAtlasStore {
@@ -30,10 +32,9 @@ impl GroupTileAtlasStore {
         Self::with_config(
             device,
             TileAtlasConfig {
-                max_layers: 2,
+                tier: AtlasTier::Small12, // 4 layers for group preview
                 format,
                 usage,
-                ..TileAtlasConfig::default()
             },
         )
     }
@@ -48,14 +49,15 @@ impl GroupTileAtlasStore {
             GenericTileAtlasConfig::from(config),
         ))?;
 
+        let tier_layout = config.tier.layout();
         let cpu = Arc::new(
-            core::TileAtlasCpu::new(config.max_layers, layout)
+            core::TileAtlasCpu::new(core::next_backend_id(), tier_layout.max_layers(), layout)
                 .map_err(|_| TileAtlasCreateError::MaxLayersExceedsDeviceLimit)?,
         );
         let (texture, view) = gpu::create_atlas_texture_and_array_view(
             device,
             layout,
-            config.max_layers,
+            tier_layout.max_layers(),
             gpu::atlas_format_to_wgpu(config.format),
             gpu::atlas_usage_to_wgpu(config.usage),
             "tiles.group_atlas.array",
@@ -68,7 +70,7 @@ impl GroupTileAtlasStore {
                 texture,
                 view,
                 format: config.format,
-                max_layers: config.max_layers,
+                max_layers: tier_layout.max_layers(),
                 layout: TileAtlasLayout {
                     tiles_per_row: layout.tiles_per_row,
                     tiles_per_column: layout.tiles_per_column,

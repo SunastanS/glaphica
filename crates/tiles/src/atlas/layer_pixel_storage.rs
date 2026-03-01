@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    ImageIngestError, TILE_SIZE, TileAddress, TileAllocError, TileAtlasCreateError,
-    TileAtlasLayout, TileGpuDrainError, TileImage, TileIngestError, TileKey, TileSetError,
-    TileSetHandle, VirtualImage,
+    ImageIngestError, TileAddress, TileAllocError, TileAtlasCreateError, TileAtlasLayout,
+    TileGpuDrainError, TileIngestError, TileKey, TileSetError, TileSetHandle, TILE_IMAGE,
 };
 
 use super::brush_buffer_storage;
-use super::format::{Bgra8Spec, Bgra8SrgbSpec, Rgba8Spec, Rgba8SrgbSpec, rgba8_tile_len};
+use super::format::{rgba8_tile_len, Bgra8Spec, Bgra8SrgbSpec, Rgba8Spec, Rgba8SrgbSpec};
 use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
 
 #[derive(Debug)]
@@ -251,7 +250,7 @@ impl TileAtlasStore {
         height: u32,
         bytes: &[u8],
     ) -> Result<Option<TileKey>, TileIngestError> {
-        if width != TILE_SIZE || height != TILE_SIZE {
+        if width != TILE_IMAGE || height != TILE_IMAGE {
             return Err(TileIngestError::SizeMismatch);
         }
         if bytes.is_empty() {
@@ -279,7 +278,7 @@ impl TileAtlasStore {
         bytes: &[u8],
         bytes_per_row: u32,
     ) -> Result<Option<TileKey>, TileIngestError> {
-        if width != TILE_SIZE || height != TILE_SIZE {
+        if width != TILE_IMAGE || height != TILE_IMAGE {
             return Err(TileIngestError::SizeMismatch);
         }
         if bytes.is_empty() {
@@ -322,8 +321,8 @@ impl TileAtlasStore {
             return Ok(None);
         }
 
-        let mut packed = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
-        for row in 0..(TILE_SIZE as usize) {
+        let mut packed = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
+        for row in 0..(TILE_IMAGE as usize) {
             let src_start = row * bytes_per_row_usize;
             let src_end = src_start + row_bytes_usize;
             let source = data
@@ -344,27 +343,24 @@ impl TileAtlasStore {
         size_y: u32,
         bytes: &[u8],
         bytes_per_row: u32,
-    ) -> Result<TileImage, ImageIngestError> {
+    ) -> Result<model::TileImage<TileKey>, ImageIngestError> {
         let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
         if !self.usage().contains_copy_dst() {
             return Err(ImageIngestError::from(TileIngestError::MissingCopyDstUsage));
         }
-        let bytes_per_row_usize: usize = bytes_per_row
-            .try_into()
-            .map_err(|_| ImageIngestError::SizeOverflow)?;
-        let mut image = VirtualImage::new(size_x, size_y)?;
+        let mut image = model::TileImage::from_pixel_size(size_x, size_y);
 
         for tile_y in 0..image.tiles_per_column() {
             for tile_x in 0..image.tiles_per_row() {
                 let source_x = tile_x
-                    .checked_mul(TILE_SIZE)
+                    .checked_mul(TILE_IMAGE)
                     .ok_or(ImageIngestError::SizeOverflow)?;
                 let source_y = tile_y
-                    .checked_mul(TILE_SIZE)
+                    .checked_mul(TILE_IMAGE)
                     .ok_or(ImageIngestError::SizeOverflow)?;
 
-                let rect_width = TILE_SIZE.min(size_x.saturating_sub(source_x));
-                let rect_height = TILE_SIZE.min(size_y.saturating_sub(source_y));
+                let rect_width = TILE_IMAGE.min(size_x.saturating_sub(source_x));
+                let rect_height = TILE_IMAGE.min(size_y.saturating_sub(source_y));
                 if rect_width == 0 || rect_height == 0 {
                     continue;
                 }
@@ -373,7 +369,7 @@ impl TileAtlasStore {
                     size_x,
                     size_y,
                     bytes,
-                    bytes_per_row_usize,
+                    bytes_per_row as usize,
                     source_x,
                     source_y,
                     rect_width,
@@ -382,11 +378,11 @@ impl TileAtlasStore {
                 else {
                     continue;
                 };
-                image.set_tile(tile_x, tile_y, key)?;
+                image.set_tile_at(tile_x, tile_y, key)?;
             }
         }
 
-        Ok(TileImage::from_virtual(image))
+        Ok(image)
     }
 
     fn ingest_subrect_rgba8_as_full_tile(
@@ -403,7 +399,7 @@ impl TileAtlasStore {
         if rect_width == 0 || rect_height == 0 {
             return Ok(None);
         }
-        if rect_width > TILE_SIZE || rect_height > TILE_SIZE {
+        if rect_width > TILE_IMAGE || rect_height > TILE_IMAGE {
             return Err(ImageIngestError::NonTileAligned);
         }
 
@@ -432,8 +428,8 @@ impl TileAtlasStore {
             .try_into()
             .map_err(|_| ImageIngestError::SizeOverflow)?;
 
-        let mut packed = vec![0u8; (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4];
-        let packed_row_bytes = (TILE_SIZE as usize) * 4;
+        let mut packed = vec![0u8; (TILE_IMAGE as usize) * (TILE_IMAGE as usize) * 4];
+        let packed_row_bytes = (TILE_IMAGE as usize) * 4;
         for row in 0..(rect_height as usize) {
             let source_row = (source_y as usize)
                 .checked_add(row)

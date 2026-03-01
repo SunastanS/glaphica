@@ -6,15 +6,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use model::{EmptyKey, TileImage, TILE_IMAGE};
 use render_protocol::{
     BlendModePipelineStrategy, RenderNodeSnapshot, RenderTreeSnapshot, TransformMatrix4x4,
 };
-use tiles::{TILE_SIZE, TILE_STRIDE, TileImage, TileKey};
+use tiles::{TileKey, TILE_STRIDE};
 
 use crate::{
-    BlendMode, DrawPassContext, GroupTargetCacheEntry, LeafDrawCacheKey, Renderer,
-    TileCompositeSpace, TileCoord, TileDrawInstance, TileInstanceGpu, ViewportMode, build_group_tile_draw_instances,
-    tile_coord_from_draw_instance,
+    build_group_tile_draw_instances, tile_coord_from_draw_instance, BlendMode, DrawPassContext,
+    GroupTargetCacheEntry, LeafDrawCacheKey, Renderer, TileCompositeSpace, TileCoord,
+    TileDrawInstance, TileInstanceGpu, ViewportMode,
 };
 
 static ROOT_DRAW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -48,12 +49,13 @@ impl Renderer {
             panic!("visible tile computation produced non-finite bounds");
         }
 
-        let (document_width, document_height) = self.data_state.render_data_resolver.document_size();
+        let (document_width, document_height) =
+            self.data_state.render_data_resolver.document_size();
         if document_width == 0 || document_height == 0 {
             panic!("document size must be positive");
         }
-        let tiles_per_row = document_width.div_ceil(TILE_SIZE);
-        let tiles_per_column = document_height.div_ceil(TILE_SIZE);
+        let tiles_per_row = document_width.div_ceil(TILE_IMAGE);
+        let tiles_per_column = document_height.div_ceil(TILE_IMAGE);
 
         // Clamp to document bounds first, so wildly-panned views don't create huge sets.
         let min_x = min_x.clamp(0.0, document_width as f32);
@@ -61,18 +63,18 @@ impl Renderer {
         let max_x = max_x.clamp(0.0, document_width as f32);
         let max_y = max_y.clamp(0.0, document_height as f32);
 
-        let min_tile_x = (min_x / (TILE_SIZE as f32)).floor() as i32;
-        let min_tile_y = (min_y / (TILE_SIZE as f32)).floor() as i32;
-        let max_tile_x = (max_x / (TILE_SIZE as f32)).floor() as i32;
-        let max_tile_y = (max_y / (TILE_SIZE as f32)).floor() as i32;
+        let min_tile_x = (min_x / (TILE_IMAGE as f32)).floor() as i32;
+        let min_tile_y = (min_y / (TILE_IMAGE as f32)).floor() as i32;
+        let max_tile_x = (max_x / (TILE_IMAGE as f32)).floor() as i32;
+        let max_tile_y = (max_y / (TILE_IMAGE as f32)).floor() as i32;
 
         let min_tile_x = min_tile_x.clamp(0, tiles_per_row.saturating_sub(1) as i32) as u32;
         let min_tile_y = min_tile_y.clamp(0, tiles_per_column.saturating_sub(1) as i32) as u32;
         let max_tile_x = max_tile_x.clamp(0, tiles_per_row.saturating_sub(1) as i32) as u32;
         let max_tile_y = max_tile_y.clamp(0, tiles_per_column.saturating_sub(1) as i32) as u32;
 
-        let estimated_count = (max_tile_x - min_tile_x + 1) as usize
-            * (max_tile_y - min_tile_y + 1) as usize;
+        let estimated_count =
+            (max_tile_x - min_tile_x + 1) as usize * (max_tile_y - min_tile_y + 1) as usize;
         let mut visible = HashSet::with_capacity(estimated_count.min(2048));
         for tile_y in min_tile_y..=max_tile_y {
             for tile_x in min_tile_x..=max_tile_x {
@@ -117,7 +119,9 @@ impl Renderer {
         }
     }
 
-    fn live_ids(snapshot: &RenderTreeSnapshot) -> (HashSet<LeafDrawCacheKey>, HashSet<u64>, HashSet<u64>) {
+    fn live_ids(
+        snapshot: &RenderTreeSnapshot,
+    ) -> (HashSet<LeafDrawCacheKey>, HashSet<u64>, HashSet<u64>) {
         let mut live_leaf_keys = HashSet::new();
         let mut live_leaf_layers = HashSet::new();
         let mut live_group_ids = HashSet::new();
@@ -232,7 +236,7 @@ impl Renderer {
         let set = self
             .gpu_state
             .group_tile_store
-            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| tile_key))
+            .adopt_tile_set(entry.image.iter_tiles().map(|(_, _, tile_key)| *tile_key))
             .unwrap_or_else(|error| panic!("adopt group cache tile set for release: {error}"));
         self.gpu_state
             .group_tile_store
@@ -288,8 +292,7 @@ impl Renderer {
         &self,
         cache_extent: wgpu::Extent3d,
     ) -> GroupTargetCacheEntry {
-        let image = TileImage::new(cache_extent.width, cache_extent.height)
-            .unwrap_or_else(|error| panic!("create group virtual image: {error:?}"));
+        let image = TileImage::from_pixel_size(cache_extent.width, cache_extent.height);
         GroupTargetCacheEntry {
             image,
             draw_instances: Vec::new(),
@@ -302,15 +305,15 @@ impl Renderer {
         entry: GroupTargetCacheEntry,
         cache_extent: wgpu::Extent3d,
     ) -> (GroupTargetCacheEntry, bool) {
-        if entry.image.size_x() == cache_extent.width && entry.image.size_y() == cache_extent.height
+        if entry.image.pixel_size().0 == cache_extent.width
+            && entry.image.pixel_size().1 == cache_extent.height
         {
             return (entry, false);
         }
         self.release_group_cache_entry(entry);
         (
             GroupTargetCacheEntry {
-                image: TileImage::new(cache_extent.width, cache_extent.height)
-                    .unwrap_or_else(|error| panic!("resize group virtual image: {error:?}")),
+                image: TileImage::from_pixel_size(cache_extent.width, cache_extent.height),
                 draw_instances: Vec::new(),
                 blend: BlendMode::Normal,
             },
@@ -447,12 +450,12 @@ impl Renderer {
         entry: &mut GroupTargetCacheEntry,
         tile_coord: TileCoord,
     ) -> TileKey {
-        if let Some(existing_key) = entry
+        let existing_key = entry
             .image
-            .get_tile(tile_coord.tile_x, tile_coord.tile_y)
-            .unwrap_or_else(|error| panic!("get group tile key: {error:?}"))
-        {
-            existing_key
+            .get_tile_at(tile_coord.tile_x, tile_coord.tile_y)
+            .unwrap_or_else(|error| panic!("get group tile key: {error:?}"));
+        if !existing_key.is_empty() {
+            *existing_key
         } else {
             let allocated_key = self
                 .gpu_state
@@ -461,7 +464,7 @@ impl Renderer {
                 .unwrap_or_else(|error| panic!("allocate group tile: {error}"));
             entry
                 .image
-                .set_tile(tile_coord.tile_x, tile_coord.tile_y, allocated_key)
+                .set_tile_at(tile_coord.tile_x, tile_coord.tile_y, allocated_key)
                 .unwrap_or_else(|error| panic!("set group tile key: {error:?}"));
             allocated_key
         }
@@ -650,9 +653,11 @@ impl Renderer {
             .checked_mul(std::mem::size_of::<TileInstanceGpu>() as u64)
             .expect("tile instance buffer write offset overflow");
         let instance_bytes: &[u8] = bytemuck::cast_slice(&self.gpu_state.tile_instance_gpu_staging);
-        self.gpu_state
-            .queue
-            .write_buffer(&self.gpu_state.tile_instance_buffer, offset_bytes, instance_bytes);
+        self.gpu_state.queue.write_buffer(
+            &self.gpu_state.tile_instance_buffer,
+            offset_bytes,
+            instance_bytes,
+        );
         self.tile_instance_arena_cursor = required_len;
         base_instance_index
     }
@@ -700,9 +705,7 @@ impl Renderer {
     }
 }
 
-fn invert_2d_affine_clip_matrix(
-    matrix: TransformMatrix4x4,
-) -> (f32, f32, f32, f32, f32, f32) {
+fn invert_2d_affine_clip_matrix(matrix: TransformMatrix4x4) -> (f32, f32, f32, f32, f32, f32) {
     // Column-major 4x4.
     // clip_x = a00 * doc_x + a01 * doc_y + tx
     // clip_y = a10 * doc_x + a11 * doc_y + ty

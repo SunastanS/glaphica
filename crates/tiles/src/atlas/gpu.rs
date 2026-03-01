@@ -4,9 +4,9 @@ use std::sync::Arc;
 use super::core;
 use super::format::{TileFormatSpec, TileGpuOpAdapter, TilePayloadSpec};
 use super::{GenericTileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
+use crate::{TileAddress, TileAtlasCreateError, TileAtlasLayout, TileGpuDrainError, TILE_STRIDE};
 #[cfg(test)]
-use crate::{TILE_GUTTER, TILES_PER_ROW};
-use crate::{TILE_STRIDE, TileAddress, TileAtlasCreateError, TileAtlasLayout, TileGpuDrainError};
+use crate::{TILES_PER_ROW, TILE_GUTTER};
 
 pub(in crate::atlas) fn validate_generic_atlas_config(
     device: &wgpu::Device,
@@ -34,10 +34,11 @@ pub(in crate::atlas) fn validate_generic_atlas_config(
 pub(in crate::atlas) fn core_config_from_generic(
     config: GenericTileAtlasConfig,
 ) -> core::AtlasCoreConfig {
+    let tier_layout = config.tier.layout();
     core::AtlasCoreConfig {
-        max_layers: config.max_layers,
-        tiles_per_row: config.tiles_per_row,
-        tiles_per_column: config.tiles_per_column,
+        max_layers: tier_layout.max_layers(),
+        tiles_per_row: tier_layout.tiles_per_row(),
+        tiles_per_column: tier_layout.tiles_per_column(),
     }
 }
 

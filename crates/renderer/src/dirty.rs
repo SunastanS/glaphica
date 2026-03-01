@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    DirtyRect, GROUP_FULL_DIRTY_RATIO_THRESHOLD, RenderDataResolver, RenderTreeNode,
-    collect_node_dirty_rects, dirty_rect_to_tile_coords,
+    collect_node_dirty_rects, dirty_rect_to_tile_coords, DirtyRect, RenderDataResolver,
+    RenderTreeNode, GROUP_FULL_DIRTY_RATIO_THRESHOLD,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

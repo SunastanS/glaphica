@@ -7,8 +7,11 @@
 - Stop early when you need more context and references, maybe docs, examples
 - Never write a fallback, make the program panic fast
 - If a roll of developing didn't reach its original target, report next steps
+- Do not run test automatically unless in debug tracing work
 
-**Read `docs/Instructions/coding_guidelines.md` before coding.**
+**Read `docs/guides/coding-guidelines.md` before coding.**
+
+The gsd-tools is at /home/sunastans/.config/opencode/get-shit-done/bin/gsd-tools.cjs
 
 ## Crate-Specific Guidelines
 
@@ -27,6 +30,7 @@
   - `GLAPHICA_RENDER_TREE_INVARIANTS=1`
   - `GLAPHICA_PERF_LOG=1`
   - `GLAPHICA_FRAME_SCHEDULER_TRACE=1`
+  - `GLAPHICA_QUIET=1` (global quiet mode; when set, suppresses business logs even if trace switches are enabled)
 - **GPU/wgpu**: Be extremely cautious with CPU→GPU ordering. Prefer safe ordering first, optimize after correctness.
 - **Command-Queue**: Clean up state at the correct time boundary - only at enqueue time if no later command depends on it.
 
@@ -51,10 +55,11 @@ glaphica/
 │   ├── renderer_protocol/
 │   ├── tiles/
 │   ├── render│   └── view/
-├── docs/Instructions/
-│   ├── coding_guidelines.md
-│   ├── debug_playbook.md
-│   └── wgpu.md
+├── docs/
+│   ├── guides/         # Developer guides
+│   ├── architecture/   # Architecture docs
+│   ├── planning/       # Project planning
+│   └── debug/          # Debug records
 └── .github/workflows/
     └── ci.yml
 ```
@@ -63,7 +68,7 @@ glaphica/
 
 ## Additional Resources
 
-- `docs/Instructions/debug_playbook.md` - Debugging strategies
-- `docs/Instructions/wgpu.md` - GPU-specific guidance
+- `docs/guides/debug-playbook.md` - Debugging strategies
+- `docs/guides/wgpu-guide.md` - GPU-specific guidance
 - `crates/renderer/DESIGN.md` - Renderer architecture
 - `crates/renderer/docs/merge_ack_integration.md` - Merge integration details

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use render_protocol::{
     BlendMode, GpuMergeOp, GpuTileRef, LayerId, MergeAuditMeta, MergeExecutionResult,
@@ -840,6 +840,7 @@ fn rollback_new_keys<S: MergeTileStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tile_key_encoding::{BackendId, GenerationId, SlotId};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Default)]
@@ -925,7 +926,7 @@ mod tests {
                 .0
                 .lock()
                 .expect("fake tile store mutex should not be poisoned");
-            let key = TileKey(guard.next_key);
+            let key = TileKey::new(BackendId(0), GenerationId(0), SlotId(guard.next_key as u32));
             guard.next_key = guard
                 .next_key
                 .checked_add(1)
@@ -1004,7 +1005,7 @@ mod tests {
                 tile_x: 0,
                 tile_y: 0,
                 existing_layer_key,
-                stroke_buffer_key: TileKey(500),
+                stroke_buffer_key: TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
                 blend_mode: BlendMode::Normal,
                 opacity: 1.0,
                 op_trace_id: 7,
@@ -1030,7 +1031,7 @@ mod tests {
                     tile_x: 0,
                     tile_y: 0,
                     existing_layer_key: first_existing_layer_key,
-                    stroke_buffer_key: TileKey(500),
+                    stroke_buffer_key: TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
                     blend_mode: BlendMode::Normal,
                     opacity: 1.0,
                     op_trace_id: 7,
@@ -1039,7 +1040,7 @@ mod tests {
                     tile_x: 1,
                     tile_y: 0,
                     existing_layer_key: second_existing_layer_key,
-                    stroke_buffer_key: TileKey(501),
+                    stroke_buffer_key: TileKey::new(BackendId(0), GenerationId(0), SlotId(501)),
                     blend_mode: BlendMode::Normal,
                     opacity: 1.0,
                     op_trace_id: 8,
@@ -1069,7 +1070,7 @@ mod tests {
     fn poll_submission_results_does_not_advance_receipt_state() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1099,7 +1100,7 @@ mod tests {
     fn ack_merge_result_is_single_state_transition_entry() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1133,7 +1134,7 @@ mod tests {
     fn query_merge_audit_record_reports_minimal_receipt_and_completion_metadata() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1185,7 +1186,7 @@ mod tests {
     fn duplicate_ack_is_fail_fast() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1222,7 +1223,7 @@ mod tests {
     fn illegal_state_transition_is_fail_fast() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1264,7 +1265,7 @@ mod tests {
     fn upstream_processing_blocks_new_submission_until_business_drain() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1298,7 +1299,7 @@ mod tests {
     fn duplicate_completion_notice_replay_is_rejected() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1326,9 +1327,9 @@ mod tests {
     #[test]
     fn finalize_marks_drop_keys_retained_without_releasing_them() {
         let store = SharedFakeTileStore::default();
-        let old_layer_key = TileKey(600);
+        let old_layer_key = TileKey::new(BackendId(0), GenerationId(0), SlotId(600));
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1375,9 +1376,9 @@ mod tests {
     #[test]
     fn abort_releases_new_keys_and_preserves_old_keys() {
         let store = SharedFakeTileStore::default();
-        let old_layer_key = TileKey(600);
+        let old_layer_key = TileKey::new(BackendId(0), GenerationId(0), SlotId(600));
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1428,7 +1429,7 @@ mod tests {
     fn ack_rejects_mismatched_receipt_notice_pair() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1464,7 +1465,7 @@ mod tests {
     fn drain_business_results_does_not_unlock_when_notice_is_unacked() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1493,7 +1494,7 @@ mod tests {
     fn duplicate_notice_id_across_receipts_is_rejected() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1553,7 +1554,7 @@ mod tests {
     fn renderer_completion_signal_adapter_enqueues_notice() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1584,7 +1585,7 @@ mod tests {
     fn submit_rejects_duplicate_tx_token_for_same_stroke_session() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
@@ -1612,16 +1613,16 @@ mod tests {
     #[test]
     fn submit_rejects_shared_previous_key_across_multiple_tile_ops() {
         let store = SharedFakeTileStore::default();
-        let shared_previous_key = TileKey(600);
+        let shared_previous_key = TileKey::new(BackendId(0), GenerationId(0), SlotId(600));
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
             },
         );
         store.seed_key(
-            TileKey(501),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(501)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 11,
@@ -1666,14 +1667,14 @@ mod tests {
     fn new_key_mapping_preserves_tile_coordinates() {
         let store = SharedFakeTileStore::default();
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
             },
         );
         store.seed_key(
-            TileKey(501),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(501)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 11,
@@ -1694,17 +1695,17 @@ mod tests {
     #[test]
     fn finalize_precheck_prevents_partial_drop_key_release() {
         let store = SharedFakeTileStore::default();
-        let first_old_layer_key = TileKey(600);
-        let second_old_layer_key = TileKey(601);
+        let first_old_layer_key = TileKey::new(BackendId(0), GenerationId(0), SlotId(600));
+        let second_old_layer_key = TileKey::new(BackendId(0), GenerationId(0), SlotId(601));
         store.seed_key(
-            TileKey(500),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(500)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 9,
             },
         );
         store.seed_key(
-            TileKey(501),
+            TileKey::new(BackendId(0), GenerationId(0), SlotId(501)),
             TileAddress {
                 atlas_layer: 0,
                 tile_index: 11,

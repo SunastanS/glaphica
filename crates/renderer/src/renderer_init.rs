@@ -5,22 +5,23 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 
 use render_protocol::TransformMatrix4x4;
 use tiles::{
     GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore, GroupTileAtlasStore,
-    TILE_STRIDE, TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat, TileAtlasGpuArray,
-    TileAtlasStore, TileAtlasUsage,
+    TileAtlasConfig, TileAtlasCreateError, TileAtlasFormat, TileAtlasGpuArray, TileAtlasStore,
+    TileAtlasUsage, TILE_STRIDE,
 };
 use wgpu::util::DeviceExt;
 
 use crate::{
-    BrushDabWriteGpu, BrushDabWriteMetaGpu, BrushWorkState, CacheState, DataState, DirtyStateStore,
-    FrameState, FrameSync, GPU_TIMING_SLOTS, GpuFrameTimingSlot, GpuFrameTimingSlotState,
-    GpuFrameTimingState, GpuState, GroupTargetCacheEntry, IDENTITY_MATRIX, TileCompositePipelines,
-    INITIAL_TILE_INSTANCE_CAPACITY, InputState, RenderDataResolver, Renderer, TileInstanceGpu,
-    TileTextureManagerGpu, ViewState, create_composite_pipeline, multiply_blend_state,
+    create_composite_pipeline, multiply_blend_state, BrushDabWriteGpu, BrushDabWriteMetaGpu,
+    BrushWorkState, CacheState, DataState, DirtyStateStore, FrameState, FrameSync,
+    GpuFrameTimingSlot, GpuFrameTimingSlotState, GpuFrameTimingState, GpuState,
+    GroupTargetCacheEntry, InputState, RenderDataResolver, Renderer, TileCompositePipelines,
+    TileInstanceGpu, TileTextureManagerGpu, ViewState, GPU_TIMING_SLOTS, IDENTITY_MATRIX,
+    INITIAL_TILE_INSTANCE_CAPACITY,
 };
 
 impl Renderer {
@@ -75,6 +76,29 @@ impl Renderer {
         render_data_resolver: Box<dyn RenderDataResolver>,
     ) -> (Self, crate::ViewOpSender) {
         let (view_sender, view_receiver) = mpsc::channel();
+
+        // Create thread channels when true_threading feature is enabled.
+        // This happens before Renderer::new() to follow initialization sequence:
+        // Channels → Renderer → Runtime thread
+        #[cfg(feature = "true_threading")]
+        let (main_thread_channels, engine_thread_channels) = {
+            use crate::RuntimeCommand;
+            use engine::create_thread_channels;
+            use protocol::{RuntimeError, RuntimeReceipt};
+
+            // Capacities from CONTEXT.md
+            let input_ring_capacity = 1024;
+            let input_control_capacity = 256;
+            let gpu_command_capacity = 1024;
+            let gpu_feedback_capacity = 256;
+
+            create_thread_channels::<RuntimeCommand, RuntimeReceipt, RuntimeError>(
+                input_ring_capacity,
+                input_control_capacity,
+                gpu_command_capacity,
+                gpu_feedback_capacity,
+            )
+        };
 
         let (merge_device_lost_sender, merge_device_lost_receiver) = mpsc::channel();
         device.set_device_lost_callback(move |reason, message| {
@@ -237,41 +261,44 @@ impl Renderer {
 
         let pipeline_layout_rgba = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("renderer.composite_layout.rgba"),
-            bind_group_layouts: &[&per_frame_bind_group_layout, &atlas_bind_group_layout_filterable],
+            bind_group_layouts: &[
+                &per_frame_bind_group_layout,
+                &atlas_bind_group_layout_filterable,
+            ],
             immediate_size: 0,
         });
         let composite_pipelines_rgba = TileCompositePipelines {
             alpha_content: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &shader_rgba,
-            surface_config.format,
-            wgpu::BlendState::ALPHA_BLENDING,
-            "renderer.composite_pipeline.alpha",
+                &device,
+                &pipeline_layout_rgba,
+                &shader_rgba,
+                surface_config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+                "renderer.composite_pipeline.alpha",
             ),
             multiply_content: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &shader_rgba,
-            surface_config.format,
-            multiply_blend_state(),
-            "renderer.composite_pipeline.multiply",
+                &device,
+                &pipeline_layout_rgba,
+                &shader_rgba,
+                surface_config.format,
+                multiply_blend_state(),
+                "renderer.composite_pipeline.multiply",
             ),
             alpha_slot: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &slot_shader_rgba,
-            surface_config.format,
-            wgpu::BlendState::ALPHA_BLENDING,
-            "renderer.composite_pipeline.slot.alpha",
+                &device,
+                &pipeline_layout_rgba,
+                &slot_shader_rgba,
+                surface_config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+                "renderer.composite_pipeline.slot.alpha",
             ),
             multiply_slot: create_composite_pipeline(
-            &device,
-            &pipeline_layout_rgba,
-            &slot_shader_rgba,
-            surface_config.format,
-            multiply_blend_state(),
-            "renderer.composite_pipeline.slot.multiply",
+                &device,
+                &pipeline_layout_rgba,
+                &slot_shader_rgba,
+                surface_config.format,
+                multiply_blend_state(),
+                "renderer.composite_pipeline.slot.multiply",
             ),
         };
 
@@ -336,14 +363,13 @@ impl Renderer {
         let (group_tile_store, group_tile_atlas) = GroupTileAtlasStore::with_config(
             &device,
             TileAtlasConfig {
-                max_layers: 2,
+                tier: tiles::AtlasTier::Small12, // 4 layers for group operations
                 format: tile_atlas.format(),
                 usage: Self::tile_atlas_usage_from_wgpu(
                     wgpu::TextureUsages::TEXTURE_BINDING
                         | wgpu::TextureUsages::COPY_DST
                         | wgpu::TextureUsages::COPY_SRC,
                 ),
-                ..TileAtlasConfig::default()
             },
         )
         .expect("create group tile atlas");
@@ -704,6 +730,11 @@ impl Renderer {
                 merge_scratch_view,
                 merge_device_lost_receiver,
                 merge_uncaptured_error_receiver,
+
+                #[cfg(feature = "true_threading")]
+                main_thread_channels: Some(main_thread_channels),
+                #[cfg(feature = "true_threading")]
+                engine_thread_channels: Some(engine_thread_channels),
             },
             view_state: ViewState {
                 view_matrix: IDENTITY_MATRIX,

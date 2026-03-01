@@ -16,6 +16,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs::OpenOptions, io::Write};
 
+use model::{TILE_IMAGE, TileImage};
 use render_protocol::{
     BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, BufferTileCoordinate, ImageHandle,
     ImageSource, LayerId, ProgramRevision, ReferenceLayerSelection, ReferenceSetId, RenderOp,
@@ -23,8 +24,8 @@ use render_protocol::{
 };
 use tiles::{
     DirtySinceResult, GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
-    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_SIZE, TILE_STRIDE, TileAddress,
-    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImage, TileKey,
+    GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_STRIDE, TileAddress,
+    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey,
 };
 
 #[repr(C)]
@@ -57,7 +58,7 @@ impl TileTextureManagerGpu {
             atlas_height: layout.atlas_height as f32,
             tiles_per_row: layout.tiles_per_row,
             tiles_per_column: layout.tiles_per_column,
-            tile_size: TILE_SIZE as f32,
+            tile_size: TILE_IMAGE as f32,
             tile_stride: TILE_STRIDE as f32,
             tile_gutter: TILE_GUTTER as f32,
             _padding0: 0.0,
@@ -180,7 +181,7 @@ struct LeafDrawCacheKey {
 
 #[derive(Debug)]
 struct GroupTargetCacheEntry {
-    image: TileImage,
+    image: TileImage<TileKey>,
     draw_instances: Vec<TileDrawInstance>,
     blend: BlendMode,
 }
@@ -207,7 +208,9 @@ pub trait RenderDataResolver {
         visitor: &mut dyn FnMut(u32, u32, TileKey),
     ) {
         match image_source {
-            ImageSource::LayerImage { image_handle } => self.visit_image_tiles(image_handle, visitor),
+            ImageSource::LayerImage { image_handle } => {
+                self.visit_image_tiles(image_handle, visitor)
+            }
             ImageSource::BrushBuffer { stroke_session_id } => {
                 panic!(
                     "render data resolver does not support brush buffer tile visit: stroke_session_id={}",
@@ -284,8 +287,7 @@ pub trait RenderDataResolver {
             ImageSource::BrushBuffer { stroke_session_id } => {
                 panic!(
                     "render data resolver does not support brush buffer tile address resolution: stroke_session_id={} key={:?}",
-                    stroke_session_id,
-                    tile_key
+                    stroke_session_id, tile_key
                 );
             }
         }
@@ -497,6 +499,17 @@ struct GpuState {
     merge_scratch_view: wgpu::TextureView,
     merge_device_lost_receiver: mpsc::Receiver<(wgpu::DeviceLostReason, String)>,
     merge_uncaptured_error_receiver: mpsc::Receiver<String>,
+
+    /// Channel infrastructure for true threading mode.
+    /// Created when GpuState is initialized with true_threading feature enabled.
+    #[cfg(feature = "true_threading")]
+    main_thread_channels: Option<
+        engine::MainThreadChannels<RuntimeCommand, protocol::RuntimeReceipt, protocol::RuntimeError>,
+    >,
+    #[cfg(feature = "true_threading")]
+    engine_thread_channels: Option<
+        engine::EngineThreadChannels<RuntimeCommand, protocol::RuntimeReceipt, protocol::RuntimeError>,
+    >,
 }
 
 #[repr(C)]
@@ -577,6 +590,9 @@ pub enum BrushRenderEnqueueError {
         received_layer_id: LayerId,
     },
     BeginWithPendingMerge,
+    MergeError {
+        message: String,
+    },
 }
 
 const IDENTITY_MATRIX: TransformMatrix4x4 = [
@@ -643,18 +659,22 @@ impl TileCompositePipelines {
         composite_space: TileCompositeSpace,
     ) -> &wgpu::RenderPipeline {
         match (blend_strategy, composite_space) {
-            (render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Content) => {
-                &self.alpha_content
-            }
-            (render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Content) => {
-                &self.multiply_content
-            }
-            (render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend, TileCompositeSpace::Slot) => {
-                &self.alpha_slot
-            }
-            (render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend, TileCompositeSpace::Slot) => {
-                &self.multiply_slot
-            }
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend,
+                TileCompositeSpace::Content,
+            ) => &self.alpha_content,
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend,
+                TileCompositeSpace::Content,
+            ) => &self.multiply_content,
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceAlphaBlend,
+                TileCompositeSpace::Slot,
+            ) => &self.alpha_slot,
+            (
+                render_protocol::BlendModePipelineStrategy::SurfaceMultiplyBlend,
+                TileCompositeSpace::Slot,
+            ) => &self.multiply_slot,
             (render_protocol::BlendModePipelineStrategy::Unsupported, _) => {
                 panic!("unsupported blend strategy in composite pipelines");
             }
@@ -707,10 +727,10 @@ fn dirty_rect_to_tile_coords(dirty_rect: DirtyRect) -> HashSet<TileCoord> {
         return HashSet::new();
     }
 
-    let start_tile_x = min_x / TILE_SIZE;
-    let start_tile_y = min_y / TILE_SIZE;
-    let end_tile_x = max_x.saturating_sub(1) / TILE_SIZE;
-    let end_tile_y = max_y.saturating_sub(1) / TILE_SIZE;
+    let start_tile_x = min_x / TILE_IMAGE;
+    let start_tile_y = min_y / TILE_IMAGE;
+    let end_tile_x = max_x.saturating_sub(1) / TILE_IMAGE;
+    let end_tile_y = max_y.saturating_sub(1) / TILE_IMAGE;
 
     let mut tiles = HashSet::new();
     for tile_y in start_tile_y..=end_tile_y {
@@ -740,6 +760,18 @@ mod renderer_composite;
 mod renderer_draw_builders;
 
 mod renderer_pipeline;
+
+/// Runtime command type for true threading mode.
+/// Phase 2 will define the complete set of command variants.
+#[cfg(feature = "true_threading")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuntimeCommand {
+    /// Placeholder - Phase 2 will define all variants
+    PresentFrame,
+    Resize,
+    EnqueueBrushCommands,
+    PollMergeNotices,
+}
 
 mod renderer_view_ops;
 
