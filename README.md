@@ -1,3 +1,3 @@
 # Glaphica
 
-Finally I can't stand the origin mess one and begin to rewrite manually
+Glaphica is a digital painting tool in rust and wgpu.
