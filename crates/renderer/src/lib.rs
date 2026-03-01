@@ -16,6 +16,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::{fs::OpenOptions, io::Write};
 
+use model::{TILE_IMAGE, TileImage};
 use render_protocol::{
     BlendMode, BrushId, BrushProgramKey, BrushRenderCommand, BufferTileCoordinate, ImageHandle,
     ImageSource, LayerId, ProgramRevision, ReferenceLayerSelection, ReferenceSetId, RenderOp,
@@ -24,9 +25,8 @@ use render_protocol::{
 use tiles::{
     DirtySinceResult, GenericR32FloatTileAtlasGpuArray, GenericR32FloatTileAtlasStore,
     GroupTileAtlasGpuArray, GroupTileAtlasStore, TILE_GUTTER, TILE_STRIDE, TileAddress,
-    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileImage, TileKey,
+    TileAtlasGpuArray, TileAtlasLayout, TileGpuDrainError, TileKey,
 };
-use model::TILE_IMAGE;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -181,7 +181,7 @@ struct LeafDrawCacheKey {
 
 #[derive(Debug)]
 struct GroupTargetCacheEntry {
-    image: TileImage,
+    image: TileImage<TileKey>,
     draw_instances: Vec<TileDrawInstance>,
     blend: BlendMode,
 }
@@ -499,6 +499,17 @@ struct GpuState {
     merge_scratch_view: wgpu::TextureView,
     merge_device_lost_receiver: mpsc::Receiver<(wgpu::DeviceLostReason, String)>,
     merge_uncaptured_error_receiver: mpsc::Receiver<String>,
+
+    /// Channel infrastructure for true threading mode.
+    /// Created when GpuState is initialized with true_threading feature enabled.
+    #[cfg(feature = "true_threading")]
+    main_thread_channels: Option<
+        engine::MainThreadChannels<RuntimeCommand, protocol::RuntimeReceipt, protocol::RuntimeError>,
+    >,
+    #[cfg(feature = "true_threading")]
+    engine_thread_channels: Option<
+        engine::EngineThreadChannels<RuntimeCommand, protocol::RuntimeReceipt, protocol::RuntimeError>,
+    >,
 }
 
 #[repr(C)]
@@ -579,6 +590,9 @@ pub enum BrushRenderEnqueueError {
         received_layer_id: LayerId,
     },
     BeginWithPendingMerge,
+    MergeError {
+        message: String,
+    },
 }
 
 const IDENTITY_MATRIX: TransformMatrix4x4 = [
@@ -746,6 +760,18 @@ mod renderer_composite;
 mod renderer_draw_builders;
 
 mod renderer_pipeline;
+
+/// Runtime command type for true threading mode.
+/// Phase 2 will define the complete set of command variants.
+#[cfg(feature = "true_threading")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuntimeCommand {
+    /// Placeholder - Phase 2 will define all variants
+    PresentFrame,
+    Resize,
+    EnqueueBrushCommands,
+    PollMergeNotices,
+}
 
 mod renderer_view_ops;
 

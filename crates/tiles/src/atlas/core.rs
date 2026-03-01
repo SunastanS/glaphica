@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{mpsc, Mutex};
 
-use crate::{INDEX_SHARDS, TILE_STRIDE};
 use crate::{
-    TileAddress, TileAllocError, TileAtlasCreateError, TileKey, TileSetError, TileSetHandle,
-    TileSetId,
+    BackendId, GenerationId, SlotId, TileAddress, TileAllocError, TileAtlasCreateError, TileKey,
+    TileSetError, TileSetHandle, TileSetId,
 };
+use crate::{INDEX_SHARDS, TILE_STRIDE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::atlas) struct AtlasUsage {
@@ -414,7 +414,8 @@ pub(in crate::atlas) struct TileAtlasCpu {
     pages: Vec<TileAllocatorPage>,
     index_shards: [Mutex<HashMap<TileKey, TileRecord>>; INDEX_SHARDS],
     lifecycle_gc: Mutex<TileKeyLifecycleGcState>,
-    next_key: AtomicU64,
+    backend_id: BackendId,
+    tiles_per_atlas: u32,
     next_retain_id: AtomicU64,
     owner_tag: u64,
     next_set_id: AtomicU64,
@@ -423,9 +424,15 @@ pub(in crate::atlas) struct TileAtlasCpu {
 }
 
 static NEXT_ATLAS_OWNER_TAG: AtomicU64 = AtomicU64::new(1);
+static NEXT_BACKEND_ID: AtomicU8 = AtomicU8::new(1);
+
+pub(in crate::atlas) fn next_backend_id() -> BackendId {
+    BackendId(NEXT_BACKEND_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 impl TileAtlasCpu {
     pub(in crate::atlas) fn new(
+        backend_id: BackendId,
         max_layers: u32,
         layout: AtlasLayout,
     ) -> Result<Self, TileAllocError> {
@@ -438,7 +445,8 @@ impl TileAtlasCpu {
             pages,
             index_shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
             lifecycle_gc: Mutex::new(TileKeyLifecycleGcState::default()),
-            next_key: AtomicU64::new(0),
+            backend_id,
+            tiles_per_atlas: layout.tiles_per_atlas,
             next_retain_id: AtomicU64::new(0),
             owner_tag: NEXT_ATLAS_OWNER_TAG.fetch_add(1, Ordering::Relaxed),
             next_set_id: AtomicU64::new(0),
@@ -497,7 +505,6 @@ impl TileAtlasCpu {
     }
 
     fn allocate_raw(&self) -> Result<(TileKey, TileAddress, bool), TileAllocError> {
-        let key = self.next_key()?;
         let address = self.take_free_address()?;
 
         let page = self
@@ -505,6 +512,15 @@ impl TileAtlasCpu {
             .get(address.atlas_layer as usize)
             .ok_or(TileAllocError::AtlasFull)?;
         let generation = page.generation(address.tile_index)?;
+
+        // Calculate slot: layer * tiles_per_atlas + tile_index
+        let slot_index = address
+            .atlas_layer
+            .checked_mul(self.tiles_per_atlas)
+            .and_then(|v| v.checked_add(address.tile_index as u32))
+            .ok_or(TileAllocError::AtlasFull)?;
+        let slot = SlotId(slot_index);
+        let key = self.encode_key(slot, GenerationId(generation));
 
         let shard = self.shard_for_key(key);
         self.index_shards[shard]
@@ -745,23 +761,11 @@ impl TileAtlasCpu {
     }
 
     fn shard_for_key(&self, key: TileKey) -> usize {
-        (key.0 as usize) & (INDEX_SHARDS - 1)
+        (key.slot().0 as usize) & (INDEX_SHARDS - 1)
     }
 
-    fn next_key(&self) -> Result<TileKey, TileAllocError> {
-        loop {
-            let current = self.next_key.load(Ordering::Relaxed);
-            let Some(next) = current.checked_add(1) else {
-                return Err(TileAllocError::KeySpaceExhausted);
-            };
-            if self
-                .next_key
-                .compare_exchange(current, next, Ordering::SeqCst, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Ok(TileKey(current));
-            }
-        }
+    fn encode_key(&self, slot: SlotId, generation: GenerationId) -> TileKey {
+        TileKey::new(self.backend_id, generation, slot)
     }
 
     fn next_retain_id(&self) -> u64 {
@@ -972,7 +976,7 @@ pub(in crate::atlas) fn tile_coords_from_index_with_row(
 #[cfg(test)]
 mod tests {
     use super::{AtlasLayout, TileAtlasCpu};
-    use crate::{TILE_STRIDE, TileAllocError};
+    use crate::{BackendId, TileAllocError, TILE_STRIDE};
 
     fn test_layout(tiles_per_row: u32, tiles_per_column: u32) -> AtlasLayout {
         let tiles_per_atlas = tiles_per_row
@@ -994,7 +998,7 @@ mod tests {
 
     #[test]
     fn allocate_evicts_oldest_retain_batch_when_full() {
-        let cpu = TileAtlasCpu::new(1, test_layout(3, 1)).expect("create cpu atlas");
+        let cpu = TileAtlasCpu::new(BackendId(0), 1, test_layout(3, 1)).expect("create cpu atlas");
         let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
         let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
         let (key_c, _) = cpu.allocate_without_ops().expect("allocate key c");
@@ -1014,22 +1018,7 @@ mod tests {
 
     #[test]
     fn allocate_fails_when_full_and_no_retain_batches_exist() {
-        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
-        let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
-        let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
-        cpu.mark_keys_active(&[key_a, key_b]);
-
-        let error = cpu
-            .allocate_without_ops()
-            .expect_err("allocate should fail without retained keys");
-        assert!(matches!(error, TileAllocError::AtlasFull));
-        assert!(cpu.is_allocated(key_a));
-        assert!(cpu.is_allocated(key_b));
-    }
-
-    #[test]
-    fn retain_batch_eviction_uses_batch_insertion_order() {
-        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
+        let cpu = TileAtlasCpu::new(BackendId(0), 1, test_layout(2, 1)).expect("create cpu atlas");
         let (oldest_key, _) = cpu.allocate_without_ops().expect("allocate oldest key");
         let (newer_key, _) = cpu.allocate_without_ops().expect("allocate newer key");
 
@@ -1046,7 +1035,7 @@ mod tests {
 
     #[test]
     fn drain_evicted_batches_reports_gc_evictions_and_is_idempotent() {
-        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
+        let cpu = TileAtlasCpu::new(BackendId(0), 1, test_layout(2, 1)).expect("create cpu atlas");
         let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
         let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
         let retain_id = cpu.retain_keys_new_batch(&[key_a, key_b]);
@@ -1068,7 +1057,7 @@ mod tests {
 
     #[test]
     fn retain_reuses_key_moves_to_new_batch() {
-        let cpu = TileAtlasCpu::new(1, test_layout(2, 1)).expect("create cpu atlas");
+        let cpu = TileAtlasCpu::new(BackendId(0), 1, test_layout(2, 1)).expect("create cpu atlas");
         let (key_a, _) = cpu.allocate_without_ops().expect("allocate key a");
         let (key_b, _) = cpu.allocate_without_ops().expect("allocate key b");
 

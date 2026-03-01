@@ -1,3 +1,4 @@
+use protocol::MergeItem;
 /// Runtime command protocol.
 ///
 /// Defines the command/receipt interface between AppCore and GpuRuntime.
@@ -5,6 +6,8 @@
 ///
 /// Design note: Commands own their data (no lifetime parameters) to keep
 /// the command interface simple and avoid lifetime propagation.
+use std::sync::mpsc::Sender;
+
 use render_protocol::{
     BrushRenderCommand, MergeAuditMeta, MergeExecutionResult, RenderTreeSnapshot,
     StrokeExecutionReceiptId,
@@ -20,12 +23,27 @@ pub enum RuntimeCommand {
     /// Present a frame and drain tile operations.
     PresentFrame { frame_id: u64 },
 
-    /// Resize the surface.
+    /// Resize the surface (with view_transform).
     Resize {
         width: u32,
         height: u32,
         view_transform: ViewTransform,
     },
+
+    /// Resize with handshake (for Phase 4 initialization, no view_transform).
+    ResizeHandshake {
+        width: u32,
+        height: u32,
+        ack_sender: Sender<Result<(), RuntimeError>>,
+    },
+
+    /// Initialize with handshake (for Phase 4 startup).
+    Init {
+        ack_sender: Sender<Result<(), RuntimeError>>,
+    },
+
+    /// Shutdown engine thread (explicit handshake).
+    Shutdown { reason: String },
 
     /// Bind a new render tree.
     BindRenderTree {
@@ -44,6 +62,16 @@ pub enum RuntimeCommand {
 
     /// Process merge completions (coarse-grained: submit + poll + initial processing).
     ProcessMergeCompletions { frame_id: u64 },
+
+    /// Acknowledge merge completion results.
+    AckMergeResults { notices: Vec<MergeCompletionNotice> },
+
+    /// Enqueue planned merge operations.
+    EnqueuePlannedMerge {
+        receipt: render_protocol::StrokeExecutionReceipt,
+        gpu_merge_ops: Vec<render_protocol::GpuMergeOp>,
+        meta: render_protocol::MergePlanMeta,
+    },
 }
 
 /// Receipts returned by GpuRuntime after executing commands.
@@ -54,6 +82,15 @@ pub enum RuntimeReceipt {
 
     /// Surface resized.
     Resized,
+
+    /// Surface resized (handshake ack).
+    ResizeHandshakeAck,
+
+    /// Initialization completed.
+    InitComplete,
+
+    /// Shutdown acknowledged.
+    ShutdownAck { reason: String },
 
     /// Render tree bound.
     RenderTreeBound,
@@ -72,6 +109,12 @@ pub enum RuntimeReceipt {
         submission_receipt_ids: Vec<StrokeExecutionReceiptId>,
         renderer_notices: Vec<RendererNotice>,
     },
+
+    /// Merge results acknowledged.
+    MergeResultsAcknowledged,
+
+    /// Planned merge enqueued.
+    PlannedMergeEnqueued,
 }
 
 /// Renderer notice for merge completion processing.
@@ -103,6 +146,24 @@ pub enum RuntimeError {
 
     /// Merge poll failed.
     MergePoll(renderer::MergePollError),
+
+    /// Merge ack failed.
+    MergeAck(renderer::MergeAckError),
+
+    /// Merge enqueue failed.
+    MergeEnqueue(renderer::MergeEnqueueError),
+
+    /// Shutdown requested.
+    ShutdownRequested { reason: String },
+
+    /// Engine thread disconnected.
+    EngineThreadDisconnected,
+
+    /// Feedback queue timeout (release mode graceful degradation).
+    FeedbackQueueTimeout,
+
+    /// Handshake timeout.
+    HandshakeTimeout { operation: &'static str },
 }
 
 impl From<renderer::PresentError> for RuntimeError {
@@ -132,6 +193,18 @@ impl From<renderer::MergeSubmitError> for RuntimeError {
 impl From<renderer::MergePollError> for RuntimeError {
     fn from(err: renderer::MergePollError) -> Self {
         RuntimeError::MergePoll(err)
+    }
+}
+
+impl From<renderer::MergeAckError> for RuntimeError {
+    fn from(err: renderer::MergeAckError) -> Self {
+        RuntimeError::MergeAck(err)
+    }
+}
+
+impl From<renderer::MergeEnqueueError> for RuntimeError {
+    fn from(err: renderer::MergeEnqueueError) -> Self {
+        RuntimeError::MergeEnqueue(err)
     }
 }
 
@@ -166,4 +239,89 @@ impl RuntimeError {
             other => Err(other),
         }
     }
+}
+
+// MergeItem implementations for RuntimeReceipt and RuntimeError
+// Required for GpuFeedbackMergeState
+
+use std::hash::Hash;
+
+impl MergeItem for RuntimeReceipt {
+    type MergeKey = ReceiptMergeKey;
+
+    fn merge_key(&self) -> Self::MergeKey {
+        match self {
+            RuntimeReceipt::FramePresented {
+                executed_tile_count,
+            } => ReceiptMergeKey::FramePresented(*executed_tile_count),
+            RuntimeReceipt::Resized => ReceiptMergeKey::Resized,
+            RuntimeReceipt::ResizeHandshakeAck => ReceiptMergeKey::ResizeHandshakeAck,
+            RuntimeReceipt::InitComplete => ReceiptMergeKey::InitComplete,
+            RuntimeReceipt::ShutdownAck { reason } => ReceiptMergeKey::ShutdownAck(reason.clone()),
+            RuntimeReceipt::RenderTreeBound => ReceiptMergeKey::RenderTreeBound,
+            RuntimeReceipt::BrushCommandsEnqueued { dab_count } => {
+                ReceiptMergeKey::BrushCommandsEnqueued(*dab_count)
+            }
+            RuntimeReceipt::BrushCommandEnqueued => ReceiptMergeKey::BrushCommandEnqueued,
+            RuntimeReceipt::MergeNotices { .. } => ReceiptMergeKey::MergeNotices,
+            RuntimeReceipt::MergeCompletionsProcessed { .. } => {
+                ReceiptMergeKey::MergeCompletionsProcessed
+            }
+            RuntimeReceipt::MergeResultsAcknowledged => ReceiptMergeKey::MergeResultsAcknowledged,
+            RuntimeReceipt::PlannedMergeEnqueued => ReceiptMergeKey::PlannedMergeEnqueued,
+        }
+    }
+}
+
+impl MergeItem for RuntimeError {
+    type MergeKey = ErrorMergeKey;
+
+    fn merge_key(&self) -> Self::MergeKey {
+        match self {
+            RuntimeError::PresentError(_) => ErrorMergeKey::PresentError,
+            RuntimeError::SurfaceError(_) => ErrorMergeKey::SurfaceError,
+            RuntimeError::ResizeError(_) => ErrorMergeKey::ResizeError,
+            RuntimeError::BrushEnqueueError(_) => ErrorMergeKey::BrushEnqueueError,
+            RuntimeError::MergeSubmit(_) => ErrorMergeKey::MergeSubmit,
+            RuntimeError::MergePoll(_) => ErrorMergeKey::MergePoll,
+            RuntimeError::MergeAck(_) => ErrorMergeKey::MergeAck,
+            RuntimeError::MergeEnqueue(_) => ErrorMergeKey::MergeEnqueue,
+            RuntimeError::ShutdownRequested { .. } => ErrorMergeKey::ShutdownRequested,
+            RuntimeError::EngineThreadDisconnected => ErrorMergeKey::EngineThreadDisconnected,
+            RuntimeError::FeedbackQueueTimeout => ErrorMergeKey::FeedbackQueueTimeout,
+            RuntimeError::HandshakeTimeout { .. } => ErrorMergeKey::HandshakeTimeout,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReceiptMergeKey {
+    FramePresented(usize),
+    Resized,
+    ResizeHandshakeAck,
+    InitComplete,
+    ShutdownAck(String),
+    RenderTreeBound,
+    BrushCommandsEnqueued(u64),
+    BrushCommandEnqueued,
+    MergeNotices,
+    MergeCompletionsProcessed,
+    MergeResultsAcknowledged,
+    PlannedMergeEnqueued,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ErrorMergeKey {
+    PresentError,
+    SurfaceError,
+    ResizeError,
+    BrushEnqueueError,
+    MergeSubmit,
+    MergePoll,
+    MergeAck,
+    MergeEnqueue,
+    ShutdownRequested,
+    EngineThreadDisconnected,
+    FeedbackQueueTimeout,
+    HandshakeTimeout,
 }

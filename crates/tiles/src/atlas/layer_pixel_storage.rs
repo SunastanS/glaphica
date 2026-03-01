@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    ImageIngestError, TILE_IMAGE, TileAddress, TileAllocError, TileAtlasCreateError,
-    TileAtlasLayout, TileGpuDrainError, TileImage, TileIngestError, TileKey, TileSetError,
-    TileSetHandle, VirtualImage,
+    ImageIngestError, TileAddress, TileAllocError, TileAtlasCreateError, TileAtlasLayout,
+    TileGpuDrainError, TileIngestError, TileKey, TileSetError, TileSetHandle, TILE_IMAGE,
 };
 
 use super::brush_buffer_storage;
-use super::format::{Bgra8Spec, Bgra8SrgbSpec, Rgba8Spec, Rgba8SrgbSpec, rgba8_tile_len};
+use super::format::{rgba8_tile_len, Bgra8Spec, Bgra8SrgbSpec, Rgba8Spec, Rgba8SrgbSpec};
 use super::{GenericTileAtlasConfig, TileAtlasConfig, TileAtlasFormat, TileAtlasUsage};
 
 #[derive(Debug)]
@@ -344,15 +343,12 @@ impl TileAtlasStore {
         size_y: u32,
         bytes: &[u8],
         bytes_per_row: u32,
-    ) -> Result<TileImage, ImageIngestError> {
+    ) -> Result<model::TileImage<TileKey>, ImageIngestError> {
         let _layout = rgba8_strided_layout(size_x, size_y, bytes, bytes_per_row)?;
         if !self.usage().contains_copy_dst() {
             return Err(ImageIngestError::from(TileIngestError::MissingCopyDstUsage));
         }
-        let bytes_per_row_usize: usize = bytes_per_row
-            .try_into()
-            .map_err(|_| ImageIngestError::SizeOverflow)?;
-        let mut image = VirtualImage::new(size_x, size_y)?;
+        let mut image = model::TileImage::from_pixel_size(size_x, size_y);
 
         for tile_y in 0..image.tiles_per_column() {
             for tile_x in 0..image.tiles_per_row() {
@@ -373,7 +369,7 @@ impl TileAtlasStore {
                     size_x,
                     size_y,
                     bytes,
-                    bytes_per_row_usize,
+                    bytes_per_row as usize,
                     source_x,
                     source_y,
                     rect_width,
@@ -382,11 +378,11 @@ impl TileAtlasStore {
                 else {
                     continue;
                 };
-                image.set_tile(tile_x, tile_y, key)?;
+                image.set_tile_at(tile_x, tile_y, key)?;
             }
         }
 
-        Ok(TileImage::from_virtual(image))
+        Ok(image)
     }
 
     fn ingest_subrect_rgba8_as_full_tile(

@@ -1,0 +1,18 @@
+{
+  "tasks": {
+    "task-1772275012983-orhjgn": {
+      "taskId": "task-1772275012983-orhjgn",
+      "type": "research",
+      "description": "prepare for refactoring by reading .planning files",
+      "priority": "normal",
+      "status": "pending",
+      "progress": 0,
+      "assignedTo": [],
+      "tags": [],
+      "createdAt": "2026-02-28T10:36:52.983Z",
+      "startedAt": null,
+      "completedAt": null
+    }
+  },
+  "version": "3.0.0"
+}

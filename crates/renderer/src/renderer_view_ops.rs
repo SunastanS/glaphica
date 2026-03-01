@@ -8,9 +8,7 @@ use render_protocol::{
     Viewport,
 };
 
-use crate::{
-    CacheState, DirtyRect, DirtyStateStore, FrameState, PresentError, Renderer, ViewState,
-};
+use crate::{CacheState, DirtyStateStore, FrameState, Renderer, ViewState};
 
 struct DropStaleWorkResult {
     state_changed: bool,
@@ -277,44 +275,6 @@ impl Renderer {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn take_present_request(&mut self) -> bool {
-        let requested = self.view_state.present_requested;
-        self.view_state.present_requested = false;
-        requested
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn brush_command_quota(&self) -> u32 {
-        self.view_state.brush_command_quota
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn viewport(&self) -> Option<Viewport> {
-        self.view_state.viewport
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn bound_tree(&self) -> Option<&RenderTreeSnapshot> {
-        self.frame_state.bound_tree.as_ref()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn view_matrix(&self) -> TransformMatrix4x4 {
-        self.view_state.view_matrix
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn mark_layer_dirty_rect(&mut self, layer_id: u64, dirty_rect: DirtyRect) {
-        if self
-            .frame_state
-            .dirty_state_store
-            .mark_layer_rect(layer_id, dirty_rect)
-        {
-            self.frame_state.frame_sync.note_state_change();
-        }
-    }
-
     pub fn resize(&mut self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -329,15 +289,5 @@ impl Renderer {
             .surface
             .configure(&self.gpu_state.device, &self.gpu_state.surface_config);
         self.frame_state.frame_sync.note_state_change();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn present(&mut self) -> Result<(), PresentError> {
-        let next_frame_id = self
-            .frame_state
-            .frame_sync
-            .last_committed_frame_id
-            .map_or(0, |frame_id| frame_id.saturating_add(1));
-        self.present_frame(next_frame_id)
     }
 }

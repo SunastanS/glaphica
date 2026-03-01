@@ -1,8 +1,8 @@
+use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use smallvec::SmallVec;
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
@@ -107,7 +107,7 @@ impl<Key> MergeVecIndex<Key> {
 }
 
 #[derive(Debug)]
-pub struct GpuFeedbackMergeState<Receipt, Error> 
+pub struct GpuFeedbackMergeState<Receipt, Error>
 where
     Receipt: MergeItem,
     Error: MergeItem,
@@ -116,7 +116,7 @@ where
     pub error_index: MergeVecIndex<Error::MergeKey>,
 }
 
-impl<Receipt, Error> Default for GpuFeedbackMergeState<Receipt, Error> 
+impl<Receipt, Error> Default for GpuFeedbackMergeState<Receipt, Error>
 where
     Receipt: MergeItem,
     Error: MergeItem,
@@ -133,8 +133,7 @@ pub fn merge_vec<Item>(
     current: &mut SmallVec<[Item; 4]>,
     incoming: SmallVec<[Item; 4]>,
     merge_index: &mut MergeVecIndex<Item::MergeKey>,
-)
-where
+) where
     Item: MergeItem,
 {
     merge_index.clear();
@@ -186,8 +185,16 @@ where
             .executed_batch_waterline
             .max(newer.executed_batch_waterline);
         current.complete_waterline = current.complete_waterline.max(newer.complete_waterline);
-        merge_vec(&mut current.receipts, newer.receipts, &mut merge_state.receipt_index);
-        merge_vec(&mut current.errors, newer.errors, &mut merge_state.error_index);
+        merge_vec(
+            &mut current.receipts,
+            newer.receipts,
+            &mut merge_state.receipt_index,
+        );
+        merge_vec(
+            &mut current.errors,
+            newer.errors,
+            &mut merge_state.error_index,
+        );
         current
     }
 }
@@ -229,11 +236,65 @@ pub mod merge_test_support {
     }
 }
 
+/// Runtime acknowledgment receipts for resource allocation and command completion.
+/// Most commands use waterline tracking - receipts only for exceptional cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeReceipt {
+    /// Resource allocation completed successfully
+    ResourceAllocated { id: u64 },
+    /// Command completed with result
+    CommandCompleted { command_id: u64 },
+}
+
+impl MergeItem for RuntimeReceipt {
+    type MergeKey = u64;
+
+    fn merge_key(&self) -> Self::MergeKey {
+        match self {
+            RuntimeReceipt::ResourceAllocated { id } => *id,
+            RuntimeReceipt::CommandCompleted { command_id } => *command_id,
+        }
+    }
+
+    fn merge_duplicate(existing: &mut Self, incoming: Self) {
+        // Replace with newer receipt
+        *existing = incoming;
+    }
+}
+
+/// Runtime error types for command-level failures.
+/// All errors are fatal (fail fast), abstract wgpu details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeError {
+    /// Command type not recognized
+    InvalidCommand { command_type: String },
+    /// Command execution failed
+    CommandFailed { error: String },
+    /// Channel closed unexpectedly
+    ChannelClosed,
+    /// Operation timed out
+    Timeout { operation: String },
+}
+
+impl MergeItem for RuntimeError {
+    type MergeKey = u64;
+
+    fn merge_key(&self) -> Self::MergeKey {
+        match self {
+            RuntimeError::InvalidCommand { command_type } => command_type.len() as u64,
+            RuntimeError::CommandFailed { error } => error.len() as u64,
+            RuntimeError::ChannelClosed => 0,
+            RuntimeError::Timeout { operation } => operation.len() as u64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
+        merge_test_support::{TestError, TestReceipt},
         CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, GpuFeedbackMergeState,
-        PresentFrameId, SubmitWaterline, merge_test_support::{TestError, TestReceipt},
+        PresentFrameId, SubmitWaterline,
     };
 
     #[test]
@@ -304,7 +365,8 @@ mod tests {
         };
 
         let mut merge_state = GpuFeedbackMergeState::<TestReceipt, TestError>::default();
-        let merged = GpuFeedbackFrame::merge_mailbox(frame.clone(), frame.clone(), &mut merge_state);
+        let merged =
+            GpuFeedbackFrame::merge_mailbox(frame.clone(), frame.clone(), &mut merge_state);
         assert_eq!(merged, frame);
     }
 
@@ -390,5 +452,71 @@ mod tests {
         assert_eq!(merged.receipts[0].payload_version, 8);
         assert_eq!(merged.receipts[1].key, 9);
         assert_eq!(merged.receipts[1].payload_version, 1);
+    }
+
+    #[test]
+    fn runtime_receipt_has_required_traits_and_variants() {
+        use super::{MergeItem, RuntimeReceipt};
+
+        // Test Debug, Clone, PartialEq, Eq
+        let receipt1 = RuntimeReceipt::ResourceAllocated { id: 42 };
+        let receipt2 = receipt1.clone();
+        assert_eq!(receipt1, receipt2);
+
+        let receipt3 = RuntimeReceipt::CommandCompleted { command_id: 100 };
+        assert_ne!(receipt1, receipt3);
+
+        // Test merge_key implementation
+        assert_eq!(receipt1.merge_key(), 42);
+        assert_eq!(receipt3.merge_key(), 100);
+
+        // Test merge_duplicate replaces with newer
+        let mut existing = RuntimeReceipt::ResourceAllocated { id: 1 };
+        let incoming = RuntimeReceipt::ResourceAllocated { id: 2 };
+        RuntimeReceipt::merge_duplicate(&mut existing, incoming);
+        assert_eq!(existing, RuntimeReceipt::ResourceAllocated { id: 2 });
+    }
+
+    #[test]
+    fn runtime_error_has_required_traits_and_variants() {
+        use super::{MergeItem, RuntimeError};
+
+        // Test Debug, Clone, PartialEq, Eq
+        let error1 = RuntimeError::InvalidCommand {
+            command_type: "test".to_string(),
+        };
+        let error2 = error1.clone();
+        assert_eq!(error1, error2);
+
+        let error3 = RuntimeError::CommandFailed {
+            error: "failed".to_string(),
+        };
+        assert_ne!(error1, error3);
+
+        let error4 = RuntimeError::ChannelClosed;
+        let error5 = RuntimeError::Timeout {
+            operation: "wait".to_string(),
+        };
+
+        // Test merge_key implementation
+        assert_eq!(error1.merge_key(), 4); // "test".len() as u64
+        assert_eq!(error3.merge_key(), 6); // "failed".len() as u64
+        assert_eq!(error4.merge_key(), 0);
+        assert_eq!(error5.merge_key(), 4); // "wait".len() as u64
+
+        // Test merge_duplicate replaces with newer
+        let mut existing = RuntimeError::InvalidCommand {
+            command_type: "old".to_string(),
+        };
+        let incoming = RuntimeError::InvalidCommand {
+            command_type: "new".to_string(),
+        };
+        RuntimeError::merge_duplicate(&mut existing, incoming);
+        assert_eq!(
+            existing,
+            RuntimeError::InvalidCommand {
+                command_type: "new".to_string()
+            }
+        );
     }
 }
