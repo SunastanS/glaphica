@@ -1,6 +1,7 @@
 # Rust coding guidelines
 
-* Keep diff relatively small (~100lines) in a roll for reviewing convience.
+* Keep diff relatively small (~100 lines) in a roll for reviewing convience.
+* Do not duplicate any logic, try to reuse by importing and using existing implementations.
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
 * Do not write organizational or comments that summarize the code. Comments should only be written in order to explain "why" the code is written in some way in the case there is a reason that is tricky / non-obvious.
 * Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.
@@ -23,3 +24,7 @@
   ```
 * treat keys and ids seriously, never create structs with magic keys or ids, the should only be provided by somewhere with enough context to know what they mean.
 * prefer index mapping over key lookup and Hash maps for performance.
+
+# Test guidelines
+
+* perfer not to run full test for endless wornings will mess up context, use `grep` to trace specific errors.

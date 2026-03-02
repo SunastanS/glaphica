@@ -64,9 +64,13 @@ impl TileKey {
     /// 63          56 55             32 31              0
 
     pub fn new(backend: BackendId, generation: GenerationId, slot: SlotId) -> Self {
-        let backend = backend.raw() as u64;
-        let generation = generation.raw() as u64;
-        let slot = slot.raw() as u64;
+        Self::from_parts(backend.raw(), generation.raw(), slot.raw())
+    }
+
+    pub fn from_parts(backend: u8, generation: u32, slot: u32) -> Self {
+        let backend = backend as u64;
+        let generation = generation as u64;
+        let slot = slot as u64;
         TileKey(
             (backend & BACKEND_MASK) << BACKEND_SHIFT
                 | (generation & GEN_MASK) << GEN_SHIFT
@@ -76,16 +80,28 @@ impl TileKey {
 
     const EMPTY: TileKey = TileKey(u64::MAX);
 
+    pub fn backend_index(&self) -> u8 {
+        ((self.0 >> BACKEND_SHIFT) & BACKEND_MASK) as u8
+    }
+
+    pub fn generation_index(&self) -> u32 {
+        ((self.0 >> GEN_SHIFT) & GEN_MASK) as u32
+    }
+
+    pub fn slot_index(&self) -> u32 {
+        ((self.0 >> SLOT_SHIFT) & SLOT_MASK) as u32
+    }
+
     pub fn backend(&self) -> BackendId {
-        BackendId::new((self.0 >> BACKEND_SHIFT) as u8)
+        BackendId::new(self.backend_index())
     }
 
     pub fn generation(&self) -> GenerationId {
-        GenerationId::new(((self.0 >> GEN_SHIFT) & GEN_MASK) as u32)
+        GenerationId::new(self.generation_index())
     }
 
     pub fn slot(&self) -> SlotId {
-        SlotId::new(((self.0 >> SLOT_SHIFT) & SLOT_MASK) as u32)
+        SlotId::new(self.slot_index())
     }
 }
 

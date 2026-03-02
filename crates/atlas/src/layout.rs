@@ -1,12 +1,5 @@
-use crate::key::SlotId;
-
-pub(crate) struct TileAddress {
-    offset: (u32, u32),
-    layer: u32,
-}
-
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum AtlasLayout {
+pub enum AtlasLayout {
     Tiny8,
     Small11,
     Medium14,
@@ -52,26 +45,6 @@ impl AtlasLayout {
             AtlasLayout::Medium14 => 6,
             AtlasLayout::Large17 => 7,
             AtlasLayout::Huge20 => 8,
-        }
-    }
-
-    pub fn get_tile_address(self, slot: SlotId) -> TileAddress {
-        let slot = slot.raw();
-
-        let edge_bits = self.tiles_per_edge_bits();
-        let layer_bits = edge_bits * 2;
-
-        let layer = slot >> layer_bits;
-
-        let index_mask = (1 << layer_bits) - 1;
-        let index = slot & index_mask;
-
-        let y = index >> edge_bits;
-        let x = index & ((1 << edge_bits) - 1);
-
-        TileAddress {
-            offset: (x, y),
-            layer,
         }
     }
 }

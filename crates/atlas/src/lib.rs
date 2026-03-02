@@ -1,5 +1,5 @@
-mod key;
+pub mod key;
 
-mod layout;
+pub mod layout;
 
 mod backend;
