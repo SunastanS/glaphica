@@ -1,5 +1,6 @@
 # Rust coding guidelines
 
+* Keep diff relatively small (~100lines) in a roll for reviewing convience.
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
 * Do not write organizational or comments that summarize the code. Comments should only be written in order to explain "why" the code is written in some way in the case there is a reason that is tricky / non-obvious.
 * Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.

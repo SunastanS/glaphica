@@ -1,0 +1,10 @@
+[package]
+name = "threads"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossbeam-channel = "0.5.15"
+crossbeam-queue = "0.3.12"
+rtrb = "0.3.3"
+thread_protocol = { path = "../thread_protocol" }

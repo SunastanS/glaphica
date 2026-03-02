@@ -3,9 +3,9 @@ members = [
     "crates/tiles",
     "crates/atlas",
     "crates/images",
-    "crates/glaphica-constants", "crates/threads",
+    "crates/glaphica-constants", "crates/threads", "crates/thread_protocol",
 ]
 
-[workspace.dependencies]
+resolver = "3"
 
-workspace.resolver = "3"
+[workspace.dependencies]
