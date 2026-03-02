@@ -1,6 +1,6 @@
 use atlas::key::TileKey;
 use atlas::layout::AtlasLayout;
-use glaphica_constants::TILE_SIZE;
+use glaphica_constants::ATLAS_TILE_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasAddress {
@@ -82,7 +82,7 @@ impl AtlasStorageRuntime {
         texture: AtlasTextureConfig<'_>,
     ) -> Result<(), AtlasStorageRuntimeRegisterError> {
         self.validate_backend_id(backend_id)?;
-        let edge_size = layout.tiles_per_edge() * TILE_SIZE;
+        let edge_size = layout.tiles_per_edge() * ATLAS_TILE_SIZE;
         let texture2d_array = device.create_texture(&wgpu::TextureDescriptor {
             label: texture.label,
             size: wgpu::Extent3d {
@@ -142,8 +142,8 @@ fn build_address(layout: AtlasLayout, slot: u32) -> AtlasAddress {
         layer,
         tile_offset,
         texel_offset: (
-            tile_offset.0.saturating_mul(TILE_SIZE),
-            tile_offset.1.saturating_mul(TILE_SIZE),
+            tile_offset.0.saturating_mul(ATLAS_TILE_SIZE),
+            tile_offset.1.saturating_mul(ATLAS_TILE_SIZE),
         ),
     }
 }
@@ -153,7 +153,7 @@ mod tests {
     use super::{AtlasStorageRuntime, AtlasStorageRuntimeRegisterError};
     use atlas::key::TileKey;
     use atlas::layout::AtlasLayout;
-    use glaphica_constants::TILE_SIZE;
+    use glaphica_constants::ATLAS_TILE_SIZE;
 
     #[test]
     fn validate_backend_requires_contiguous_backend_ids() {
@@ -181,7 +181,10 @@ mod tests {
 
         assert_eq!(address.layer, layer);
         assert_eq!(address.tile_offset, (x, y));
-        assert_eq!(address.texel_offset, (x * TILE_SIZE, y * TILE_SIZE));
+        assert_eq!(
+            address.texel_offset,
+            (x * ATLAS_TILE_SIZE, y * ATLAS_TILE_SIZE)
+        );
     }
 
     #[test]
