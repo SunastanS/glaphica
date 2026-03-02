@@ -342,9 +342,9 @@ mod tests {
     fn mailbox_merge_policy_matches_protocol_merge_mailbox() {
         let current = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(2),
-            submit_waterline: SubmitWaterline(3),
-            executed_batch_waterline: ExecutedBatchWaterline(4),
-            complete_waterline: CompleteWaterline(5),
+            submit_waterline: SubmitWaterline::new(3),
+            executed_batch_waterline: ExecutedBatchWaterline::new(4),
+            complete_waterline: CompleteWaterline::new(5),
             receipts: vec![TestReceipt {
                 key: 10,
                 revision: 1,
@@ -353,9 +353,9 @@ mod tests {
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(1),
-            submit_waterline: SubmitWaterline(30),
-            executed_batch_waterline: ExecutedBatchWaterline(40),
-            complete_waterline: CompleteWaterline(50),
+            submit_waterline: SubmitWaterline::new(30),
+            executed_batch_waterline: ExecutedBatchWaterline::new(40),
+            complete_waterline: CompleteWaterline::new(50),
             receipts: vec![TestReceipt {
                 key: 10,
                 revision: 2,

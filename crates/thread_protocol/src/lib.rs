@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::marker::PhantomData;
+use std::{cmp::Ordering, fmt};
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
@@ -31,14 +33,71 @@ pub enum InputControlEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PresentFrameId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SubmitWaterline(pub u64);
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubmitWaterlineTag {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ExecutedBatchWaterline(pub u64);
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExecutedBatchWaterlineTag {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompleteWaterline(pub u64);
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompleteWaterlineTag {}
+
+#[repr(transparent)]
+pub struct Waterline<Tag> {
+    raw: u64,
+    _marker: PhantomData<Tag>,
+}
+
+impl<Tag> Copy for Waterline<Tag> {}
+
+impl<Tag> Clone for Waterline<Tag> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Tag> PartialEq for Waterline<Tag> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl<Tag> Eq for Waterline<Tag> {}
+
+impl<Tag> PartialOrd for Waterline<Tag> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<Tag> Ord for Waterline<Tag> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl<Tag> fmt::Debug for Waterline<Tag> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.raw.fmt(f)
+    }
+}
+
+impl<Tag> Waterline<Tag> {
+    pub const fn new(raw: u64) -> Self {
+        Self {
+            raw,
+            _marker: PhantomData,
+        }
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.raw
+    }
+}
+
+pub type SubmitWaterline = Waterline<SubmitWaterlineTag>;
+pub type ExecutedBatchWaterline = Waterline<ExecutedBatchWaterlineTag>;
+pub type CompleteWaterline = Waterline<CompleteWaterlineTag>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GpuCmdMsg<Command> {
@@ -218,9 +277,9 @@ mod tests {
     fn mailbox_merge_is_idempotent_and_uses_max_waterlines() {
         let current = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(10),
-            submit_waterline: SubmitWaterline(2),
-            executed_batch_waterline: ExecutedBatchWaterline(3),
-            complete_waterline: CompleteWaterline(4),
+            submit_waterline: SubmitWaterline::new(2),
+            executed_batch_waterline: ExecutedBatchWaterline::new(3),
+            complete_waterline: CompleteWaterline::new(4),
             receipts: vec![TestReceipt {
                 key: 1,
                 payload_version: 10,
@@ -229,9 +288,9 @@ mod tests {
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(9),
-            submit_waterline: SubmitWaterline(20),
-            executed_batch_waterline: ExecutedBatchWaterline(30),
-            complete_waterline: CompleteWaterline(40),
+            submit_waterline: SubmitWaterline::new(20),
+            executed_batch_waterline: ExecutedBatchWaterline::new(30),
+            complete_waterline: CompleteWaterline::new(40),
             receipts: vec![
                 TestReceipt {
                     key: 1,
@@ -249,9 +308,9 @@ mod tests {
         let once = GpuFeedbackFrame::merge_mailbox(current, newer.clone(), &mut merge_state);
         let twice = GpuFeedbackFrame::merge_mailbox(once.clone(), newer, &mut merge_state);
         assert_eq!(once.present_frame_id, PresentFrameId(10));
-        assert_eq!(once.submit_waterline, SubmitWaterline(20));
-        assert_eq!(once.executed_batch_waterline, ExecutedBatchWaterline(30));
-        assert_eq!(once.complete_waterline, CompleteWaterline(40));
+        assert_eq!(once.submit_waterline, SubmitWaterline::new(20));
+        assert_eq!(once.executed_batch_waterline, ExecutedBatchWaterline::new(30));
+        assert_eq!(once.complete_waterline, CompleteWaterline::new(40));
         assert_eq!(once.receipts.len(), 2);
         assert_eq!(once.errors.len(), 2);
         assert_eq!(once.receipts[0].payload_version, 11);
@@ -263,9 +322,9 @@ mod tests {
     fn mailbox_merge_panics_when_current_contains_duplicated_keys() {
         let current = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(1),
-            submit_waterline: SubmitWaterline(1),
-            executed_batch_waterline: ExecutedBatchWaterline(1),
-            complete_waterline: CompleteWaterline(1),
+            submit_waterline: SubmitWaterline::new(1),
+            executed_batch_waterline: ExecutedBatchWaterline::new(1),
+            complete_waterline: CompleteWaterline::new(1),
             receipts: vec![
                 TestReceipt {
                     key: 1,
@@ -280,9 +339,9 @@ mod tests {
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(2),
-            submit_waterline: SubmitWaterline(2),
-            executed_batch_waterline: ExecutedBatchWaterline(2),
-            complete_waterline: CompleteWaterline(2),
+            submit_waterline: SubmitWaterline::new(2),
+            executed_batch_waterline: ExecutedBatchWaterline::new(2),
+            complete_waterline: CompleteWaterline::new(2),
             receipts: vec![TestReceipt {
                 key: 2,
                 payload_version: 1,
@@ -298,9 +357,9 @@ mod tests {
     fn mailbox_merge_merges_duplicated_incoming_keys_with_item_policy() {
         let current = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(1),
-            submit_waterline: SubmitWaterline(1),
-            executed_batch_waterline: ExecutedBatchWaterline(1),
-            complete_waterline: CompleteWaterline(1),
+            submit_waterline: SubmitWaterline::new(1),
+            executed_batch_waterline: ExecutedBatchWaterline::new(1),
+            complete_waterline: CompleteWaterline::new(1),
             receipts: vec![TestReceipt {
                 key: 7,
                 payload_version: 5,
@@ -309,9 +368,9 @@ mod tests {
         };
         let newer = GpuFeedbackFrame {
             present_frame_id: PresentFrameId(2),
-            submit_waterline: SubmitWaterline(2),
-            executed_batch_waterline: ExecutedBatchWaterline(2),
-            complete_waterline: CompleteWaterline(2),
+            submit_waterline: SubmitWaterline::new(2),
+            executed_batch_waterline: ExecutedBatchWaterline::new(2),
+            complete_waterline: CompleteWaterline::new(2),
             receipts: vec![
                 TestReceipt {
                     key: 7,
@@ -336,5 +395,13 @@ mod tests {
         assert_eq!(merged.receipts[0].payload_version, 8);
         assert_eq!(merged.receipts[1].key, 9);
         assert_eq!(merged.receipts[1].payload_version, 1);
+    }
+
+    #[test]
+    fn waterline_types_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SubmitWaterline>();
+        assert_send_sync::<ExecutedBatchWaterline>();
+        assert_send_sync::<CompleteWaterline>();
     }
 }
