@@ -1,5 +1,5 @@
-use atlas::key::{BackendId, TileKey};
-use glaphica_constants::IMAGE_TILE_SIZE;
+use glaphica_core::IMAGE_TILE_SIZE;
+use glaphica_core::{BackendId, TileKey};
 
 struct ImageLayout {
     size_x: u32,

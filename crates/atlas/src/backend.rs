@@ -1,5 +1,5 @@
-use crate::key::{BackendId, GenerationId, SlotId, TileKey};
 use crate::layout::AtlasLayout;
+use glaphica_core::{BackendId, GenerationId, SlotId, TileKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtlasBackendError {
@@ -181,7 +181,7 @@ mod tests {
         AtlasBackendError, AtlasBackendManagerError, AtlasLayout, Backend, BackendManager,
         FreeSlotPool,
     };
-    use crate::key::BackendId;
+    use glaphica_core::BackendId;
 
     #[test]
     fn allocate_increases_slot_id() {

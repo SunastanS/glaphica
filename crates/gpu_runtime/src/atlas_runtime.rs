@@ -1,6 +1,6 @@
-use atlas::key::TileKey;
 use atlas::layout::AtlasLayout;
-use glaphica_constants::ATLAS_TILE_SIZE;
+use glaphica_core::ATLAS_TILE_SIZE;
+use glaphica_core::TileKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasAddress {
@@ -151,9 +151,9 @@ fn build_address(layout: AtlasLayout, slot: u32) -> AtlasAddress {
 #[cfg(test)]
 mod tests {
     use super::{AtlasStorageRuntime, AtlasStorageRuntimeRegisterError};
-    use atlas::key::TileKey;
     use atlas::layout::AtlasLayout;
-    use glaphica_constants::ATLAS_TILE_SIZE;
+    use glaphica_core::ATLAS_TILE_SIZE;
+    use glaphica_core::TileKey;
 
     #[test]
     fn validate_backend_requires_contiguous_backend_ids() {

@@ -1,3 +1,5 @@
+pub use glaphica_core::{AtlasLayout, PipelineId, ShaderId, TileKey};
+
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -5,7 +7,7 @@ use std::{cmp::Ordering, fmt};
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
-/// Should not depend on other crates
+/// Should only depend on foundational crates
 
 /// Input transport design:
 /// - Ring buffer: lossy high-frequency samples (ok to drop/overwrite).
@@ -25,9 +27,36 @@ pub struct InputRingSample {
     pub twist: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputControlEvent {
-    Notify,
+pub trait InputControlOp {
+    type Target;
+
+    fn apply(&self, target: &mut Self::Target);
+    fn undo(&self, target: &mut Self::Target);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputControlEvent<Control>
+where
+    Control: InputControlOp,
+{
+    Control(Control),
+}
+
+impl<Control> InputControlEvent<Control>
+where
+    Control: InputControlOp,
+{
+    pub fn apply(&self, target: &mut Control::Target) {
+        match self {
+            Self::Control(control) => control.apply(target),
+        }
+    }
+
+    pub fn undo(&self, target: &mut Control::Target) {
+        match self {
+            Self::Control(control) => control.undo(target),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -99,9 +128,30 @@ pub type SubmitWaterline = Waterline<SubmitWaterlineTag>;
 pub type ExecutedBatchWaterline = Waterline<ExecutedBatchWaterlineTag>;
 pub type CompleteWaterline = Waterline<CompleteWaterlineTag>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GpuCmdMsg<Command> {
-    Command(Command),
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawOp {
+    pub tile_key: TileKey,
+    pub input: Vec<f32>,
+    pub pipeline_id: PipelineId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyOp {
+    pub src_tile_key: TileKey,
+    pub dst_tile_key: TileKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClearOp {
+    pub tile_key: TileKey,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuCmdMsg {
+    Notify,
+    DrawOp(DrawOp),
+    CopyOp(CopyOp),
+    ClearOp(ClearOp),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,8 +281,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, GpuFeedbackMergeState,
-        MergeItem, PresentFrameId, SubmitWaterline,
+        ClearOp, CompleteWaterline, CopyOp, DrawOp, ExecutedBatchWaterline, GpuCmdMsg,
+        GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem,
+        PipelineId, PresentFrameId, SubmitWaterline, TileKey,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,7 +360,10 @@ mod tests {
         let twice = GpuFeedbackFrame::merge_mailbox(once.clone(), newer, &mut merge_state);
         assert_eq!(once.present_frame_id, PresentFrameId(10));
         assert_eq!(once.submit_waterline, SubmitWaterline::new(20));
-        assert_eq!(once.executed_batch_waterline, ExecutedBatchWaterline::new(30));
+        assert_eq!(
+            once.executed_batch_waterline,
+            ExecutedBatchWaterline::new(30)
+        );
         assert_eq!(once.complete_waterline, CompleteWaterline::new(40));
         assert_eq!(once.receipts.len(), 2);
         assert_eq!(once.errors.len(), 2);
@@ -403,5 +457,84 @@ mod tests {
         assert_send_sync::<SubmitWaterline>();
         assert_send_sync::<ExecutedBatchWaterline>();
         assert_send_sync::<CompleteWaterline>();
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestControlOp(u8);
+
+    impl InputControlOp for TestControlOp {
+        type Target = u8;
+
+        fn apply(&self, target: &mut Self::Target) {
+            *target = target.saturating_add(self.0);
+        }
+
+        fn undo(&self, target: &mut Self::Target) {
+            *target = target.saturating_sub(self.0);
+        }
+    }
+
+    #[test]
+    fn input_control_event_delegates_apply_and_undo() {
+        let event = InputControlEvent::Control(TestControlOp(3));
+        let mut state = 10;
+        event.apply(&mut state);
+        assert_eq!(state, 13);
+        event.undo(&mut state);
+        assert_eq!(state, 10);
+    }
+
+    #[test]
+    fn gpu_cmd_draw_op_carries_tile_key_input_and_pipeline_id() {
+        let cmd = GpuCmdMsg::DrawOp(DrawOp {
+            tile_key: TileKey::from_parts(2, 3, 4),
+            input: vec![1.0, 0.5, 9.0],
+            pipeline_id: PipelineId(7),
+        });
+
+        match cmd {
+            GpuCmdMsg::DrawOp(draw_op) => {
+                assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
+                assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
+                assert_eq!(draw_op.pipeline_id, PipelineId(7));
+            }
+            GpuCmdMsg::CopyOp(_) => panic!("expected draw op"),
+            GpuCmdMsg::ClearOp(_) => panic!("expected draw op"),
+            GpuCmdMsg::Notify => panic!("expected draw op"),
+        }
+    }
+
+    #[test]
+    fn gpu_cmd_copy_op_carries_source_and_destination_keys() {
+        let cmd = GpuCmdMsg::CopyOp(CopyOp {
+            src_tile_key: TileKey::from_parts(1, 2, 3),
+            dst_tile_key: TileKey::from_parts(4, 5, 6),
+        });
+
+        match cmd {
+            GpuCmdMsg::CopyOp(copy_op) => {
+                assert_eq!(copy_op.src_tile_key, TileKey::from_parts(1, 2, 3));
+                assert_eq!(copy_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
+            }
+            GpuCmdMsg::DrawOp(_) => panic!("expected copy op"),
+            GpuCmdMsg::ClearOp(_) => panic!("expected copy op"),
+            GpuCmdMsg::Notify => panic!("expected copy op"),
+        }
+    }
+
+    #[test]
+    fn gpu_cmd_clear_op_carries_target_key() {
+        let cmd = GpuCmdMsg::ClearOp(ClearOp {
+            tile_key: TileKey::from_parts(9, 8, 7),
+        });
+
+        match cmd {
+            GpuCmdMsg::ClearOp(clear_op) => {
+                assert_eq!(clear_op.tile_key, TileKey::from_parts(9, 8, 7));
+            }
+            GpuCmdMsg::DrawOp(_) => panic!("expected clear op"),
+            GpuCmdMsg::CopyOp(_) => panic!("expected clear op"),
+            GpuCmdMsg::Notify => panic!("expected clear op"),
+        }
     }
 }

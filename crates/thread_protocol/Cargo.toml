@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+glaphica_core = { path = "../glaphica_core" }
+smol_str = "0.3.4"

@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 atlas = { path = "../atlas" }
-glaphica_constants = { path = "../glaphica_constants" }
+glaphica_core = { path = "../glaphica_core" }

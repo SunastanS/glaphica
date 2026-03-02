@@ -28,14 +28,14 @@ impl<Tag, Repr: Copy> Clone for Id<Tag, Repr> {
 }
 
 impl<Tag, Repr> Id<Tag, Repr> {
-    pub(crate) const fn new(raw: Repr) -> Self {
+    pub const fn new(raw: Repr) -> Self {
         Self {
             raw,
             _marker: PhantomData,
         }
     }
 
-    pub(crate) const fn raw(self) -> Repr
+    pub const fn raw(self) -> Repr
     where
         Repr: Copy,
     {

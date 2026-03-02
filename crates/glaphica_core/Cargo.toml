@@ -1,5 +1,5 @@
 [package]
-name = "glaphica_constants"
+name = "glaphica_core"
 version = "0.1.0"
 edition = "2024"
 

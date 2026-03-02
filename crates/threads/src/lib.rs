@@ -7,8 +7,8 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounde
 use crossbeam_queue::ArrayQueue;
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 use thread_protocol::{
-    GpuCmdMsg, GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputRingSample,
-    MergeItem,
+    GpuCmdMsg, GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp,
+    InputRingSample, MergeItem,
 };
 
 /// Engine-level unified entry for mailbox merge.
@@ -29,17 +29,23 @@ impl MailboxMergePolicy {
     }
 }
 
-pub struct MainThreadChannels<Command, Receipt, Error> {
-    pub input_control_queue: MainInputControlQueue,
+pub struct MainThreadChannels<Control, Receipt, Error>
+where
+    Control: InputControlOp,
+{
+    pub input_control_queue: MainInputControlQueue<Control>,
     pub input_ring_producer: MainInputRingProducer,
-    pub gpu_command_receiver: Consumer<GpuCmdMsg<Command>>,
+    pub gpu_command_receiver: Consumer<GpuCmdMsg>,
     pub gpu_feedback_sender: Producer<GpuFeedbackFrame<Receipt, Error>>,
 }
 
-pub struct EngineThreadChannels<Command, Receipt, Error> {
-    pub input_control_queue: EngineInputControlQueue,
+pub struct EngineThreadChannels<Control, Receipt, Error>
+where
+    Control: InputControlOp,
+{
+    pub input_control_queue: EngineInputControlQueue<Control>,
     pub input_ring_consumer: EngineInputRingConsumer,
-    pub gpu_command_sender: Producer<GpuCmdMsg<Command>>,
+    pub gpu_command_sender: Producer<GpuCmdMsg>,
     pub gpu_feedback_receiver: Consumer<GpuFeedbackFrame<Receipt, Error>>,
 }
 
@@ -184,16 +190,25 @@ impl EngineInputRingConsumer {
     }
 }
 
-pub struct MainInputControlQueue {
-    producer: Producer<InputControlEvent>,
+pub struct MainInputControlQueue<Control>
+where
+    Control: InputControlOp,
+{
+    producer: Producer<InputControlEvent<Control>>,
 }
 
-impl MainInputControlQueue {
-    pub fn push(&mut self, control: InputControlEvent) -> Result<(), PushError<InputControlEvent>> {
+impl<Control> MainInputControlQueue<Control>
+where
+    Control: InputControlOp,
+{
+    pub fn push(
+        &mut self,
+        control: InputControlEvent<Control>,
+    ) -> Result<(), PushError<InputControlEvent<Control>>> {
         self.producer.push(control)
     }
 
-    pub fn blocking_push(&mut self, mut control: InputControlEvent) {
+    pub fn blocking_push(&mut self, mut control: InputControlEvent<Control>) {
         loop {
             match self.producer.push(control) {
                 Ok(()) => break,
@@ -210,12 +225,18 @@ impl MainInputControlQueue {
     }
 }
 
-pub struct EngineInputControlQueue {
-    consumer: Consumer<InputControlEvent>,
+pub struct EngineInputControlQueue<Control>
+where
+    Control: InputControlOp,
+{
+    consumer: Consumer<InputControlEvent<Control>>,
 }
 
-impl EngineInputControlQueue {
-    pub fn pop(&mut self) -> Result<InputControlEvent, PopError> {
+impl<Control> EngineInputControlQueue<Control>
+where
+    Control: InputControlOp,
+{
+    pub fn pop(&mut self) -> Result<InputControlEvent<Control>, PopError> {
         self.consumer.pop()
     }
 
@@ -224,15 +245,18 @@ impl EngineInputControlQueue {
     }
 }
 
-pub fn create_thread_channels<Command, Receipt, Error>(
+pub fn create_thread_channels<Control, Receipt, Error>(
     input_ring_capacity: usize,
     input_control_capacity: usize,
     gpu_command_capacity: usize,
     gpu_feedback_capacity: usize,
 ) -> (
-    MainThreadChannels<Command, Receipt, Error>,
-    EngineThreadChannels<Command, Receipt, Error>,
-) {
+    MainThreadChannels<Control, Receipt, Error>,
+    EngineThreadChannels<Control, Receipt, Error>,
+)
+where
+    Control: InputControlOp,
+{
     assert!(
         input_ring_capacity > 0,
         "input ring capacity must be greater than zero"
