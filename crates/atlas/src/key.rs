@@ -78,7 +78,7 @@ impl TileKey {
         )
     }
 
-    const EMPTY: TileKey = TileKey(u64::MAX);
+    pub const EMPTY: TileKey = TileKey(u64::MAX);
 
     pub fn backend_index(&self) -> u8 {
         ((self.0 >> BACKEND_SHIFT) & BACKEND_MASK) as u8

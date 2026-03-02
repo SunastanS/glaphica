@@ -374,6 +374,10 @@ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 [[package]]
 name = "images"
 version = "0.1.0"
+dependencies = [
+ "atlas",
+ "glaphica_constants",
+]
 
 [[package]]
 name = "indexmap"
@@ -816,10 +820,6 @@ dependencies = [
  "rtrb",
  "thread_protocol",
 ]
-
-[[package]]
-name = "tiles"
-version = "0.1.0"
 
 [[package]]
 name = "unicode-ident"
