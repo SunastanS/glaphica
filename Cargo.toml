@@ -3,7 +3,7 @@ members = [
     "crates/tiles",
     "crates/atlas",
     "crates/images",
-    "crates/glaphica-constants", "crates/threads", "crates/thread_protocol",
+    "crates/glaphica_constants", "crates/threads", "crates/thread_protocol", "crates/gpu_runtime",
 ]
 
 resolver = "3"
