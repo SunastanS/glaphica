@@ -12,7 +12,15 @@ pub struct AtlasAddress {
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasResolvedAddress<'a> {
     pub texture2d_array: &'a wgpu::Texture,
+    pub format: wgpu::TextureFormat,
     pub address: AtlasAddress,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AtlasBackendResource<'a> {
+    pub texture2d_array: &'a wgpu::Texture,
+    pub format: wgpu::TextureFormat,
+    pub layers: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +32,7 @@ pub enum AtlasStorageRuntimeRegisterError {
 #[derive(Debug)]
 struct BackendBinding {
     layout: AtlasLayout,
+    format: wgpu::TextureFormat,
     texture2d_array: wgpu::Texture,
 }
 
@@ -48,7 +57,8 @@ impl Default for AtlasTextureConfig<'_> {
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             mip_level_count: 1,
             sample_count: 1,
         }
@@ -100,6 +110,7 @@ impl AtlasStorageRuntime {
 
         self.backends.push(BackendBinding {
             layout,
+            format: texture.format,
             texture2d_array,
         });
         Ok(())
@@ -111,7 +122,17 @@ impl AtlasStorageRuntime {
         let address = build_address(backend.layout, key.slot_index());
         Some(AtlasResolvedAddress {
             texture2d_array: &backend.texture2d_array,
+            format: backend.format,
             address,
+        })
+    }
+
+    pub fn backend_resource(&self, backend_id: u8) -> Option<AtlasBackendResource<'_>> {
+        let backend = self.backends.get(backend_id as usize)?;
+        Some(AtlasBackendResource {
+            texture2d_array: &backend.texture2d_array,
+            format: backend.format,
+            layers: backend.layout.layers(),
         })
     }
 

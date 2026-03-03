@@ -1,7 +1,14 @@
 use glaphica_core::{BrushId, TileKey};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefImage {
+    pub tile_key: TileKey,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrawOp {
     pub tile_key: TileKey,
+    pub ref_image: Option<RefImage>,
     pub input: Vec<f32>,
     pub brush_id: BrushId,
 }

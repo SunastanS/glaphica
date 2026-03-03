@@ -53,7 +53,7 @@ where
 }
 
 mod gpu_command;
-pub use gpu_command::{ClearOp, CopyOp, DrawOp, GpuCmdMsg};
+pub use gpu_command::{ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage};
 
 mod gpu_feedback;
 pub use gpu_feedback::{
@@ -66,7 +66,7 @@ mod tests {
     use super::{
         BrushId, ClearOp, CompleteWaterline, CopyOp, DrawOp, ExecutedBatchWaterline, GpuCmdMsg,
         GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem,
-        SubmitWaterline, TileKey,
+        RefImage, SubmitWaterline, TileKey,
     };
 
     use glaphica_core::PresentFrameId;
@@ -273,6 +273,9 @@ mod tests {
     fn gpu_cmd_draw_op_carries_tile_key_input_and_brush_id() {
         let cmd = GpuCmdMsg::DrawOp(DrawOp {
             tile_key: TileKey::from_parts(2, 3, 4),
+            ref_image: Some(RefImage {
+                tile_key: TileKey::from_parts(8, 9, 10),
+            }),
             input: vec![1.0, 0.5, 9.0],
             brush_id: BrushId(7),
         });
@@ -280,6 +283,12 @@ mod tests {
         match cmd {
             GpuCmdMsg::DrawOp(draw_op) => {
                 assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
+                assert_eq!(
+                    draw_op.ref_image,
+                    Some(RefImage {
+                        tile_key: TileKey::from_parts(8, 9, 10)
+                    })
+                );
                 assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
                 assert_eq!(draw_op.brush_id, BrushId(7));
             }

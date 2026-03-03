@@ -86,6 +86,7 @@ name = "brushes"
 version = "0.1.0"
 dependencies = [
  "glaphica_core",
+ "images",
  "thread_protocol",
 ]
 
@@ -351,8 +352,10 @@ name = "gpu_runtime"
 version = "0.1.0"
 dependencies = [
  "atlas",
+ "brushes",
  "glaphica_core",
  "pollster",
+ "thread_protocol",
  "wgpu",
 ]
 

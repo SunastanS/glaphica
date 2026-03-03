@@ -40,22 +40,19 @@ impl Display for BrushRegistryError {
 
 impl Error for BrushRegistryError {}
 
-pub(crate) struct BrushRegistry<T> {
+pub struct BrushRegistry<T> {
     slots: Vec<Option<T>>,
 }
 
 impl<T> BrushRegistry<T> {
-    pub(crate) fn with_max_brushes(max_brushes: usize) -> Self {
+    pub fn with_max_brushes(max_brushes: usize) -> Self {
         let mut slots = Vec::with_capacity(max_brushes);
         slots.resize_with(max_brushes, || None);
         Self { slots }
     }
 
-    pub(crate) fn register(
-        &mut self,
-        brush_id: BrushId,
-        pipeline: T,
-    ) -> Result<(), BrushRegistryError> {
+    pub fn register(&mut self, brush_id: BrushId, pipeline: T) -> Result<(), BrushRegistryError> {
+        self.ensure_can_register(brush_id)?;
         let max_brushes = self.slots.len();
         let index = self.brush_index(brush_id)?;
         let Some(slot) = self.slots.get_mut(index) else {
@@ -64,14 +61,25 @@ impl<T> BrushRegistry<T> {
                 max_brushes,
             });
         };
-        if slot.is_some() {
-            return Err(BrushRegistryError::BrushAlreadyRegistered { brush_id });
-        }
         *slot = Some(pipeline);
         Ok(())
     }
 
-    pub(crate) fn get_mut(&mut self, brush_id: BrushId) -> Result<&mut T, BrushRegistryError> {
+    pub fn ensure_can_register(&self, brush_id: BrushId) -> Result<(), BrushRegistryError> {
+        let index = self.brush_index(brush_id)?;
+        let Some(slot) = self.slots.get(index) else {
+            return Err(BrushRegistryError::BrushIdOutOfRange {
+                brush_id,
+                max_brushes: self.slots.len(),
+            });
+        };
+        if slot.is_some() {
+            return Err(BrushRegistryError::BrushAlreadyRegistered { brush_id });
+        }
+        Ok(())
+    }
+
+    pub fn get_mut(&mut self, brush_id: BrushId) -> Result<&mut T, BrushRegistryError> {
         let max_brushes = self.slots.len();
         let index = self.brush_index(brush_id)?;
         let Some(slot) = self.slots.get_mut(index) else {
@@ -81,6 +89,20 @@ impl<T> BrushRegistry<T> {
             });
         };
         let Some(value) = slot.as_mut() else {
+            return Err(BrushRegistryError::BrushNotRegistered { brush_id });
+        };
+        Ok(value)
+    }
+
+    pub fn get(&self, brush_id: BrushId) -> Result<&T, BrushRegistryError> {
+        let index = self.brush_index(brush_id)?;
+        let Some(slot) = self.slots.get(index) else {
+            return Err(BrushRegistryError::BrushIdOutOfRange {
+                brush_id,
+                max_brushes: self.slots.len(),
+            });
+        };
+        let Some(value) = slot.as_ref() else {
             return Err(BrushRegistryError::BrushNotRegistered { brush_id });
         };
         Ok(value)
