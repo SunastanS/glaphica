@@ -56,7 +56,7 @@ fn default_usage_for_kind(kind: BackendKind) -> wgpu::TextureUsages {
             wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::STORAGE_BINDING
         }
         BackendKind::BranchCache => {
             wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT

@@ -1,10 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use brushes::{
-    BrushDrawInputLayout, BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry,
-    BrushPipelineError, BrushRegistryError,
-};
+use brushes::{BrushDrawInputLayout, BrushLayoutRegistry, BrushPipelineError, BrushRegistryError};
 use glaphica_core::BrushId;
 use thread_protocol::{DrawOp, GpuCmdMsg};
 
@@ -14,7 +11,6 @@ pub trait BrushDrawExecutor<Context>: Send {
         context: &mut Context,
         draw_op: &DrawOp,
         layout: BrushDrawInputLayout,
-        pipeline_spec: BrushGpuPipelineSpec,
     ) -> Result<(), BrushPipelineError>;
 }
 
@@ -92,14 +88,12 @@ impl<Executor> BrushGpuRuntime<Executor> {
         context: &mut Context,
         draw_op: &DrawOp,
         layout_registry: &BrushLayoutRegistry,
-        pipeline_registry: &BrushGpuPipelineRegistry,
     ) -> Result<(), BrushGpuDispatchError>
     where
         Executor: BrushDrawExecutor<Context>,
     {
         let brush_id = draw_op.brush_id;
         let layout = layout_registry.layout(brush_id)?;
-        let pipeline_spec = pipeline_registry.pipeline_spec(brush_id)?;
         if !layout.validate_input(&draw_op.input) {
             return Err(BrushGpuDispatchError::InputLayoutMismatch {
                 brush_id,
@@ -108,7 +102,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
             });
         }
         self.executor
-            .execute_draw(context, draw_op, layout, pipeline_spec)
+            .execute_draw(context, draw_op, layout)
             .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
     }
 
@@ -117,14 +111,13 @@ impl<Executor> BrushGpuRuntime<Executor> {
         context: &mut Context,
         command: &GpuCmdMsg,
         layout_registry: &BrushLayoutRegistry,
-        pipeline_registry: &BrushGpuPipelineRegistry,
     ) -> Result<BrushGpuApplyOutcome, BrushGpuDispatchError>
     where
         Executor: BrushDrawExecutor<Context>,
     {
         match command {
             GpuCmdMsg::DrawOp(draw_op) => {
-                self.apply_draw_op(context, draw_op, layout_registry, pipeline_registry)?;
+                self.apply_draw_op(context, draw_op, layout_registry)?;
                 Ok(BrushGpuApplyOutcome::AppliedDraw)
             }
             GpuCmdMsg::CopyOp(_) | GpuCmdMsg::ClearOp(_) => {
@@ -160,7 +153,6 @@ mod tests {
             context: &mut TestContext,
             draw_op: &DrawOp,
             _layout: BrushDrawInputLayout,
-            _pipeline_spec: BrushGpuPipelineSpec,
         ) -> Result<(), brushes::BrushPipelineError> {
             context.input.clear();
             context.input.extend_from_slice(&draw_op.input);
@@ -183,6 +175,7 @@ mod tests {
             vertex_entry: "vs_main",
             fragment_entry: "fs_main",
             uses_brush_cache_backend: false,
+            cache_backend_format: None,
         }
     }
 
@@ -192,11 +185,9 @@ mod tests {
         let mut layouts = BrushLayoutRegistry::new(4);
         let mut pipeline_registry = BrushGpuPipelineRegistry::new(4);
         assert!(layouts.register_layout(BrushId(2), test_layout()).is_ok());
-        assert!(
-            pipeline_registry
-                .register_pipeline_spec(BrushId(2), test_pipeline_spec())
-                .is_ok()
-        );
+        assert!(pipeline_registry
+            .register_pipeline_spec(BrushId(2), test_pipeline_spec())
+            .is_ok());
 
         let draw_op = DrawOp {
             tile_key: TileKey::from_parts(0, 0, 0),
@@ -205,7 +196,7 @@ mod tests {
             brush_id: BrushId(2),
         };
         let mut context = TestContext::default();
-        let apply = runtime.apply_draw_op(&mut context, &draw_op, &layouts, &pipeline_registry);
+        let apply = runtime.apply_draw_op(&mut context, &draw_op, &layouts);
         assert!(apply.is_ok());
         assert_eq!(context.input, vec![1.0, 2.0, 3.0]);
     }
@@ -216,11 +207,9 @@ mod tests {
         let mut layouts = BrushLayoutRegistry::new(4);
         let mut pipeline_registry = BrushGpuPipelineRegistry::new(4);
         assert!(layouts.register_layout(BrushId(1), test_layout()).is_ok());
-        assert!(
-            pipeline_registry
-                .register_pipeline_spec(BrushId(1), test_pipeline_spec())
-                .is_ok()
-        );
+        assert!(pipeline_registry
+            .register_pipeline_spec(BrushId(1), test_pipeline_spec())
+            .is_ok());
 
         let draw_op = DrawOp {
             tile_key: TileKey::from_parts(0, 0, 0),
@@ -229,7 +218,7 @@ mod tests {
             brush_id: BrushId(1),
         };
         let mut context = TestContext::default();
-        let apply = runtime.apply_draw_op(&mut context, &draw_op, &layouts, &pipeline_registry);
+        let apply = runtime.apply_draw_op(&mut context, &draw_op, &layouts);
         assert!(matches!(
             apply,
             Err(BrushGpuDispatchError::InputLayoutMismatch {
@@ -257,7 +246,7 @@ mod tests {
         let clear_cmd = GpuCmdMsg::ClearOp(ClearOp {
             tile_key: TileKey::from_parts(0, 0, 0),
         });
-        let outcome = runtime.apply_gpu_cmd(&mut context, &clear_cmd, &layouts, &pipeline_registry);
+        let outcome = runtime.apply_gpu_cmd(&mut context, &clear_cmd, &layouts);
         assert!(matches!(outcome, Ok(BrushGpuApplyOutcome::IgnoredNonDraw)));
     }
 }

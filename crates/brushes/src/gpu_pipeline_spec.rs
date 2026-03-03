@@ -1,3 +1,5 @@
+use glaphica_core::TextureFormat;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushGpuPipelineSpec {
     pub label: &'static str,
@@ -5,4 +7,5 @@ pub struct BrushGpuPipelineSpec {
     pub vertex_entry: &'static str,
     pub fragment_entry: &'static str,
     pub uses_brush_cache_backend: bool,
+    pub cache_backend_format: Option<TextureFormat>,
 }

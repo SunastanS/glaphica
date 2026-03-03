@@ -25,6 +25,10 @@
 * treat keys and ids seriously, never create structs with magic keys or ids, the should only be provided by somewhere with enough context to know what they mean.
 * prefer index mapping over key lookup and Hash maps for performance.
 
+# Interaction guidelines
+
+* No need to point to specific line number in final report, I can track all you edit automatically.
+
 # Project Structure
 
 ```

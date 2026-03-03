@@ -1,8 +1,9 @@
+use crate::context::GpuContext;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use brushes::{BrushDrawInputLayout, BrushGpuPipelineSpec, BrushPipelineError};
-use glaphica_core::{ATLAS_TILE_SIZE, BrushId};
+use glaphica_core::{BrushId, TextureFormat, ATLAS_TILE_SIZE};
 use thread_protocol::DrawOp;
 
 use crate::atlas_runtime::{AtlasBackendResource, AtlasStorageRuntime};
@@ -13,15 +14,15 @@ pub enum WgpuBrushExecutorError {
     BrushIdOutOfRange {
         brush_id: BrushId,
     },
+    BrushNotConfigured {
+        brush_id: BrushId,
+    },
     MissingTargetAtlasBackend {
         brush_id: BrushId,
     },
     MissingSourceBackend {
         brush_id: BrushId,
         backend_id: u8,
-    },
-    CacheBackendNotConfigured {
-        brush_id: BrushId,
     },
     MissingCacheBackend {
         brush_id: BrushId,
@@ -36,6 +37,11 @@ pub enum WgpuBrushExecutorError {
         backend_role: &'static str,
         format: wgpu::TextureFormat,
     },
+    InconsistentSourceFormat {
+        brush_id: BrushId,
+        expected: wgpu::TextureFormat,
+        actual: wgpu::TextureFormat,
+    },
 }
 
 impl Display for WgpuBrushExecutorError {
@@ -47,6 +53,9 @@ impl Display for WgpuBrushExecutorError {
                     "brush id {} cannot be indexed on this platform",
                     brush_id.0
                 )
+            }
+            Self::BrushNotConfigured { brush_id } => {
+                write!(f, "brush {} has not been configured", brush_id.0)
             }
             Self::MissingTargetAtlasBackend { brush_id } => {
                 write!(
@@ -62,11 +71,6 @@ impl Display for WgpuBrushExecutorError {
                 f,
                 "source backend {} is missing for brush {}",
                 backend_id, brush_id.0
-            ),
-            Self::CacheBackendNotConfigured { brush_id } => write!(
-                f,
-                "brush {} requires cache backend but no cache backend id is configured",
-                brush_id.0
             ),
             Self::MissingCacheBackend {
                 brush_id,
@@ -90,23 +94,20 @@ impl Display for WgpuBrushExecutorError {
                 "{backend_role} atlas format {format:?} is unsupported for brush {} sampling",
                 brush_id.0
             ),
+            Self::InconsistentSourceFormat {
+                brush_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "source format mismatch for brush {}: expected {:?}, got {:?}",
+                brush_id.0, expected, actual
+            ),
         }
     }
 }
 
 impl Error for WgpuBrushExecutorError {}
-
-#[derive(Debug)]
-struct CachedPipeline {
-    key: PipelineKey,
-    pipeline: wgpu::RenderPipeline,
-}
-
-#[derive(Debug)]
-struct BrushPipelineCache {
-    spec: BrushGpuPipelineSpec,
-    pipelines: Vec<CachedPipeline>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct AtlasBindGroupLayoutKey {
@@ -118,25 +119,6 @@ struct AtlasBindGroupLayoutKey {
 struct CachedAtlasBindGroupLayout {
     key: AtlasBindGroupLayoutKey,
     layout: wgpu::BindGroupLayout,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PipelineKey {
-    target_format: wgpu::TextureFormat,
-    atlas_layout_key: AtlasBindGroupLayoutKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AtlasBindGroupKey {
-    source_backend_id: u8,
-    cache_backend_id: Option<u8>,
-    layout_key: AtlasBindGroupLayoutKey,
-}
-
-#[derive(Debug)]
-struct CachedAtlasBindGroup {
-    key: AtlasBindGroupKey,
-    bind_group: wgpu::BindGroup,
 }
 
 #[derive(Debug)]
@@ -163,20 +145,25 @@ struct BrushShaderParams {
 }
 
 pub struct WgpuBrushContext<'a> {
-    pub device: &'a wgpu::Device,
-    pub queue: &'a wgpu::Queue,
+    pub gpu_context: &'a GpuContext,
     pub atlas_storage: &'a AtlasStorageRuntime,
-    pub brush_cache_backend_id: Option<u8>,
+    pub source_backend_id: u8,
+}
+
+struct BrushContext {
+    spec: BrushGpuPipelineSpec,
+    cache_backend_id: Option<u8>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    atlas_bind_group: Option<wgpu::BindGroup>,
 }
 
 #[derive(Default)]
 pub struct WgpuBrushExecutor {
-    pipelines: Vec<Option<BrushPipelineCache>>,
+    brushes: Vec<Option<BrushContext>>,
     draw_bind_group_layout: Option<wgpu::BindGroupLayout>,
     atlas_bind_group_layouts: Vec<CachedAtlasBindGroupLayout>,
     atlas_sampler: Option<wgpu::Sampler>,
     dummy_cache_texture: Option<DummyCacheTexture>,
-    atlas_bind_groups: Vec<CachedAtlasBindGroup>,
 }
 
 impl WgpuBrushExecutor {
@@ -187,6 +174,25 @@ impl WgpuBrushExecutor {
     fn brush_index(brush_id: BrushId) -> Result<usize, WgpuBrushExecutorError> {
         usize::try_from(brush_id.0)
             .map_err(|_| WgpuBrushExecutorError::BrushIdOutOfRange { brush_id })
+    }
+
+    pub fn configure_brush(
+        &mut self,
+        brush_id: BrushId,
+        spec: BrushGpuPipelineSpec,
+        cache_backend_id: Option<u8>,
+    ) -> Result<(), WgpuBrushExecutorError> {
+        let brush_index = Self::brush_index(brush_id)?;
+        if self.brushes.len() <= brush_index {
+            self.brushes.resize_with(brush_index + 1, || None);
+        }
+        self.brushes[brush_index] = Some(BrushContext {
+            spec,
+            cache_backend_id,
+            pipeline: None,
+            atlas_bind_group: None,
+        });
+        Ok(())
     }
 
     fn ensure_draw_bind_group_layout(&mut self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -359,42 +365,14 @@ impl WgpuBrushExecutor {
         }
     }
 
-    fn ensure_render_pipeline(
-        &mut self,
+    fn create_render_pipeline(
         device: &wgpu::Device,
-        brush_id: BrushId,
-        spec: BrushGpuPipelineSpec,
-        pipeline_key: PipelineKey,
+        spec: &BrushGpuPipelineSpec,
+        target_format: wgpu::TextureFormat,
         draw_bind_group_layout: &wgpu::BindGroupLayout,
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> Result<&wgpu::RenderPipeline, WgpuBrushExecutorError> {
-        let brush_index = Self::brush_index(brush_id)?;
-        if self.pipelines.len() <= brush_index {
-            self.pipelines.resize_with(brush_index + 1, || None);
-        }
-        let slot = &mut self.pipelines[brush_index];
-        match slot {
-            Some(cache) if cache.spec == spec => {}
-            _ => {
-                *slot = Some(BrushPipelineCache {
-                    spec,
-                    pipelines: Vec::new(),
-                });
-            }
-        }
-        let cache = match slot.as_mut() {
-            Some(cache) => cache,
-            None => unreachable!("pipeline slot is initialized above"),
-        };
-
-        if let Some(existing_index) = cache
-            .pipelines
-            .iter()
-            .position(|cached| cached.key == pipeline_key)
-        {
-            return Ok(&cache.pipelines[existing_index].pipeline);
-        }
-
+        brush_id: BrushId,
+    ) -> Result<wgpu::RenderPipeline, WgpuBrushExecutorError> {
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(spec.label),
             source: wgpu::ShaderSource::Wgsl(spec.wgsl_source.into()),
@@ -422,7 +400,7 @@ impl WgpuBrushExecutor {
                     entry_point: Some(spec.fragment_entry),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: pipeline_key.target_format,
+                        format: target_format,
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -431,45 +409,23 @@ impl WgpuBrushExecutor {
                 cache: None,
             })
         };
-        let pipeline = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_pipeline))
-            .map_err(|_| WgpuBrushExecutorError::PipelineCreationPanicked {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_pipeline)).map_err(|_| {
+            WgpuBrushExecutorError::PipelineCreationPanicked {
                 brush_id,
                 label: spec.label,
-            })?;
-        cache.pipelines.push(CachedPipeline {
-            key: pipeline_key,
-            pipeline,
-        });
-        let pipeline = match cache.pipelines.last() {
-            Some(cached) => &cached.pipeline,
-            None => unreachable!("pipeline was just pushed"),
-        };
-        Ok(pipeline)
+            }
+        })
     }
 
-    fn ensure_atlas_bind_group(
+    fn create_atlas_bind_group(
         &mut self,
         device: &wgpu::Device,
         atlas_storage: &AtlasStorageRuntime,
-        brush_id: BrushId,
         source_backend_id: u8,
         cache_backend_id: Option<u8>,
-        layout_key: AtlasBindGroupLayoutKey,
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
-    ) -> Result<&wgpu::BindGroup, WgpuBrushExecutorError> {
-        let key = AtlasBindGroupKey {
-            source_backend_id,
-            cache_backend_id,
-            layout_key,
-        };
-        if let Some(existing_index) = self
-            .atlas_bind_groups
-            .iter()
-            .position(|entry| entry.key == key)
-        {
-            return Ok(&self.atlas_bind_groups[existing_index].bind_group);
-        }
-
+        brush_id: BrushId,
+    ) -> Result<wgpu::BindGroup, WgpuBrushExecutorError> {
         let source_backend = atlas_storage.backend_resource(source_backend_id).ok_or(
             WgpuBrushExecutorError::MissingSourceBackend {
                 brush_id,
@@ -493,7 +449,7 @@ impl WgpuBrushExecutor {
         };
 
         let atlas_sampler = self.ensure_atlas_sampler(device);
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("glaphica-brush-atlas-bind-group"),
             layout: atlas_bind_group_layout,
             entries: &[
@@ -510,14 +466,17 @@ impl WgpuBrushExecutor {
                     resource: wgpu::BindingResource::Sampler(&atlas_sampler),
                 },
             ],
-        });
-        self.atlas_bind_groups
-            .push(CachedAtlasBindGroup { key, bind_group });
-        let bind_group = match self.atlas_bind_groups.last() {
-            Some(entry) => &entry.bind_group,
-            None => unreachable!("atlas bind group was just pushed"),
-        };
-        Ok(bind_group)
+        }))
+    }
+}
+
+fn to_wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+        TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
+        TextureFormat::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
     }
 }
 
@@ -527,8 +486,27 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
         context: &mut WgpuBrushContext<'_>,
         draw_op: &DrawOp,
         _layout: BrushDrawInputLayout,
-        pipeline_spec: BrushGpuPipelineSpec,
     ) -> Result<(), BrushPipelineError> {
+        let brush_index = Self::brush_index(draw_op.brush_id)?;
+
+        let (cache_backend_id, needs_pipeline, needs_atlas_bind_group) = {
+            let brush_context = self
+                .brushes
+                .get(brush_index)
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?
+                .as_ref()
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?;
+            (
+                brush_context.cache_backend_id,
+                brush_context.pipeline.is_none(),
+                brush_context.atlas_bind_group.is_none(),
+            )
+        };
+
         let resolved = context.atlas_storage.resolve(draw_op.tile_key).ok_or(
             WgpuBrushExecutorError::MissingTargetAtlasBackend {
                 brush_id: draw_op.brush_id,
@@ -544,24 +522,17 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
                 backend_id: source_tile_key.backend_index(),
             },
         )?;
-        let source_backend_id = source_tile_key.backend_index();
-        let cache_backend_id = if pipeline_spec.uses_brush_cache_backend {
-            Some(context.brush_cache_backend_id.ok_or(
-                WgpuBrushExecutorError::CacheBackendNotConfigured {
-                    brush_id: draw_op.brush_id,
-                },
-            )?)
-        } else {
-            None
-        };
 
-        let source_backend = context
-            .atlas_storage
-            .backend_resource(source_backend_id)
-            .ok_or(WgpuBrushExecutorError::MissingSourceBackend {
+        if source_resolved.format != resolved.format {
+            return Err(WgpuBrushExecutorError::InconsistentSourceFormat {
                 brush_id: draw_op.brush_id,
-                backend_id: source_backend_id,
-            })?;
+                expected: resolved.format,
+                actual: source_resolved.format,
+            }
+            .into());
+        }
+
+        let device_features = context.gpu_context.device.features();
         let cache_backend = match cache_backend_id {
             Some(cache_backend_id) => Some(
                 context
@@ -574,58 +545,83 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             ),
             None => None,
         };
-        let device_features = context.device.features();
+
+        let cache_format = cache_backend
+            .map(|b| b.format)
+            .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
+
         let atlas_layout_key = AtlasBindGroupLayoutKey {
             source_sample_type: Self::texture_sample_type_for_atlas(
                 draw_op.brush_id,
                 "source",
-                source_backend.format,
+                source_resolved.format,
                 device_features,
             )?,
             cache_sample_type: Self::texture_sample_type_for_atlas(
                 draw_op.brush_id,
                 "cache",
-                cache_backend
-                    .map(|backend| backend.format)
-                    .unwrap_or(wgpu::TextureFormat::Rgba8Unorm),
+                cache_format,
                 device_features,
             )?,
         };
-        let draw_bind_group_layout = self.ensure_draw_bind_group_layout(context.device);
+
+        let draw_bind_group_layout =
+            self.ensure_draw_bind_group_layout(&context.gpu_context.device);
         let atlas_bind_group_layout =
-            self.ensure_atlas_bind_group_layout(context.device, atlas_layout_key);
-        let atlas_bind_group = self
-            .ensure_atlas_bind_group(
-                context.device,
+            self.ensure_atlas_bind_group_layout(&context.gpu_context.device, atlas_layout_key);
+
+        if needs_atlas_bind_group {
+            let bind_group = self.create_atlas_bind_group(
+                &context.gpu_context.device,
                 context.atlas_storage,
-                draw_op.brush_id,
-                source_backend_id,
+                context.source_backend_id,
                 cache_backend_id,
-                atlas_layout_key,
                 &atlas_bind_group_layout,
-            )?
-            .clone();
-        let pipeline_key = PipelineKey {
-            target_format: resolved.format,
-            atlas_layout_key,
+                draw_op.brush_id,
+            )?;
+            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            brush_context.atlas_bind_group = Some(bind_group);
+        }
+
+        if needs_pipeline {
+            let spec = {
+                let brush_context = self.brushes[brush_index].as_ref().unwrap();
+                brush_context.spec
+            };
+            let pipeline = Self::create_render_pipeline(
+                &context.gpu_context.device,
+                &spec,
+                resolved.format,
+                &draw_bind_group_layout,
+                &atlas_bind_group_layout,
+                draw_op.brush_id,
+            )?;
+            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            brush_context.pipeline = Some(pipeline);
+        }
+
+        let (pipeline, atlas_bind_group) = {
+            let brush_context = self.brushes[brush_index].as_ref().unwrap();
+            (
+                brush_context.pipeline.as_ref().unwrap(),
+                brush_context.atlas_bind_group.as_ref().unwrap(),
+            )
         };
-        let pipeline = self.ensure_render_pipeline(
-            context.device,
-            draw_op.brush_id,
-            pipeline_spec,
-            pipeline_key,
-            &draw_bind_group_layout,
-            &atlas_bind_group_layout,
-        )?;
 
         let input_bytes = encode_input_bytes(&draw_op.input);
-        let input_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("glaphica-brush-input-storage"),
-            size: input_bytes.len() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue.write_buffer(&input_buffer, 0, &input_bytes);
+        let input_buffer = context
+            .gpu_context
+            .device
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glaphica-brush-input-storage"),
+                size: input_bytes.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        context
+            .gpu_context
+            .queue
+            .write_buffer(&input_buffer, 0, &input_bytes);
 
         let params = BrushShaderParams {
             input_len: draw_op.input.len() as u32,
@@ -642,30 +638,38 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             _pad2: 0,
         };
         let params_bytes = encode_shader_params_bytes(params);
-        let params_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("glaphica-brush-params-uniform"),
-            size: params_bytes.len() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        context.queue.write_buffer(&params_buffer, 0, &params_bytes);
-
-        let draw_bind_group = context
+        let params_buffer = context
+            .gpu_context
             .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("glaphica-brush-draw-bind-group"),
-                layout: &draw_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: input_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                ],
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glaphica-brush-params-uniform"),
+                size: params_bytes.len() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
+        context
+            .gpu_context
+            .queue
+            .write_buffer(&params_buffer, 0, &params_bytes);
+
+        let draw_bind_group =
+            context
+                .gpu_context
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("glaphica-brush-draw-bind-group"),
+                    layout: &draw_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: input_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: params_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
 
         let attachment_view = resolved
             .texture2d_array
@@ -681,11 +685,13 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
                 array_layer_count: Some(1),
             });
 
-        let mut encoder = context
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glaphica-brush-draw-encoder"),
-            });
+        let mut encoder =
+            context
+                .gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-brush-draw-encoder"),
+                });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glaphica-brush-pass"),
@@ -705,7 +711,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &draw_bind_group, &[]);
-            pass.set_bind_group(1, &atlas_bind_group, &[]);
+            pass.set_bind_group(1, atlas_bind_group, &[]);
             pass.set_scissor_rect(
                 resolved.address.texel_offset.0,
                 resolved.address.texel_offset.1,
@@ -714,7 +720,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             );
             pass.draw(0..3, 0..1);
         }
-        context.queue.submit(Some(encoder.finish()));
+        context.gpu_context.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 }
@@ -768,7 +774,7 @@ fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 48] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrushShaderParams, encode_input_bytes, encode_shader_params_bytes};
+    use super::{encode_input_bytes, encode_shader_params_bytes, BrushShaderParams};
 
     #[test]
     fn encode_input_bytes_keeps_empty_input_buffer_non_zero_sized() {

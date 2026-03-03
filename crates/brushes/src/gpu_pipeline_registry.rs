@@ -53,6 +53,7 @@ mod tests {
             vertex_entry: "vs_main",
             fragment_entry: "fs_main",
             uses_brush_cache_backend: false,
+            cache_backend_format: None,
         };
         assert!(registry.register_pipeline_spec(BrushId(2), spec).is_ok());
         assert_eq!(registry.pipeline_spec(BrushId(2)), Ok(spec));

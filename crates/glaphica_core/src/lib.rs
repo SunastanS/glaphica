@@ -8,6 +8,10 @@ pub use tiles::{
     BackendId, BackendKind, BackendTag, GenerationId, GenerationTag, Id, SlotId, SlotTag, TileKey,
 };
 
+mod id_allocator;
+
+pub use id_allocator::{EpochIdAllocator, PresentFrameIdAllocator, StrokeIdAllocator};
+
 mod vec2;
 
 pub use vec2::{CanvasVec2, RadianVec2, ScreenVec2};
@@ -19,11 +23,14 @@ pub use texture_format::TextureFormat;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrushId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PresentFrameId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StrokeId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EpochId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InputDeviceKind {

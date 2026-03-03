@@ -3,11 +3,11 @@ use std::fmt::{Display, Formatter};
 
 use glaphica_core::{BrushInput, TileKey};
 
-use crate::BrushPipelineError;
 use crate::brush_spec::BrushSpec;
 use crate::draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
 use crate::engine_runtime::EngineBrushPipeline;
 use crate::gpu_pipeline_spec::BrushGpuPipelineSpec;
+use crate::BrushPipelineError;
 
 pub const PIXEL_RECT_DRAW_LAYOUT: BrushDrawInputLayout = BrushDrawInputLayout::new(
     BrushDrawKind::PixelRect,
@@ -160,6 +160,7 @@ impl BrushSpec for PixelRectBrush {
             vertex_entry: "vs_main",
             fragment_entry: "fs_main",
             uses_brush_cache_backend: false,
+            cache_backend_format: None,
         }
     }
 }
@@ -177,7 +178,7 @@ mod tests {
         BrushEngineRuntime, BrushGpuPipelineRegistry, BrushLayoutRegistry, EngineBrushPipeline,
     };
 
-    use super::{PIXEL_RECT_DRAW_LAYOUT, PixelRectBrush, decode_pixel_rect_draw_input};
+    use super::{decode_pixel_rect_draw_input, PixelRectBrush, PIXEL_RECT_DRAW_LAYOUT};
 
     fn build_input(center: CanvasVec2) -> BrushInput {
         BrushInput {
