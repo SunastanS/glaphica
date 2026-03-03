@@ -1,4 +1,4 @@
-use glaphica_core::{BrushId, TileKey};
+use glaphica_core::{BrushId, RenderTreeGeneration, TileKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefImage {
@@ -24,9 +24,15 @@ pub struct ClearOp {
     pub tile_key: TileKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderTreeUpdatedOp {
+    pub generation: RenderTreeGeneration,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GpuCmdMsg {
     DrawOp(DrawOp),
     CopyOp(CopyOp),
     ClearOp(ClearOp),
+    RenderTreeUpdated(RenderTreeUpdatedOp),
 }

@@ -1,34 +1,28 @@
+mod shared_tree;
 mod view;
 
-use glaphica_core::BackendId;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use glaphica_core::{BackendId, NodeId, RenderTreeGeneration};
 use images::layout::ImageLayout;
 use images::Image;
 use images::ImageCreateError;
 
+pub use shared_tree::{
+    FlatNodeKind, FlatRenderNode, FlatRenderTree, NodeConfig, RenderCmd, RenderSource,
+    SharedRenderTree,
+};
 pub use view::View;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LayerId(u64);
-
-impl LayerId {
-    const fn initial() -> Self {
-        Self(0)
-    }
-
-    fn next(self) -> Self {
-        Self(self.0 + 1)
-    }
-}
 
 pub struct Document {
     layer_tree: UiLayerTree,
-    render_layer_tree: RenderLayerTree,
     layout: ImageLayout,
     metadata: Metadata,
     leaf_backend: BackendId,
     branch_cache_backend: BackendId,
-    next_layer_id: LayerId,
-    active_layer: Option<LayerId>,
+    next_node_id: NodeId,
+    active_node: Option<NodeId>,
 }
 
 pub struct Metadata {
@@ -42,7 +36,7 @@ impl Document {
         leaf_backend: BackendId,
         branch_cache_backend: BackendId,
     ) -> Result<Self, ImageCreateError> {
-        let initial_id = LayerId::initial();
+        let initial_id = NodeId(0);
         let image = Image::new(layout, leaf_backend)?;
         let layer_tree = UiLayerTree {
             root: UiLayerNode::Leaf(UiLeafNode {
@@ -55,16 +49,14 @@ impl Document {
             }),
             layout,
         };
-        let render_layer_tree = layer_tree.infer_render_tree(leaf_backend, branch_cache_backend)?;
         Ok(Self {
             layer_tree,
-            render_layer_tree,
             layout,
             metadata: Metadata { name },
             leaf_backend,
             branch_cache_backend,
-            next_layer_id: initial_id.next(),
-            active_layer: Some(initial_id),
+            next_node_id: NodeId(initial_id.0 + 1),
+            active_node: Some(initial_id),
         })
     }
 
@@ -88,32 +80,31 @@ impl Document {
         &self.layer_tree
     }
 
-    pub fn render_layer_tree(&self) -> &RenderLayerTree {
-        &self.render_layer_tree
-    }
-
-    pub fn rebuild_render_tree(&mut self) -> Result<(), ImageCreateError> {
-        self.render_layer_tree = self
+    pub fn build_flat_render_tree(
+        &self,
+        generation: RenderTreeGeneration,
+    ) -> Result<FlatRenderTree, ImageCreateError> {
+        let render_tree = self
             .layer_tree
             .infer_render_tree(self.leaf_backend, self.branch_cache_backend)?;
-        Ok(())
+        Ok(render_tree.flatten(generation))
     }
 
-    pub fn active_layer(&self) -> Option<LayerId> {
-        self.active_layer
+    pub fn active_node(&self) -> Option<NodeId> {
+        self.active_node
     }
 
-    pub fn set_active_layer(&mut self, id: LayerId) {
-        self.active_layer = Some(id);
+    pub fn set_active_node(&mut self, id: NodeId) {
+        self.active_node = Some(id);
     }
 
-    pub fn clear_active_layer(&mut self) {
-        self.active_layer = None;
+    pub fn clear_active_node(&mut self) {
+        self.active_node = None;
     }
 
-    fn allocate_layer_id(&mut self) -> LayerId {
-        let id = self.next_layer_id;
-        self.next_layer_id = id.next();
+    fn allocate_node_id(&mut self) -> NodeId {
+        let id = self.next_node_id;
+        self.next_node_id = NodeId(id.0 + 1);
         id
     }
 }
@@ -126,6 +117,71 @@ pub struct UiLayerTree {
 pub struct RenderLayerTree {
     root: RenderLayerNode,
     layout: ImageLayout,
+}
+
+impl RenderLayerTree {
+    pub fn flatten(self, generation: RenderTreeGeneration) -> FlatRenderTree {
+        let mut nodes = HashMap::new();
+        let root_id = flatten_node(&self.root, None, &mut nodes);
+        FlatRenderTree {
+            generation,
+            nodes: Arc::new(nodes),
+            root_id,
+        }
+    }
+}
+
+fn flatten_node(
+    node: &RenderLayerNode,
+    parent_id: Option<NodeId>,
+    nodes: &mut HashMap<NodeId, FlatRenderNode>,
+) -> Option<NodeId> {
+    match node {
+        RenderLayerNode::Branch(branch) => {
+            let id = branch.id;
+            let mut child_ids = Vec::new();
+            for child in &branch.children {
+                if let Some(child_id) = flatten_node(child, Some(id), nodes) {
+                    child_ids.push(child_id);
+                }
+            }
+            nodes.insert(
+                id,
+                FlatRenderNode {
+                    parent_id,
+                    config: shared_tree::NodeConfig {
+                        opacity: branch.config.opacity,
+                        blend_mode: match branch.config.blend_mode {
+                            BranchBlendMode::Base(mode) => mode,
+                            BranchBlendMode::Penetrate => LeafBlendMode::Normal,
+                        },
+                    },
+                    kind: FlatNodeKind::Branch {
+                        children: child_ids,
+                        cache: branch.cache.clone(),
+                    },
+                },
+            );
+            Some(id)
+        }
+        RenderLayerNode::Leaf(leaf) => {
+            let id = leaf.id;
+            nodes.insert(
+                id,
+                FlatRenderNode {
+                    parent_id,
+                    config: shared_tree::NodeConfig {
+                        opacity: leaf.config.opacity,
+                        blend_mode: leaf.config.blend_mode,
+                    },
+                    kind: FlatNodeKind::Leaf {
+                        image: leaf.image.clone(),
+                    },
+                },
+            );
+            Some(id)
+        }
+    }
 }
 
 impl UiLayerTree {
@@ -144,6 +200,7 @@ impl UiLayerTree {
         )?;
         let root = rendered_nodes.into_iter().next().unwrap_or_else(|| {
             RenderLayerNode::Leaf(RenderLeafNode {
+                id: NodeId(u64::MAX),
                 config: LeafConfig {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
@@ -241,6 +298,7 @@ fn infer_render_branch(
     let cache = Image::new(layout, branch_cache_backend)?;
 
     Ok(vec![RenderLayerNode::Branch(RenderBranchNode {
+        id: branch.id,
         config: BranchConfig {
             opacity: combined_opacity,
             blend_mode: BranchBlendMode::Base(blend_mode),
@@ -262,6 +320,7 @@ fn infer_render_leaf(
     };
 
     vec![RenderLayerNode::Leaf(RenderLeafNode {
+        id: leaf.id,
         config: LeafConfig {
             opacity: parent_opacity * leaf.config.opacity,
             blend_mode,
@@ -278,14 +337,14 @@ pub enum UiLayerNode {
 
 #[derive(Clone, PartialEq)]
 pub struct UiBranchNode {
-    id: LayerId,
+    id: NodeId,
     config: BranchConfig,
     children: Vec<UiLayerNode>,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct UiLeafNode {
-    id: LayerId,
+    id: NodeId,
     config: LeafConfig,
     image: Image,
 }
@@ -298,6 +357,7 @@ pub enum RenderLayerNode {
 
 #[derive(Clone, PartialEq)]
 pub struct RenderBranchNode {
+    id: NodeId,
     config: BranchConfig,
     children: Vec<RenderLayerNode>,
     cache: Image,
@@ -305,6 +365,7 @@ pub struct RenderBranchNode {
 
 #[derive(Clone, PartialEq)]
 pub struct RenderLeafNode {
+    id: NodeId,
     config: LeafConfig,
     image: Image,
 }

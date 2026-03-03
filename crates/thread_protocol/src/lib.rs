@@ -1,4 +1,6 @@
-pub use glaphica_core::{AtlasLayout, BrushId, EpochId, InputDeviceKind, MappedCursor, TileKey};
+pub use glaphica_core::{
+    AtlasLayout, BrushId, EpochId, InputDeviceKind, MappedCursor, RenderTreeGeneration, TileKey,
+};
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
@@ -53,7 +55,7 @@ where
 }
 
 mod gpu_command;
-pub use gpu_command::{ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage};
+pub use gpu_command::{ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage, RenderTreeUpdatedOp};
 
 mod gpu_feedback;
 pub use gpu_feedback::{
@@ -294,6 +296,7 @@ mod tests {
             }
             GpuCmdMsg::CopyOp(_) => panic!("expected draw op"),
             GpuCmdMsg::ClearOp(_) => panic!("expected draw op"),
+            GpuCmdMsg::RenderTreeUpdated(_) => panic!("expected draw op"),
         }
     }
 
@@ -311,6 +314,7 @@ mod tests {
             }
             GpuCmdMsg::DrawOp(_) => panic!("expected copy op"),
             GpuCmdMsg::ClearOp(_) => panic!("expected copy op"),
+            GpuCmdMsg::RenderTreeUpdated(_) => panic!("expected copy op"),
         }
     }
 
@@ -326,6 +330,7 @@ mod tests {
             }
             GpuCmdMsg::DrawOp(_) => panic!("expected clear op"),
             GpuCmdMsg::CopyOp(_) => panic!("expected clear op"),
+            GpuCmdMsg::RenderTreeUpdated(_) => panic!("expected clear op"),
         }
     }
 }

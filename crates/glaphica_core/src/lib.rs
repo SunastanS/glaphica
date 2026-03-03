@@ -2,6 +2,10 @@ pub const ATLAS_TILE_SIZE: u32 = 64;
 pub const GUTTER_SIZE: u32 = 1;
 pub const IMAGE_TILE_SIZE: u32 = ATLAS_TILE_SIZE - 2 * GUTTER_SIZE;
 
+mod dirty;
+
+pub use dirty::{ImageDirtyKey, ImageDirtyTracker, NodeId, TileDirtyTracker};
+
 mod tiles;
 
 pub use tiles::{
@@ -22,6 +26,9 @@ pub use texture_format::TextureFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrushId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RenderTreeGeneration(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PresentFrameId(pub u64);

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 glaphica_core = { path = "../glaphica_core" }
 images = { path = "../images" }
+arc-swap = "1.7"

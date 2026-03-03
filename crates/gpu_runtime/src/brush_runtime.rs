@@ -120,7 +120,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
                 self.apply_draw_op(context, draw_op, layout_registry)?;
                 Ok(BrushGpuApplyOutcome::AppliedDraw)
             }
-            GpuCmdMsg::CopyOp(_) | GpuCmdMsg::ClearOp(_) => {
+            GpuCmdMsg::CopyOp(_) | GpuCmdMsg::ClearOp(_) | GpuCmdMsg::RenderTreeUpdated(_) => {
                 Ok(BrushGpuApplyOutcome::IgnoredNonDraw)
             }
         }
