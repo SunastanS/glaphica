@@ -1,0 +1,8 @@
+[package]
+name = "brushes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glaphica_core = { path = "../glaphica_core" }
+thread_protocol = { path = "../thread_protocol" }

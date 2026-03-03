@@ -60,19 +60,19 @@ bitflags::bitflags! {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BrushInput {
-    stroke: StrokeId,
-    cursor: MappedCursor,
-    flags: BrushInputFlags,
-    path_s: f32,
-    delta_s: f32,
-    dt_s: f32,
-    vel: CanvasVec2,     // canvas per second
-    speed: f32,          // cached |vel|
-    tangent: CanvasVec2, // unit-ish, stable near zero speed
-    acc: CanvasVec2,     // canvas per second ^ 2
-    accel: f32,          // cached |acc|
-    curvature: f32,      // 1/canvas_unit
-    confidence: f32,     // [0, 1]
+    pub stroke: StrokeId,
+    pub cursor: MappedCursor,
+    pub flags: BrushInputFlags,
+    pub path_s: f32,
+    pub delta_s: f32,
+    pub dt_s: f32,
+    pub vel: CanvasVec2,     // canvas per second
+    pub speed: f32,          // cached |vel|
+    pub tangent: CanvasVec2, // unit-ish, stable near zero speed
+    pub acc: CanvasVec2,     // canvas per second ^ 2
+    pub accel: f32,          // cached |acc|
+    pub curvature: f32,      // 1/canvas_unit
+    pub confidence: f32,     // [0, 1]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
