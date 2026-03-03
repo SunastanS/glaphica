@@ -285,7 +285,6 @@ mod tests {
             }
             GpuCmdMsg::CopyOp(_) => panic!("expected draw op"),
             GpuCmdMsg::ClearOp(_) => panic!("expected draw op"),
-            GpuCmdMsg::Notify => panic!("expected draw op"),
         }
     }
 
@@ -303,7 +302,6 @@ mod tests {
             }
             GpuCmdMsg::DrawOp(_) => panic!("expected copy op"),
             GpuCmdMsg::ClearOp(_) => panic!("expected copy op"),
-            GpuCmdMsg::Notify => panic!("expected copy op"),
         }
     }
 
@@ -319,7 +317,6 @@ mod tests {
             }
             GpuCmdMsg::DrawOp(_) => panic!("expected clear op"),
             GpuCmdMsg::CopyOp(_) => panic!("expected clear op"),
-            GpuCmdMsg::Notify => panic!("expected clear op"),
         }
     }
 }

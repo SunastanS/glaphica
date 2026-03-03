@@ -19,7 +19,6 @@ pub struct ClearOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GpuCmdMsg {
-    Notify,
     DrawOp(DrawOp),
     CopyOp(CopyOp),
     ClearOp(ClearOp),
