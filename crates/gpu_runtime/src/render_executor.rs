@@ -178,16 +178,19 @@ impl RenderExecutor {
         format: wgpu::TextureFormat,
         blend_mode: LeafBlendMode,
     ) -> wgpu::RenderPipeline {
-        let blend = match blend_mode {
-            LeafBlendMode::Normal => wgpu::BlendState::ALPHA_BLENDING,
-            LeafBlendMode::Multiply => wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::Dst,
-                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
-                    operation: wgpu::BlendOperation::Add,
+        let (blend, fs_entry) = match blend_mode {
+            LeafBlendMode::Normal => (wgpu::BlendState::ALPHA_BLENDING, "fs_normal"),
+            LeafBlendMode::Multiply => (
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Dst,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent::REPLACE,
                 },
-                alpha: wgpu::BlendComponent::REPLACE,
-            },
+                "fs_multiply",
+            ),
         };
 
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -207,7 +210,7 @@ impl RenderExecutor {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,

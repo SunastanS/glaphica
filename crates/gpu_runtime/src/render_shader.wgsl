@@ -25,12 +25,23 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 }
 
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_normal(input: VertexOutput) -> @location(0) vec4<f32> {
     let texel_size = 1.0 / f32(64u);
     let uv = vec2<f32>(
         f32(params.src_x) * texel_size + input.uv.x * texel_size,
         f32(params.src_y) * texel_size + input.uv.y * texel_size,
     );
     let color = textureSample(src_texture, src_sampler, uv, params.src_layer);
-    return vec4<f32>(color.rgb * params.opacity, color.a * params.opacity);
+    return vec4<f32>(color.rgb * color.a, params.opacity);
+}
+
+@fragment
+fn fs_multiply(input: VertexOutput) -> @location(0) vec4<f32> {
+    let texel_size = 1.0 / f32(64u);
+    let uv = vec2<f32>(
+        f32(params.src_x) * texel_size + input.uv.x * texel_size,
+        f32(params.src_y) * texel_size + input.uv.y * texel_size,
+    );
+    let color = textureSample(src_texture, src_sampler, uv, params.src_layer);
+    return vec4<f32>(color.rgb, params.opacity);
 }
