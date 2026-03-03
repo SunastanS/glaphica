@@ -1,6 +1,4 @@
-use glaphica_core::ATLAS_TILE_SIZE;
-use glaphica_core::AtlasLayout;
-use glaphica_core::TileKey;
+use glaphica_core::{AtlasLayout, BackendKind, TileKey, ATLAS_TILE_SIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasAddress {
@@ -21,6 +19,7 @@ pub struct AtlasBackendResource<'a> {
     pub texture2d_array: &'a wgpu::Texture,
     pub format: wgpu::TextureFormat,
     pub layers: u32,
+    pub kind: BackendKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +31,7 @@ pub enum AtlasStorageRuntimeRegisterError {
 #[derive(Debug)]
 struct BackendBinding {
     layout: AtlasLayout,
+    kind: BackendKind,
     format: wgpu::TextureFormat,
     texture2d_array: wgpu::Texture,
 }
@@ -50,15 +50,26 @@ pub struct AtlasTextureConfig<'a> {
     pub sample_count: u32,
 }
 
+fn default_usage_for_kind(kind: BackendKind) -> wgpu::TextureUsages {
+    match kind {
+        BackendKind::Leaf => {
+            wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+        }
+        BackendKind::BranchCache => {
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT
+        }
+    }
+}
+
 impl Default for AtlasTextureConfig<'_> {
     fn default() -> Self {
         Self {
             label: None,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::empty(),
             mip_level_count: 1,
             sample_count: 1,
         }
@@ -88,29 +99,36 @@ impl AtlasStorageRuntime {
         &mut self,
         device: &wgpu::Device,
         backend_id: u8,
+        kind: BackendKind,
         layout: AtlasLayout,
-        texture: AtlasTextureConfig<'_>,
+        config: AtlasTextureConfig<'_>,
     ) -> Result<(), AtlasStorageRuntimeRegisterError> {
         self.validate_backend_id(backend_id)?;
         let edge_size = layout.tiles_per_edge() * ATLAS_TILE_SIZE;
+        let usage = if config.usage.is_empty() {
+            default_usage_for_kind(kind)
+        } else {
+            config.usage
+        };
         let texture2d_array = device.create_texture(&wgpu::TextureDescriptor {
-            label: texture.label,
+            label: config.label,
             size: wgpu::Extent3d {
                 width: edge_size,
                 height: edge_size,
                 depth_or_array_layers: layout.layers(),
             },
-            mip_level_count: texture.mip_level_count,
-            sample_count: texture.sample_count,
+            mip_level_count: config.mip_level_count,
+            sample_count: config.sample_count,
             dimension: wgpu::TextureDimension::D2,
-            format: texture.format,
-            usage: texture.usage,
+            format: config.format,
+            usage,
             view_formats: &[],
         });
 
         self.backends.push(BackendBinding {
             layout,
-            format: texture.format,
+            kind,
+            format: config.format,
             texture2d_array,
         });
         Ok(())
@@ -133,6 +151,7 @@ impl AtlasStorageRuntime {
             texture2d_array: &backend.texture2d_array,
             format: backend.format,
             layers: backend.layout.layers(),
+            kind: backend.kind,
         })
     }
 
@@ -172,9 +191,9 @@ fn build_address(layout: AtlasLayout, slot: u32) -> AtlasAddress {
 #[cfg(test)]
 mod tests {
     use super::{AtlasStorageRuntime, AtlasStorageRuntimeRegisterError};
-    use glaphica_core::ATLAS_TILE_SIZE;
     use glaphica_core::AtlasLayout;
     use glaphica_core::TileKey;
+    use glaphica_core::ATLAS_TILE_SIZE;
 
     #[test]
     fn validate_backend_requires_contiguous_backend_ids() {

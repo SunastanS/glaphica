@@ -12,6 +12,12 @@ const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 const GEN_MASK: u64 = (1 << GEN_BITS) - 1;
 const BACKEND_MASK: u64 = (1 << BACKEND_BITS) - 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    Leaf,
+    BranchCache,
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Id<Tag, Repr> {

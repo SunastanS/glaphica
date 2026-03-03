@@ -35,6 +35,7 @@ impl Display for ImageTileAccessError {
 
 impl Error for ImageTileAccessError {}
 
+#[derive(Clone, PartialEq)]
 pub struct Image {
     layout: ImageLayout,
     tile_keys: Box<[TileKey]>,
@@ -112,7 +113,7 @@ impl Image {
 
 #[cfg(test)]
 mod tests {
-    use glaphica_core::{BackendId, CanvasVec2, IMAGE_TILE_SIZE, TileKey};
+    use glaphica_core::{BackendId, CanvasVec2, TileKey, IMAGE_TILE_SIZE};
 
     use crate::layout::ImageLayout;
 
@@ -156,16 +157,12 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(
-            image
-                .set_tile_key(0, TileKey::from_parts(1, 2, 100))
-                .is_ok()
-        );
-        assert!(
-            image
-                .set_tile_key(1, TileKey::from_parts(1, 2, 101))
-                .is_ok()
-        );
+        assert!(image
+            .set_tile_key(0, TileKey::from_parts(1, 2, 100))
+            .is_ok());
+        assert!(image
+            .set_tile_key(1, TileKey::from_parts(1, 2, 101))
+            .is_ok());
 
         let mut keys = Vec::new();
         image.collect_affected_tile_keys(

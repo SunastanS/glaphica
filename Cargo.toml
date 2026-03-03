@@ -2,7 +2,12 @@
 members = [
     "crates/atlas",
     "crates/images",
-    "crates/glaphica_core", "crates/threads", "crates/thread_protocol", "crates/gpu_runtime", "crates/brushes",
+    "crates/glaphica_core",
+    "crates/threads",
+    "crates/thread_protocol",
+    "crates/gpu_runtime",
+    "crates/brushes",
+    "crates/document",
 ]
 
 resolver = "3"
