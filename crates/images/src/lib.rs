@@ -1,3 +1,11 @@
+// To represent an image with tiles, we need to
+// - cut images into tiles with Image_TILE_SIZE (without gutter)
+// - store them in atlas with ATLAS_TILE_SIZE (with gutter)
+// - build a 1 to 1 mapping to represent the storage
+//
+// as TileKey is a single shot to a slot in atlas with a specific key for empty
+// an image is basically a list of TileKey
+
 use glaphica_core::IMAGE_TILE_SIZE;
 use glaphica_core::{BackendId, TileKey};
 

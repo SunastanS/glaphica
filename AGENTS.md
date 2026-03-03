@@ -25,6 +25,18 @@
 * treat keys and ids seriously, never create structs with magic keys or ids, the should only be provided by somewhere with enough context to know what they mean.
 * prefer index mapping over key lookup and Hash maps for performance.
 
-# Test guidelines
+# Project Structure
 
-* perfer not to run full test for endless wornings will mess up context, use `grep` to trace specific errors.
+```
+glaphica
+├── AGENTS.md
+├── Cargo.toml
+├── crates
+│   ├── atlas
+│   ├── glaphica_core    //sharing types
+│   ├── gpu_runtime      //a thin runtime in app thread to submit gpu command
+│   ├── images
+│   ├── thread_protocol
+│   └── threads          //thread model
+└── README.md
+```
