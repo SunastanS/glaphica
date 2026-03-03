@@ -1,4 +1,4 @@
-pub use glaphica_core::{AtlasLayout, BrushId, TileKey};
+pub use glaphica_core::{AtlasLayout, BrushId, InputDeviceKind, MappedCursor, TileKey};
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
@@ -15,11 +15,9 @@ pub struct InputRingSample {
     /// `epoch` groups samples that share the same semantic state (tool/params/target).
     /// Back-end must treat epoch boundaries as "can only change at safe points".
     pub epoch: u32,
-    pub cursor_x: f32,
-    pub cursor_y: f32,
-    pub pressure: f32,
-    pub tilt: f32,
-    pub twist: f32,
+    pub time_ns: u64,
+    pub device: InputDeviceKind,
+    pub cursor: MappedCursor,
 }
 
 pub trait InputControlOp {

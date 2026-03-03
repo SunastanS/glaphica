@@ -82,6 +82,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brushes"
+version = "0.1.0"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -279,6 +283,9 @@ dependencies = [
 [[package]]
 name = "glaphica_core"
 version = "0.1.0"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "glow"

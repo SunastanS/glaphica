@@ -6,11 +6,74 @@ mod tiles;
 
 pub use tiles::{BackendId, BackendTag, GenerationId, GenerationTag, Id, SlotId, SlotTag, TileKey};
 
+mod vec2;
+
+pub use vec2::{CanvasVec2, RadianVec2, ScreenVec2};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrushId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PresentFrameId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StrokeId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InputDeviceKind {
+    Pen,
+    Cursor,
+    Finger(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawCursor {
+    pub cursor: ScreenVec2,
+    pub tilt: RadianVec2,
+    pub pressure: f32,
+    pub twist: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MappedCursor {
+    pub cursor: CanvasVec2,
+    pub tilt: RadianVec2, // [tile_x, tile_y]
+    pub pressure: f32,    // [0, 1]
+    pub twist: f32,       // [-Pi, Pi]
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct BrushInputFlags: u32 {
+        const PATH_S = 1 << 0;
+        const DELTA_S = 1 << 1;
+        const DT_S = 1 << 2;
+        const VEL = 1 << 3;
+        const SPEED = 1 << 4;
+        const TANGENT = 1 << 5;
+        const ACC = 1 << 6;
+        const ACCEL = 1 << 7;
+        const CURVATURE = 1 << 8;
+        const CONFIDENCE = 1 << 9;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushInput {
+    stroke: StrokeId,
+    cursor: MappedCursor,
+    flags: BrushInputFlags,
+    path_s: f32,
+    delta_s: f32,
+    dt_s: f32,
+    vel: CanvasVec2,     // canvas per second
+    speed: f32,          // cached |vel|
+    tangent: CanvasVec2, // unit-ish, stable near zero speed
+    acc: CanvasVec2,     // canvas per second ^ 2
+    accel: f32,          // cached |acc|
+    curvature: f32,      // 1/canvas_unit
+    confidence: f32,     // [0, 1]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AtlasLayout {

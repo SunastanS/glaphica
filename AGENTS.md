@@ -33,6 +33,7 @@ glaphica
 ├── Cargo.toml
 ├── crates
 │   ├── atlas
+│   ├── brushes
 │   ├── glaphica_core    //sharing types
 │   ├── gpu_runtime      //a thin runtime in app thread to submit gpu command
 │   ├── images
