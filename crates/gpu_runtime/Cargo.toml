@@ -10,6 +10,7 @@ blocking = ["dep:pollster"]
 [dependencies]
 atlas = { path = "../atlas" }
 brushes = { path = "../brushes" }
+document = { path = "../document" }
 glaphica_core = { path = "../glaphica_core" }
 thread_protocol = { path = "../thread_protocol" }
 

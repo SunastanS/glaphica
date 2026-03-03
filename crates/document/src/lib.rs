@@ -376,7 +376,7 @@ pub struct LeafConfig {
     blend_mode: LeafBlendMode,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LeafBlendMode {
     Normal,
     Multiply,
