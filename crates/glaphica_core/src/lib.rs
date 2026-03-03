@@ -2,15 +2,15 @@ pub const ATLAS_TILE_SIZE: u32 = 64;
 pub const GUTTER_SIZE: u32 = 1;
 pub const IMAGE_TILE_SIZE: u32 = ATLAS_TILE_SIZE - 2 * GUTTER_SIZE;
 
-mod key;
+mod tiles;
 
-pub use key::{BackendId, BackendTag, GenerationId, GenerationTag, Id, SlotId, SlotTag, TileKey};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PipelineId(pub u64);
+pub use tiles::{BackendId, BackendTag, GenerationId, GenerationTag, Id, SlotId, SlotTag, TileKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ShaderId(pub u64);
+pub struct BrushId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PresentFrameId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AtlasLayout {

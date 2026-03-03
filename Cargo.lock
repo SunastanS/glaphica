@@ -843,6 +843,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-queue",
+ "glaphica_core",
  "rtrb",
  "thread_protocol",
 ]

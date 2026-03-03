@@ -319,9 +319,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::MailboxMergePolicy;
+    use glaphica_core::PresentFrameId;
     use thread_protocol::{
         CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, GpuFeedbackMergeState,
-        MergeItem, PresentFrameId, SubmitWaterline,
+        MergeItem, SubmitWaterline,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]

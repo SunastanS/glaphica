@@ -1,5 +1,5 @@
-use atlas::layout::AtlasLayout;
 use glaphica_core::ATLAS_TILE_SIZE;
+use glaphica_core::AtlasLayout;
 use glaphica_core::TileKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,8 +151,8 @@ fn build_address(layout: AtlasLayout, slot: u32) -> AtlasAddress {
 #[cfg(test)]
 mod tests {
     use super::{AtlasStorageRuntime, AtlasStorageRuntimeRegisterError};
-    use atlas::layout::AtlasLayout;
     use glaphica_core::ATLAS_TILE_SIZE;
+    use glaphica_core::AtlasLayout;
     use glaphica_core::TileKey;
 
     #[test]
