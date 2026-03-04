@@ -1,0 +1,16 @@
+[package]
+name = "glaphica"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+app = { path = "../app" }
+brushes = { path = "../brushes" }
+glaphica_core = { path = "../glaphica_core" }
+images = { path = "../images" }
+thread_protocol = { path = "../thread_protocol" }
+gpu_runtime = { path = "../gpu_runtime" }
+
+wgpu = "28.0.0"
+winit = "0.30"
+tokio = { version = "1", features = ["rt-multi-thread"] }

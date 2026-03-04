@@ -9,6 +9,8 @@ members = [
     "crates/app",
     "crates/document",
     "crates/brushes",
+    "crates/glaphica",
+    "crates/frame_scheduler",
 ]
 
 resolver = "3"

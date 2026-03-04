@@ -1,0 +1,8 @@
+[package]
+name = "frame_scheduler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thread_protocol = { path = "../thread_protocol" }
+rtrb = "0.3.2"
