@@ -66,8 +66,16 @@ impl Image {
         &self.tile_keys
     }
 
+    pub fn tile_count(&self) -> usize {
+        self.tile_keys.len()
+    }
+
     pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
         self.tile_keys.get(tile_index).copied()
+    }
+
+    pub fn tile_canvas_origin(&self, tile_index: usize) -> Option<CanvasVec2> {
+        self.layout.tile_canvas_origin(tile_index)
     }
 
     pub fn set_tile_key(

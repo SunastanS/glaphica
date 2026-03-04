@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use glaphica_core::BrushId;
+use glaphica_core::{BackendKind, BrushId};
 
 use crate::draw_layout::BrushDrawInputLayout;
 use crate::engine_runtime::{BrushEngineRuntime, EngineBrushPipeline};
@@ -33,6 +33,9 @@ pub trait BrushSpec: EngineBrushPipeline + Sized + 'static {
     fn max_affected_radius_px(&self) -> u32;
     fn draw_input_layout(&self) -> BrushDrawInputLayout;
     fn gpu_pipeline_spec(&self) -> BrushGpuPipelineSpec;
+    fn cache_backend_kind(&self) -> Option<BackendKind> {
+        None
+    }
 
     fn register(
         self,
@@ -88,6 +91,7 @@ mod tests {
             &mut self,
             _brush_input: &BrushInput,
             _tile_key: TileKey,
+            _tile_canvas_origin: glaphica_core::CanvasVec2,
         ) -> Result<Vec<f32>, crate::BrushPipelineError> {
             Ok(vec![0.0, 0.0, 1.0])
         }

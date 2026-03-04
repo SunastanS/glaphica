@@ -425,15 +425,21 @@ impl WgpuBrushExecutor {
         cache_backend_id: Option<u8>,
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
         brush_id: BrushId,
+        has_ref_image: bool,
     ) -> Result<wgpu::BindGroup, WgpuBrushExecutorError> {
-        let source_backend = atlas_storage.backend_resource(source_backend_id).ok_or(
-            WgpuBrushExecutorError::MissingSourceBackend {
-                brush_id,
-                backend_id: source_backend_id,
-            },
-        )?;
-        let source_view =
-            create_atlas_sampling_view(source_backend, "glaphica-brush-source-atlas-view");
+        let source_view = if has_ref_image {
+            let source_backend = atlas_storage.backend_resource(source_backend_id).ok_or(
+                WgpuBrushExecutorError::MissingSourceBackend {
+                    brush_id,
+                    backend_id: source_backend_id,
+                },
+            )?;
+            create_atlas_sampling_view(source_backend, "glaphica-brush-source-atlas-view")
+        } else {
+            // Use dummy texture when there's no ref_image to avoid binding the same texture
+            // as both RESOURCE and COLOR_TARGET
+            self.ensure_dummy_cache_texture(device).clone()
+        };
 
         let cache_view = match cache_backend_id {
             Some(cache_backend_id) => {
@@ -468,24 +474,12 @@ impl WgpuBrushExecutor {
             ],
         }))
     }
-}
 
-fn to_wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
-    match format {
-        TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
-        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
-        TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
-        TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
-        TextureFormat::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
-    }
-}
-
-impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
-    fn execute_draw(
+    fn encode_draw(
         &mut self,
         context: &mut WgpuBrushContext<'_>,
         draw_op: &DrawOp,
-        _layout: BrushDrawInputLayout,
+        encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), BrushPipelineError> {
         let brush_index = Self::brush_index(draw_op.brush_id)?;
 
@@ -578,6 +572,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
                 cache_backend_id,
                 &atlas_bind_group_layout,
                 draw_op.brush_id,
+                draw_op.ref_image.is_some(),
             )?;
             let brush_context = self.brushes[brush_index].as_mut().unwrap();
             brush_context.atlas_bind_group = Some(bind_group);
@@ -685,13 +680,6 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
                 array_layer_count: Some(1),
             });
 
-        let mut encoder =
-            context
-                .gpu_context
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("glaphica-brush-draw-encoder"),
-                });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glaphica-brush-pass"),
@@ -720,8 +708,48 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             );
             pass.draw(0..3, 0..1);
         }
+
+        Ok(())
+    }
+}
+
+fn to_wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+        TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
+        TextureFormat::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
+    }
+}
+
+impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
+    fn execute_draw(
+        &mut self,
+        context: &mut WgpuBrushContext<'_>,
+        draw_op: &DrawOp,
+        _layout: BrushDrawInputLayout,
+    ) -> Result<(), BrushPipelineError> {
+        let mut encoder =
+            context
+                .gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-brush-draw-encoder"),
+                });
+        self.encode_draw(context, draw_op, &mut encoder)?;
         context.gpu_context.queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+
+    fn execute_draw_with_encoder(
+        &mut self,
+        context: &mut WgpuBrushContext<'_>,
+        draw_op: &DrawOp,
+        _layout: BrushDrawInputLayout,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushPipelineError> {
+        self.encode_draw(context, draw_op, encoder)
     }
 }
 

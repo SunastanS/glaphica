@@ -93,6 +93,19 @@ impl ImageLayout {
         usize::try_from(index).ok()
     }
 
+    pub fn tile_canvas_origin(&self, tile_index: usize) -> Option<CanvasVec2> {
+        let tile_x = self.tile_x as usize;
+        if tile_index >= tile_x * self.tile_y as usize {
+            return None;
+        }
+        let tile_coord_x = (tile_index % tile_x) as u32;
+        let tile_coord_y = (tile_index / tile_x) as u32;
+        Some(CanvasVec2::new(
+            tile_coord_x as f32 * IMAGE_TILE_SIZE as f32,
+            tile_coord_y as f32 * IMAGE_TILE_SIZE as f32,
+        ))
+    }
+
     fn affected_tile_bounds(
         &self,
         center: CanvasVec2,

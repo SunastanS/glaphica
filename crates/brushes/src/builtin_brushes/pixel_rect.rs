@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use glaphica_core::{BrushInput, TileKey};
+use glaphica_core::{BrushInput, CanvasVec2, TileKey};
 
 use crate::brush_spec::BrushSpec;
 use crate::draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
@@ -135,12 +135,11 @@ impl EngineBrushPipeline for PixelRectBrush {
         &mut self,
         brush_input: &BrushInput,
         _tile_key: TileKey,
+        tile_canvas_origin: CanvasVec2,
     ) -> Result<Vec<f32>, BrushPipelineError> {
-        Ok(vec![
-            brush_input.cursor.cursor.x,
-            brush_input.cursor.cursor.y,
-            self.radius_px as f32,
-        ])
+        let local_x = brush_input.cursor.cursor.x - tile_canvas_origin.x;
+        let local_y = brush_input.cursor.cursor.y - tile_canvas_origin.y;
+        Ok(vec![local_x, local_y, self.radius_px as f32])
     }
 }
 
@@ -207,13 +206,31 @@ mod tests {
     fn encode_draw_input_carries_center_and_radius() {
         let mut brush = PixelRectBrush::new(5);
         let input = build_input(CanvasVec2::new(12.0, 7.0));
-        let encoded = brush.encode_draw_input(&input, TileKey::from_parts(0, 0, 0));
+        let encoded = brush.encode_draw_input(
+            &input,
+            TileKey::from_parts(0, 0, 0),
+            CanvasVec2::new(0.0, 0.0),
+        );
         assert!(encoded.is_ok());
         let encoded = match encoded {
             Ok(encoded) => encoded,
             Err(_) => return,
         };
         assert_eq!(encoded, vec![12.0, 7.0, 5.0]);
+    }
+
+    #[test]
+    fn encode_draw_input_converts_to_local_coords() {
+        let mut brush = PixelRectBrush::new(5);
+        let input = build_input(CanvasVec2::new(100.0, 200.0));
+        let tile_origin = CanvasVec2::new(64.0, 128.0);
+        let encoded = brush.encode_draw_input(&input, TileKey::from_parts(0, 0, 0), tile_origin);
+        assert!(encoded.is_ok());
+        let encoded = match encoded {
+            Ok(encoded) => encoded,
+            Err(_) => return,
+        };
+        assert_eq!(encoded, vec![36.0, 72.0, 5.0]);
     }
 
     #[test]

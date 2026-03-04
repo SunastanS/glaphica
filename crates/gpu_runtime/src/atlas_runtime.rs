@@ -57,6 +57,7 @@ fn default_usage_for_kind(kind: BackendKind) -> wgpu::TextureUsages {
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
         }
         BackendKind::BranchCache => {
             wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -169,13 +170,17 @@ impl AtlasStorageRuntime {
 }
 
 fn build_address(layout: AtlasLayout, slot: u32) -> AtlasAddress {
-    let edge_bits = layout.tiles_per_edge_bits();
-    let layer_bits = edge_bits * 2;
-    let layer = slot >> layer_bits;
-    let index_mask = (1u32 << layer_bits) - 1;
-    let index = slot & index_mask;
-    let y = index >> edge_bits;
-    let x = index & ((1u32 << edge_bits) - 1);
+    let parity = slot >> 31;
+    let index_within_parity = slot & 0x7FFF_FFFF;
+    let tiles_per_edge = layout.tiles_per_edge();
+    let tiles_per_layer = tiles_per_edge * tiles_per_edge;
+
+    let layer_in_group = index_within_parity / tiles_per_layer;
+    let tile_in_layer = index_within_parity % tiles_per_layer;
+
+    let layer = parity + 2 * layer_in_group;
+    let x = tile_in_layer % tiles_per_edge;
+    let y = tile_in_layer / tiles_per_edge;
 
     let tile_offset = (x, y);
     AtlasAddress {
@@ -210,21 +215,62 @@ mod tests {
     }
 
     #[test]
-    fn build_address_maps_slot_to_layer_and_offsets() {
-        let x = 3;
-        let y = 7;
-        let layer = 1;
-        let edge_bits = AtlasLayout::Small11.tiles_per_edge_bits();
-        let layer_bits = edge_bits * 2;
-        let slot = (layer << layer_bits) | (y << edge_bits) | x;
+    fn build_address_even_parity_slot() {
+        let tiles_per_edge = AtlasLayout::Small11.tiles_per_edge();
+        let x = 3u32;
+        let y = 7u32;
+        let layer_in_even_group = 0u32;
+        let tile_in_layer = y * tiles_per_edge + x;
+        let index_within_parity =
+            layer_in_even_group * (tiles_per_edge * tiles_per_edge) + tile_in_layer;
+        let slot = index_within_parity;
+
         let address = super::build_address(AtlasLayout::Small11, slot);
 
-        assert_eq!(address.layer, layer);
+        assert_eq!(address.layer, 0);
         assert_eq!(address.tile_offset, (x, y));
         assert_eq!(
             address.texel_offset,
             (x * ATLAS_TILE_SIZE, y * ATLAS_TILE_SIZE)
         );
+    }
+
+    #[test]
+    fn build_address_odd_parity_slot() {
+        let tiles_per_edge = AtlasLayout::Small11.tiles_per_edge();
+        let x = 3u32;
+        let y = 7u32;
+        let layer_in_odd_group = 0u32;
+        let tile_in_layer = y * tiles_per_edge + x;
+        let index_within_parity =
+            layer_in_odd_group * (tiles_per_edge * tiles_per_edge) + tile_in_layer;
+        let slot = (1u32 << 31) | index_within_parity;
+
+        let address = super::build_address(AtlasLayout::Small11, slot);
+
+        assert_eq!(address.layer, 1);
+        assert_eq!(address.tile_offset, (x, y));
+        assert_eq!(
+            address.texel_offset,
+            (x * ATLAS_TILE_SIZE, y * ATLAS_TILE_SIZE)
+        );
+    }
+
+    #[test]
+    fn build_address_even_parity_second_layer() {
+        let tiles_per_edge = AtlasLayout::Medium14.tiles_per_edge();
+        let tiles_per_layer = tiles_per_edge * tiles_per_edge;
+        let x = 5u32;
+        let y = 10u32;
+        let layer_in_even_group = 1u32;
+        let tile_in_layer = y * tiles_per_edge + x;
+        let index_within_parity = layer_in_even_group * tiles_per_layer + tile_in_layer;
+        let slot = index_within_parity;
+
+        let address = super::build_address(AtlasLayout::Medium14, slot);
+
+        assert_eq!(address.layer, 2);
+        assert_eq!(address.tile_offset, (x, y));
     }
 
     #[test]

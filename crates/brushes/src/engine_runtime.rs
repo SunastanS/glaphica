@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use glaphica_core::{BackendId, BrushId, BrushInput, NodeId, TileKey};
+use glaphica_core::{BackendId, BrushId, BrushInput, CanvasVec2, NodeId, TileKey};
 use images::Image;
 use thread_protocol::{CopyOp, DrawOp, GpuCmdMsg, RefImage};
 
@@ -11,6 +11,10 @@ use crate::{BrushPipelineError, BrushRegistryError};
 
 pub trait TileSlotAllocator {
     fn alloc(&mut self, backend: BackendId) -> Option<TileKey>;
+
+    fn alloc_with_parity(&mut self, backend: BackendId, _parity: bool) -> Option<TileKey> {
+        self.alloc(backend)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +34,7 @@ pub trait EngineBrushPipeline: Send {
         &mut self,
         brush_input: &BrushInput,
         tile_key: TileKey,
+        tile_canvas_origin: CanvasVec2,
     ) -> Result<Vec<f32>, BrushPipelineError>;
 }
 
@@ -151,7 +156,7 @@ impl BrushEngineRuntime {
         let registration = self.pipelines.get_mut(brush_id)?;
         let encoded_input = registration
             .pipeline
-            .encode_draw_input(brush_input, tile_key)
+            .encode_draw_input(brush_input, tile_key, CanvasVec2::new(0.0, 0.0))
             .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
         Ok(DrawOp {
             node_id,
@@ -274,9 +279,12 @@ impl BrushEngineRuntime {
 
         let registration = self.pipelines.get_mut(brush_id)?;
         for affected_tile in self.scratch_affected_tiles.iter().copied() {
+            let tile_canvas_origin = image
+                .tile_canvas_origin(affected_tile.tile_index)
+                .unwrap_or(CanvasVec2::new(0.0, 0.0));
             let encoded_input = registration
                 .pipeline
-                .encode_draw_input(brush_input, affected_tile.tile_key)
+                .encode_draw_input(brush_input, affected_tile.tile_key, tile_canvas_origin)
                 .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
             emit(DrawOp {
                 node_id,
@@ -356,9 +364,12 @@ impl BrushEngineRuntime {
 
         let registration = self.pipelines.get_mut(brush_id)?;
         for (tile_index, final_tile_key, ref_tile_key, copy_op, tile_key_update) in prepared_tiles {
+            let tile_canvas_origin = image
+                .tile_canvas_origin(tile_index)
+                .unwrap_or(CanvasVec2::new(0.0, 0.0));
             let encoded_input = registration
                 .pipeline
-                .encode_draw_input(brush_input, final_tile_key)
+                .encode_draw_input(brush_input, final_tile_key, tile_canvas_origin)
                 .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
 
             output.push(StrokeDrawOutput {
@@ -394,7 +405,12 @@ impl BrushEngineRuntime {
         }
 
         let backend = image.backend();
-        let Some(new_tile_key) = allocator.alloc(backend) else {
+        let next_tile = if current_tile_key == TileKey::EMPTY {
+            allocator.alloc(backend)
+        } else {
+            allocator.alloc_with_parity(backend, !current_tile_key.slot_parity())
+        };
+        let Some(new_tile_key) = next_tile else {
             return (current_tile_key, None, None);
         };
 
@@ -407,7 +423,9 @@ impl BrushEngineRuntime {
             })
         };
 
-        let _ = image.set_tile_key(tile_index, new_tile_key);
+        if image.set_tile_key(tile_index, new_tile_key).is_err() {
+            return (current_tile_key, None, None);
+        }
         self.stroke_tiles.insert(stroke_key);
 
         (
@@ -426,7 +444,7 @@ mod tests {
     };
     use images::{layout::ImageLayout, Image};
 
-    use super::{BrushEngineRuntime, EngineBrushPipeline};
+    use super::{BrushEngineRuntime, EngineBrushPipeline, TileSlotAllocator};
 
     struct TestEnginePipeline;
 
@@ -435,8 +453,36 @@ mod tests {
             &mut self,
             _brush_input: &BrushInput,
             tile_key: TileKey,
+            _tile_canvas_origin: CanvasVec2,
         ) -> Result<Vec<f32>, crate::BrushPipelineError> {
             Ok(vec![tile_key.slot_index() as f32])
+        }
+    }
+
+    #[derive(Default)]
+    struct TestAllocator {
+        regular_alloc: Option<TileKey>,
+        odd_alloc: Option<TileKey>,
+        even_alloc: Option<TileKey>,
+        parity_requests: Vec<bool>,
+    }
+
+    impl TileSlotAllocator for TestAllocator {
+        fn alloc(&mut self, _backend: glaphica_core::BackendId) -> Option<TileKey> {
+            self.regular_alloc.take()
+        }
+
+        fn alloc_with_parity(
+            &mut self,
+            _backend: glaphica_core::BackendId,
+            parity: bool,
+        ) -> Option<TileKey> {
+            self.parity_requests.push(parity);
+            if parity {
+                self.odd_alloc.take()
+            } else {
+                self.even_alloc.take()
+            }
         }
     }
 
@@ -550,6 +596,52 @@ mod tests {
         assert_eq!(
             draw_ops[1].ref_image.map(|ref_image| ref_image.tile_key),
             Some(TileKey::from_parts(2, 3, 201))
+        );
+    }
+
+    #[test]
+    fn stroke_prepare_allocates_opposite_parity_for_copy_op() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let mut image = match Image::new(layout, glaphica_core::BackendId::new(1)) {
+            Ok(image) => image,
+            Err(_) => return,
+        };
+        let existing_key = TileKey::from_parts(1, 0, 0x0000_0007);
+        assert!(image.set_tile_key(0, existing_key).is_ok());
+
+        let mut runtime = BrushEngineRuntime::new(4);
+        assert!(runtime
+            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+            .is_ok());
+        runtime.begin_stroke();
+
+        let mut allocator = TestAllocator {
+            regular_alloc: None,
+            odd_alloc: Some(TileKey::from_parts(1, 0, 0x8000_0001)),
+            even_alloc: None,
+            parity_requests: Vec::new(),
+        };
+        let brush_input = build_test_brush_input(CanvasVec2::new(10.0, 10.0));
+        let mut output = Vec::new();
+        let build_result = runtime.build_stroke_draw_outputs_for_image(
+            BrushId(2),
+            &brush_input,
+            NodeId(9),
+            &mut image,
+            None,
+            &mut allocator,
+            &mut output,
+        );
+        assert!(build_result.is_ok());
+        assert_eq!(allocator.parity_requests, vec![true]);
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].draw_op.tile_key, TileKey::from_parts(1, 0, 0x8000_0001));
+        assert_eq!(
+            output[0].copy_op,
+            Some(thread_protocol::CopyOp {
+                src_tile_key: existing_key,
+                dst_tile_key: TileKey::from_parts(1, 0, 0x8000_0001),
+            })
         );
     }
 }

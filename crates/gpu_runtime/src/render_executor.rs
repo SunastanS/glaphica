@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use document::{LeafBlendMode, RenderCmd};
 use glaphica_core::{TileKey, ATLAS_TILE_SIZE};
+use thread_protocol::{ClearOp, CopyOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
 use crate::context::GpuContext;
@@ -59,9 +60,173 @@ impl RenderExecutor {
         self.ensure_pipelines(context, format);
         let cache = self.cache.as_ref().unwrap();
 
+        let mut encoder =
+            context
+                .gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-render-cmd-encoder"),
+                });
         for cmd in cmds {
-            execute_cmd(context, cmd, cache)?;
+            encode_cmd(context, cmd, cache, &mut encoder)?;
         }
+        context.gpu_context.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn execute_with_encoder(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        context: &mut RenderContext<'_>,
+        cmds: &[RenderCmd],
+    ) -> Result<(), RenderExecutorError> {
+        if cmds.is_empty() {
+            return Ok(());
+        }
+
+        let format = self.detect_format(context, cmds);
+        self.ensure_pipelines(context, format);
+        let cache = self.cache.as_ref().unwrap();
+
+        for cmd in cmds {
+            encode_cmd(context, cmd, cache, encoder)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_tile(
+        &self,
+        context: &mut RenderContext<'_>,
+        clear_op: &ClearOp,
+    ) -> Result<(), RenderExecutorError> {
+        let mut encoder =
+            context
+                .gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-clear-tile-encoder"),
+                });
+        self.encode_clear_tile(context, clear_op, &mut encoder)?;
+        context.gpu_context.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn clear_tile_with_encoder(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        context: &mut RenderContext<'_>,
+        clear_op: &ClearOp,
+    ) -> Result<(), RenderExecutorError> {
+        self.encode_clear_tile(context, clear_op, encoder)
+    }
+
+    fn encode_clear_tile(
+        &self,
+        context: &mut RenderContext<'_>,
+        clear_op: &ClearOp,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), RenderExecutorError> {
+        let resolved = context.atlas_storage.resolve(clear_op.tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: clear_op.tile_key,
+            },
+        )?;
+
+        let dst_view = create_render_attachment_view(&resolved);
+
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-clear-tile-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn copy_tile(
+        &self,
+        context: &mut RenderContext<'_>,
+        copy_op: &CopyOp,
+    ) -> Result<(), RenderExecutorError> {
+        let mut encoder =
+            context
+                .gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-copy-tile-encoder"),
+                });
+        self.encode_copy_tile(context, copy_op, &mut encoder)?;
+        context.gpu_context.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn copy_tile_with_encoder(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        context: &mut RenderContext<'_>,
+        copy_op: &CopyOp,
+    ) -> Result<(), RenderExecutorError> {
+        self.encode_copy_tile(context, copy_op, encoder)
+    }
+
+    fn encode_copy_tile(
+        &self,
+        context: &mut RenderContext<'_>,
+        copy_op: &CopyOp,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), RenderExecutorError> {
+        let src_resolved = context.atlas_storage.resolve(copy_op.src_tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: copy_op.src_tile_key,
+            },
+        )?;
+        let dst_resolved = context.atlas_storage.resolve(copy_op.dst_tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: copy_op.dst_tile_key,
+            },
+        )?;
+
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: src_resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: src_resolved.address.texel_offset.0,
+                    y: src_resolved.address.texel_offset.1,
+                    z: src_resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: dst_resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: dst_resolved.address.texel_offset.0,
+                    y: dst_resolved.address.texel_offset.1,
+                    z: dst_resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+
         Ok(())
     }
 
@@ -225,26 +390,47 @@ impl RenderExecutor {
     }
 }
 
-fn execute_cmd(
+fn encode_cmd(
     context: &mut RenderContext<'_>,
     cmd: &RenderCmd,
     cache: &PipelineCache,
+    encoder: &mut wgpu::CommandEncoder,
 ) -> Result<(), RenderExecutorError> {
     if cmd.to.is_empty() || cmd.from.is_empty() {
         return Ok(());
     }
 
-    let mut encoder =
-        context
-            .gpu_context
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glaphica-render-cmd-encoder"),
-            });
+    // Dev assertion: verify all sources have matching tile_keys length
+    #[cfg(debug_assertions)]
+    {
+        for (i, source) in cmd.from.iter().enumerate() {
+            debug_assert!(
+                source.tile_keys.len() == cmd.to.len(),
+                "RenderCmd source {} has {} tile_keys but cmd.to has {} tiles. \
+                 This indicates a bug in build_render_cmds - all sources must have \
+                 matching tile_counts for the dirty tile indices.",
+                i,
+                source.tile_keys.len(),
+                cmd.to.len()
+            );
+        }
+    }
 
     for (tile_idx, &dst_tile_key) in cmd.to.iter().enumerate() {
         if dst_tile_key == TileKey::EMPTY {
             continue;
+        }
+
+        let mut src_keys = Vec::new();
+        for source in &cmd.from {
+            if tile_idx >= source.tile_keys.len() {
+                continue;
+            }
+            let src_tile_key = source.tile_keys[tile_idx];
+            if src_tile_key == TileKey::EMPTY {
+                continue;
+            }
+            src_keys.push(src_tile_key);
         }
 
         let dst_resolved = context.atlas_storage.resolve(dst_tile_key).ok_or(
@@ -316,7 +502,6 @@ fn execute_cmd(
         }
     }
 
-    context.gpu_context.queue.submit(Some(encoder.finish()));
     Ok(())
 }
 

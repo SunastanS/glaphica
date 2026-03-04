@@ -12,6 +12,14 @@ pub trait BrushDrawExecutor<Context>: Send {
         draw_op: &DrawOp,
         layout: BrushDrawInputLayout,
     ) -> Result<(), BrushPipelineError>;
+
+    fn execute_draw_with_encoder(
+        &mut self,
+        context: &mut Context,
+        draw_op: &DrawOp,
+        layout: BrushDrawInputLayout,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushPipelineError>;
 }
 
 #[derive(Debug)]
@@ -83,6 +91,10 @@ impl<Executor> BrushGpuRuntime<Executor> {
         Self { executor }
     }
 
+    pub fn executor_mut(&mut self) -> &mut Executor {
+        &mut self.executor
+    }
+
     pub fn apply_draw_op<Context>(
         &mut self,
         context: &mut Context,
@@ -103,6 +115,30 @@ impl<Executor> BrushGpuRuntime<Executor> {
         }
         self.executor
             .execute_draw(context, draw_op, layout)
+            .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
+    }
+
+    pub fn apply_draw_op_with_encoder<Context>(
+        &mut self,
+        context: &mut Context,
+        draw_op: &DrawOp,
+        layout_registry: &BrushLayoutRegistry,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushGpuDispatchError>
+    where
+        Executor: BrushDrawExecutor<Context>,
+    {
+        let brush_id = draw_op.brush_id;
+        let layout = layout_registry.layout(brush_id)?;
+        if !layout.validate_input(&draw_op.input) {
+            return Err(BrushGpuDispatchError::InputLayoutMismatch {
+                brush_id,
+                layout,
+                input_len: draw_op.input.len(),
+            });
+        }
+        self.executor
+            .execute_draw_with_encoder(context, draw_op, layout, encoder)
             .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
     }
 
@@ -154,6 +190,18 @@ mod tests {
             context: &mut TestContext,
             draw_op: &DrawOp,
             _layout: BrushDrawInputLayout,
+        ) -> Result<(), brushes::BrushPipelineError> {
+            context.input.clear();
+            context.input.extend_from_slice(&draw_op.input);
+            Ok(())
+        }
+
+        fn execute_draw_with_encoder(
+            &mut self,
+            context: &mut TestContext,
+            draw_op: &DrawOp,
+            _layout: BrushDrawInputLayout,
+            _encoder: &mut wgpu::CommandEncoder,
         ) -> Result<(), brushes::BrushPipelineError> {
             context.input.clear();
             context.input.extend_from_slice(&draw_op.input);
