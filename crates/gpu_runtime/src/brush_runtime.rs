@@ -120,9 +120,10 @@ impl<Executor> BrushGpuRuntime<Executor> {
                 self.apply_draw_op(context, draw_op, layout_registry)?;
                 Ok(BrushGpuApplyOutcome::AppliedDraw)
             }
-            GpuCmdMsg::CopyOp(_) | GpuCmdMsg::ClearOp(_) | GpuCmdMsg::RenderTreeUpdated(_) => {
-                Ok(BrushGpuApplyOutcome::IgnoredNonDraw)
-            }
+            GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::ClearOp(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => Ok(BrushGpuApplyOutcome::IgnoredNonDraw),
         }
     }
 }
@@ -134,7 +135,7 @@ mod tests {
         BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind, BrushEngineRuntime,
         BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry, BrushSpec,
     };
-    use glaphica_core::{BrushId, TileKey};
+    use glaphica_core::{BrushId, NodeId, TileKey};
     use thread_protocol::{ClearOp, DrawOp, GpuCmdMsg};
 
     use super::{BrushDrawExecutor, BrushGpuApplyOutcome, BrushGpuDispatchError, BrushGpuRuntime};
@@ -190,6 +191,8 @@ mod tests {
             .is_ok());
 
         let draw_op = DrawOp {
+            node_id: NodeId(0),
+            tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
             ref_image: None,
             input: vec![1.0, 2.0, 3.0],
@@ -212,6 +215,8 @@ mod tests {
             .is_ok());
 
         let draw_op = DrawOp {
+            node_id: NodeId(0),
+            tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
             ref_image: None,
             input: vec![1.0, 2.0],

@@ -18,6 +18,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "app"
+version = "0.1.0"
+dependencies = [
+ "document",
+ "glaphica_core",
+ "gpu_runtime",
+ "thread_protocol",
+ "threads",
+ "wgpu",
+]
+
+[[package]]
 name = "arc-swap"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

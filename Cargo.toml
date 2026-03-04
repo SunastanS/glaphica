@@ -6,8 +6,9 @@ members = [
     "crates/threads",
     "crates/thread_protocol",
     "crates/gpu_runtime",
-    "crates/brushes",
+    "crates/app",
     "crates/document",
+    "crates/brushes",
 ]
 
 resolver = "3"

@@ -13,7 +13,10 @@ pub mod layout_registry;
 pub use brush_registry::{BrushRegistry, BrushRegistryError};
 pub use brush_spec::{BrushSpec, BrushSpecRegisterError};
 pub use draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
-pub use engine_runtime::{BrushEngineRuntime, EngineBrushDispatchError, EngineBrushPipeline};
+pub use engine_runtime::{
+    BrushEngineRuntime, EngineBrushDispatchError, EngineBrushPipeline, StrokeDrawOutput,
+    StrokeTileKey, TileSlotAllocator,
+};
 pub use gpu_pipeline_registry::BrushGpuPipelineRegistry;
 pub use gpu_pipeline_spec::BrushGpuPipelineSpec;
 pub use layout_registry::BrushLayoutRegistry;

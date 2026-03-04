@@ -55,7 +55,9 @@ where
 }
 
 mod gpu_command;
-pub use gpu_command::{ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage, RenderTreeUpdatedOp};
+pub use gpu_command::{
+    ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage, RenderTreeUpdatedOp, TileSlotKeyUpdateOp,
+};
 
 mod gpu_feedback;
 pub use gpu_feedback::{
@@ -273,7 +275,10 @@ mod tests {
 
     #[test]
     fn gpu_cmd_draw_op_carries_tile_key_input_and_brush_id() {
+        use glaphica_core::NodeId;
         let cmd = GpuCmdMsg::DrawOp(DrawOp {
+            node_id: NodeId(1),
+            tile_index: 0,
             tile_key: TileKey::from_parts(2, 3, 4),
             ref_image: Some(RefImage {
                 tile_key: TileKey::from_parts(8, 9, 10),
@@ -284,6 +289,8 @@ mod tests {
 
         match cmd {
             GpuCmdMsg::DrawOp(draw_op) => {
+                assert_eq!(draw_op.node_id, NodeId(1));
+                assert_eq!(draw_op.tile_index, 0);
                 assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
                 assert_eq!(
                     draw_op.ref_image,
@@ -294,9 +301,10 @@ mod tests {
                 assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
                 assert_eq!(draw_op.brush_id, BrushId(7));
             }
-            GpuCmdMsg::CopyOp(_) => panic!("expected draw op"),
-            GpuCmdMsg::ClearOp(_) => panic!("expected draw op"),
-            GpuCmdMsg::RenderTreeUpdated(_) => panic!("expected draw op"),
+            GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::ClearOp(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected draw op"),
         }
     }
 
@@ -312,9 +320,10 @@ mod tests {
                 assert_eq!(copy_op.src_tile_key, TileKey::from_parts(1, 2, 3));
                 assert_eq!(copy_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
             }
-            GpuCmdMsg::DrawOp(_) => panic!("expected copy op"),
-            GpuCmdMsg::ClearOp(_) => panic!("expected copy op"),
-            GpuCmdMsg::RenderTreeUpdated(_) => panic!("expected copy op"),
+            GpuCmdMsg::DrawOp(_)
+            | GpuCmdMsg::ClearOp(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected copy op"),
         }
     }
 
@@ -328,9 +337,10 @@ mod tests {
             GpuCmdMsg::ClearOp(clear_op) => {
                 assert_eq!(clear_op.tile_key, TileKey::from_parts(9, 8, 7));
             }
-            GpuCmdMsg::DrawOp(_) => panic!("expected clear op"),
-            GpuCmdMsg::CopyOp(_) => panic!("expected clear op"),
-            GpuCmdMsg::RenderTreeUpdated(_) => panic!("expected clear op"),
+            GpuCmdMsg::DrawOp(_)
+            | GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected clear op"),
         }
     }
 }

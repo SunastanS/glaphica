@@ -57,9 +57,10 @@ impl RenderExecutor {
 
         let format = self.detect_format(context, cmds);
         self.ensure_pipelines(context, format);
+        let cache = self.cache.as_ref().unwrap();
 
         for cmd in cmds {
-            self.execute_cmd(context, cmd)?;
+            execute_cmd(context, cmd, cache)?;
         }
         Ok(())
     }
@@ -222,55 +223,60 @@ impl RenderExecutor {
             cache: None,
         })
     }
+}
 
-    fn execute_cmd(
-        &mut self,
-        context: &mut RenderContext<'_>,
-        cmd: &RenderCmd,
-    ) -> Result<(), RenderExecutorError> {
-        let cache = self.cache.as_ref().unwrap();
-        let tile_count = cmd.to.len();
-        if tile_count == 0 || cmd.from.is_empty() {
-            return Ok(());
+fn execute_cmd(
+    context: &mut RenderContext<'_>,
+    cmd: &RenderCmd,
+    cache: &PipelineCache,
+) -> Result<(), RenderExecutorError> {
+    if cmd.to.is_empty() || cmd.from.is_empty() {
+        return Ok(());
+    }
+
+    let mut encoder =
+        context
+            .gpu_context
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glaphica-render-cmd-encoder"),
+            });
+
+    for (tile_idx, &dst_tile_key) in cmd.to.iter().enumerate() {
+        if dst_tile_key == TileKey::EMPTY {
+            continue;
         }
 
-        let first_dst = cmd.to[0];
-        let dst_resolved = context.atlas_storage.resolve(first_dst).ok_or(
+        let dst_resolved = context.atlas_storage.resolve(dst_tile_key).ok_or(
             RenderExecutorError::MissingTileBackend {
-                tile_key: first_dst,
+                tile_key: dst_tile_key,
             },
         )?;
 
         let mut bind_groups: Vec<(wgpu::BindGroup, LeafBlendMode)> = Vec::new();
         for source in &cmd.from {
-            for tile_idx in 0..tile_count {
-                if tile_idx >= source.tile_keys.len() {
-                    continue;
-                }
-                let src_tile_key = source.tile_keys[tile_idx];
-                if src_tile_key == TileKey::EMPTY {
-                    continue;
-                }
-
-                let bind_group = self.create_bind_group(
-                    context,
-                    &cache.bind_group_layout,
-                    &cache.sampler,
-                    &cache.params_buffer,
-                    src_tile_key,
-                    source.config.opacity,
-                );
-                bind_groups.push((bind_group, source.config.blend_mode));
+            if tile_idx >= source.tile_keys.len() {
+                continue;
             }
+            let src_tile_key = source.tile_keys[tile_idx];
+            if src_tile_key == TileKey::EMPTY {
+                continue;
+            }
+
+            let bind_group = create_bind_group(
+                context,
+                &cache.bind_group_layout,
+                &cache.sampler,
+                &cache.params_buffer,
+                src_tile_key,
+                source.config.opacity,
+            );
+            bind_groups.push((bind_group, source.config.blend_mode));
         }
 
-        let mut encoder =
-            context
-                .gpu_context
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("glaphica-render-cmd-encoder"),
-                });
+        if bind_groups.is_empty() {
+            continue;
+        }
 
         let dst_view = create_render_attachment_view(&dst_resolved);
 
@@ -308,71 +314,70 @@ impl RenderExecutor {
                 pass.draw(0..3, 0..1);
             }
         }
-
-        context.gpu_context.queue.submit(Some(encoder.finish()));
-        Ok(())
     }
 
-    fn create_bind_group(
-        &self,
-        context: &RenderContext<'_>,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        params_buffer: &wgpu::Buffer,
-        src_tile_key: TileKey,
-        opacity: f32,
-    ) -> wgpu::BindGroup {
-        let src_resolved = context.atlas_storage.resolve(src_tile_key).unwrap();
+    context.gpu_context.queue.submit(Some(encoder.finish()));
+    Ok(())
+}
 
-        let src_view = src_resolved
-            .texture2d_array
-            .create_view(&wgpu::TextureViewDescriptor {
-                label: Some("glaphica-render-src-view"),
-                format: Some(src_resolved.format),
-                dimension: Some(wgpu::TextureViewDimension::D2Array),
-                usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
-                aspect: wgpu::TextureAspect::All,
-                base_mip_level: 0,
-                mip_level_count: Some(1),
-                base_array_layer: 0,
-                array_layer_count: None,
-            });
+fn create_bind_group(
+    context: &RenderContext<'_>,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    params_buffer: &wgpu::Buffer,
+    src_tile_key: TileKey,
+    opacity: f32,
+) -> wgpu::BindGroup {
+    let src_resolved = context.atlas_storage.resolve(src_tile_key).unwrap();
 
-        let params = RenderParams {
-            src_layer: src_resolved.address.layer,
-            src_x: src_resolved.address.texel_offset.0,
-            src_y: src_resolved.address.texel_offset.1,
-            opacity,
-        };
-        let params_bytes: [u8; 16] = params.encode();
+    let src_view = src_resolved
+        .texture2d_array
+        .create_view(&wgpu::TextureViewDescriptor {
+            label: Some("glaphica-render-src-view"),
+            format: Some(src_resolved.format),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: None,
+        });
 
-        context
-            .gpu_context
-            .queue
-            .write_buffer(params_buffer, 0, &params_bytes);
+    let params = RenderParams {
+        src_layer: src_resolved.address.layer,
+        src_x: src_resolved.address.texel_offset.0,
+        src_y: src_resolved.address.texel_offset.1,
+        opacity,
+    };
+    let params_bytes: [u8; 16] = params.encode();
 
-        context
-            .gpu_context
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("glaphica-render-bind-group"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                ],
-            })
-    }
+    context
+        .gpu_context
+        .queue
+        .write_buffer(params_buffer, 0, &params_bytes);
+
+    context
+        .gpu_context
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-render-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        })
 }
 
 #[repr(C)]
