@@ -7,8 +7,8 @@ use std::sync::Arc;
 use glaphica_core::{BackendId, NodeId, RenderTreeGeneration};
 use images::layout::ImageLayout;
 use images::Image;
-use images::ImageCreateError;
 
+pub use images::ImageCreateError;
 pub use shared_tree::{
     FlatNodeKind, FlatRenderNode, FlatRenderTree, NodeConfig, RenderCmd, RenderSource,
     SharedRenderTree,
@@ -102,6 +102,75 @@ impl Document {
         self.active_node = None;
     }
 
+    pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
+        self.layer_tree.get_leaf_image(node_id)
+    }
+
+    pub fn get_leaf_image_mut(&mut self, node_id: NodeId) -> Option<&mut Image> {
+        self.layer_tree.get_leaf_image_mut(node_id)
+    }
+
+    /// Incrementally syncs tile keys from UiLayerTree to FlatRenderTree.
+    ///
+    /// This method performs a lazy update: instead of rebuilding the entire
+    /// FlatRenderTree from UiLayerTree, it only updates the tile keys at
+    /// specified positions by querying UiLayerTree directly.
+    ///
+    /// # Usage
+    ///
+    /// This method should be called immediately after modifying tile keys in
+    /// UiLayerTree (e.g., after a brush stroke allocates new atlas slots).
+    /// Do not call this method in isolation - it assumes UiLayerTree already
+    /// contains the correct tile keys to sync.
+    ///
+    /// # Parameters
+    ///
+    /// - `tree`: The current FlatRenderTree to update
+    /// - `updates`: List of (NodeId, tile_index) positions to sync
+    /// - `new_generation`: New generation number for the updated tree
+    pub fn sync_tile_keys_to_flat_tree(
+        &self,
+        tree: &FlatRenderTree,
+        updates: &[(NodeId, usize)],
+        new_generation: RenderTreeGeneration,
+    ) -> FlatRenderTree {
+        if updates.is_empty() {
+            return FlatRenderTree {
+                generation: new_generation,
+                nodes: tree.nodes.clone(),
+                root_id: tree.root_id,
+            };
+        }
+
+        let mut new_nodes = (*tree.nodes).clone();
+
+        for (node_id, tile_index) in updates {
+            let ui_image = match self.layer_tree.get_leaf_image(*node_id) {
+                Some(img) => img,
+                None => continue,
+            };
+
+            let new_tile_key = match ui_image.tile_key(*tile_index) {
+                Some(key) => key,
+                None => continue,
+            };
+
+            if let Some(node) = new_nodes.get_mut(node_id) {
+                let image = match &mut node.kind {
+                    FlatNodeKind::Leaf { image } => image,
+                    FlatNodeKind::Branch { cache, .. } => cache,
+                };
+                let _ = image.set_tile_key(*tile_index, new_tile_key);
+            }
+        }
+
+        FlatRenderTree {
+            generation: new_generation,
+            nodes: Arc::new(new_nodes),
+            root_id: tree.root_id,
+        }
+    }
+
     fn allocate_node_id(&mut self) -> NodeId {
         let id = self.next_node_id;
         self.next_node_id = NodeId(id.0 + 1);
@@ -112,6 +181,85 @@ impl Document {
 pub struct UiLayerTree {
     root: UiLayerNode,
     layout: ImageLayout,
+}
+
+impl UiLayerTree {
+    pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
+        get_leaf_image_from_node(&self.root, node_id)
+    }
+
+    pub fn get_leaf_image_mut(&mut self, node_id: NodeId) -> Option<&mut Image> {
+        get_leaf_image_from_node_mut(&mut self.root, node_id)
+    }
+
+    pub fn infer_render_tree(
+        &self,
+        leaf_backend: BackendId,
+        branch_cache_backend: BackendId,
+    ) -> Result<RenderLayerTree, ImageCreateError> {
+        let rendered_nodes = infer_render_nodes(
+            &self.root,
+            1.0,
+            true,
+            leaf_backend,
+            branch_cache_backend,
+            self.layout,
+        )?;
+        let root = rendered_nodes.into_iter().next().unwrap_or_else(|| {
+            RenderLayerNode::Leaf(RenderLeafNode {
+                id: NodeId(u64::MAX),
+                config: LeafConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                image: Image::new(self.layout, leaf_backend).unwrap(),
+            })
+        });
+        Ok(RenderLayerTree {
+            root,
+            layout: self.layout,
+        })
+    }
+}
+
+fn get_leaf_image_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&Image> {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            for child in &branch.children {
+                if let Some(image) = get_leaf_image_from_node(child, node_id) {
+                    return Some(image);
+                }
+            }
+            None
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.id == node_id {
+                Some(&leaf.image)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn get_leaf_image_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Option<&mut Image> {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            for child in &mut branch.children {
+                if let Some(image) = get_leaf_image_from_node_mut(child, node_id) {
+                    return Some(image);
+                }
+            }
+            None
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.id == node_id {
+                Some(&mut leaf.image)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 pub struct RenderLayerTree {
@@ -181,37 +329,6 @@ fn flatten_node(
             );
             Some(id)
         }
-    }
-}
-
-impl UiLayerTree {
-    pub fn infer_render_tree(
-        &self,
-        leaf_backend: BackendId,
-        branch_cache_backend: BackendId,
-    ) -> Result<RenderLayerTree, ImageCreateError> {
-        let rendered_nodes = infer_render_nodes(
-            &self.root,
-            1.0,
-            true,
-            leaf_backend,
-            branch_cache_backend,
-            self.layout,
-        )?;
-        let root = rendered_nodes.into_iter().next().unwrap_or_else(|| {
-            RenderLayerNode::Leaf(RenderLeafNode {
-                id: NodeId(u64::MAX),
-                config: LeafConfig {
-                    opacity: 1.0,
-                    blend_mode: LeafBlendMode::Normal,
-                },
-                image: Image::new(self.layout, leaf_backend).unwrap(),
-            })
-        });
-        Ok(RenderLayerTree {
-            root,
-            layout: self.layout,
-        })
     }
 }
 
@@ -392,4 +509,112 @@ pub struct BranchConfig {
 pub enum BranchBlendMode {
     Base(LeafBlendMode),
     Penetrate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
+    use images::layout::ImageLayout;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_sync_tile_keys_partial_update_preserves_untouched_tiles() {
+        // Create a document with a leaf node that has 2 tiles
+        let layout = ImageLayout::new(256, 128); // 2 tiles horizontally
+
+        let mut leaf_image = Image::new(layout, BackendId::new(1)).unwrap();
+        leaf_image
+            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+            .unwrap();
+        leaf_image
+            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+            .unwrap();
+
+        let leaf_node = UiLeafNode {
+            id: NodeId(0),
+            config: LeafConfig {
+                opacity: 1.0,
+                blend_mode: LeafBlendMode::Normal,
+            },
+            image: leaf_image,
+        };
+
+        let ui_tree = UiLayerTree {
+            root: UiLayerNode::Leaf(leaf_node),
+            layout,
+        };
+
+        let mut doc = Document {
+            layer_tree: ui_tree,
+            layout,
+            leaf_backend: BackendId::new(1),
+            branch_cache_backend: BackendId::new(2),
+            next_node_id: NodeId(1),
+            active_node: None,
+            metadata: Metadata {
+                name: "test".to_string(),
+            },
+        };
+
+        // Create initial flat render tree
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            NodeId(0),
+            FlatRenderNode {
+                parent_id: None,
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Leaf {
+                    image: {
+                        let mut img = Image::new(layout, BackendId::new(1)).unwrap();
+                        img.set_tile_key(0, TileKey::from_parts(1, 1, 100)).unwrap();
+                        img.set_tile_key(1, TileKey::from_parts(1, 1, 101)).unwrap();
+                        img
+                    },
+                },
+            },
+        );
+
+        let old_tree = FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(nodes),
+            root_id: Some(NodeId(0)),
+        };
+
+        // Simulate: update tile 1 to a new key in the document
+        doc.get_leaf_image_mut(NodeId(0))
+            .unwrap()
+            .set_tile_key(1, TileKey::from_parts(1, 1, 201))
+            .unwrap();
+
+        // Partial update: only sync tile 1
+        let updates = vec![(NodeId(0), 1)];
+
+        let new_tree =
+            doc.sync_tile_keys_to_flat_tree(&old_tree, &updates, RenderTreeGeneration(1));
+
+        // Verify that both tiles are preserved correctly
+        let new_node = new_tree.nodes.get(&NodeId(0)).unwrap();
+        let new_image = match &new_node.kind {
+            FlatNodeKind::Leaf { image } => image,
+            FlatNodeKind::Branch { .. } => panic!("Expected leaf node"),
+        };
+
+        // Tile 0 should keep its original key (from old_tree)
+        assert_eq!(
+            new_image.tile_key(0),
+            Some(TileKey::from_parts(1, 1, 100)),
+            "Tile 0 should preserve original key from old tree"
+        );
+
+        // Tile 1 should have the updated key from doc.layer_tree
+        assert_eq!(
+            new_image.tile_key(1),
+            Some(TileKey::from_parts(1, 1, 201)),
+            "Tile 1 should have updated key from document"
+        );
+    }
 }
