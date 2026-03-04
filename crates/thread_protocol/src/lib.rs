@@ -56,13 +56,13 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage, RenderTreeUpdatedOp, TileSlotKeyUpdateOp,
+    ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
 };
 
 mod gpu_feedback;
 pub use gpu_feedback::{
     CompleteWaterline, ExecutedBatchWaterline, GpuFeedbackFrame, GpuFeedbackMergeState, MergeItem,
-    SubmitWaterline,
+    MergeVecIndex, SubmitWaterline,
 };
 
 #[cfg(test)]

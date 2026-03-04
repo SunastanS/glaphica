@@ -26,13 +26,14 @@ pub struct ClearOp {
     pub tile_key: TileKey,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RenderTreeUpdatedOp {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderTreeUpdatedMsg {
     pub generation: RenderTreeGeneration,
+    pub dirty_branch_caches: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TileSlotKeyUpdateOp {
+pub struct TileSlotKeyUpdateMsg {
     pub updates: Vec<(NodeId, usize, TileKey)>,
 }
 
@@ -41,6 +42,6 @@ pub enum GpuCmdMsg {
     DrawOp(DrawOp),
     CopyOp(CopyOp),
     ClearOp(ClearOp),
-    RenderTreeUpdated(RenderTreeUpdatedOp),
-    TileSlotKeyUpdate(TileSlotKeyUpdateOp),
+    RenderTreeUpdated(RenderTreeUpdatedMsg),
+    TileSlotKeyUpdate(TileSlotKeyUpdateMsg),
 }

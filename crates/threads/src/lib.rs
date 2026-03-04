@@ -1,9 +1,9 @@
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 use crossbeam_queue::ArrayQueue;
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 use thread_protocol::{
@@ -94,6 +94,10 @@ impl MainInputRingProducer {
                     // acceptable for lossy input semantics as long as newest data keeps flowing.
                     if self.shared.queue.pop().is_some() {
                         self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+                        eprintln!(
+                            "[THREADS] Input ring buffer full, dropped {} samples",
+                            self.shared.dropped.load(Ordering::Relaxed)
+                        );
                     } else {
                         std::thread::yield_now();
                     }
