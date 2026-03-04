@@ -14,32 +14,89 @@ pub enum AtlasBackendManagerError {
 }
 
 pub struct Backend {
-    // total_slots = layout.total_slots() = FreeSlotPool::total_slots = generations.len()
     backend_id: BackendId,
     layout: AtlasLayout,
     total_slots: u32,
-    pool: FreeSlotPool,
+    even_pool: ParityPool,
+    odd_pool: ParityPool,
     generations: Box<[GenerationId]>,
 }
 
 impl Backend {
     pub fn new(layout: AtlasLayout, backend_id: BackendId) -> Self {
         let total_slots = layout.total_slots();
+        let tiles_per_layer = layout.tiles_per_edge() * layout.tiles_per_edge();
+        let layers = layout.layers();
+        let even_layers = (layers + 1) / 2;
+        let odd_layers = layers / 2;
+        let even_slots = even_layers * tiles_per_layer;
+        let odd_slots = odd_layers * tiles_per_layer;
+
         Self {
             backend_id,
             layout,
             total_slots,
-            pool: FreeSlotPool::new(total_slots),
+            even_pool: ParityPool::new(even_slots),
+            odd_pool: ParityPool::new(odd_slots),
             generations: vec![GenerationId::new(0); total_slots as usize].into_boxed_slice(),
         }
     }
 
     pub fn alloc(&mut self) -> Result<TileKey, AtlasBackendError> {
-        let Some(slot) = self.pool.alloc() else {
-            return Err(AtlasBackendError::OutOfSlots);
+        let (encoded_slot, raw_slot) = self.alloc_internal()?;
+        let generation = self.generations[raw_slot as usize];
+        Ok(TileKey::new(
+            self.backend_id,
+            generation,
+            SlotId::new(encoded_slot),
+        ))
+    }
+
+    pub fn alloc_with_parity(&mut self, parity: bool) -> Result<TileKey, AtlasBackendError> {
+        let (encoded_slot, raw_slot) = self
+            .alloc_from_parity(parity)
+            .ok_or(AtlasBackendError::OutOfSlots)?;
+        let generation = self.generations[raw_slot as usize];
+        Ok(TileKey::new(
+            self.backend_id,
+            generation,
+            SlotId::new(encoded_slot),
+        ))
+    }
+
+    fn alloc_internal(&mut self) -> Result<(u32, u32), AtlasBackendError> {
+        if let Some(alloc) = self.alloc_from_parity(false) {
+            return Ok(alloc);
+        }
+
+        if let Some(alloc) = self.alloc_from_parity(true) {
+            return Ok(alloc);
+        }
+
+        Err(AtlasBackendError::OutOfSlots)
+    }
+
+    fn alloc_from_parity(&mut self, parity: bool) -> Option<(u32, u32)> {
+        let index = if parity {
+            self.odd_pool.alloc()?
+        } else {
+            self.even_pool.alloc()?
         };
-        let generation = self.generations[slot.raw() as usize];
-        Ok(TileKey::new(self.backend_id, generation, slot))
+        let encoded = encode_slot(parity, index);
+        let raw_slot = self.decode_raw_slot(parity, index);
+        Some((encoded, raw_slot))
+    }
+
+    fn decode_raw_slot(&self, parity: bool, index_within_parity: u32) -> u32 {
+        let tiles_per_layer = self.layout.tiles_per_edge() * self.layout.tiles_per_edge();
+        let layer_in_group = index_within_parity / tiles_per_layer;
+        let tile_in_layer = index_within_parity % tiles_per_layer;
+        let layer = if parity {
+            1 + 2 * layer_in_group
+        } else {
+            0 + 2 * layer_in_group
+        };
+        layer * tiles_per_layer + tile_in_layer
     }
 
     pub fn alloc_batch(&mut self, count: usize) -> Vec<TileKey> {
@@ -59,8 +116,11 @@ impl Backend {
             return Err(AtlasBackendError::WrongBackend);
         }
 
-        let slot = key.slot();
-        let index = slot.raw() as usize;
+        let parity = key.slot_parity();
+        let index_within_parity = key.slot_index_within_parity();
+        let raw_slot = self.decode_raw_slot(parity, index_within_parity);
+        let index = raw_slot as usize;
+
         let Some(current_generation) = self.generations.get(index).copied() else {
             return Err(AtlasBackendError::InvalidSlot);
         };
@@ -70,7 +130,12 @@ impl Backend {
 
         let generation = current_generation.raw().wrapping_add(1);
         self.generations[index] = GenerationId::new(generation);
-        self.pool.free(slot);
+
+        if parity {
+            self.odd_pool.free(index_within_parity);
+        } else {
+            self.even_pool.free(index_within_parity);
+        }
         Ok(())
     }
 
@@ -87,9 +152,63 @@ impl Backend {
     }
 }
 
+fn encode_slot(parity: bool, index_within_parity: u32) -> u32 {
+    let parity_bit = if parity { 1u32 << 31 } else { 0u32 };
+    parity_bit | (index_within_parity & 0x7FFF_FFFF)
+}
+
+#[derive(Debug, Default)]
+struct ParityPool {
+    total_slots: u32,
+    next_index: u32,
+    freelist: Vec<u32>,
+}
+
+impl ParityPool {
+    pub const fn new(total_slots: u32) -> Self {
+        Self {
+            total_slots,
+            next_index: 0,
+            freelist: Vec::new(),
+        }
+    }
+
+    pub fn alloc(&mut self) -> Option<u32> {
+        if let Some(index) = self.freelist.pop() {
+            return Some(index);
+        }
+
+        if self.next_index >= self.total_slots {
+            return None;
+        }
+
+        let index = self.next_index;
+        self.next_index = self.next_index.checked_add(1).expect("index overflow");
+        Some(index)
+    }
+
+    pub fn free(&mut self, index: u32) {
+        self.freelist.push(index);
+    }
+
+    pub fn clear(&mut self) {
+        self.next_index = 0;
+        self.freelist.clear();
+    }
+
+    pub fn allocated(&self) -> u32 {
+        let reused = self.freelist.len().min(self.next_index as usize) as u32;
+        self.next_index - reused
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.allocated() == 0
+    }
+}
+
 #[derive(Default)]
 pub struct BackendManager {
-    backends: Vec<Backend>, //index = backend_id
+    backends: Vec<Backend>,
 }
 
 impl BackendManager {
@@ -125,86 +244,74 @@ impl BackendManager {
     }
 }
 
-#[derive(Debug, Default)]
-struct FreeSlotPool {
-    total_slots: u32,
-    next_slot: u32,
-    freelist: Vec<SlotId>,
-}
-
-impl FreeSlotPool {
-    pub const fn new(total_slots: u32) -> Self {
-        Self {
-            total_slots,
-            next_slot: 0,
-            freelist: Vec::new(),
-        }
-    }
-
-    pub fn alloc(&mut self) -> Option<SlotId> {
-        if let Some(slot) = self.freelist.pop() {
-            return Some(slot);
-        }
-
-        if self.next_slot >= self.total_slots {
-            return None;
-        }
-
-        let slot = self.next_slot;
-        self.next_slot = self.next_slot.checked_add(1).expect("slot id overflow");
-        Some(SlotId::new(slot))
-    }
-
-    pub fn free(&mut self, slot: SlotId) {
-        self.freelist.push(slot);
-    }
-
-    pub fn clear(&mut self) {
-        self.next_slot = 0;
-        self.freelist.clear();
-    }
-
-    pub fn allocated(&self) -> u32 {
-        let reused = self.freelist.len().min(self.next_slot as usize) as u32;
-        self.next_slot - reused
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.allocated() == 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AtlasBackendError, AtlasBackendManagerError, AtlasLayout, Backend, BackendManager,
-        FreeSlotPool,
+        ParityPool,
     };
     use glaphica_core::BackendId;
 
     #[test]
-    fn allocate_increases_slot_id() {
-        let mut pool = FreeSlotPool::new(3);
+    fn parity_pool_allocate_increases_index() {
+        let mut pool = ParityPool::new(3);
         let a = pool.alloc().unwrap();
         let b = pool.alloc().unwrap();
         let c = pool.alloc().unwrap();
         assert!(pool.alloc().is_none());
-        assert_eq!(a.raw(), 0);
-        assert_eq!(b.raw(), 1);
-        assert_eq!(c.raw(), 2);
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+        assert_eq!(c, 2);
         assert_eq!(pool.allocated(), 3);
     }
 
     #[test]
-    fn freed_slot_is_reused() {
-        let mut pool = FreeSlotPool::new(2);
+    fn parity_pool_freed_index_is_reused() {
+        let mut pool = ParityPool::new(2);
         let a = pool.alloc().unwrap();
         let b = pool.alloc().unwrap();
         pool.free(a);
         let reused = pool.alloc().unwrap();
-        assert_eq!(reused.raw(), a.raw());
+        assert_eq!(reused, a);
         assert_eq!(pool.allocated(), 2);
-        assert_eq!(b.raw(), 1);
+        assert_eq!(b, 1);
+    }
+
+    #[test]
+    fn alloc_returns_even_slots_first() {
+        let mut backend = Backend::new(AtlasLayout::Small11, BackendId::new(0));
+        let key = backend.alloc().unwrap();
+        assert!(!key.slot_parity());
+    }
+
+    #[test]
+    fn alloc_fills_even_layers_before_odd() {
+        let mut backend = Backend::new(AtlasLayout::Small11, BackendId::new(0));
+        let tiles_per_layer = 32 * 32;
+
+        for _ in 0..tiles_per_layer {
+            let key = backend.alloc().unwrap();
+            assert!(!key.slot_parity());
+        }
+
+        let odd_key = backend.alloc().unwrap();
+        assert!(odd_key.slot_parity());
+    }
+
+    #[test]
+    fn alloc_with_parity_uses_requested_pool() {
+        let mut backend = Backend::new(AtlasLayout::Small11, BackendId::new(0));
+        let odd_key = backend.alloc_with_parity(true).unwrap();
+        let even_key = backend.alloc_with_parity(false).unwrap();
+        assert!(odd_key.slot_parity());
+        assert!(!even_key.slot_parity());
+    }
+
+    #[test]
+    fn alloc_with_parity_rejects_unavailable_parity_pool() {
+        let mut backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let err = backend.alloc_with_parity(true).unwrap_err();
+        assert_eq!(err, AtlasBackendError::OutOfSlots);
     }
 
     #[test]
@@ -260,5 +367,47 @@ mod tests {
 
         let err = manager.add_backend(AtlasLayout::Tiny8).unwrap_err();
         assert_eq!(err, AtlasBackendManagerError::TooManyBackends);
+    }
+
+    #[test]
+    fn tiny8_only_uses_even_pool() {
+        let mut backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let keys = backend.alloc_batch(300);
+        assert_eq!(keys.len(), 256);
+        for key in &keys {
+            assert!(!key.slot_parity());
+        }
+    }
+
+    #[test]
+    fn medium14_allocates_across_parity_groups() {
+        let mut backend = Backend::new(AtlasLayout::Medium14, BackendId::new(0));
+        let tiles_per_layer = 64 * 64;
+        let even_layers = 2;
+        let odd_layers = 2;
+
+        let mut even_count = 0;
+        let mut odd_count = 0;
+
+        for _ in 0..(even_layers * tiles_per_layer) {
+            let key = backend.alloc().unwrap();
+            if key.slot_parity() {
+                odd_count += 1;
+            } else {
+                even_count += 1;
+            }
+        }
+
+        assert_eq!(even_count, even_layers * tiles_per_layer);
+        assert_eq!(odd_count, 0);
+
+        odd_count = 0;
+        for _ in 0..(odd_layers * tiles_per_layer) {
+            let key = backend.alloc().unwrap();
+            assert!(key.slot_parity());
+            odd_count += 1;
+        }
+
+        assert_eq!(odd_count, odd_layers * tiles_per_layer);
     }
 }

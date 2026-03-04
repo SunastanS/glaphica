@@ -66,8 +66,15 @@ pub struct TileKey(u64);
 
 impl TileKey {
     /// TileKey:
-    /// | backend (8) | generation (24) | slot_index (32) |
-    /// 63          56 55             32 31              0
+    /// | backend (8) | generation (24) | slot (32) |
+    /// 63          56 55             32 31         0
+    ///
+    /// Slot encoding (32 bits):
+    /// | parity (1) | index_within_parity (31) |
+    /// 31          31                           0
+    ///
+    /// parity: 0 = even layers (0, 2, 4, ...), 1 = odd layers (1, 3, 5, ...)
+    /// index_within_parity: sequential index within the parity group
 
     pub fn new(backend: BackendId, generation: GenerationId, slot: SlotId) -> Self {
         Self::from_parts(backend.raw(), generation.raw(), slot.raw())
@@ -109,6 +116,14 @@ impl TileKey {
     pub fn slot(&self) -> SlotId {
         SlotId::new(self.slot_index())
     }
+
+    pub fn slot_parity(&self) -> bool {
+        (self.slot_index() >> 31) == 1
+    }
+
+    pub fn slot_index_within_parity(&self) -> u32 {
+        self.slot_index() & 0x7FFF_FFFF
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +157,26 @@ mod tests {
         assert_eq!(TileKey::EMPTY.backend().raw(), 0xFF);
         assert_eq!(TileKey::EMPTY.generation().raw(), 0xFF_FFFF);
         assert_eq!(TileKey::EMPTY.slot().raw(), u32::MAX);
+    }
+
+    #[test]
+    fn slot_parity_extracts_highest_bit() {
+        let even_slot = SlotId::new(0x0000_0001);
+        let odd_slot = SlotId::new(0x8000_0001);
+
+        let even_key = TileKey::new(BackendId::new(0), GenerationId::new(0), even_slot);
+        let odd_key = TileKey::new(BackendId::new(0), GenerationId::new(0), odd_slot);
+
+        assert!(!even_key.slot_parity());
+        assert!(odd_key.slot_parity());
+    }
+
+    #[test]
+    fn slot_index_within_parity_masks_lower_31_bits() {
+        let slot = SlotId::new(0x8FFF_FFFF);
+        let key = TileKey::new(BackendId::new(0), GenerationId::new(0), slot);
+
+        assert!(key.slot_parity());
+        assert_eq!(key.slot_index_within_parity(), 0x0FFF_FFFF);
     }
 }
