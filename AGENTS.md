@@ -38,10 +38,11 @@ glaphica
 ├── crates
 │   ├── atlas
 │   ├── brushes
-│   ├── glaphica_core    //sharing types
-│   ├── gpu_runtime      //a thin runtime in app thread to submit gpu command
+│   ├── glaphica         // entrance of app
+│   ├── glaphica_core    // sharing types
+│   ├── gpu_runtime      // a thin runtime in app thread to submit gpu command
 │   ├── images
 │   ├── thread_protocol
-│   └── threads          //thread model
+│   └── threads          // thread model
 └── README.md
 ```
