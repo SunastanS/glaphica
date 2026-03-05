@@ -249,6 +249,17 @@ impl AppThreadIntegration {
         let (controls, samples) = input_frame.to_runtime();
         self.input_controls = controls;
         self.input_samples = samples;
+
+        for event in &self.input_controls {
+            let InputControlEvent::Control(control) = event;
+            if control.begin {
+                let stroke_id = StrokeId(self.next_stroke_id);
+                self.next_stroke_id += 1;
+                self.engine_state.begin_stroke(stroke_id);
+            } else {
+                self.engine_state.end_stroke();
+            }
+        }
         for event in &self.input_controls {
             event.apply(&mut self.active_stroke_node);
         }

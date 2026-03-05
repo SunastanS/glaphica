@@ -27,7 +27,7 @@ impl Backend {
         let total_slots = layout.total_slots();
         let tiles_per_layer = layout.tiles_per_edge() * layout.tiles_per_edge();
         let layers = layout.layers();
-        let even_layers = (layers + 1) / 2;
+        let even_layers = layers.div_ceil(2);
         let odd_layers = layers / 2;
         let even_slots = even_layers * tiles_per_layer;
         let odd_slots = odd_layers * tiles_per_layer;
@@ -94,7 +94,7 @@ impl Backend {
         let layer = if parity {
             1 + 2 * layer_in_group
         } else {
-            0 + 2 * layer_in_group
+            2 * layer_in_group
         };
         layer * tiles_per_layer + tile_in_layer
     }

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use app::{AppThreadIntegration, trace::TraceRecorder};
 use brushes::builtin_brushes::pixel_rect::PixelRectBrush;
@@ -12,6 +13,7 @@ use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key, NamedKey},
     window::{Window, WindowId},
 };
 
@@ -24,10 +26,14 @@ struct App {
     replay_frames: Vec<app::trace::TraceInputFrame>,
     replay_index: usize,
     replay_finished: bool,
+    shutdown_requested: bool,
+    output_finalized: bool,
+    started_at: Option<Instant>,
+    sigint_flag: Arc<AtomicBool>,
 }
 
 impl App {
-    fn new(run_config: RunConfig) -> Self {
+    fn new(run_config: RunConfig, sigint_flag: Arc<AtomicBool>) -> Self {
         Self {
             window: None,
             integration: None,
@@ -37,6 +43,10 @@ impl App {
             replay_frames: Vec::new(),
             replay_index: 0,
             replay_finished: false,
+            shutdown_requested: false,
+            output_finalized: false,
+            started_at: None,
+            sigint_flag,
         }
     }
 
@@ -45,6 +55,9 @@ impl App {
     }
 
     fn finalize_outputs(&mut self) {
+        if self.output_finalized {
+            return;
+        }
         let Some(integration) = &mut self.integration else {
             return;
         };
@@ -75,6 +88,13 @@ impl App {
                 eprintln!("Trace files save failed: {error}");
             }
         }
+        self.output_finalized = true;
+    }
+
+    fn request_shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        self.shutdown_requested = true;
+        self.finalize_outputs();
+        event_loop.exit();
     }
 }
 
@@ -86,6 +106,9 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
         self.window = Some(window.clone());
+        if self.started_at.is_none() {
+            self.started_at = Some(Instant::now());
+        }
 
         if self.integration.is_none() {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
@@ -160,8 +183,7 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                self.finalize_outputs();
-                event_loop.exit();
+                self.request_shutdown(event_loop);
             }
             WindowEvent::Resized(size) => {
                 if let Some(integration) = &mut self.integration {
@@ -216,11 +238,38 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.request_shutdown(event_loop),
+                        Key::Character(value) if value.eq_ignore_ascii_case("q") => {
+                            self.request_shutdown(event_loop)
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.shutdown_requested {
+            return;
+        }
+        if self.sigint_flag.load(Ordering::Relaxed) {
+            self.request_shutdown(event_loop);
+            return;
+        }
+        if let (Some(max_duration_ms), Some(started_at)) =
+            (self.run_config.exit_after_ms, self.started_at)
+        {
+            if started_at.elapsed() >= Duration::from_millis(max_duration_ms) {
+                self.request_shutdown(event_loop);
+                return;
+            }
+        }
+
         let replay_mode = self.is_replay_mode();
         if let Some(integration) = &mut self.integration {
             let has_work = if replay_mode && !self.replay_finished {
@@ -241,8 +290,7 @@ impl ApplicationHandler for App {
             }
 
             if replay_mode && self.replay_finished {
-                self.finalize_outputs();
-                event_loop.exit();
+                self.request_shutdown(event_loop);
             }
         }
     }
@@ -251,7 +299,16 @@ impl ApplicationHandler for App {
 fn main() {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let run_config = RunConfig::from_args(std::env::args().skip(1).collect());
-    let mut app = App::new(run_config);
+    let sigint_flag = Arc::new(AtomicBool::new(false));
+    {
+        let sigint_flag = sigint_flag.clone();
+        if let Err(error) = ctrlc::set_handler(move || {
+            sigint_flag.store(true, Ordering::Relaxed);
+        }) {
+            eprintln!("failed to set Ctrl+C handler: {error}");
+        }
+    }
+    let mut app = App::new(run_config, sigint_flag);
     event_loop.run_app(&mut app).expect("failed to run app");
 }
 
@@ -268,6 +325,7 @@ struct RunConfig {
     record_input_path: Option<PathBuf>,
     record_output_path: Option<PathBuf>,
     screenshot_path: Option<PathBuf>,
+    exit_after_ms: Option<u64>,
 }
 
 impl RunConfig {
@@ -297,6 +355,14 @@ impl RunConfig {
                 "--screenshot" => {
                     if let Some(path) = args.get(index + 1) {
                         config.screenshot_path = Some(Path::new(path).to_path_buf());
+                    }
+                    index += 2;
+                }
+                "--exit-after-ms" => {
+                    if let Some(value) = args.get(index + 1) {
+                        if let Ok(ms) = value.parse::<u64>() {
+                            config.exit_after_ms = Some(ms);
+                        }
                     }
                     index += 2;
                 }

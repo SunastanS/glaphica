@@ -87,6 +87,7 @@ pub struct ScreenBlitter {
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group_layout: Option<wgpu::BindGroupLayout>,
     sampler: Option<wgpu::Sampler>,
+    pipeline_format: Option<wgpu::TextureFormat>,
 }
 
 impl ScreenBlitter {
@@ -95,6 +96,7 @@ impl ScreenBlitter {
             pipeline: None,
             bind_group_layout: None,
             sampler: None,
+            pipeline_format: None,
         }
     }
 
@@ -257,7 +259,7 @@ impl ScreenBlitter {
         _target_width: u32,
         _target_height: u32,
     ) {
-        if self.pipeline.is_some() {
+        if self.pipeline.is_some() && self.pipeline_format == Some(format) {
             return;
         }
 
@@ -332,6 +334,7 @@ impl ScreenBlitter {
 
         self.bind_group_layout = Some(bind_group_layout);
         self.pipeline = Some(pipeline);
+        self.pipeline_format = Some(format);
     }
 }
 

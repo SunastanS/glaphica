@@ -5,7 +5,6 @@ pub use glaphica_core::{
 /// This crate defines the bottom communication protocol of app thread and engine thread
 /// Can be dependent by any crates
 /// Should only depend on foundational crates
-
 /// Input transport design:
 /// - Ring buffer: lossy high-frequency samples (ok to drop/overwrite).
 /// - Control events that define semantic boundaries (stroke begin/end, tool change, layer change)

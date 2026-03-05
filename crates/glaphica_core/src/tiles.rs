@@ -75,7 +75,6 @@ impl TileKey {
     ///
     /// parity: 0 = even layers (0, 2, 4, ...), 1 = odd layers (1, 3, 5, ...)
     /// index_within_parity: sequential index within the parity group
-
     pub fn new(backend: BackendId, generation: GenerationId, slot: SlotId) -> Self {
         Self::from_parts(backend.raw(), generation.raw(), slot.raw())
     }
