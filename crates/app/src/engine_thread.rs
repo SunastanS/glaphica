@@ -1,5 +1,5 @@
 use atlas::BackendManager;
-use brushes::{BrushEngineRuntime, StrokeDrawOutput, TileSlotAllocator};
+use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
 use document::{Document, SharedRenderTree};
 use glaphica_core::{
     BackendId, BrushId, BrushInput, NodeId, RenderTreeGeneration, StrokeId, TileKey,
@@ -46,6 +46,9 @@ pub struct EngineThreadState {
     active_stroke_id: Option<StrokeId>,
 }
 
+const RESAMPLER_MIN_TIME_S: f32 = 0.008;
+const RESAMPLER_MAX_TIME_S: f32 = 0.05;
+
 impl EngineThreadState {
     pub fn new(document: Document, shared_tree: Arc<SharedRenderTree>, max_brushes: usize) -> Self {
         let input_processor = StrokeInputProcessor::new(InputProcessingConfig {
@@ -58,8 +61,8 @@ impl EngineThreadState {
             resampling: stroke_input::ResamplerConfig {
                 min_distance: 2.0,
                 max_distance: 10.0,
-                min_time_s: 0.008,
-                max_time_s: 0.05,
+                min_time_s: RESAMPLER_MIN_TIME_S,
+                max_time_s: RESAMPLER_MAX_TIME_S,
             },
             velocity_window_size: 4,
             curvature_window_size: 4,
@@ -137,6 +140,16 @@ impl EngineThreadState {
         &mut self.input_processor
     }
 
+    pub fn set_resampler_distance(&mut self, distance: BrushResamplerDistance) {
+        self.input_processor
+            .set_resampling_config(stroke_input::ResamplerConfig {
+                min_distance: distance.min_distance,
+                max_distance: distance.max_distance,
+                min_time_s: RESAMPLER_MIN_TIME_S,
+                max_time_s: RESAMPLER_MAX_TIME_S,
+            });
+    }
+
     pub fn process_stroke_input(
         &mut self,
         brush_id: BrushId,
@@ -171,11 +184,21 @@ impl EngineThreadState {
         let mut tile_updates: Vec<(NodeId, usize)> = Vec::new();
 
         for output in &self.stroke_outputs {
+            if let Some(clear_op) = output.clear_op {
+                gpu_cmds.push(thread_protocol::GpuCmdMsg::ClearOp(clear_op));
+            }
+
             if let Some(copy_op) = output.copy_op {
                 gpu_cmds.push(thread_protocol::GpuCmdMsg::CopyOp(copy_op));
             }
 
-            gpu_cmds.push(thread_protocol::GpuCmdMsg::DrawOp(output.draw_op.clone()));
+            if let Some(write_op) = output.write_op {
+                gpu_cmds.push(thread_protocol::GpuCmdMsg::WriteOp(write_op));
+            }
+
+            if let Some(draw_op) = &output.draw_op {
+                gpu_cmds.push(thread_protocol::GpuCmdMsg::DrawOp(draw_op.clone()));
+            }
 
             if let Some((node_id, tile_index, _tile_key)) = output.tile_key_update {
                 tile_updates.push((node_id, tile_index));

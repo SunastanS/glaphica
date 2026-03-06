@@ -9,8 +9,9 @@ use glaphica_core::{
 };
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
-    ClearOp, CopyOp, DrawOp, GpuCmdMsg, InputControlEvent, InputRingSample, RefImage,
-    RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
+    ClearOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg, InputControlEvent,
+    InputRingSample, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode,
+    WriteOp,
 };
 
 use crate::StrokeControl;
@@ -110,6 +111,7 @@ pub struct TraceInputSample {
 pub enum TraceGpuCmd {
     DrawOp(TraceDrawOp),
     CopyOp(TraceCopyOp),
+    WriteOp(TraceWriteOp),
     ClearOp(TraceClearOp),
     RenderTreeUpdated(TraceRenderTreeUpdatedMsg),
     TileSlotKeyUpdate(TraceTileSlotKeyUpdateMsg),
@@ -120,15 +122,48 @@ pub struct TraceDrawOp {
     pub node_id: u64,
     pub tile_index: usize,
     pub tile_key: TraceTileKey,
+    #[serde(default = "trace_draw_blend_mode_alpha")]
+    pub blend_mode: TraceDrawBlendMode,
+    #[serde(default = "trace_draw_frame_merge_none")]
+    pub frame_merge: TraceDrawFrameMergePolicy,
+    #[serde(default = "trace_empty_tile_key")]
+    pub origin_tile_key: TraceTileKey,
     pub ref_image_tile_key: Option<TraceTileKey>,
     pub input: Vec<f32>,
     pub brush_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceDrawBlendMode {
+    Alpha,
+    Replace,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceDrawFrameMergePolicy {
+    None,
+    KeepLastInFrameByNodeTileBrush,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TraceCopyOp {
     pub src_tile_key: TraceTileKey,
     pub dst_tile_key: TraceTileKey,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TraceWriteOp {
+    pub src_tile_key: TraceTileKey,
+    pub dst_tile_key: TraceTileKey,
+    #[serde(default = "trace_write_blend_mode_normal")]
+    pub blend_mode: TraceWriteBlendMode,
+    #[serde(default = "trace_write_opacity_one")]
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceWriteBlendMode {
+    Normal,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -257,6 +292,26 @@ fn save_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), TraceIoErr
     Ok(())
 }
 
+fn trace_empty_tile_key() -> TraceTileKey {
+    TraceTileKey::from(TileKey::EMPTY)
+}
+
+fn trace_draw_blend_mode_alpha() -> TraceDrawBlendMode {
+    TraceDrawBlendMode::Alpha
+}
+
+fn trace_draw_frame_merge_none() -> TraceDrawFrameMergePolicy {
+    TraceDrawFrameMergePolicy::None
+}
+
+fn trace_write_blend_mode_normal() -> TraceWriteBlendMode {
+    TraceWriteBlendMode::Normal
+}
+
+fn trace_write_opacity_one() -> f32 {
+    1.0
+}
+
 impl From<TileKey> for TraceTileKey {
     fn from(value: TileKey) -> Self {
         Self {
@@ -322,6 +377,17 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 node_id: draw_op.node_id.0,
                 tile_index: draw_op.tile_index,
                 tile_key: TraceTileKey::from(draw_op.tile_key),
+                blend_mode: match draw_op.blend_mode {
+                    DrawBlendMode::Alpha => TraceDrawBlendMode::Alpha,
+                    DrawBlendMode::Replace => TraceDrawBlendMode::Replace,
+                },
+                frame_merge: match draw_op.frame_merge {
+                    DrawFrameMergePolicy::None => TraceDrawFrameMergePolicy::None,
+                    DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush => {
+                        TraceDrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+                    }
+                },
+                origin_tile_key: TraceTileKey::from(draw_op.origin_tile),
                 ref_image_tile_key: draw_op.ref_image.map(|ref_image| ref_image.tile_key.into()),
                 input: draw_op.input,
                 brush_id: draw_op.brush_id.0,
@@ -329,6 +395,14 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
             GpuCmdMsg::CopyOp(copy_op) => Self::CopyOp(TraceCopyOp {
                 src_tile_key: copy_op.src_tile_key.into(),
                 dst_tile_key: copy_op.dst_tile_key.into(),
+            }),
+            GpuCmdMsg::WriteOp(write_op) => Self::WriteOp(TraceWriteOp {
+                src_tile_key: write_op.src_tile_key.into(),
+                dst_tile_key: write_op.dst_tile_key.into(),
+                blend_mode: match write_op.blend_mode {
+                    WriteBlendMode::Normal => TraceWriteBlendMode::Normal,
+                },
+                opacity: write_op.opacity,
             }),
             GpuCmdMsg::ClearOp(clear_op) => Self::ClearOp(TraceClearOp {
                 tile_key: clear_op.tile_key.into(),
@@ -365,6 +439,17 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                 node_id: NodeId(draw_op.node_id),
                 tile_index: draw_op.tile_index,
                 tile_key: draw_op.tile_key.into(),
+                blend_mode: match draw_op.blend_mode {
+                    TraceDrawBlendMode::Alpha => DrawBlendMode::Alpha,
+                    TraceDrawBlendMode::Replace => DrawBlendMode::Replace,
+                },
+                frame_merge: match draw_op.frame_merge {
+                    TraceDrawFrameMergePolicy::None => DrawFrameMergePolicy::None,
+                    TraceDrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush => {
+                        DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+                    }
+                },
+                origin_tile: draw_op.origin_tile_key.into(),
                 ref_image: draw_op.ref_image_tile_key.map(|tile_key| RefImage {
                     tile_key: tile_key.into(),
                 }),
@@ -374,6 +459,14 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
             TraceGpuCmd::CopyOp(copy_op) => Self::CopyOp(CopyOp {
                 src_tile_key: copy_op.src_tile_key.into(),
                 dst_tile_key: copy_op.dst_tile_key.into(),
+            }),
+            TraceGpuCmd::WriteOp(write_op) => Self::WriteOp(WriteOp {
+                src_tile_key: write_op.src_tile_key.into(),
+                dst_tile_key: write_op.dst_tile_key.into(),
+                blend_mode: match write_op.blend_mode {
+                    TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
+                },
+                opacity: write_op.opacity,
             }),
             TraceGpuCmd::ClearOp(clear_op) => Self::ClearOp(ClearOp {
                 tile_key: clear_op.tile_key.into(),

@@ -27,7 +27,8 @@
 
 # Interaction guidelines
 
-* No need to point to specific line number in final report, I can track all you edit automatically.
+* No need to point to specific line number in final report, user can track all you edit automatically.
+* Be cautious when debugging, unless there are appearant logic or santax errors, agents should use logs or tests to first locate and reappear the error before fixing it.
 
 # Project Structure
 
@@ -36,12 +37,16 @@ glaphica
 ├── AGENTS.md
 ├── Cargo.toml
 ├── crates
+│   ├── app
 │   ├── atlas
 │   ├── brushes
+│   ├── document
+│   ├── fram_scheduler
 │   ├── glaphica         // entrance of app
 │   ├── glaphica_core    // sharing types
 │   ├── gpu_runtime      // a thin runtime in app thread to submit gpu command
 │   ├── images
+│   ├── stroke_input
 │   ├── thread_protocol
 │   └── threads          // thread model
 └── README.md

@@ -1,9 +1,9 @@
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use crossbeam_queue::ArrayQueue;
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 use thread_protocol::{

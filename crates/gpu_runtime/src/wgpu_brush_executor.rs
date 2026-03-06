@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use brushes::{BrushDrawInputLayout, BrushGpuPipelineSpec, BrushPipelineError};
-use glaphica_core::{BrushId, TextureFormat, ATLAS_TILE_SIZE};
-use thread_protocol::DrawOp;
+use glaphica_core::{ATLAS_TILE_SIZE, BrushId, TextureFormat};
+use thread_protocol::{DrawBlendMode, DrawOp};
 
 use crate::atlas_runtime::{AtlasBackendResource, AtlasStorageRuntime};
 use crate::brush_runtime::BrushDrawExecutor;
@@ -139,7 +139,10 @@ struct BrushShaderParams {
     src_tile_origin_x: u32,
     src_tile_origin_y: u32,
     src_tile_layer: u32,
-    _pad0: u32,
+    cache_tile_origin_x: u32,
+    cache_tile_origin_y: u32,
+    cache_tile_layer: u32,
+    has_cache_tile: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -147,14 +150,13 @@ struct BrushShaderParams {
 pub struct WgpuBrushContext<'a> {
     pub gpu_context: &'a GpuContext,
     pub atlas_storage: &'a AtlasStorageRuntime,
-    pub source_backend_id: u8,
 }
 
 struct BrushContext {
     spec: BrushGpuPipelineSpec,
     cache_backend_id: Option<u8>,
-    pipeline: Option<wgpu::RenderPipeline>,
-    atlas_bind_group: Option<wgpu::BindGroup>,
+    alpha_pipeline: Option<wgpu::RenderPipeline>,
+    replace_pipeline: Option<wgpu::RenderPipeline>,
 }
 
 #[derive(Default)]
@@ -189,8 +191,8 @@ impl WgpuBrushExecutor {
         self.brushes[brush_index] = Some(BrushContext {
             spec,
             cache_backend_id,
-            pipeline: None,
-            atlas_bind_group: None,
+            alpha_pipeline: None,
+            replace_pipeline: None,
         });
         Ok(())
     }
@@ -372,6 +374,7 @@ impl WgpuBrushExecutor {
         draw_bind_group_layout: &wgpu::BindGroupLayout,
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
         brush_id: BrushId,
+        blend_mode: DrawBlendMode,
     ) -> Result<wgpu::RenderPipeline, WgpuBrushExecutorError> {
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(spec.label),
@@ -383,6 +386,10 @@ impl WgpuBrushExecutor {
             immediate_size: 0,
         });
         let create_pipeline = || {
+            let blend = match blend_mode {
+                DrawBlendMode::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+                DrawBlendMode::Replace => Some(wgpu::BlendState::REPLACE),
+            };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(spec.label),
                 layout: Some(&pipeline_layout),
@@ -401,7 +408,7 @@ impl WgpuBrushExecutor {
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target_format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
@@ -426,6 +433,7 @@ impl WgpuBrushExecutor {
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
         brush_id: BrushId,
         has_ref_image: bool,
+        has_cache_tile: bool,
     ) -> Result<wgpu::BindGroup, WgpuBrushExecutorError> {
         let source_view = if has_ref_image {
             let source_backend = atlas_storage.backend_resource(source_backend_id).ok_or(
@@ -441,8 +449,9 @@ impl WgpuBrushExecutor {
             self.ensure_dummy_cache_texture(device).clone()
         };
 
-        let cache_view = match cache_backend_id {
-            Some(cache_backend_id) => {
+        let cache_view = match (cache_backend_id, has_cache_tile) {
+            (_, false) => self.ensure_dummy_cache_texture(device).clone(),
+            (Some(cache_backend_id), true) => {
                 let cache_backend = atlas_storage.backend_resource(cache_backend_id).ok_or(
                     WgpuBrushExecutorError::MissingCacheBackend {
                         brush_id,
@@ -451,7 +460,7 @@ impl WgpuBrushExecutor {
                 )?;
                 create_atlas_sampling_view(cache_backend, "glaphica-brush-cache-atlas-view")
             }
-            None => self.ensure_dummy_cache_texture(device).clone(),
+            (None, true) => self.ensure_dummy_cache_texture(device).clone(),
         };
 
         let atlas_sampler = self.ensure_atlas_sampler(device);
@@ -483,7 +492,12 @@ impl WgpuBrushExecutor {
     ) -> Result<(), BrushPipelineError> {
         let brush_index = Self::brush_index(draw_op.brush_id)?;
 
-        let (cache_backend_id, needs_pipeline, needs_atlas_bind_group) = {
+        let source_backend_id = draw_op
+            .ref_image
+            .map(|image| image.tile_key.backend_index())
+            .unwrap_or(draw_op.tile_key.backend_index());
+
+        let (cache_backend_id, needs_alpha_pipeline, needs_replace_pipeline, spec) = {
             let brush_context = self
                 .brushes
                 .get(brush_index)
@@ -496,8 +510,9 @@ impl WgpuBrushExecutor {
                 })?;
             (
                 brush_context.cache_backend_id,
-                brush_context.pipeline.is_none(),
-                brush_context.atlas_bind_group.is_none(),
+                brush_context.alpha_pipeline.is_none(),
+                brush_context.replace_pipeline.is_none(),
+                brush_context.spec,
             )
         };
 
@@ -563,26 +578,24 @@ impl WgpuBrushExecutor {
             self.ensure_draw_bind_group_layout(&context.gpu_context.device);
         let atlas_bind_group_layout =
             self.ensure_atlas_bind_group_layout(&context.gpu_context.device, atlas_layout_key);
+        let cache_resolved = if draw_op.origin_tile == glaphica_core::TileKey::EMPTY {
+            None
+        } else {
+            context.atlas_storage.resolve(draw_op.origin_tile)
+        };
 
-        if needs_atlas_bind_group {
-            let bind_group = self.create_atlas_bind_group(
-                &context.gpu_context.device,
-                context.atlas_storage,
-                context.source_backend_id,
-                cache_backend_id,
-                &atlas_bind_group_layout,
-                draw_op.brush_id,
-                draw_op.ref_image.is_some(),
-            )?;
-            let brush_context = self.brushes[brush_index].as_mut().unwrap();
-            brush_context.atlas_bind_group = Some(bind_group);
-        }
+        let atlas_bind_group = self.create_atlas_bind_group(
+            &context.gpu_context.device,
+            context.atlas_storage,
+            source_backend_id,
+            cache_backend_id,
+            &atlas_bind_group_layout,
+            draw_op.brush_id,
+            draw_op.ref_image.is_some(),
+            cache_resolved.is_some(),
+        )?;
 
-        if needs_pipeline {
-            let spec = {
-                let brush_context = self.brushes[brush_index].as_ref().unwrap();
-                brush_context.spec
-            };
+        if needs_alpha_pipeline {
             let pipeline = Self::create_render_pipeline(
                 &context.gpu_context.device,
                 &spec,
@@ -590,17 +603,32 @@ impl WgpuBrushExecutor {
                 &draw_bind_group_layout,
                 &atlas_bind_group_layout,
                 draw_op.brush_id,
+                DrawBlendMode::Alpha,
             )?;
             let brush_context = self.brushes[brush_index].as_mut().unwrap();
-            brush_context.pipeline = Some(pipeline);
+            brush_context.alpha_pipeline = Some(pipeline);
         }
 
-        let (pipeline, atlas_bind_group) = {
+        if needs_replace_pipeline {
+            let pipeline = Self::create_render_pipeline(
+                &context.gpu_context.device,
+                &spec,
+                resolved.format,
+                &draw_bind_group_layout,
+                &atlas_bind_group_layout,
+                draw_op.brush_id,
+                DrawBlendMode::Replace,
+            )?;
+            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            brush_context.replace_pipeline = Some(pipeline);
+        }
+
+        let pipeline = {
             let brush_context = self.brushes[brush_index].as_ref().unwrap();
-            (
-                brush_context.pipeline.as_ref().unwrap(),
-                brush_context.atlas_bind_group.as_ref().unwrap(),
-            )
+            match draw_op.blend_mode {
+                DrawBlendMode::Alpha => brush_context.alpha_pipeline.as_ref().unwrap(),
+                DrawBlendMode::Replace => brush_context.replace_pipeline.as_ref().unwrap(),
+            }
         };
 
         let input_bytes = encode_input_bytes(&draw_op.input);
@@ -628,7 +656,14 @@ impl WgpuBrushExecutor {
             src_tile_origin_x: source_resolved.address.texel_offset.0,
             src_tile_origin_y: source_resolved.address.texel_offset.1,
             src_tile_layer: source_resolved.address.layer,
-            _pad0: 0,
+            cache_tile_origin_x: cache_resolved
+                .map(|resolved| resolved.address.texel_offset.0)
+                .unwrap_or(0),
+            cache_tile_origin_y: cache_resolved
+                .map(|resolved| resolved.address.texel_offset.1)
+                .unwrap_or(0),
+            cache_tile_layer: cache_resolved.map(|resolved| resolved.address.layer).unwrap_or(0),
+            has_cache_tile: if cache_resolved.is_some() { 1 } else { 0 },
             _pad1: 0,
             _pad2: 0,
         };
@@ -699,7 +734,7 @@ impl WgpuBrushExecutor {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &draw_bind_group, &[]);
-            pass.set_bind_group(1, atlas_bind_group, &[]);
+            pass.set_bind_group(1, &atlas_bind_group, &[]);
             pass.set_scissor_rect(
                 resolved.address.texel_offset.0,
                 resolved.address.texel_offset.1,
@@ -783,8 +818,8 @@ fn encode_input_bytes(input: &[f32]) -> Vec<u8> {
     bytes
 }
 
-fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 48] {
-    let mut bytes = [0u8; 48];
+fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 60] {
+    let mut bytes = [0u8; 60];
     bytes[0..4].copy_from_slice(&params.input_len.to_ne_bytes());
     bytes[4..8].copy_from_slice(&params.tile_origin_x.to_ne_bytes());
     bytes[8..12].copy_from_slice(&params.tile_origin_y.to_ne_bytes());
@@ -794,15 +829,18 @@ fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 48] {
     bytes[24..28].copy_from_slice(&params.src_tile_origin_x.to_ne_bytes());
     bytes[28..32].copy_from_slice(&params.src_tile_origin_y.to_ne_bytes());
     bytes[32..36].copy_from_slice(&params.src_tile_layer.to_ne_bytes());
-    bytes[36..40].copy_from_slice(&params._pad0.to_ne_bytes());
-    bytes[40..44].copy_from_slice(&params._pad1.to_ne_bytes());
-    bytes[44..48].copy_from_slice(&params._pad2.to_ne_bytes());
+    bytes[36..40].copy_from_slice(&params.cache_tile_origin_x.to_ne_bytes());
+    bytes[40..44].copy_from_slice(&params.cache_tile_origin_y.to_ne_bytes());
+    bytes[44..48].copy_from_slice(&params.cache_tile_layer.to_ne_bytes());
+    bytes[48..52].copy_from_slice(&params.has_cache_tile.to_ne_bytes());
+    bytes[52..56].copy_from_slice(&params._pad1.to_ne_bytes());
+    bytes[56..60].copy_from_slice(&params._pad2.to_ne_bytes());
     bytes
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_input_bytes, encode_shader_params_bytes, BrushShaderParams};
+    use super::{BrushShaderParams, encode_input_bytes, encode_shader_params_bytes};
 
     #[test]
     fn encode_input_bytes_keeps_empty_input_buffer_non_zero_sized() {
@@ -822,12 +860,15 @@ mod tests {
             src_tile_origin_x: 256,
             src_tile_origin_y: 512,
             src_tile_layer: 9,
-            _pad0: 0,
+            cache_tile_origin_x: 300,
+            cache_tile_origin_y: 400,
+            cache_tile_layer: 10,
+            has_cache_tile: 1,
             _pad1: 0,
             _pad2: 0,
         };
         let encoded = encode_shader_params_bytes(params);
-        assert_eq!(encoded.len(), 48);
+        assert_eq!(encoded.len(), 60);
         assert_eq!(
             u32::from_ne_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]),
             3
@@ -837,8 +878,8 @@ mod tests {
             2
         );
         assert_eq!(
-            u32::from_ne_bytes([encoded[32], encoded[33], encoded[34], encoded[35]]),
-            9
+            u32::from_ne_bytes([encoded[40], encoded[41], encoded[42], encoded[43]]),
+            400
         );
     }
 }

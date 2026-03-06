@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use glaphica_core::{BackendId, BrushId, BrushInput, CanvasVec2, NodeId, TileKey};
 use images::Image;
-use thread_protocol::{CopyOp, DrawOp, GpuCmdMsg, RefImage};
+use thread_protocol::{
+    ClearOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg, RefImage,
+    WriteBlendMode, WriteOp,
+};
 
 use crate::brush_registry::BrushRegistry;
 use crate::{BrushPipelineError, BrushRegistryError};
@@ -24,8 +27,10 @@ pub struct StrokeTileKey {
 }
 
 pub struct StrokeDrawOutput {
-    pub draw_op: DrawOp,
+    pub clear_op: Option<ClearOp>,
+    pub draw_op: Option<DrawOp>,
     pub copy_op: Option<CopyOp>,
+    pub write_op: Option<WriteOp>,
     pub tile_key_update: Option<(NodeId, usize, TileKey)>,
 }
 
@@ -36,6 +41,35 @@ pub trait EngineBrushPipeline: Send {
         tile_key: TileKey,
         tile_canvas_origin: CanvasVec2,
     ) -> Result<Vec<f32>, BrushPipelineError>;
+
+    fn uses_stroke_buffer(&self) -> bool {
+        false
+    }
+
+    fn encode_stroke_buffer_dab_input(
+        &mut self,
+        brush_input: &BrushInput,
+        tile_key: TileKey,
+        tile_canvas_origin: CanvasVec2,
+    ) -> Result<Vec<f32>, BrushPipelineError> {
+        self.encode_draw_input(brush_input, tile_key, tile_canvas_origin)
+    }
+
+    fn encode_stroke_buffer_composite_input(
+        &mut self,
+        brush_input: &BrushInput,
+        tile_key: TileKey,
+        tile_canvas_origin: CanvasVec2,
+    ) -> Result<Vec<f32>, BrushPipelineError> {
+        self.encode_draw_input(brush_input, tile_key, tile_canvas_origin)
+    }
+
+    fn stroke_buffer_write_opacity(
+        &mut self,
+        _brush_input: &BrushInput,
+    ) -> Result<f32, BrushPipelineError> {
+        Ok(1.0)
+    }
 }
 
 #[derive(Debug)]
@@ -75,6 +109,7 @@ impl From<BrushRegistryError> for EngineBrushDispatchError {
 
 struct EngineBrushRegistration {
     max_affected_radius_px: u32,
+    stroke_buffer_backend: Option<BackendId>,
     pipeline: Box<dyn EngineBrushPipeline>,
 }
 
@@ -88,7 +123,9 @@ struct AffectedTile {
 pub struct BrushEngineRuntime {
     pipelines: BrushRegistry<EngineBrushRegistration>,
     scratch_affected_tiles: Vec<AffectedTile>,
-    stroke_tiles: HashSet<StrokeTileKey>,
+    stroke_tiles: HashMap<StrokeTileKey, TileKey>,
+    stroke_restore_tiles: HashMap<StrokeTileKey, TileKey>,
+    stroke_buffer_tiles: HashMap<StrokeTileKey, TileKey>,
 }
 
 impl BrushEngineRuntime {
@@ -96,16 +133,22 @@ impl BrushEngineRuntime {
         Self {
             pipelines: BrushRegistry::with_max_brushes(max_brushes),
             scratch_affected_tiles: Vec::new(),
-            stroke_tiles: HashSet::new(),
+            stroke_tiles: HashMap::new(),
+            stroke_restore_tiles: HashMap::new(),
+            stroke_buffer_tiles: HashMap::new(),
         }
     }
 
     pub fn begin_stroke(&mut self) {
         self.stroke_tiles.clear();
+        self.stroke_restore_tiles.clear();
+        self.stroke_buffer_tiles.clear();
     }
 
     pub fn end_stroke(&mut self) {
         self.stroke_tiles.clear();
+        self.stroke_restore_tiles.clear();
+        self.stroke_buffer_tiles.clear();
     }
 
     pub fn register_pipeline<P>(
@@ -117,10 +160,34 @@ impl BrushEngineRuntime {
     where
         P: EngineBrushPipeline + 'static,
     {
+        self.register_pipeline_with_stroke_buffer_backend(
+            brush_id,
+            max_affected_radius_px,
+            None,
+            pipeline,
+        )
+    }
+
+    pub fn register_pipeline_with_stroke_buffer_backend<P>(
+        &mut self,
+        brush_id: BrushId,
+        max_affected_radius_px: u32,
+        stroke_buffer_backend: Option<BackendId>,
+        pipeline: P,
+    ) -> Result<(), BrushRegistryError>
+    where
+        P: EngineBrushPipeline + 'static,
+    {
+        let stroke_buffer_backend = if pipeline.uses_stroke_buffer() {
+            stroke_buffer_backend
+        } else {
+            None
+        };
         self.pipelines.register(
             brush_id,
             EngineBrushRegistration {
                 max_affected_radius_px,
+                stroke_buffer_backend,
                 pipeline: Box::new(pipeline),
             },
         )
@@ -131,6 +198,21 @@ impl BrushEngineRuntime {
         brush_id: BrushId,
     ) -> Result<(), BrushRegistryError> {
         self.pipelines.ensure_can_register(brush_id)
+    }
+
+    pub fn update_pipeline<P>(
+        &mut self,
+        brush_id: BrushId,
+        max_affected_radius_px: u32,
+        pipeline: P,
+    ) -> Result<(), BrushRegistryError>
+    where
+        P: EngineBrushPipeline + 'static,
+    {
+        let registration = self.pipelines.get_mut(brush_id)?;
+        registration.max_affected_radius_px = max_affected_radius_px;
+        registration.pipeline = Box::new(pipeline);
+        Ok(())
     }
 
     pub fn build_draw_op(
@@ -162,6 +244,9 @@ impl BrushEngineRuntime {
             node_id,
             tile_index,
             tile_key,
+            blend_mode: DrawBlendMode::Alpha,
+            frame_merge: DrawFrameMergePolicy::None,
+            origin_tile: TileKey::EMPTY,
             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
             input: encoded_input,
             brush_id,
@@ -290,6 +375,9 @@ impl BrushEngineRuntime {
                 node_id,
                 tile_index: affected_tile.tile_index,
                 tile_key: affected_tile.tile_key,
+                blend_mode: DrawBlendMode::Alpha,
+                frame_merge: DrawFrameMergePolicy::None,
+                origin_tile: TileKey::EMPTY,
                 ref_image: affected_tile
                     .ref_tile_key
                     .map(|tile_key| RefImage { tile_key }),
@@ -334,58 +422,208 @@ impl BrushEngineRuntime {
         let mut prepared_tiles: Vec<(
             usize,
             TileKey,
+            TileKey,
             Option<TileKey>,
             Option<CopyOp>,
+            Option<ClearOp>,
+            Option<ClearOp>,
+            Option<TileKey>,
             Option<(NodeId, usize, TileKey)>,
         )> = Vec::new();
+        let stroke_buffer_backend = self.pipelines.get(brush_id)?.stroke_buffer_backend;
+        let uses_stroke_buffer = stroke_buffer_backend.is_some();
+
         for affected_tile in affected_tiles {
             let stroke_key = StrokeTileKey {
                 node_id,
                 tile_index: affected_tile.tile_index,
             };
 
-            let (final_tile_key, copy_op, tile_key_update) = self.prepare_tile_for_stroke(
-                stroke_key,
-                affected_tile.tile_key,
-                affected_tile.tile_index,
-                node_id,
-                image,
-                allocator,
-            );
+            let (final_tile_key, origin_tile, copy_op, origin_init_clear_op, tile_key_update) =
+                self
+                .prepare_tile_for_stroke(
+                    stroke_key,
+                    affected_tile.tile_key,
+                    affected_tile.tile_index,
+                    node_id,
+                    image,
+                    allocator,
+                );
+
+            let (buffer_tile_key, clear_op) = if let Some(buffer_backend) = stroke_buffer_backend {
+                let (buffer_tile_key, clear_op) =
+                    self.prepare_stroke_buffer_tile(stroke_key, buffer_backend, allocator);
+                (Some(buffer_tile_key), clear_op)
+            } else {
+                (None, None)
+            };
 
             prepared_tiles.push((
                 affected_tile.tile_index,
                 final_tile_key,
+                origin_tile,
                 affected_tile.ref_tile_key,
                 copy_op,
+                origin_init_clear_op,
+                clear_op,
+                buffer_tile_key,
                 tile_key_update,
             ));
         }
 
-        let registration = self.pipelines.get_mut(brush_id)?;
-        for (tile_index, final_tile_key, ref_tile_key, copy_op, tile_key_update) in prepared_tiles {
+        for (
+            tile_index,
+            final_tile_key,
+            origin_tile,
+            ref_tile_key,
+            copy_op,
+            origin_init_clear_op,
+            clear_op,
+            buffer_tile_key,
+            tile_key_update,
+        ) in prepared_tiles
+        {
             let tile_canvas_origin = image
                 .tile_canvas_origin(tile_index)
                 .unwrap_or(CanvasVec2::new(0.0, 0.0));
-            let encoded_input = registration
-                .pipeline
-                .encode_draw_input(brush_input, final_tile_key, tile_canvas_origin)
-                .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+            if uses_stroke_buffer {
+                let Some(buffer_tile_key) = buffer_tile_key else {
+                    continue;
+                };
+                if let Some(clear_op) = origin_init_clear_op {
+                    output.push(StrokeDrawOutput {
+                        clear_op: Some(clear_op),
+                        draw_op: None,
+                        copy_op: None,
+                        write_op: None,
+                        tile_key_update: None,
+                    });
+                }
+                if buffer_tile_key == TileKey::EMPTY {
+                    let encoded_input = self
+                        .pipelines
+                        .get_mut(brush_id)?
+                        .pipeline
+                        .encode_draw_input(brush_input, final_tile_key, tile_canvas_origin)
+                        .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+                    output.push(StrokeDrawOutput {
+                        clear_op: None,
+                        draw_op: Some(DrawOp {
+                            node_id,
+                            tile_index,
+                            tile_key: final_tile_key,
+                            blend_mode: DrawBlendMode::Alpha,
+                            frame_merge: DrawFrameMergePolicy::None,
+                            origin_tile,
+                            ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
+                            input: encoded_input,
+                            brush_id,
+                        }),
+                        copy_op,
+                        write_op: None,
+                        tile_key_update,
+                    });
+                    continue;
+                }
+                let encoded_dab_input = self
+                    .pipelines
+                    .get_mut(brush_id)?
+                    .pipeline
+                    .encode_stroke_buffer_dab_input(brush_input, buffer_tile_key, tile_canvas_origin)
+                    .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
 
-            output.push(StrokeDrawOutput {
-                draw_op: DrawOp {
-                    node_id,
-                    tile_index,
-                    tile_key: final_tile_key,
-                    ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
-                    input: encoded_input,
-                    brush_id,
-                },
-                copy_op,
-                tile_key_update,
-            });
+                output.push(StrokeDrawOutput {
+                    clear_op,
+                    draw_op: Some(DrawOp {
+                        node_id,
+                        tile_index,
+                        tile_key: buffer_tile_key,
+                        blend_mode: DrawBlendMode::Alpha,
+                        frame_merge: DrawFrameMergePolicy::None,
+                        origin_tile: TileKey::EMPTY,
+                        ref_image: None,
+                        input: encoded_dab_input,
+                        brush_id,
+                    }),
+                    copy_op,
+                    write_op: None,
+                    tile_key_update,
+                });
+
+                let write_opacity = self
+                    .pipelines
+                    .get_mut(brush_id)?
+                    .pipeline
+                    .stroke_buffer_write_opacity(brush_input)
+                    .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+                output.push(StrokeDrawOutput {
+                    clear_op: None,
+                    draw_op: None,
+                    copy_op: None,
+                    write_op: Some(WriteOp {
+                        src_tile_key: buffer_tile_key,
+                        dst_tile_key: final_tile_key,
+                        blend_mode: WriteBlendMode::Normal,
+                        opacity: write_opacity,
+                    }),
+                    tile_key_update: None,
+                });
+            } else {
+                let encoded_input = self
+                    .pipelines
+                    .get_mut(brush_id)?
+                    .pipeline
+                    .encode_draw_input(brush_input, final_tile_key, tile_canvas_origin)
+                    .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+
+                if let Some(clear_op) = origin_init_clear_op {
+                    output.push(StrokeDrawOutput {
+                        clear_op: Some(clear_op),
+                        draw_op: None,
+                        copy_op: None,
+                        write_op: None,
+                        tile_key_update: None,
+                    });
+                }
+                output.push(StrokeDrawOutput {
+                    clear_op: None,
+                    draw_op: Some(DrawOp {
+                        node_id,
+                        tile_index,
+                        tile_key: final_tile_key,
+                        blend_mode: DrawBlendMode::Alpha,
+                        frame_merge: DrawFrameMergePolicy::None,
+                        origin_tile,
+                        ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
+                        input: encoded_input,
+                        brush_id,
+                    }),
+                    copy_op,
+                    write_op: None,
+                    tile_key_update,
+                });
+            }
         }
         Ok(())
+    }
+
+    fn prepare_stroke_buffer_tile<A>(
+        &mut self,
+        stroke_key: StrokeTileKey,
+        buffer_backend: BackendId,
+        allocator: &mut A,
+    ) -> (TileKey, Option<ClearOp>)
+    where
+        A: TileSlotAllocator,
+    {
+        if let Some(tile_key) = self.stroke_buffer_tiles.get(&stroke_key).copied() {
+            return (tile_key, None);
+        }
+        let Some(tile_key) = allocator.alloc(buffer_backend) else {
+            return (TileKey::EMPTY, None);
+        };
+        self.stroke_buffer_tiles.insert(stroke_key, tile_key);
+        (tile_key, Some(ClearOp { tile_key }))
     }
 
     fn prepare_tile_for_stroke<A>(
@@ -396,13 +634,40 @@ impl BrushEngineRuntime {
         node_id: NodeId,
         image: &mut Image,
         allocator: &mut A,
-    ) -> (TileKey, Option<CopyOp>, Option<(NodeId, usize, TileKey)>)
+    ) -> (
+        TileKey,
+        TileKey,
+        Option<CopyOp>,
+        Option<ClearOp>,
+        Option<(NodeId, usize, TileKey)>,
+    )
     where
         A: TileSlotAllocator,
     {
-        if self.stroke_tiles.contains(&stroke_key) {
-            return (current_tile_key, None, None);
+        if let Some(origin_tile) = self.stroke_tiles.get(&stroke_key).copied() {
+            let restore_tile = self
+                .stroke_restore_tiles
+                .get(&stroke_key)
+                .copied()
+                .unwrap_or(origin_tile);
+            // Restore must stay in Copy(A->B) semantics. Clearing B would not preserve
+            // the "replace from original snapshot" contract for this stroke.
+            return (
+                current_tile_key,
+                origin_tile,
+                if restore_tile == TileKey::EMPTY || current_tile_key == TileKey::EMPTY {
+                    None
+                } else {
+                    Some(CopyOp {
+                        src_tile_key: restore_tile,
+                        dst_tile_key: current_tile_key,
+                    })
+                },
+                None,
+                None,
+            );
         }
+        let origin_tile = current_tile_key;
 
         let backend = image.backend();
         let next_tile = if current_tile_key == TileKey::EMPTY {
@@ -411,7 +676,24 @@ impl BrushEngineRuntime {
             allocator.alloc_with_parity(backend, !current_tile_key.slot_parity())
         };
         let Some(new_tile_key) = next_tile else {
-            return (current_tile_key, None, None);
+            return (current_tile_key, origin_tile, None, None, None);
+        };
+
+        let mut origin_init_clear_op = None;
+        let restore_tile = if current_tile_key == TileKey::EMPTY {
+            let snapshot = allocator
+                .alloc_with_parity(backend, !new_tile_key.slot_parity())
+                .or_else(|| allocator.alloc(backend));
+            if let Some(snapshot_tile) = snapshot {
+                origin_init_clear_op = Some(ClearOp {
+                    tile_key: snapshot_tile,
+                });
+                snapshot_tile
+            } else {
+                TileKey::EMPTY
+            }
+        } else {
+            current_tile_key
         };
 
         let copy_op = if current_tile_key == TileKey::EMPTY {
@@ -424,13 +706,16 @@ impl BrushEngineRuntime {
         };
 
         if image.set_tile_key(tile_index, new_tile_key).is_err() {
-            return (current_tile_key, None, None);
+            return (current_tile_key, origin_tile, None, None, None);
         }
-        self.stroke_tiles.insert(stroke_key);
+        self.stroke_tiles.insert(stroke_key, origin_tile);
+        self.stroke_restore_tiles.insert(stroke_key, restore_tile);
 
         (
             new_tile_key,
+            origin_tile,
             copy_op,
+            origin_init_clear_op,
             Some((node_id, tile_index, new_tile_key)),
         )
     }
@@ -439,10 +724,10 @@ impl BrushEngineRuntime {
 #[cfg(test)]
 mod tests {
     use glaphica_core::{
-        BrushId, BrushInput, BrushInputFlags, CanvasVec2, MappedCursor, NodeId, RadianVec2,
-        StrokeId, TileKey, IMAGE_TILE_SIZE,
+        BrushId, BrushInput, BrushInputFlags, CanvasVec2, IMAGE_TILE_SIZE, MappedCursor, NodeId,
+        RadianVec2, StrokeId, TileKey,
     };
-    use images::{layout::ImageLayout, Image};
+    use images::{Image, layout::ImageLayout};
 
     use super::{BrushEngineRuntime, EngineBrushPipeline, TileSlotAllocator};
 
@@ -518,17 +803,23 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(image
-            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
-            .is_ok());
-        assert!(image
-            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
-            .is_ok());
+        assert!(
+            image
+                .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+                .is_ok()
+        );
+        assert!(
+            image
+                .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+                .is_ok()
+        );
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
 
         let brush_input = build_test_brush_input(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 10.0));
         let mut draw_ops = Vec::new();
@@ -542,8 +833,10 @@ mod tests {
         assert!(build_result.is_ok());
         assert_eq!(draw_ops.len(), 2);
         assert_eq!(draw_ops[0].tile_key, TileKey::from_parts(1, 1, 100));
+        assert_eq!(draw_ops[0].origin_tile, TileKey::EMPTY);
         assert_eq!(draw_ops[0].ref_image, None);
         assert_eq!(draw_ops[1].tile_key, TileKey::from_parts(1, 1, 101));
+        assert_eq!(draw_ops[1].origin_tile, TileKey::EMPTY);
         assert_eq!(draw_ops[1].ref_image, None);
     }
 
@@ -554,28 +847,38 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(write_image
-            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
-            .is_ok());
-        assert!(write_image
-            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
-            .is_ok());
+        assert!(
+            write_image
+                .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+                .is_ok()
+        );
+        assert!(
+            write_image
+                .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+                .is_ok()
+        );
 
         let mut read_image = match Image::new(layout, glaphica_core::BackendId::new(2)) {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(read_image
-            .set_tile_key(0, TileKey::from_parts(2, 3, 200))
-            .is_ok());
-        assert!(read_image
-            .set_tile_key(1, TileKey::from_parts(2, 3, 201))
-            .is_ok());
+        assert!(
+            read_image
+                .set_tile_key(0, TileKey::from_parts(2, 3, 200))
+                .is_ok()
+        );
+        assert!(
+            read_image
+                .set_tile_key(1, TileKey::from_parts(2, 3, 201))
+                .is_ok()
+        );
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
 
         let brush_input = build_test_brush_input(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 10.0));
         let mut draw_ops = Vec::new();
@@ -593,10 +896,12 @@ mod tests {
             draw_ops[0].ref_image.map(|ref_image| ref_image.tile_key),
             Some(TileKey::from_parts(2, 3, 200))
         );
+        assert_eq!(draw_ops[0].origin_tile, TileKey::EMPTY);
         assert_eq!(
             draw_ops[1].ref_image.map(|ref_image| ref_image.tile_key),
             Some(TileKey::from_parts(2, 3, 201))
         );
+        assert_eq!(draw_ops[1].origin_tile, TileKey::EMPTY);
     }
 
     #[test]
@@ -610,9 +915,11 @@ mod tests {
         assert!(image.set_tile_key(0, existing_key).is_ok());
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
         runtime.begin_stroke();
 
         let mut allocator = TestAllocator {
@@ -635,7 +942,12 @@ mod tests {
         assert!(build_result.is_ok());
         assert_eq!(allocator.parity_requests, vec![true]);
         assert_eq!(output.len(), 1);
-        assert_eq!(output[0].draw_op.tile_key, TileKey::from_parts(1, 0, 0x8000_0001));
+        let draw_op = output[0].draw_op.as_ref().expect("draw op must exist");
+        assert_eq!(
+            draw_op.tile_key,
+            TileKey::from_parts(1, 0, 0x8000_0001)
+        );
+        assert_eq!(draw_op.origin_tile, existing_key);
         assert_eq!(
             output[0].copy_op,
             Some(thread_protocol::CopyOp {
@@ -643,5 +955,6 @@ mod tests {
                 dst_tile_key: TileKey::from_parts(1, 0, 0x8000_0001),
             })
         );
+        assert_eq!(output[0].write_op, None);
     }
 }

@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use glaphica_core::{TileKey, IMAGE_TILE_SIZE};
-    use images::{layout::ImageLayout, Image};
+    use crate::screen_blitter::tile_draw_size;
+    use glaphica_core::{CanvasVec2, IMAGE_TILE_SIZE};
+    use images::{Image, layout::ImageLayout};
 
     #[test]
     fn tile_canvas_origin_maps_correctly() {
@@ -58,5 +59,22 @@ mod tests {
 
         let index = layout.pixel_to_index(x, y).unwrap();
         assert_eq!(index, expected_index);
+    }
+
+    #[test]
+    fn tail_tile_draw_size_is_clamped_to_document_bounds() {
+        let size = tile_draw_size(
+            1024,
+            1024,
+            CanvasVec2::new(16.0 * IMAGE_TILE_SIZE as f32, 0.0),
+        );
+        assert_eq!(size, Some((32.0, IMAGE_TILE_SIZE as f32)));
+
+        let size = tile_draw_size(
+            1024,
+            1024,
+            CanvasVec2::new(16.0 * IMAGE_TILE_SIZE as f32, 16.0 * IMAGE_TILE_SIZE as f32),
+        );
+        assert_eq!(size, Some((32.0, 32.0)));
     }
 }

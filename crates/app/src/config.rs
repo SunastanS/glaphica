@@ -60,3 +60,18 @@ pub mod stroke_input {
     /// History buffer capacity for processed samples
     pub const HISTORY_CAPACITY: usize = 16;
 }
+
+/// Screen presentation background configuration
+pub mod render_background {
+    /// Canvas clear color outside document bounds
+    pub const CANVAS_CLEAR_COLOR: [f64; 4] = [0.16, 0.16, 0.16, 1.0];
+
+    /// Checkerboard light color inside document bounds
+    pub const DOC_CHECKER_LIGHT: [f32; 4] = [0.94, 0.94, 0.94, 1.0];
+
+    /// Checkerboard dark color inside document bounds
+    pub const DOC_CHECKER_DARK: [f32; 4] = [0.86, 0.86, 0.86, 1.0];
+
+    /// Checkerboard cell size in screen pixels
+    pub const DOC_CHECKER_SIZE_PX: f32 = 16.0;
+}

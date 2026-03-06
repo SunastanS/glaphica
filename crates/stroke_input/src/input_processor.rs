@@ -5,16 +5,11 @@ use crate::smoother::{
     ExponentialMovingAverage, ExponentialMovingAverageConfig, SmoothingStrategy,
 };
 
-/// Configuration for input processing
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InputProcessingConfig {
-    /// Smoothing configuration
     pub smoothing: ExponentialMovingAverageConfig,
-    /// Resampling configuration
     pub resampling: ResamplerConfig,
-    /// Velocity calculation window size (number of samples)
     pub velocity_window_size: usize,
-    /// Curvature calculation window size (number of samples)
     pub curvature_window_size: usize,
 }
 
@@ -29,7 +24,6 @@ impl Default for InputProcessingConfig {
     }
 }
 
-/// A processed sample with all derived values
 #[derive(Debug, Clone, Copy)]
 struct ProcessedSample {
     cursor: MappedCursor,
@@ -39,7 +33,6 @@ struct ProcessedSample {
     dt_s: f32,
 }
 
-/// Main processor that converts raw cursor input to BrushInput
 pub struct StrokeInputProcessor {
     config: InputProcessingConfig,
     smoother: ExponentialMovingAverage,
@@ -47,9 +40,7 @@ pub struct StrokeInputProcessor {
     stroke_id: Option<StrokeId>,
     /// History of processed samples for derivative calculations
     history: Vec<ProcessedSample>,
-    /// Current path length
     total_path_s: f32,
-    /// Last output timestamp for dt calculation
     last_output_time_ns: Option<u64>,
 }
 
@@ -66,7 +57,6 @@ impl StrokeInputProcessor {
         }
     }
 
-    /// Begin a new stroke
     pub fn begin_stroke(&mut self, stroke_id: StrokeId) {
         self.stroke_id = Some(stroke_id);
         self.smoother.reset();
@@ -76,7 +66,6 @@ impl StrokeInputProcessor {
         self.last_output_time_ns = None;
     }
 
-    /// End the current stroke
     pub fn end_stroke(&mut self) {
         self.stroke_id = None;
         self.smoother.reset();
@@ -86,7 +75,6 @@ impl StrokeInputProcessor {
         self.last_output_time_ns = None;
     }
 
-    /// Process a raw cursor input and return BrushInput samples
     pub fn process_input(
         &mut self,
         stroke_id: StrokeId,
@@ -102,9 +90,7 @@ impl StrokeInputProcessor {
             ResampleResult::Accepted(c) => {
                 vec![(c, timestamp_ns)]
             }
-            ResampleResult::Interpolated(points) => {
-                points
-            }
+            ResampleResult::Interpolated(points) => points,
         };
 
         let result: Vec<BrushInput> = resampled
@@ -113,6 +99,11 @@ impl StrokeInputProcessor {
             .collect();
 
         result
+    }
+
+    pub fn set_resampling_config(&mut self, config: ResamplerConfig) {
+        self.config.resampling = config;
+        self.resampler.set_config(config);
     }
 
     fn convert_to_brush_input(
@@ -158,7 +149,6 @@ impl StrokeInputProcessor {
             self.history.remove(0);
         }
 
-        // Calculate derivatives
         let (vel, speed, tangent) = self.calculate_velocity();
         let (acc, accel, curvature) = self.calculate_acceleration_and_curvature();
 

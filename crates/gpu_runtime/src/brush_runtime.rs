@@ -157,6 +157,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
                 Ok(BrushGpuApplyOutcome::AppliedDraw)
             }
             GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::ClearOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => Ok(BrushGpuApplyOutcome::IgnoredNonDraw),
@@ -172,7 +173,7 @@ mod tests {
         BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry, BrushSpec,
     };
     use glaphica_core::{BrushId, NodeId, TileKey};
-    use thread_protocol::{ClearOp, DrawOp, GpuCmdMsg};
+    use thread_protocol::{ClearOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
 
     use super::{BrushDrawExecutor, BrushGpuApplyOutcome, BrushGpuDispatchError, BrushGpuRuntime};
 
@@ -234,14 +235,19 @@ mod tests {
         let mut layouts = BrushLayoutRegistry::new(4);
         let mut pipeline_registry = BrushGpuPipelineRegistry::new(4);
         assert!(layouts.register_layout(BrushId(2), test_layout()).is_ok());
-        assert!(pipeline_registry
-            .register_pipeline_spec(BrushId(2), test_pipeline_spec())
-            .is_ok());
+        assert!(
+            pipeline_registry
+                .register_pipeline_spec(BrushId(2), test_pipeline_spec())
+                .is_ok()
+        );
 
         let draw_op = DrawOp {
             node_id: NodeId(0),
             tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
+            blend_mode: DrawBlendMode::Alpha,
+            frame_merge: DrawFrameMergePolicy::None,
+            origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0, 3.0],
             brush_id: BrushId(2),
@@ -258,14 +264,19 @@ mod tests {
         let mut layouts = BrushLayoutRegistry::new(4);
         let mut pipeline_registry = BrushGpuPipelineRegistry::new(4);
         assert!(layouts.register_layout(BrushId(1), test_layout()).is_ok());
-        assert!(pipeline_registry
-            .register_pipeline_spec(BrushId(1), test_pipeline_spec())
-            .is_ok());
+        assert!(
+            pipeline_registry
+                .register_pipeline_spec(BrushId(1), test_pipeline_spec())
+                .is_ok()
+        );
 
         let draw_op = DrawOp {
             node_id: NodeId(0),
             tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
+            blend_mode: DrawBlendMode::Alpha,
+            frame_merge: DrawFrameMergePolicy::None,
+            origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0],
             brush_id: BrushId(1),

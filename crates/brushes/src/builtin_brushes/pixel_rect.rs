@@ -7,6 +7,7 @@ use crate::brush_spec::BrushSpec;
 use crate::draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
 use crate::engine_runtime::EngineBrushPipeline;
 use crate::gpu_pipeline_spec::BrushGpuPipelineSpec;
+use crate::resampler_distance::BrushResamplerDistancePolicy;
 use crate::BrushPipelineError;
 
 pub const PIXEL_RECT_DRAW_LAYOUT: BrushDrawInputLayout = BrushDrawInputLayout::new(
@@ -121,12 +122,29 @@ pub struct PixelRectBrush {
 }
 
 impl PixelRectBrush {
+    pub const CONSTANT_A: f32 = 1.2;
+    pub const CONSTANT_B: f32 = 2.0 / 3.0;
+
     pub const fn new(radius_px: u32) -> Self {
         Self { radius_px }
     }
 
     pub const fn radius_px(self) -> u32 {
         self.radius_px
+    }
+}
+
+impl BrushResamplerDistancePolicy for PixelRectBrush {
+    fn brush_size(&self) -> u32 {
+        self.radius_px
+    }
+
+    fn max_distance_rate(&self) -> f32 {
+        Self::CONSTANT_A
+    }
+
+    fn min_distance_rate(&self) -> f32 {
+        Self::CONSTANT_B
     }
 }
 
@@ -173,6 +191,7 @@ mod tests {
 
     use crate::brush_spec::BrushSpec;
     use crate::draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
+    use crate::resampler_distance::BrushResamplerDistancePolicy;
     use crate::{
         BrushEngineRuntime, BrushGpuPipelineRegistry, BrushLayoutRegistry, EngineBrushPipeline,
     };
@@ -268,5 +287,13 @@ mod tests {
         assert!(register.is_ok());
         assert_eq!(layouts.layout(BrushId(1)), Ok(PIXEL_RECT_DRAW_LAYOUT));
         assert!(gpu_pipeline_registry.pipeline_spec(BrushId(1)).is_ok());
+    }
+
+    #[test]
+    fn resampler_distance_scales_with_brush_size() {
+        let brush = PixelRectBrush::new(3);
+        let distance = brush.resampler_distance();
+        assert!((distance.max_distance - 3.6).abs() < 0.0001);
+        assert!((distance.min_distance - 2.0).abs() < 0.0001);
     }
 }

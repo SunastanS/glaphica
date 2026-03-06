@@ -1,19 +1,20 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use brushes::BrushSpec;
+use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
 use document::{Document, SharedRenderTree};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
 use thread_protocol::{
-    GpuFeedbackFrame, InputControlEvent, InputControlOp, InputRingSample, MergeItem,
-    MergeVecIndex, TileKey,
+    DrawFrameMergePolicy, GpuCmdMsg, GpuFeedbackFrame, InputControlEvent, InputControlOp,
+    InputRingSample, MergeItem, MergeVecIndex, TileKey,
 };
-use threads::{create_thread_channels, EngineThreadChannels, MainThreadChannels};
+use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 
 use crate::trace::{TraceInputFrame, TraceIoError, TraceRecorder};
-use crate::{config, BrushRegisterError, EngineThreadState, MainThreadState};
+use crate::{BrushRegisterError, EngineThreadState, MainThreadState, config};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrokeControl {
@@ -106,14 +107,68 @@ pub struct AppThreadIntegration {
     trace_recorder: Option<TraceRecorder>,
     active_stroke_node: Option<NodeId>,
     current_brush_id: Option<BrushId>,
+    brush_resampler_distances: Vec<Option<BrushResamplerDistance>>,
     next_stroke_id: u64,
 }
 
 impl AppThreadIntegration {
-    pub async fn new(
-        document_name: String,
-        layout: ImageLayout,
-    ) -> Result<Self, crate::InitError> {
+    fn should_merge_draw_in_frame(draw_op: &thread_protocol::DrawOp) -> bool {
+        draw_op.frame_merge == DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+    }
+
+    fn compact_frame_mergeable_draws(commands: &mut Vec<GpuCmdMsg>) {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        struct CompositeKey {
+            node_id: NodeId,
+            tile_index: usize,
+            brush_id: BrushId,
+        }
+
+        let mut latest_composite_indices: HashMap<CompositeKey, usize> = HashMap::new();
+        for (index, cmd) in commands.iter().enumerate() {
+            let GpuCmdMsg::DrawOp(draw_op) = cmd else {
+                continue;
+            };
+            if !Self::should_merge_draw_in_frame(draw_op) {
+                continue;
+            }
+            latest_composite_indices.insert(
+                CompositeKey {
+                    node_id: draw_op.node_id,
+                    tile_index: draw_op.tile_index,
+                    brush_id: draw_op.brush_id,
+                },
+                index,
+            );
+        }
+
+        if latest_composite_indices.is_empty() {
+            return;
+        }
+
+        let mut compacted = Vec::with_capacity(commands.len());
+        for (index, cmd) in commands.drain(..).enumerate() {
+            let keep = match &cmd {
+                GpuCmdMsg::DrawOp(draw_op) if Self::should_merge_draw_in_frame(draw_op) => {
+                    latest_composite_indices
+                        .get(&CompositeKey {
+                            node_id: draw_op.node_id,
+                            tile_index: draw_op.tile_index,
+                            brush_id: draw_op.brush_id,
+                        })
+                        .copied()
+                        == Some(index)
+                }
+                _ => true,
+            };
+            if keep {
+                compacted.push(cmd);
+            }
+        }
+        *commands = compacted;
+    }
+
+    pub async fn new(document_name: String, layout: ImageLayout) -> Result<Self, crate::InitError> {
         let mut main_state = MainThreadState::init().await?;
 
         let document = Document::new(
@@ -131,7 +186,11 @@ impl AppThreadIntegration {
 
         main_state.set_shared_tree(shared_tree.clone());
 
-        let mut engine_state = EngineThreadState::new(document, shared_tree, crate::config::brush_processing::MAX_BRUSHES);
+        let mut engine_state = EngineThreadState::new(
+            document,
+            shared_tree,
+            crate::config::brush_processing::MAX_BRUSHES,
+        );
 
         // Add backends to the engine thread's backend manager to match main thread
         engine_state
@@ -163,6 +222,7 @@ impl AppThreadIntegration {
             trace_recorder: None,
             active_stroke_node: None,
             current_brush_id: None,
+            brush_resampler_distances: vec![None; config::brush_processing::MAX_BRUSHES],
             next_stroke_id: 1,
         })
     }
@@ -187,6 +247,26 @@ impl AppThreadIntegration {
         self.main_channels.input_ring_producer.push(sample);
     }
 
+    pub fn map_screen_to_document(&self, screen_x: f32, screen_y: f32) -> (f32, f32) {
+        self.main_state
+            .view()
+            .screen_to_document(screen_x, screen_y)
+    }
+
+    pub fn pan_view(&mut self, dx: f32, dy: f32) {
+        self.main_state.view_mut().pan(dx, dy);
+    }
+
+    pub fn zoom_view(&mut self, factor: f32, center_x: f32, center_y: f32) {
+        self.main_state.view_mut().zoom(factor, center_x, center_y);
+    }
+
+    pub fn rotate_view(&mut self, delta_radians: f32, center_x: f32, center_y: f32) {
+        self.main_state
+            .view_mut()
+            .rotate(delta_radians, center_x, center_y);
+    }
+
     pub fn begin_stroke(&mut self, node_id: NodeId) {
         let stroke_id = StrokeId(self.next_stroke_id);
         self.next_stroke_id += 1;
@@ -204,6 +284,13 @@ impl AppThreadIntegration {
 
     pub fn set_active_brush(&mut self, brush_id: BrushId) {
         self.current_brush_id = Some(brush_id);
+        let Some(brush_index) = usize::try_from(brush_id.0).ok() else {
+            return;
+        };
+        let Some(Some(distance)) = self.brush_resampler_distances.get(brush_index).copied() else {
+            return;
+        };
+        self.engine_state.set_resampler_distance(distance);
     }
 
     pub fn active_brush_id(&self) -> Option<BrushId> {
@@ -233,11 +320,13 @@ impl AppThreadIntegration {
             event.apply(&mut self.active_stroke_node);
         }
         self.input_samples.clear();
-        self.engine_channels.input_ring_consumer.drain_batch_with_wait(
-            &mut self.input_samples,
-            config::brush_processing::MAX_INPUT_BATCH_SIZE,
-            wait_timeout,
-        );
+        self.engine_channels
+            .input_ring_consumer
+            .drain_batch_with_wait(
+                &mut self.input_samples,
+                config::brush_processing::MAX_INPUT_BATCH_SIZE,
+                wait_timeout,
+            );
         self.normalize_input_sample_timestamps();
         if let Some(trace_recorder) = &mut self.trace_recorder {
             trace_recorder.record_input_frame(&self.input_controls, &self.input_samples);
@@ -267,9 +356,12 @@ impl AppThreadIntegration {
     }
 
     fn process_engine_frame_from_samples(&mut self) -> bool {
-        if !self.input_samples.is_empty() && let Some(node_id) = self.active_stroke_node {
+        if !self.input_samples.is_empty()
+            && let Some(node_id) = self.active_stroke_node
+        {
             if let Some(brush_id) = self.current_brush_id {
                 self.brush_inputs.clear();
+                self.gpu_commands.clear();
 
                 for sample in &self.input_samples {
                     let new_inputs = self
@@ -278,7 +370,8 @@ impl AppThreadIntegration {
                     self.brush_inputs.extend(new_inputs);
                 }
 
-                for brush_input in &self.brush_inputs {
+                let brush_inputs = self.brush_inputs.clone();
+                for brush_input in &brush_inputs {
                     match self.engine_state.process_stroke_input(
                         brush_id,
                         brush_input,
@@ -286,15 +379,23 @@ impl AppThreadIntegration {
                         None,
                     ) {
                         Ok(cmds) => {
-                            for cmd in cmds {
-                                if let Err(e) = self.engine_channels.gpu_command_sender.push(cmd) {
-                                    eprintln!("GPU command send failed: {e:?}");
-                                }
-                            }
+                            self.gpu_commands.extend(cmds);
                         }
                         Err(e) => {
                             eprintln!("Stroke processing failed: {e:?}");
                         }
+                    }
+                }
+
+                Self::compact_frame_mergeable_draws(&mut self.gpu_commands);
+
+                let pending_gpu_cmds = std::mem::take(&mut self.gpu_commands);
+                for cmd in pending_gpu_cmds {
+                    if self.engine_channels.gpu_command_sender.slots() == 0 {
+                        self.drain_and_process_gpu_commands();
+                    }
+                    if let Err(e) = self.engine_channels.gpu_command_sender.push(cmd) {
+                        eprintln!("GPU command send failed: {e:?}");
                     }
                 }
             }
@@ -315,6 +416,17 @@ impl AppThreadIntegration {
         }
 
         has_commands
+    }
+
+    fn drain_and_process_gpu_commands(&mut self) {
+        self.gpu_commands.clear();
+        while let Ok(cmd) = self.main_channels.gpu_command_receiver.pop() {
+            self.gpu_commands.push(cmd);
+        }
+        if !self.gpu_commands.is_empty() {
+            self.main_state.process_gpu_commands(&self.gpu_commands);
+            self.gpu_commands.clear();
+        }
     }
 
     fn normalize_input_sample_timestamps(&mut self) {
@@ -366,6 +478,23 @@ impl AppThreadIntegration {
         }
     }
 
+    pub fn present_to_screen_with_overlay<F>(&mut self, overlay: F)
+    where
+        F: FnMut(
+            &wgpu::Device,
+            &wgpu::Queue,
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+            wgpu::TextureFormat,
+            u32,
+            u32,
+        ),
+    {
+        if let Err(e) = self.main_state.present_to_screen_with_overlay(overlay) {
+            eprintln!("Screen present failed: {e:?}");
+        }
+    }
+
     pub fn save_screenshot(
         &mut self,
         output_path: &std::path::Path,
@@ -377,24 +506,76 @@ impl AppThreadIntegration {
 
     pub fn rebuild_render_tree(&mut self) -> Result<(), document::ImageCreateError> {
         let msg = self.engine_state.rebuild_render_tree()?;
-        self.main_state.process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
+        self.main_state
+            .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
         Ok(())
     }
 
-    pub fn register_brush<S: BrushSpec>(
+    pub fn register_brush<S: BrushSpec + BrushResamplerDistancePolicy>(
         &mut self,
         brush_id: BrushId,
         brush: S,
     ) -> Result<(), BrushRegisterError> {
+        let resampler_distance = brush.resampler_distance();
         let max_affected_radius_px = brush.max_affected_radius_px();
-        
-        self.main_state.register_brush(brush_id, &brush)?;
-        
+
+        let cache_backend_id = self.main_state.register_brush(brush_id, &brush)?;
+        if let Some(cache_backend_id) = cache_backend_id {
+            while self
+                .engine_state
+                .backend_manager()
+                .backend(cache_backend_id)
+                .is_none()
+            {
+                if self
+                    .engine_state
+                    .backend_manager_mut()
+                    .add_backend(AtlasLayout::Small11)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+
         self.engine_state
             .brush_runtime_mut()
-            .register_pipeline(brush_id, max_affected_radius_px, brush)
+            .register_pipeline_with_stroke_buffer_backend(
+                brush_id,
+                max_affected_radius_px,
+                cache_backend_id,
+                brush,
+            )
             .map_err(BrushRegisterError::Engine)?;
-        
+
+        let Some(brush_index) = usize::try_from(brush_id.0).ok() else {
+            return Ok(());
+        };
+        if let Some(slot) = self.brush_resampler_distances.get_mut(brush_index) {
+            *slot = Some(resampler_distance);
+        }
+
+        Ok(())
+    }
+
+    pub fn update_brush<S: BrushSpec + BrushResamplerDistancePolicy>(
+        &mut self,
+        brush_id: BrushId,
+        brush: S,
+    ) -> Result<(), BrushRegisterError> {
+        let resampler_distance = brush.resampler_distance();
+        let max_affected_radius_px = brush.max_affected_radius_px();
+        self.engine_state
+            .brush_runtime_mut()
+            .update_pipeline(brush_id, max_affected_radius_px, brush)
+            .map_err(BrushRegisterError::Engine)?;
+
+        let Some(brush_index) = usize::try_from(brush_id.0).ok() else {
+            return Ok(());
+        };
+        if let Some(slot) = self.brush_resampler_distances.get_mut(brush_index) {
+            *slot = Some(resampler_distance);
+        }
         Ok(())
     }
 }

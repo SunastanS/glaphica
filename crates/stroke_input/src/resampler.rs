@@ -3,13 +3,9 @@ use glaphica_core::{CanvasVec2, MappedCursor, RadianVec2};
 /// Configuration for the resampler
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResamplerConfig {
-    /// Minimum distance between samples (in canvas units)
     pub min_distance: f32,
-    /// Maximum distance between samples (in canvas units)
     pub max_distance: f32,
-    /// Minimum time between samples (in seconds)
     pub min_time_s: f32,
-    /// Maximum time between samples (in seconds)
     pub max_time_s: f32,
 }
 
@@ -24,18 +20,13 @@ impl Default for ResamplerConfig {
     }
 }
 
-/// Result of attempting to add a sample
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResampleResult {
-    /// Sample was accepted as-is
     Accepted(MappedCursor),
-    /// Sample was rejected (too close to previous)
     Rejected,
-    /// Sample triggered interpolation (returning interpolated points with timestamps)
     Interpolated(Vec<(MappedCursor, u64)>),
 }
 
-/// Resampler that generates uniformly spaced samples
 pub struct DistanceResampler {
     config: ResamplerConfig,
     last_sample: Option<(MappedCursor, u64)>, // (cursor, timestamp_ns)
@@ -49,7 +40,6 @@ impl DistanceResampler {
         }
     }
 
-    /// Attempt to add a new sample
     pub fn add_sample(&mut self, cursor: MappedCursor, timestamp_ns: u64) -> ResampleResult {
         let Some((last_cursor, last_time)) = self.last_sample else {
             self.last_sample = Some((cursor, timestamp_ns));
@@ -62,18 +52,15 @@ impl DistanceResampler {
         let delta_time_ns = timestamp_ns.saturating_sub(last_time);
         let delta_time_s = delta_time_ns as f32 / 1_000_000_000.0;
 
-        // Check minimum constraints
         if distance < self.config.min_distance && delta_time_s < self.config.min_time_s {
             return ResampleResult::Rejected;
         }
 
-        // If distance is acceptable, accept directly
         if distance <= self.config.max_distance && delta_time_s <= self.config.max_time_s {
             self.last_sample = Some((cursor, timestamp_ns));
             return ResampleResult::Accepted(cursor);
         }
 
-        // Need interpolation
         let distance_segments = if self.config.max_distance > 0.0 {
             (distance / self.config.max_distance).ceil() as usize
         } else {
@@ -98,6 +85,10 @@ impl DistanceResampler {
         ResampleResult::Interpolated(interpolated)
     }
 
+    pub fn set_config(&mut self, config: ResamplerConfig) {
+        self.config = config;
+    }
+
     fn interpolate_cursor(a: MappedCursor, b: MappedCursor, t: f32) -> MappedCursor {
         MappedCursor {
             cursor: CanvasVec2::new(
@@ -113,7 +104,6 @@ impl DistanceResampler {
         }
     }
 
-    /// Reset the resampler state
     pub fn reset(&mut self) {
         self.last_sample = None;
     }

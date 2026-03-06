@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use document::{LeafBlendMode, RenderCmd};
-use glaphica_core::{TileKey, ATLAS_TILE_SIZE};
-use thread_protocol::{ClearOp, CopyOp};
+use glaphica_core::{ATLAS_TILE_SIZE, TileKey};
+use thread_protocol::{ClearOp, CopyOp, WriteBlendMode, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
 use crate::context::GpuContext;
@@ -124,34 +124,40 @@ impl RenderExecutor {
         &self,
         context: &mut RenderContext<'_>,
         clear_op: &ClearOp,
-        encoder: &mut wgpu::CommandEncoder,
+        _encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), RenderExecutorError> {
         let resolved = context.atlas_storage.resolve(clear_op.tile_key).ok_or(
             RenderExecutorError::MissingTileBackend {
                 tile_key: clear_op.tile_key,
             },
         )?;
+        let bytes_per_pixel = texture_bytes_per_pixel(resolved.format);
+        let bytes_per_row = bytes_per_pixel * ATLAS_TILE_SIZE;
+        let clear_data = vec![0u8; (bytes_per_row * ATLAS_TILE_SIZE) as usize];
 
-        let dst_view = create_render_attachment_view(&resolved);
-
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("glaphica-clear-tile-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &dst_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        context.gpu_context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: resolved.address.texel_offset.0,
+                    y: resolved.address.texel_offset.1,
+                    z: resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &clear_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(ATLAS_TILE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
 
         Ok(())
     }
@@ -226,6 +232,93 @@ impl RenderExecutor {
                 depth_or_array_layers: 1,
             },
         );
+
+        Ok(())
+    }
+
+    pub fn write_tile(
+        &mut self,
+        context: &mut RenderContext<'_>,
+        write_op: &WriteOp,
+    ) -> Result<(), RenderExecutorError> {
+        let mut encoder =
+            context
+                .gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-write-tile-encoder"),
+                });
+        self.encode_write_tile(context, write_op, &mut encoder)?;
+        context.gpu_context.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn write_tile_with_encoder(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        context: &mut RenderContext<'_>,
+        write_op: &WriteOp,
+    ) -> Result<(), RenderExecutorError> {
+        self.encode_write_tile(context, write_op, encoder)
+    }
+
+    fn encode_write_tile(
+        &mut self,
+        context: &mut RenderContext<'_>,
+        write_op: &WriteOp,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), RenderExecutorError> {
+        if context.atlas_storage.resolve(write_op.src_tile_key).is_none() {
+            return Err(RenderExecutorError::MissingTileBackend {
+                tile_key: write_op.src_tile_key,
+            });
+        }
+        let dst_resolved = context.atlas_storage.resolve(write_op.dst_tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: write_op.dst_tile_key,
+            },
+        )?;
+
+        self.ensure_pipelines(context, dst_resolved.format);
+        let cache = self.cache.as_ref().unwrap();
+        let bind_group = create_bind_group(
+            context,
+            &cache.bind_group_layout,
+            &cache.sampler,
+            &cache.params_buffer,
+            write_op.src_tile_key,
+            write_op.opacity,
+        );
+        let dst_view = create_render_attachment_view(&dst_resolved);
+        let pipeline = match write_op.blend_mode {
+            WriteBlendMode::Normal => &cache.normal,
+        };
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("glaphica-render-write-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_scissor_rect(
+            dst_resolved.address.texel_offset.0,
+            dst_resolved.address.texel_offset.1,
+            ATLAS_TILE_SIZE,
+            ATLAS_TILE_SIZE,
+        );
+        pass.draw(0..3, 0..1);
 
         Ok(())
     }
@@ -345,7 +438,21 @@ impl RenderExecutor {
         blend_mode: LeafBlendMode,
     ) -> wgpu::RenderPipeline {
         let (blend, fs_entry) = match blend_mode {
-            LeafBlendMode::Normal => (wgpu::BlendState::ALPHA_BLENDING, "fs_normal"),
+            LeafBlendMode::Normal => (
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                "fs_normal",
+            ),
             LeafBlendMode::Multiply => (
                 wgpu::BlendState {
                     color: wgpu::BlendComponent {
@@ -353,7 +460,11 @@ impl RenderExecutor {
                         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                         operation: wgpu::BlendOperation::Add,
                     },
-                    alpha: wgpu::BlendComponent::REPLACE,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
                 },
                 "fs_multiply",
             ),
@@ -599,4 +710,14 @@ fn create_render_attachment_view(resolved: &AtlasResolvedAddress<'_>) -> wgpu::T
             base_array_layer: resolved.address.layer,
             array_layer_count: Some(1),
         })
+}
+
+fn texture_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
+    match format {
+        wgpu::TextureFormat::R8Unorm => 1,
+        wgpu::TextureFormat::Rg8Unorm => 2,
+        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm => 4,
+        wgpu::TextureFormat::Rgba16Float => 8,
+        _ => 4,
+    }
 }

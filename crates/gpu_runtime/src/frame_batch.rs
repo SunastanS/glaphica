@@ -6,12 +6,12 @@ use frame_scheduler::FrameHandler;
 use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
 use thread_protocol::GpuCmdMsg;
 
+use crate::RenderExecutor;
 use crate::atlas_runtime::AtlasStorageRuntime;
 use crate::brush_runtime::{BrushGpuDispatchError, BrushGpuRuntime};
 use crate::context::GpuContext;
 use crate::render_executor::RenderContext;
 use crate::wgpu_brush_executor::WgpuBrushContext;
-use crate::RenderExecutor;
 
 pub struct FrameBatch {
     encoder: wgpu::CommandEncoder,
@@ -60,7 +60,6 @@ impl FrameBatch {
                 let mut brush_ctx = WgpuBrushContext {
                     gpu_context: ctx.gpu_context,
                     atlas_storage: ctx.atlas_storage,
-                    source_backend_id: draw_op.tile_key.backend_index(),
                 };
 
                 ctx.brush_runtime
@@ -89,6 +88,20 @@ impl FrameBatch {
                     .map_err(FrameBatchError::RenderError)?;
 
                 ctx.tile_dirty_tracker.mark(copy_op.dst_tile_key);
+                self.has_commands = true;
+            }
+
+            GpuCmdMsg::WriteOp(write_op) => {
+                let mut render_ctx = RenderContext {
+                    gpu_context: ctx.gpu_context,
+                    atlas_storage: ctx.atlas_storage,
+                };
+
+                ctx.render_executor
+                    .write_tile_with_encoder(&mut self.encoder, &mut render_ctx, write_op)
+                    .map_err(FrameBatchError::RenderError)?;
+
+                ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
                 self.has_commands = true;
             }
 

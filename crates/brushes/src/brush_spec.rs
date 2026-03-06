@@ -3,12 +3,12 @@ use std::fmt::{Display, Formatter};
 
 use glaphica_core::{BackendKind, BrushId};
 
+use crate::BrushRegistryError;
 use crate::draw_layout::BrushDrawInputLayout;
 use crate::engine_runtime::{BrushEngineRuntime, EngineBrushPipeline};
 use crate::gpu_pipeline_registry::BrushGpuPipelineRegistry;
 use crate::gpu_pipeline_spec::BrushGpuPipelineSpec;
 use crate::layout_registry::BrushLayoutRegistry;
-use crate::BrushRegistryError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrushSpecRegisterError {

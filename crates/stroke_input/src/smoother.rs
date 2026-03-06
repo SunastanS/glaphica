@@ -1,15 +1,10 @@
 use glaphica_core::{CanvasVec2, MappedCursor, RadianVec2};
 
-/// Configuration for exponential moving average smoothing
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExponentialMovingAverageConfig {
-    /// Smoothing factor for position (0.0 = no smoothing, 1.0 = maximum smoothing)
     pub position_alpha: f32,
-    /// Smoothing factor for pressure
     pub pressure_alpha: f32,
-    /// Smoothing factor for tilt
     pub tilt_alpha: f32,
-    /// Smoothing factor for twist
     pub twist_alpha: f32,
 }
 
@@ -24,15 +19,11 @@ impl Default for ExponentialMovingAverageConfig {
     }
 }
 
-/// Trait for cursor smoothing strategies
 pub trait SmoothingStrategy {
-    /// Process a new sample and return smoothed result
     fn smooth(&mut self, sample: MappedCursor) -> MappedCursor;
-    /// Reset the smoother state
     fn reset(&mut self);
 }
 
-/// Exponential moving average smoother for cursor inputs
 pub struct ExponentialMovingAverage {
     config: ExponentialMovingAverageConfig,
     last_smoothed: Option<MappedCursor>,
@@ -83,7 +74,6 @@ impl SmoothingStrategy for ExponentialMovingAverage {
     }
 }
 
-/// No-op smoothing strategy that passes samples through unchanged
 pub struct NoSmoothing;
 
 impl SmoothingStrategy for NoSmoothing {

@@ -55,7 +55,8 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CopyOp, DrawOp, GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
+    ClearOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg, RefImage,
+    RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
 };
 
 mod gpu_feedback;
@@ -67,9 +68,10 @@ pub use gpu_feedback::{
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushId, ClearOp, CompleteWaterline, CopyOp, DrawOp, ExecutedBatchWaterline, GpuCmdMsg,
-        GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem,
-        RefImage, SubmitWaterline, TileKey,
+        BrushId, ClearOp, CompleteWaterline, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp,
+        ExecutedBatchWaterline, GpuCmdMsg, GpuFeedbackFrame, GpuFeedbackMergeState,
+        InputControlEvent, InputControlOp, MergeItem, RefImage, SubmitWaterline, TileKey,
+        WriteBlendMode, WriteOp,
     };
 
     use glaphica_core::PresentFrameId;
@@ -279,6 +281,9 @@ mod tests {
             node_id: NodeId(1),
             tile_index: 0,
             tile_key: TileKey::from_parts(2, 3, 4),
+            blend_mode: DrawBlendMode::Alpha,
+            frame_merge: DrawFrameMergePolicy::None,
+            origin_tile: TileKey::from_parts(11, 12, 13),
             ref_image: Some(RefImage {
                 tile_key: TileKey::from_parts(8, 9, 10),
             }),
@@ -291,6 +296,7 @@ mod tests {
                 assert_eq!(draw_op.node_id, NodeId(1));
                 assert_eq!(draw_op.tile_index, 0);
                 assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
+                assert_eq!(draw_op.origin_tile, TileKey::from_parts(11, 12, 13));
                 assert_eq!(
                     draw_op.ref_image,
                     Some(RefImage {
@@ -301,6 +307,7 @@ mod tests {
                 assert_eq!(draw_op.brush_id, BrushId(7));
             }
             GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::ClearOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected draw op"),
@@ -320,9 +327,34 @@ mod tests {
                 assert_eq!(copy_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
             }
             GpuCmdMsg::DrawOp(_)
+            | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::ClearOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected copy op"),
+        }
+    }
+
+    #[test]
+    fn gpu_cmd_write_op_carries_source_destination_and_blend_mode() {
+        let cmd = GpuCmdMsg::WriteOp(WriteOp {
+            src_tile_key: TileKey::from_parts(1, 2, 3),
+            dst_tile_key: TileKey::from_parts(4, 5, 6),
+            blend_mode: WriteBlendMode::Normal,
+            opacity: 0.7,
+        });
+
+        match cmd {
+            GpuCmdMsg::WriteOp(write_op) => {
+                assert_eq!(write_op.src_tile_key, TileKey::from_parts(1, 2, 3));
+                assert_eq!(write_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
+                assert_eq!(write_op.blend_mode, WriteBlendMode::Normal);
+                assert_eq!(write_op.opacity, 0.7);
+            }
+            GpuCmdMsg::DrawOp(_)
+            | GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::ClearOp(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected write op"),
         }
     }
 
@@ -338,6 +370,7 @@ mod tests {
             }
             GpuCmdMsg::DrawOp(_)
             | GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected clear op"),
         }
