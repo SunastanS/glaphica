@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+use brushes::BrushDrawInputLayout;
 use brushes::BrushLayoutRegistry;
 use document::SharedRenderTree;
 use frame_scheduler::FrameHandler;
 use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
-use thread_protocol::GpuCmdMsg;
+use thread_protocol::{DrawOp, GpuCmdMsg};
 
 use crate::RenderExecutor;
 use crate::atlas_runtime::AtlasStorageRuntime;
@@ -54,6 +55,7 @@ impl FrameBatch {
         &mut self,
         cmd: &GpuCmdMsg,
         ctx: &mut FrameBatchContext<'_>,
+        prevalidated_layout: Option<BrushDrawInputLayout>,
     ) -> Result<(), FrameBatchError> {
         match cmd {
             GpuCmdMsg::DrawOp(draw_op) => {
@@ -61,15 +63,28 @@ impl FrameBatch {
                     gpu_context: ctx.gpu_context,
                     atlas_storage: ctx.atlas_storage,
                 };
-
-                ctx.brush_runtime
-                    .apply_draw_op_with_encoder(
-                        &mut brush_ctx,
-                        draw_op,
-                        ctx.brush_layouts,
-                        &mut self.encoder,
-                    )
-                    .map_err(FrameBatchError::BrushError)?;
+                match prevalidated_layout {
+                    Some(layout) => {
+                        ctx.brush_runtime
+                            .apply_draw_op_with_encoder_prevalidated(
+                                &mut brush_ctx,
+                                draw_op,
+                                layout,
+                                &mut self.encoder,
+                            )
+                            .map_err(FrameBatchError::BrushError)?;
+                    }
+                    None => {
+                        ctx.brush_runtime
+                            .apply_draw_op_with_encoder(
+                                &mut brush_ctx,
+                                draw_op,
+                                ctx.brush_layouts,
+                                &mut self.encoder,
+                            )
+                            .map_err(FrameBatchError::BrushError)?;
+                    }
+                }
 
                 ctx.image_dirty_tracker
                     .mark(draw_op.node_id, draw_op.tile_index);
@@ -142,7 +157,48 @@ impl FrameBatch {
         cmd: &GpuCmdMsg,
         ctx: &mut FrameBatchContext<'_>,
     ) -> Result<(), FrameBatchError> {
-        self.encode_gpu_cmd(cmd, ctx)
+        self.encode_gpu_cmd(cmd, ctx, None)
+    }
+
+    pub fn push_command_with_layout(
+        &mut self,
+        cmd: &GpuCmdMsg,
+        ctx: &mut FrameBatchContext<'_>,
+        prevalidated_layout: Option<BrushDrawInputLayout>,
+    ) -> Result<(), FrameBatchError> {
+        self.encode_gpu_cmd(cmd, ctx, prevalidated_layout)
+    }
+
+    pub fn push_draw_batch(
+        &mut self,
+        draw_ops: &[&DrawOp],
+        layouts: &[BrushDrawInputLayout],
+        ctx: &mut FrameBatchContext<'_>,
+    ) -> Result<(), FrameBatchError> {
+        if draw_ops.is_empty() {
+            return Ok(());
+        }
+
+        let mut brush_ctx = WgpuBrushContext {
+            gpu_context: ctx.gpu_context,
+            atlas_storage: ctx.atlas_storage,
+        };
+
+        ctx.brush_runtime
+            .apply_draw_ops_with_encoder_prevalidated_batch(
+                &mut brush_ctx,
+                draw_ops,
+                layouts,
+                &mut self.encoder,
+            )
+            .map_err(FrameBatchError::BrushError)?;
+
+        for draw_op in draw_ops {
+            ctx.image_dirty_tracker.mark(draw_op.node_id, draw_op.tile_index);
+            ctx.tile_dirty_tracker.mark(draw_op.tile_key);
+        }
+        self.has_commands = true;
+        Ok(())
     }
 
     fn execute_render_commands(

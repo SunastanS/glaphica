@@ -1,18 +1,22 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::{fmt::Display, path::Path};
 
-use brushes::{BrushGpuPipelineRegistry, BrushLayoutRegistry, BrushRegistryError, BrushSpec};
+use brushes::{
+    BrushDrawInputLayout, BrushGpuPipelineRegistry, BrushLayoutRegistry, BrushRegistryError,
+    BrushSpec,
+};
 use document::{FlatRenderTree, SharedRenderTree, View};
 use glaphica_core::{
-    AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, RenderTreeGeneration,
-    TileDirtyTracker,
+    AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId,
+    RenderTreeGeneration, TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
     FrameBatch, FrameBatchContext, GpuContext, GpuContextInitDescriptor, RenderContext,
     RenderExecutor,
     atlas_runtime::AtlasStorageRuntime,
-    brush_runtime::BrushGpuRuntime,
+    brush_runtime::{BrushGpuRuntime, validate_draw_op_layout},
     surface_runtime::{SurfaceError, SurfaceRuntime},
     wgpu_brush_executor::WgpuBrushExecutorError,
 };
@@ -41,6 +45,135 @@ fn gpu_cmd_trace_config() -> GpuCmdTraceConfig {
             max_commands,
         }
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DrawLaneKey {
+    node_id: NodeId,
+    tile_index: usize,
+}
+
+fn draw_lane_key(cmd: &GpuCmdMsg) -> Option<DrawLaneKey> {
+    match cmd {
+        GpuCmdMsg::DrawOp(draw_op) => Some(DrawLaneKey {
+            node_id: draw_op.node_id,
+            tile_index: draw_op.tile_index,
+        }),
+        _ => None,
+    }
+}
+
+fn validate_draw_lane_contract(commands: &[GpuCmdMsg]) {
+    let mut lane_to_tile_key: HashMap<DrawLaneKey, TileKey> = HashMap::new();
+
+    for cmd in commands {
+        let GpuCmdMsg::DrawOp(draw_op) = cmd else {
+            continue;
+        };
+        let lane = DrawLaneKey {
+            node_id: draw_op.node_id,
+            tile_index: draw_op.tile_index,
+        };
+        match lane_to_tile_key.get(&lane).copied() {
+            Some(existing) if existing != draw_op.tile_key => {
+                eprintln!(
+                    "[BUG][gpu_cmd_lane] lane {:?} maps to multiple tile keys in one frame: {:?} then {:?}",
+                    lane, existing, draw_op.tile_key
+                );
+                debug_assert_eq!(
+                    existing, draw_op.tile_key,
+                    "draw lane must map to a stable tile_key within one frame"
+                );
+            }
+            Some(_) => {}
+            None => {
+                lane_to_tile_key.insert(lane, draw_op.tile_key);
+            }
+        }
+    }
+}
+
+fn build_draw_lane_plan(commands: &[GpuCmdMsg]) -> Vec<Vec<usize>> {
+    let mut lane_index_map: HashMap<DrawLaneKey, usize> = HashMap::new();
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    for (cmd_index, cmd) in commands.iter().enumerate() {
+        let Some(lane_key) = draw_lane_key(cmd) else {
+            continue;
+        };
+        let lane = match lane_index_map.get(&lane_key).copied() {
+            Some(existing) => existing,
+            None => {
+                let next = lanes.len();
+                lanes.push(Vec::new());
+                lane_index_map.insert(lane_key, next);
+                next
+            }
+        };
+        lanes[lane].push(cmd_index);
+    }
+    lanes
+}
+
+fn prevalidate_draw_layouts_parallel(
+    commands: &[GpuCmdMsg],
+    brush_layouts: &BrushLayoutRegistry,
+    draw_lane_plan: &[Vec<usize>],
+) -> Vec<Option<BrushDrawInputLayout>> {
+    let mut prevalidated = vec![None; commands.len()];
+    if draw_lane_plan.is_empty() {
+        return prevalidated;
+    }
+
+    let max_workers = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    let worker_count = draw_lane_plan.len().min(max_workers).max(1);
+    let chunk_size = draw_lane_plan.len().div_ceil(worker_count);
+
+    let worker_results = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for lane_chunk in draw_lane_plan.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                let mut layouts = Vec::new();
+                let mut errors = Vec::new();
+                for lane in lane_chunk {
+                    for &index in lane {
+                        let GpuCmdMsg::DrawOp(draw_op) = &commands[index] else {
+                            continue;
+                        };
+                        match validate_draw_op_layout(draw_op, brush_layouts) {
+                            Ok(layout) => layouts.push((index, layout)),
+                            Err(error) => errors.push(format!("index {}: {}", index, error)),
+                        }
+                    }
+                }
+                (layouts, errors)
+            }));
+        }
+        let mut results = Vec::new();
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => results.push(result),
+                Err(_) => {
+                    eprintln!(
+                        "[BUG][gpu_cmd_lane] draw layout prevalidation worker thread panicked"
+                    );
+                    debug_assert!(false, "draw layout prevalidation worker thread panicked");
+                }
+            }
+        }
+        results
+    });
+
+    for (layouts, errors) in worker_results {
+        for (index, layout) in layouts {
+            prevalidated[index] = Some(layout);
+        }
+        for error in errors {
+            eprintln!("GPU command processing failed: {error}");
+        }
+    }
+    prevalidated
 }
 
 pub struct MainThreadState {
@@ -276,14 +409,56 @@ impl MainThreadState {
         if trace_config.enabled {
             trace_gpu_commands(commands, trace_config.max_commands);
         }
+        validate_draw_lane_contract(commands);
+        let draw_lane_plan = build_draw_lane_plan(commands);
+        let prevalidated_draw_layouts =
+            prevalidate_draw_layouts_parallel(commands, &self.brush_layouts, &draw_lane_plan);
         let mut frame_batch = FrameBatch::new(&self.gpu_context);
-        for cmd in commands {
+        let mut index = 0usize;
+        while index < commands.len() {
+            let cmd = &commands[index];
             match cmd {
                 GpuCmdMsg::RenderTreeUpdated(msg) => {
                     self.apply_render_tree_updated(msg);
+                    index += 1;
                 }
                 GpuCmdMsg::TileSlotKeyUpdate(op) => {
                     self.apply_tile_slot_key_update(op);
+                    index += 1;
+                }
+                GpuCmdMsg::DrawOp(_) if prevalidated_draw_layouts[index].is_some() => {
+                    let mut draw_ops: Vec<&thread_protocol::DrawOp> = Vec::new();
+                    let mut layouts: Vec<BrushDrawInputLayout> = Vec::new();
+                    let mut end = index;
+                    while end < commands.len() {
+                        let GpuCmdMsg::DrawOp(draw_op) = &commands[end] else {
+                            break;
+                        };
+                        let Some(layout) = prevalidated_draw_layouts[end] else {
+                            break;
+                        };
+                        draw_ops.push(draw_op);
+                        layouts.push(layout);
+                        end += 1;
+                    }
+                    if !draw_ops.is_empty() {
+                        let mut context = FrameBatchContext {
+                            gpu_context: &self.gpu_context,
+                            atlas_storage: &self.atlas_storage,
+                            render_executor: &mut self.render_executor,
+                            brush_runtime: &mut self.brush_runtime,
+                            brush_layouts: &self.brush_layouts,
+                            shared_tree: &self.shared_tree,
+                            image_dirty_tracker: &mut self.image_dirty_tracker,
+                            tile_dirty_tracker: &mut self.tile_dirty_tracker,
+                        };
+                        if let Err(error) = frame_batch.push_draw_batch(&draw_ops, &layouts, &mut context) {
+                            eprintln!("GPU command processing failed: {error:?}");
+                        }
+                        index = end;
+                    } else {
+                        index += 1;
+                    }
                 }
                 _ => {
                     let mut context = FrameBatchContext {
@@ -296,9 +471,14 @@ impl MainThreadState {
                         image_dirty_tracker: &mut self.image_dirty_tracker,
                         tile_dirty_tracker: &mut self.tile_dirty_tracker,
                     };
-                    if let Err(error) = frame_batch.push_command(cmd, &mut context) {
+                    if let Err(error) = frame_batch.push_command_with_layout(
+                        cmd,
+                        &mut context,
+                        prevalidated_draw_layouts[index],
+                    ) {
                         eprintln!("GPU command processing failed: {error:?}");
                     }
+                    index += 1;
                 }
             }
         }

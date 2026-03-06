@@ -180,33 +180,61 @@ impl EngineThreadState {
             &mut self.stroke_outputs,
         )?;
 
-        let mut gpu_cmds = Vec::with_capacity(self.stroke_outputs.len() * 2);
+        let mut clear_ops = Vec::new();
+        let mut copy_ops = Vec::new();
+        let mut draw_ops = Vec::new();
+        let mut composite_ops = Vec::new();
+        let mut write_ops = Vec::new();
         let mut tile_updates: Vec<(NodeId, usize)> = Vec::new();
 
         for output in &self.stroke_outputs {
             if let Some(clear_op) = output.clear_op {
-                gpu_cmds.push(thread_protocol::GpuCmdMsg::ClearOp(clear_op));
+                clear_ops.push(clear_op);
             }
 
             if let Some(copy_op) = output.copy_op {
-                gpu_cmds.push(thread_protocol::GpuCmdMsg::CopyOp(copy_op));
+                copy_ops.push(copy_op);
             }
 
             if let Some(write_op) = output.write_op {
-                gpu_cmds.push(thread_protocol::GpuCmdMsg::WriteOp(write_op));
+                write_ops.push(write_op);
             }
 
             if let Some(composite_op) = output.composite_op {
-                gpu_cmds.push(thread_protocol::GpuCmdMsg::CompositeOp(composite_op));
+                composite_ops.push(composite_op);
             }
 
             if let Some(draw_op) = &output.draw_op {
-                gpu_cmds.push(thread_protocol::GpuCmdMsg::DrawOp(draw_op.clone()));
+                draw_ops.push(draw_op.clone());
             }
 
             if let Some((node_id, tile_index, _tile_key)) = output.tile_key_update {
                 tile_updates.push((node_id, tile_index));
             }
+        }
+
+        let mut gpu_cmds = Vec::with_capacity(
+            clear_ops.len()
+                + copy_ops.len()
+                + draw_ops.len()
+                + composite_ops.len()
+                + write_ops.len()
+                + 1,
+        );
+        for clear_op in clear_ops {
+            gpu_cmds.push(thread_protocol::GpuCmdMsg::ClearOp(clear_op));
+        }
+        for copy_op in copy_ops {
+            gpu_cmds.push(thread_protocol::GpuCmdMsg::CopyOp(copy_op));
+        }
+        for draw_op in draw_ops {
+            gpu_cmds.push(thread_protocol::GpuCmdMsg::DrawOp(draw_op));
+        }
+        for composite_op in composite_ops {
+            gpu_cmds.push(thread_protocol::GpuCmdMsg::CompositeOp(composite_op));
+        }
+        for write_op in write_ops {
+            gpu_cmds.push(thread_protocol::GpuCmdMsg::WriteOp(write_op));
         }
 
         if !tile_updates.is_empty() {

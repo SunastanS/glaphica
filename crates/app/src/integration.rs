@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -122,10 +122,15 @@ struct EngineFramePerf {
     smooth_and_resample: Duration,
     brush_handling: Duration,
     send_to_app_thread: Duration,
+    send_inline_submit: Duration,
     accept_by_app_thread: Duration,
     submit_to_gpu: Duration,
     sample_count: usize,
     brush_input_count: usize,
+    generated_gpu_command_count: usize,
+    inline_submitted_gpu_command_count: usize,
+    inline_submit_batches: usize,
+    pending_send_gpu_command_count: usize,
     gpu_command_count: usize,
 }
 
@@ -138,6 +143,7 @@ pub struct AppThreadIntegration {
     input_samples: Vec<InputRingSample>,
     brush_inputs: Vec<glaphica_core::BrushInput>,
     gpu_commands: Vec<thread_protocol::GpuCmdMsg>,
+    pending_send_gpu_commands: VecDeque<thread_protocol::GpuCmdMsg>,
     feedback_merge_state: AppGpuFeedbackMergeState,
     trace_recorder: Option<TraceRecorder>,
     active_stroke_node: Option<NodeId>,
@@ -255,6 +261,9 @@ impl AppThreadIntegration {
             input_samples: Vec::with_capacity(config::batch_capacities::INPUT_SAMPLES),
             brush_inputs: Vec::with_capacity(config::batch_capacities::BRUSH_INPUTS),
             gpu_commands: Vec::with_capacity(config::batch_capacities::GPU_COMMANDS),
+            pending_send_gpu_commands: VecDeque::with_capacity(
+                config::batch_capacities::GPU_COMMANDS,
+            ),
             feedback_merge_state: AppGpuFeedbackMergeState::default(),
             trace_recorder: None,
             active_stroke_node: None,
@@ -404,6 +413,7 @@ impl AppThreadIntegration {
         &mut self,
         mut perf: Option<&mut EngineFramePerf>,
     ) -> bool {
+        let mut generated_gpu_command_count = 0usize;
         if !self.input_samples.is_empty()
             && let Some(node_id) = self.active_stroke_node
         {
@@ -447,19 +457,29 @@ impl AppThreadIntegration {
                 Self::compact_frame_mergeable_draws(&mut self.gpu_commands);
 
                 let pending_gpu_cmds = std::mem::take(&mut self.gpu_commands);
-                let send_to_app_thread_started = Instant::now();
-                for cmd in pending_gpu_cmds {
-                    if self.engine_channels.gpu_command_sender.slots() == 0 {
-                        self.drain_and_process_gpu_commands();
-                    }
-                    if let Err(e) = self.engine_channels.gpu_command_sender.push(cmd) {
-                        eprintln!("GPU command send failed: {e:?}");
-                    }
-                }
-                if let Some(perf) = perf.as_deref_mut() {
-                    perf.send_to_app_thread = send_to_app_thread_started.elapsed();
-                }
+                generated_gpu_command_count = pending_gpu_cmds.len();
+                self.pending_send_gpu_commands.extend(pending_gpu_cmds);
             }
+        }
+
+        let send_to_app_thread_started = Instant::now();
+        while self.engine_channels.gpu_command_sender.slots() > 0 {
+            let Some(cmd) = self.pending_send_gpu_commands.front().cloned() else {
+                break;
+            };
+            if let Err(e) = self.engine_channels.gpu_command_sender.push(cmd) {
+                eprintln!("GPU command send failed: {e:?}");
+                break;
+            }
+            self.pending_send_gpu_commands.pop_front();
+        }
+        if let Some(perf) = perf.as_deref_mut() {
+            perf.send_to_app_thread = send_to_app_thread_started.elapsed();
+            perf.send_inline_submit = Duration::ZERO;
+            perf.generated_gpu_command_count = generated_gpu_command_count;
+            perf.inline_submitted_gpu_command_count = 0;
+            perf.inline_submit_batches = 0;
+            perf.pending_send_gpu_command_count = self.pending_send_gpu_commands.len();
         }
 
         self.gpu_commands.clear();
@@ -518,7 +538,7 @@ impl AppThreadIntegration {
         };
         self.perf_frame_seq += 1;
         eprintln!(
-            "[PERF][pipeline][engine_frame={}] total_ms={:.3} bottleneck={} ({:.3}ms) samples={} brush_inputs={} gpu_cmds={} stages_ms={{input:{:.3}, smooth_resample:{:.3}, brush:{:.3}, send:{:.3}, accept:{:.3}, submit:{:.3}}}",
+            "[PERF][pipeline][engine_frame={}] total_ms={:.3} bottleneck={} ({:.3}ms) samples={} brush_inputs={} gpu_cmds={} generated_gpu_cmds={} pending_send_gpu_cmds={} inline_submit_cmds={} inline_submit_batches={} inline_submit_ms={:.3} stages_ms={{input:{:.3}, smooth_resample:{:.3}, brush:{:.3}, send:{:.3}, accept:{:.3}, submit:{:.3}}}",
             self.perf_frame_seq,
             duration_ms(total),
             bottleneck,
@@ -526,6 +546,11 @@ impl AppThreadIntegration {
             perf.sample_count,
             perf.brush_input_count,
             perf.gpu_command_count,
+            perf.generated_gpu_command_count,
+            perf.pending_send_gpu_command_count,
+            perf.inline_submitted_gpu_command_count,
+            perf.inline_submit_batches,
+            duration_ms(perf.send_inline_submit),
             duration_ms(perf.input_sample),
             duration_ms(perf.smooth_and_resample),
             duration_ms(perf.brush_handling),
@@ -533,17 +558,6 @@ impl AppThreadIntegration {
             duration_ms(perf.accept_by_app_thread),
             duration_ms(perf.submit_to_gpu),
         );
-    }
-
-    fn drain_and_process_gpu_commands(&mut self) {
-        self.gpu_commands.clear();
-        while let Ok(cmd) = self.main_channels.gpu_command_receiver.pop() {
-            self.gpu_commands.push(cmd);
-        }
-        if !self.gpu_commands.is_empty() {
-            self.main_state.process_gpu_commands(&self.gpu_commands);
-            self.gpu_commands.clear();
-        }
     }
 
     fn normalize_input_sample_timestamps(&mut self) {

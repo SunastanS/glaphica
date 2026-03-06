@@ -251,6 +251,7 @@ impl BrushEngineRuntime {
             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
             input: encoded_input,
             brush_id,
+            stroke_id: brush_input.stroke,
         })
     }
 
@@ -384,6 +385,7 @@ impl BrushEngineRuntime {
                     .map(|tile_key| RefImage { tile_key }),
                 input: encoded_input,
                 brush_id,
+                stroke_id: brush_input.stroke,
             });
         }
         Ok(())
@@ -520,6 +522,7 @@ impl BrushEngineRuntime {
                             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
                             input: encoded_input,
                             brush_id,
+                            stroke_id: brush_input.stroke,
                         }),
                         copy_op,
                         write_op: None,
@@ -547,6 +550,7 @@ impl BrushEngineRuntime {
                         ref_image: None,
                         input: encoded_dab_input,
                         brush_id,
+                        stroke_id: brush_input.stroke,
                     }),
                     copy_op,
                     write_op: None,
@@ -622,6 +626,7 @@ impl BrushEngineRuntime {
                         ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
                         input: encoded_input,
                         brush_id,
+                        stroke_id: brush_input.stroke,
                     }),
                     copy_op,
                     write_op: None,

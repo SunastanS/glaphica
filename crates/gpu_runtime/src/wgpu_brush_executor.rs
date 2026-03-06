@@ -1,6 +1,8 @@
 use crate::context::GpuContext;
+use glaphica_core::StrokeId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::num::NonZeroU64;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -43,6 +45,10 @@ pub enum WgpuBrushExecutorError {
         brush_id: BrushId,
         expected: wgpu::TextureFormat,
         actual: wgpu::TextureFormat,
+    },
+    DynamicOffsetOutOfRange {
+        brush_id: BrushId,
+        offset: u64,
     },
 }
 
@@ -105,6 +111,11 @@ impl Display for WgpuBrushExecutorError {
                 "source format mismatch for brush {}: expected {:?}, got {:?}",
                 brush_id.0, expected, actual
             ),
+            Self::DynamicOffsetOutOfRange { brush_id, offset } => write!(
+                f,
+                "dynamic offset {} exceeds u32 range for brush {}",
+                offset, brush_id.0
+            ),
         }
     }
 }
@@ -123,6 +134,21 @@ struct CachedAtlasBindGroupLayout {
     layout: wgpu::BindGroupLayout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StrokeAtlasBindGroupKey {
+    source_backend_id: u8,
+    cache_backend_id: Option<u8>,
+    has_ref_image: bool,
+    has_cache_tile: bool,
+    layout_key: AtlasBindGroupLayoutKey,
+}
+
+#[derive(Debug)]
+struct CachedStrokeAtlasBindGroup {
+    key: StrokeAtlasBindGroupKey,
+    bind_group: wgpu::BindGroup,
+}
+
 #[derive(Debug)]
 struct DummyCacheTexture {
     _texture: wgpu::Texture,
@@ -131,11 +157,21 @@ struct DummyCacheTexture {
 
 #[derive(Debug)]
 struct TransientDrawResources {
-    _input_buffer: wgpu::Buffer,
-    _params_buffer: wgpu::Buffer,
-    _draw_bind_group: wgpu::BindGroup,
     _atlas_bind_group: wgpu::BindGroup,
     _attachment_view: wgpu::TextureView,
+}
+
+#[derive(Debug)]
+struct BrushDrawRing {
+    input_buffer: wgpu::Buffer,
+    params_buffer: wgpu::Buffer,
+    draw_bind_group: wgpu::BindGroup,
+    input_binding_size: u64,
+    input_stride: u64,
+    params_stride: u64,
+    input_cursor: u64,
+    params_cursor: u64,
+    last_stroke_id: Option<StrokeId>,
 }
 
 #[repr(C)]
@@ -158,6 +194,25 @@ struct BrushShaderParams {
     _pad2: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrawPassKey {
+    backend_id: u8,
+    layer: u32,
+    format: wgpu::TextureFormat,
+}
+
+#[derive(Debug)]
+struct PreparedDrawCall {
+    pass_key: DrawPassKey,
+    scissor_x: u32,
+    scissor_y: u32,
+    pipeline: wgpu::RenderPipeline,
+    draw_bind_group: wgpu::BindGroup,
+    atlas_bind_group: wgpu::BindGroup,
+    input_dynamic_offset: u32,
+    params_dynamic_offset: u32,
+}
+
 pub struct WgpuBrushContext<'a> {
     pub gpu_context: &'a GpuContext,
     pub atlas_storage: &'a AtlasStorageRuntime,
@@ -168,6 +223,9 @@ struct BrushContext {
     cache_backend_id: Option<u8>,
     alpha_pipeline: Option<wgpu::RenderPipeline>,
     replace_pipeline: Option<wgpu::RenderPipeline>,
+    draw_ring: Option<BrushDrawRing>,
+    stroke_cached_bind_groups: Vec<CachedStrokeAtlasBindGroup>,
+    cached_stroke_id: Option<StrokeId>,
 }
 
 #[derive(Default)]
@@ -213,6 +271,16 @@ fn should_trace_gpu_draw_exec_event() -> bool {
     seq <= config.max_events
 }
 
+const BRUSH_SHADER_PARAMS_SIZE: u64 = 60;
+const BRUSH_RING_INITIAL_SLOTS: u64 = 128;
+
+fn align_up_u64(value: u64, alignment: u64) -> u64 {
+    if alignment <= 1 {
+        return value;
+    }
+    value.div_ceil(alignment).saturating_mul(alignment)
+}
+
 impl WgpuBrushExecutor {
     pub fn new() -> Self {
         Self::default()
@@ -221,6 +289,113 @@ impl WgpuBrushExecutor {
     fn brush_index(brush_id: BrushId) -> Result<usize, WgpuBrushExecutorError> {
         usize::try_from(brush_id.0)
             .map_err(|_| WgpuBrushExecutorError::BrushIdOutOfRange { brush_id })
+    }
+
+    fn create_brush_draw_ring(
+        device: &wgpu::Device,
+        draw_bind_group_layout: &wgpu::BindGroupLayout,
+        input_binding_size: u64,
+        input_stride: u64,
+        params_stride: u64,
+        slots: u64,
+    ) -> BrushDrawRing {
+        let input_capacity = input_stride.saturating_mul(slots);
+        let params_capacity = params_stride.saturating_mul(slots);
+
+        let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-brush-input-ring-storage"),
+            size: input_capacity.max(input_stride),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-brush-params-ring-uniform"),
+            size: params_capacity.max(params_stride),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let draw_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-brush-draw-ring-bind-group"),
+            layout: draw_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &input_buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(input_binding_size),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &params_buffer,
+                        offset: 0,
+                        size: NonZeroU64::new(BRUSH_SHADER_PARAMS_SIZE),
+                    }),
+                },
+            ],
+        });
+
+        BrushDrawRing {
+            input_buffer,
+            params_buffer,
+            draw_bind_group,
+            input_binding_size,
+            input_stride,
+            params_stride,
+            input_cursor: 0,
+            params_cursor: 0,
+            last_stroke_id: None,
+        }
+    }
+
+    fn get_or_create_stroke_atlas_bind_group(
+        &mut self,
+        brush_id: BrushId,
+        brush_index: usize,
+        key: StrokeAtlasBindGroupKey,
+        device: &wgpu::Device,
+        atlas_storage: &AtlasStorageRuntime,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Result<wgpu::BindGroup, WgpuBrushExecutorError> {
+        {
+            let brush_context = self
+                .brushes
+                .get(brush_index)
+                .and_then(|entry| entry.as_ref())
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured { brush_id })?;
+            if let Some(existing) = brush_context
+                .stroke_cached_bind_groups
+                .iter()
+                .find(|cached| cached.key == key)
+            {
+                return Ok(existing.bind_group.clone());
+            }
+        }
+
+        let bind_group = self.create_atlas_bind_group(
+            device,
+            atlas_storage,
+            key.source_backend_id,
+            key.cache_backend_id,
+            layout,
+            brush_id,
+            key.has_ref_image,
+            key.has_cache_tile,
+        )?;
+        let brush_context = self
+            .brushes
+            .get_mut(brush_index)
+            .and_then(|entry| entry.as_mut())
+            .ok_or(WgpuBrushExecutorError::BrushNotConfigured { brush_id })?;
+        brush_context
+            .stroke_cached_bind_groups
+            .push(CachedStrokeAtlasBindGroup { key, bind_group });
+        match brush_context.stroke_cached_bind_groups.last() {
+            Some(cached) => Ok(cached.bind_group.clone()),
+            None => unreachable!("stroke atlas bind group was just pushed"),
+        }
     }
 
     pub fn configure_brush(
@@ -238,12 +413,24 @@ impl WgpuBrushExecutor {
             cache_backend_id,
             alpha_pipeline: None,
             replace_pipeline: None,
+            draw_ring: None,
+            stroke_cached_bind_groups: Vec::new(),
+            cached_stroke_id: None,
         });
         Ok(())
     }
 
     pub fn clear_transient_draw_resources(&mut self) {
         self.transient_draw_resources.clear();
+        for brush in &mut self.brushes {
+            if let Some(brush) = brush.as_mut() {
+                if let Some(ring) = brush.draw_ring.as_mut() {
+                    ring.input_cursor = 0;
+                    ring.params_cursor = 0;
+                    ring.last_stroke_id = None;
+                }
+            }
+        }
     }
 
     fn ensure_draw_bind_group_layout(&mut self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -258,7 +445,7 @@ impl WgpuBrushExecutor {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true,
                         min_binding_size: None,
                     },
                     count: None,
@@ -268,8 +455,8 @@ impl WgpuBrushExecutor {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: NonZeroU64::new(BRUSH_SHADER_PARAMS_SIZE),
                     },
                     count: None,
                 },
@@ -533,13 +720,11 @@ impl WgpuBrushExecutor {
         }))
     }
 
-    fn encode_draw(
+    fn prepare_draw_call(
         &mut self,
         context: &mut WgpuBrushContext<'_>,
         draw_op: &DrawOp,
-        encoder: &mut wgpu::CommandEncoder,
-        retain_resources: bool,
-    ) -> Result<(), BrushPipelineError> {
+    ) -> Result<PreparedDrawCall, BrushPipelineError> {
         let brush_index = Self::brush_index(draw_op.brush_id)?;
 
         let source_backend_id = draw_op
@@ -651,15 +836,27 @@ impl WgpuBrushExecutor {
             context.atlas_storage.resolve(draw_op.origin_tile)
         };
 
-        let atlas_bind_group = self.create_atlas_bind_group(
-            &context.gpu_context.device,
-            context.atlas_storage,
+        {
+            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            if brush_context.cached_stroke_id != Some(draw_op.stroke_id) {
+                brush_context.cached_stroke_id = Some(draw_op.stroke_id);
+                brush_context.stroke_cached_bind_groups.clear();
+            }
+        }
+        let atlas_bind_group_key = StrokeAtlasBindGroupKey {
             source_backend_id,
             cache_backend_id,
-            &atlas_bind_group_layout,
+            has_ref_image: draw_op.ref_image.is_some(),
+            has_cache_tile: cache_resolved.is_some(),
+            layout_key: atlas_layout_key,
+        };
+        let atlas_bind_group = self.get_or_create_stroke_atlas_bind_group(
             draw_op.brush_id,
-            draw_op.ref_image.is_some(),
-            cache_resolved.is_some(),
+            brush_index,
+            atlas_bind_group_key,
+            &context.gpu_context.device,
+            context.atlas_storage,
+            &atlas_bind_group_layout,
         )?;
 
         if needs_alpha_pipeline {
@@ -693,26 +890,14 @@ impl WgpuBrushExecutor {
         let pipeline = {
             let brush_context = self.brushes[brush_index].as_ref().unwrap();
             match draw_op.blend_mode {
-                DrawBlendMode::Alpha => brush_context.alpha_pipeline.as_ref().unwrap(),
-                DrawBlendMode::Replace => brush_context.replace_pipeline.as_ref().unwrap(),
+                DrawBlendMode::Alpha => brush_context.alpha_pipeline.as_ref().unwrap().clone(),
+                DrawBlendMode::Replace => {
+                    brush_context.replace_pipeline.as_ref().unwrap().clone()
+                }
             }
         };
 
         let input_bytes = encode_input_bytes(&draw_op.input);
-        let input_buffer = context
-            .gpu_context
-            .device
-            .create_buffer(&wgpu::BufferDescriptor {
-                label: Some("glaphica-brush-input-storage"),
-                size: input_bytes.len() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        context
-            .gpu_context
-            .queue
-            .write_buffer(&input_buffer, 0, &input_bytes);
-
         let params = BrushShaderParams {
             input_len: draw_op.input.len() as u32,
             tile_origin_x: resolved.address.texel_offset.0,
@@ -735,50 +920,131 @@ impl WgpuBrushExecutor {
             _pad2: 0,
         };
         let params_bytes = encode_shader_params_bytes(params);
-        let params_buffer = context
-            .gpu_context
-            .device
-            .create_buffer(&wgpu::BufferDescriptor {
-                label: Some("glaphica-brush-params-uniform"),
-                size: params_bytes.len() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+        let limits = context.gpu_context.device.limits();
+        let input_alignment = u64::from(limits.min_storage_buffer_offset_alignment);
+        let params_alignment = u64::from(limits.min_uniform_buffer_offset_alignment);
+        let input_binding_size = (input_bytes.len() as u64).max(4);
+        let input_stride = align_up_u64(input_binding_size, input_alignment.max(1));
+        let params_stride = align_up_u64(BRUSH_SHADER_PARAMS_SIZE, params_alignment.max(1));
+
+        let brush_context = self.brushes[brush_index].as_mut().unwrap();
+        let should_recreate_ring = match brush_context.draw_ring.as_ref() {
+            Some(ring) => {
+                ring.input_binding_size != input_binding_size
+                    || ring.input_stride != input_stride
+                    || ring.params_stride != params_stride
+            }
+            None => true,
+        };
+        if should_recreate_ring {
+            brush_context.draw_ring = Some(Self::create_brush_draw_ring(
+                &context.gpu_context.device,
+                &draw_bind_group_layout,
+                input_binding_size,
+                input_stride,
+                params_stride,
+                BRUSH_RING_INITIAL_SLOTS,
+            ));
+        }
+
+        let ring_ref = brush_context.draw_ring.as_ref().unwrap();
+        let next_input_end = ring_ref.input_cursor.saturating_add(ring_ref.input_stride);
+        let next_params_end = ring_ref.params_cursor.saturating_add(ring_ref.params_stride);
+        let input_capacity = ring_ref.input_buffer.size();
+        let params_capacity = ring_ref.params_buffer.size();
+        if next_input_end > input_capacity || next_params_end > params_capacity {
+            let needed_slots_input = next_input_end.div_ceil(ring_ref.input_stride);
+            let needed_slots_params = next_params_end.div_ceil(ring_ref.params_stride);
+            let current_slots_input = input_capacity.div_ceil(ring_ref.input_stride).max(1);
+            let current_slots_params = params_capacity.div_ceil(ring_ref.params_stride).max(1);
+            let mut slots = current_slots_input.max(current_slots_params).max(1);
+            let needed_slots = needed_slots_input.max(needed_slots_params).max(1);
+            while slots < needed_slots {
+                slots = slots.saturating_mul(2);
+            }
+            brush_context.draw_ring = Some(Self::create_brush_draw_ring(
+                &context.gpu_context.device,
+                &draw_bind_group_layout,
+                ring_ref.input_binding_size,
+                ring_ref.input_stride,
+                ring_ref.params_stride,
+                slots,
+            ));
+        }
+
+        let ring = brush_context.draw_ring.as_mut().unwrap();
+        let stroke_changed = ring.last_stroke_id != Some(draw_op.stroke_id);
+        let input_offset = ring.input_cursor;
+        let params_offset = ring.params_cursor;
+        ring.input_cursor = ring.input_cursor.saturating_add(ring.input_stride);
+        ring.params_cursor = ring.params_cursor.saturating_add(ring.params_stride);
+        if stroke_changed {
+            ring.last_stroke_id = Some(draw_op.stroke_id);
+        }
+
         context
             .gpu_context
             .queue
-            .write_buffer(&params_buffer, 0, &params_bytes);
+            .write_buffer(&ring.input_buffer, input_offset, &input_bytes);
+        context
+            .gpu_context
+            .queue
+            .write_buffer(&ring.params_buffer, params_offset, &params_bytes);
 
-        let draw_bind_group =
-            context
-                .gpu_context
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("glaphica-brush-draw-bind-group"),
-                    layout: &draw_bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: input_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: params_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
+        let input_dynamic_offset = u32::try_from(input_offset).map_err(|_| {
+            WgpuBrushExecutorError::DynamicOffsetOutOfRange {
+                brush_id: draw_op.brush_id,
+                offset: input_offset,
+            }
+        })?;
+        let params_dynamic_offset = u32::try_from(params_offset).map_err(|_| {
+            WgpuBrushExecutorError::DynamicOffsetOutOfRange {
+                brush_id: draw_op.brush_id,
+                offset: params_offset,
+            }
+        })?;
 
-        let attachment_view = resolved
+        Ok(PreparedDrawCall {
+            pass_key: DrawPassKey {
+                backend_id: draw_op.tile_key.backend_index(),
+                layer: resolved.address.layer,
+                format: resolved.format,
+            },
+            scissor_x: resolved.address.texel_offset.0,
+            scissor_y: resolved.address.texel_offset.1,
+            pipeline,
+            draw_bind_group: ring.draw_bind_group.clone(),
+            atlas_bind_group,
+            input_dynamic_offset,
+            params_dynamic_offset,
+        })
+    }
+
+    fn encode_draw(
+        &mut self,
+        context: &mut WgpuBrushContext<'_>,
+        draw_op: &DrawOp,
+        encoder: &mut wgpu::CommandEncoder,
+        retain_resources: bool,
+    ) -> Result<(), BrushPipelineError> {
+        let call = self.prepare_draw_call(context, draw_op)?;
+        let backend = context
+            .atlas_storage
+            .backend_resource(call.pass_key.backend_id)
+            .ok_or(WgpuBrushExecutorError::MissingTargetAtlasBackend {
+                brush_id: draw_op.brush_id,
+            })?;
+        let attachment_view = backend
             .texture2d_array
             .create_view(&wgpu::TextureViewDescriptor {
                 label: Some("glaphica-brush-atlas-layer-view"),
-                format: Some(resolved.format),
+                format: Some(call.pass_key.format),
                 dimension: Some(wgpu::TextureViewDimension::D2),
                 usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
                 aspect: wgpu::TextureAspect::All,
                 base_mip_level: 0,
                 mip_level_count: Some(1),
-                base_array_layer: resolved.address.layer,
+                base_array_layer: call.pass_key.layer,
                 array_layer_count: Some(1),
             });
 
@@ -799,24 +1065,20 @@ impl WgpuBrushExecutor {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &draw_bind_group, &[]);
-            pass.set_bind_group(1, &atlas_bind_group, &[]);
-            pass.set_scissor_rect(
-                resolved.address.texel_offset.0,
-                resolved.address.texel_offset.1,
-                ATLAS_TILE_SIZE,
-                ATLAS_TILE_SIZE,
+            pass.set_pipeline(&call.pipeline);
+            pass.set_bind_group(
+                0,
+                &call.draw_bind_group,
+                &[call.input_dynamic_offset, call.params_dynamic_offset],
             );
+            pass.set_bind_group(1, &call.atlas_bind_group, &[]);
+            pass.set_scissor_rect(call.scissor_x, call.scissor_y, ATLAS_TILE_SIZE, ATLAS_TILE_SIZE);
             pass.draw(0..3, 0..1);
         }
 
         if retain_resources {
             self.transient_draw_resources.push(TransientDrawResources {
-                _input_buffer: input_buffer,
-                _params_buffer: params_buffer,
-                _draw_bind_group: draw_bind_group,
-                _atlas_bind_group: atlas_bind_group,
+                _atlas_bind_group: call.atlas_bind_group,
                 _attachment_view: attachment_view,
             });
         }
@@ -863,6 +1125,97 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), BrushPipelineError> {
         self.encode_draw(context, draw_op, encoder, true)
+    }
+
+    fn execute_draw_batch_with_encoder(
+        &mut self,
+        context: &mut WgpuBrushContext<'_>,
+        draw_ops: &[&DrawOp],
+        _layouts: &[BrushDrawInputLayout],
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushPipelineError> {
+        if draw_ops.is_empty() {
+            return Ok(());
+        }
+
+        let mut calls = Vec::with_capacity(draw_ops.len());
+        for draw_op in draw_ops {
+            calls.push(self.prepare_draw_call(context, draw_op)?);
+        }
+
+        let mut start = 0usize;
+        while start < calls.len() {
+            let pass_key = calls[start].pass_key;
+            let mut end = start + 1;
+            while end < calls.len() && calls[end].pass_key == pass_key {
+                end += 1;
+            }
+
+            let backend = context
+                .atlas_storage
+                .backend_resource(pass_key.backend_id)
+                .ok_or(WgpuBrushExecutorError::MissingTargetAtlasBackend {
+                    brush_id: draw_ops[start].brush_id,
+                })?;
+            let attachment_view = backend
+                .texture2d_array
+                .create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("glaphica-brush-atlas-layer-view"),
+                    format: Some(pass_key.format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                    aspect: wgpu::TextureAspect::All,
+                    base_mip_level: 0,
+                    mip_level_count: Some(1),
+                    base_array_layer: pass_key.layer,
+                    array_layer_count: Some(1),
+                });
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("glaphica-brush-pass-batch"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &attachment_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                for call in &calls[start..end] {
+                    pass.set_pipeline(&call.pipeline);
+                    pass.set_bind_group(
+                        0,
+                        &call.draw_bind_group,
+                        &[call.input_dynamic_offset, call.params_dynamic_offset],
+                    );
+                    pass.set_bind_group(1, &call.atlas_bind_group, &[]);
+                    pass.set_scissor_rect(
+                        call.scissor_x,
+                        call.scissor_y,
+                        ATLAS_TILE_SIZE,
+                        ATLAS_TILE_SIZE,
+                    );
+                    pass.draw(0..3, 0..1);
+                }
+            }
+
+            self.transient_draw_resources.push(TransientDrawResources {
+                _atlas_bind_group: calls[start].atlas_bind_group.clone(),
+                _attachment_view: attachment_view,
+            });
+
+            start = end;
+        }
+
+        Ok(())
     }
 }
 

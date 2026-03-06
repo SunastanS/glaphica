@@ -20,6 +20,19 @@ pub trait BrushDrawExecutor<Context>: Send {
         layout: BrushDrawInputLayout,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), BrushPipelineError>;
+
+    fn execute_draw_batch_with_encoder(
+        &mut self,
+        context: &mut Context,
+        draw_ops: &[&DrawOp],
+        layouts: &[BrushDrawInputLayout],
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushPipelineError> {
+        for (draw_op, layout) in draw_ops.iter().zip(layouts.iter().copied()) {
+            self.execute_draw_with_encoder(context, draw_op, layout, encoder)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -86,6 +99,22 @@ pub struct BrushGpuRuntime<Executor> {
     executor: Executor,
 }
 
+pub fn validate_draw_op_layout(
+    draw_op: &DrawOp,
+    layout_registry: &BrushLayoutRegistry,
+) -> Result<BrushDrawInputLayout, BrushGpuDispatchError> {
+    let brush_id = draw_op.brush_id;
+    let layout = layout_registry.layout(brush_id)?;
+    if !layout.validate_input(&draw_op.input) {
+        return Err(BrushGpuDispatchError::InputLayoutMismatch {
+            brush_id,
+            layout,
+            input_len: draw_op.input.len(),
+        });
+    }
+    Ok(layout)
+}
+
 impl<Executor> BrushGpuRuntime<Executor> {
     pub fn new(executor: Executor) -> Self {
         Self { executor }
@@ -105,14 +134,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
         Executor: BrushDrawExecutor<Context>,
     {
         let brush_id = draw_op.brush_id;
-        let layout = layout_registry.layout(brush_id)?;
-        if !layout.validate_input(&draw_op.input) {
-            return Err(BrushGpuDispatchError::InputLayoutMismatch {
-                brush_id,
-                layout,
-                input_len: draw_op.input.len(),
-            });
-        }
+        let layout = validate_draw_op_layout(draw_op, layout_registry)?;
         self.executor
             .execute_draw(context, draw_op, layout)
             .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
@@ -128,17 +150,43 @@ impl<Executor> BrushGpuRuntime<Executor> {
     where
         Executor: BrushDrawExecutor<Context>,
     {
+        let layout = validate_draw_op_layout(draw_op, layout_registry)?;
+        self.apply_draw_op_with_encoder_prevalidated(context, draw_op, layout, encoder)
+    }
+
+    pub fn apply_draw_op_with_encoder_prevalidated<Context>(
+        &mut self,
+        context: &mut Context,
+        draw_op: &DrawOp,
+        layout: BrushDrawInputLayout,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushGpuDispatchError>
+    where
+        Executor: BrushDrawExecutor<Context>,
+    {
         let brush_id = draw_op.brush_id;
-        let layout = layout_registry.layout(brush_id)?;
-        if !layout.validate_input(&draw_op.input) {
-            return Err(BrushGpuDispatchError::InputLayoutMismatch {
-                brush_id,
-                layout,
-                input_len: draw_op.input.len(),
-            });
-        }
         self.executor
             .execute_draw_with_encoder(context, draw_op, layout, encoder)
+            .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
+    }
+
+    pub fn apply_draw_ops_with_encoder_prevalidated_batch<Context>(
+        &mut self,
+        context: &mut Context,
+        draw_ops: &[&DrawOp],
+        layouts: &[BrushDrawInputLayout],
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), BrushGpuDispatchError>
+    where
+        Executor: BrushDrawExecutor<Context>,
+    {
+        debug_assert_eq!(draw_ops.len(), layouts.len());
+        if draw_ops.is_empty() {
+            return Ok(());
+        }
+        let brush_id = draw_ops[0].brush_id;
+        self.executor
+            .execute_draw_batch_with_encoder(context, draw_ops, layouts, encoder)
             .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
     }
 
@@ -173,7 +221,7 @@ mod tests {
         BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind, BrushEngineRuntime,
         BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry, BrushSpec,
     };
-    use glaphica_core::{BrushId, NodeId, TileKey};
+    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
     use thread_protocol::{ClearOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
 
     use super::{BrushDrawExecutor, BrushGpuApplyOutcome, BrushGpuDispatchError, BrushGpuRuntime};
@@ -252,6 +300,7 @@ mod tests {
             ref_image: None,
             input: vec![1.0, 2.0, 3.0],
             brush_id: BrushId(2),
+            stroke_id: StrokeId(1),
         };
         let mut context = TestContext::default();
         let apply = runtime.apply_draw_op(&mut context, &draw_op, &layouts);
@@ -281,6 +330,7 @@ mod tests {
             ref_image: None,
             input: vec![1.0, 2.0],
             brush_id: BrushId(1),
+            stroke_id: StrokeId(2),
         };
         let mut context = TestContext::default();
         let apply = runtime.apply_draw_op(&mut context, &draw_op, &layouts);

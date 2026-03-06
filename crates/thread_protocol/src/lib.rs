@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn gpu_cmd_draw_op_carries_tile_key_input_and_brush_id() {
-        use glaphica_core::NodeId;
+        use glaphica_core::{NodeId, StrokeId};
         let cmd = GpuCmdMsg::DrawOp(DrawOp {
             node_id: NodeId(1),
             tile_index: 0,
@@ -289,6 +289,7 @@ mod tests {
             }),
             input: vec![1.0, 0.5, 9.0],
             brush_id: BrushId(7),
+            stroke_id: StrokeId(17),
         });
 
         match cmd {
@@ -305,9 +306,11 @@ mod tests {
                 );
                 assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
                 assert_eq!(draw_op.brush_id, BrushId(7));
+                assert_eq!(draw_op.stroke_id, StrokeId(17));
             }
             GpuCmdMsg::CopyOp(_)
             | GpuCmdMsg::WriteOp(_)
+            | GpuCmdMsg::CompositeOp(_)
             | GpuCmdMsg::ClearOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected draw op"),

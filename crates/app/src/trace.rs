@@ -5,7 +5,7 @@ use std::path::Path;
 
 use glaphica_core::{
     BrushId, CanvasVec2, EpochId, InputDeviceKind, MappedCursor, NodeId, RadianVec2,
-    RenderTreeGeneration, TileKey,
+    RenderTreeGeneration, StrokeId, TileKey,
 };
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
@@ -121,6 +121,8 @@ pub enum TraceGpuCmd {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceDrawOp {
     pub node_id: u64,
+    #[serde(default)]
+    pub stroke_id: u64,
     pub tile_index: usize,
     pub tile_key: TraceTileKey,
     #[serde(default = "trace_draw_blend_mode_alpha")]
@@ -387,6 +389,7 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
         match value {
             GpuCmdMsg::DrawOp(draw_op) => Self::DrawOp(TraceDrawOp {
                 node_id: draw_op.node_id.0,
+                stroke_id: draw_op.stroke_id.0,
                 tile_index: draw_op.tile_index,
                 tile_key: TraceTileKey::from(draw_op.tile_key),
                 blend_mode: match draw_op.blend_mode {
@@ -458,6 +461,7 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
         match value {
             TraceGpuCmd::DrawOp(draw_op) => Self::DrawOp(DrawOp {
                 node_id: NodeId(draw_op.node_id),
+                stroke_id: StrokeId(draw_op.stroke_id),
                 tile_index: draw_op.tile_index,
                 tile_key: draw_op.tile_key.into(),
                 blend_mode: match draw_op.blend_mode {

@@ -1,4 +1,4 @@
-use glaphica_core::{BrushId, NodeId, RenderTreeGeneration, TileKey};
+use glaphica_core::{BrushId, NodeId, RenderTreeGeneration, StrokeId, TileKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawBlendMode {
@@ -44,6 +44,8 @@ pub struct DrawOp {
     /// Brush-defined draw payload.
     pub input: Vec<f32>,
     pub brush_id: BrushId,
+    /// Stroke identity from input pipeline.
+    pub stroke_id: StrokeId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
