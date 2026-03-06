@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
 use document::{Document, SharedRenderTree};
@@ -94,6 +94,41 @@ impl Default for AppGpuFeedbackMergeState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PerfTraceConfig {
+    enabled: bool,
+    slow_threshold: Duration,
+}
+
+impl PerfTraceConfig {
+    fn from_env() -> Self {
+        let enabled = std::env::var("GLAPHICA_DEBUG_PIPELINE_TRACE")
+            .ok()
+            .is_some_and(|value| value != "0");
+        let slow_threshold_ms = std::env::var("GLAPHICA_DEBUG_PIPELINE_SLOW_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(4);
+        Self {
+            enabled,
+            slow_threshold: Duration::from_millis(slow_threshold_ms),
+        }
+    }
+}
+
+#[derive(Default)]
+struct EngineFramePerf {
+    input_sample: Duration,
+    smooth_and_resample: Duration,
+    brush_handling: Duration,
+    send_to_app_thread: Duration,
+    accept_by_app_thread: Duration,
+    submit_to_gpu: Duration,
+    sample_count: usize,
+    brush_input_count: usize,
+    gpu_command_count: usize,
+}
+
 pub struct AppThreadIntegration {
     main_state: MainThreadState,
     engine_state: EngineThreadState,
@@ -109,6 +144,8 @@ pub struct AppThreadIntegration {
     current_brush_id: Option<BrushId>,
     brush_resampler_distances: Vec<Option<BrushResamplerDistance>>,
     next_stroke_id: u64,
+    perf_trace: PerfTraceConfig,
+    perf_frame_seq: u64,
 }
 
 impl AppThreadIntegration {
@@ -224,6 +261,8 @@ impl AppThreadIntegration {
             current_brush_id: None,
             brush_resampler_distances: vec![None; config::brush_processing::MAX_BRUSHES],
             next_stroke_id: 1,
+            perf_trace: PerfTraceConfig::from_env(),
+            perf_frame_seq: 0,
         })
     }
 
@@ -312,6 +351,7 @@ impl AppThreadIntegration {
     }
 
     pub fn process_engine_frame(&mut self, wait_timeout: std::time::Duration) -> bool {
+        let mut perf = EngineFramePerf::default();
         self.input_controls.clear();
         while let Ok(event) = self.engine_channels.input_control_queue.pop() {
             self.input_controls.push(event);
@@ -320,6 +360,7 @@ impl AppThreadIntegration {
             event.apply(&mut self.active_stroke_node);
         }
         self.input_samples.clear();
+        let input_sample_started = Instant::now();
         self.engine_channels
             .input_ring_consumer
             .drain_batch_with_wait(
@@ -328,16 +369,20 @@ impl AppThreadIntegration {
                 wait_timeout,
             );
         self.normalize_input_sample_timestamps();
+        perf.input_sample = input_sample_started.elapsed();
+        perf.sample_count = self.input_samples.len();
         if let Some(trace_recorder) = &mut self.trace_recorder {
             trace_recorder.record_input_frame(&self.input_controls, &self.input_samples);
         }
-        self.process_engine_frame_from_samples()
+        self.process_engine_frame_from_samples(Some(&mut perf))
     }
 
     pub fn process_replay_input_frame(&mut self, input_frame: &TraceInputFrame) -> bool {
+        let mut perf = EngineFramePerf::default();
         let (controls, samples) = input_frame.to_runtime();
         self.input_controls = controls;
         self.input_samples = samples;
+        perf.sample_count = self.input_samples.len();
 
         for event in &self.input_controls {
             let InputControlEvent::Control(control) = event;
@@ -352,10 +397,13 @@ impl AppThreadIntegration {
         for event in &self.input_controls {
             event.apply(&mut self.active_stroke_node);
         }
-        self.process_engine_frame_from_samples()
+        self.process_engine_frame_from_samples(Some(&mut perf))
     }
 
-    fn process_engine_frame_from_samples(&mut self) -> bool {
+    fn process_engine_frame_from_samples(
+        &mut self,
+        mut perf: Option<&mut EngineFramePerf>,
+    ) -> bool {
         if !self.input_samples.is_empty()
             && let Some(node_id) = self.active_stroke_node
         {
@@ -363,14 +411,20 @@ impl AppThreadIntegration {
                 self.brush_inputs.clear();
                 self.gpu_commands.clear();
 
+                let smooth_and_resample_started = Instant::now();
                 for sample in &self.input_samples {
                     let new_inputs = self
                         .engine_state
                         .process_raw_input(sample.cursor, sample.time_ns);
                     self.brush_inputs.extend(new_inputs);
                 }
+                if let Some(perf) = perf.as_deref_mut() {
+                    perf.smooth_and_resample = smooth_and_resample_started.elapsed();
+                    perf.brush_input_count = self.brush_inputs.len();
+                }
 
                 let brush_inputs = self.brush_inputs.clone();
+                let brush_handling_started = Instant::now();
                 for brush_input in &brush_inputs {
                     match self.engine_state.process_stroke_input(
                         brush_id,
@@ -386,10 +440,14 @@ impl AppThreadIntegration {
                         }
                     }
                 }
+                if let Some(perf) = perf.as_deref_mut() {
+                    perf.brush_handling = brush_handling_started.elapsed();
+                }
 
                 Self::compact_frame_mergeable_draws(&mut self.gpu_commands);
 
                 let pending_gpu_cmds = std::mem::take(&mut self.gpu_commands);
+                let send_to_app_thread_started = Instant::now();
                 for cmd in pending_gpu_cmds {
                     if self.engine_channels.gpu_command_sender.slots() == 0 {
                         self.drain_and_process_gpu_commands();
@@ -398,12 +456,20 @@ impl AppThreadIntegration {
                         eprintln!("GPU command send failed: {e:?}");
                     }
                 }
+                if let Some(perf) = perf.as_deref_mut() {
+                    perf.send_to_app_thread = send_to_app_thread_started.elapsed();
+                }
             }
         }
 
         self.gpu_commands.clear();
+        let accept_by_app_thread_started = Instant::now();
         while let Ok(cmd) = self.main_channels.gpu_command_receiver.pop() {
             self.gpu_commands.push(cmd);
+        }
+        if let Some(perf) = perf.as_deref_mut() {
+            perf.accept_by_app_thread = accept_by_app_thread_started.elapsed();
+            perf.gpu_command_count = self.gpu_commands.len();
         }
 
         if let Some(trace_recorder) = &mut self.trace_recorder {
@@ -412,10 +478,61 @@ impl AppThreadIntegration {
 
         let has_commands = !self.gpu_commands.is_empty();
         if has_commands {
+            let submit_to_gpu_started = Instant::now();
             self.main_state.process_gpu_commands(&self.gpu_commands);
+            if let Some(perf) = perf.as_deref_mut() {
+                perf.submit_to_gpu = submit_to_gpu_started.elapsed();
+            }
+        }
+
+        if let Some(perf) = perf {
+            self.trace_engine_frame_perf(perf);
         }
 
         has_commands
+    }
+
+    fn trace_engine_frame_perf(&mut self, perf: &EngineFramePerf) {
+        if !self.perf_trace.enabled {
+            return;
+        }
+        let stages = [
+            ("input_sample", perf.input_sample),
+            ("smooth_and_resample", perf.smooth_and_resample),
+            ("brush_handling", perf.brush_handling),
+            ("send_to_app_thread", perf.send_to_app_thread),
+            ("accept_by_app_thread", perf.accept_by_app_thread),
+            ("submit_to_gpu", perf.submit_to_gpu),
+        ];
+        let total = stages
+            .iter()
+            .map(|(_, duration)| *duration)
+            .fold(Duration::ZERO, |acc, item| acc + item);
+        if total < self.perf_trace.slow_threshold {
+            return;
+        }
+        let Some((bottleneck, bottleneck_duration)) =
+            stages.iter().max_by_key(|(_, duration)| *duration)
+        else {
+            return;
+        };
+        self.perf_frame_seq += 1;
+        eprintln!(
+            "[PERF][pipeline][engine_frame={}] total_ms={:.3} bottleneck={} ({:.3}ms) samples={} brush_inputs={} gpu_cmds={} stages_ms={{input:{:.3}, smooth_resample:{:.3}, brush:{:.3}, send:{:.3}, accept:{:.3}, submit:{:.3}}}",
+            self.perf_frame_seq,
+            duration_ms(total),
+            bottleneck,
+            duration_ms(*bottleneck_duration),
+            perf.sample_count,
+            perf.brush_input_count,
+            perf.gpu_command_count,
+            duration_ms(perf.input_sample),
+            duration_ms(perf.smooth_and_resample),
+            duration_ms(perf.brush_handling),
+            duration_ms(perf.send_to_app_thread),
+            duration_ms(perf.accept_by_app_thread),
+            duration_ms(perf.submit_to_gpu),
+        );
     }
 
     fn drain_and_process_gpu_commands(&mut self) {
@@ -461,7 +578,20 @@ impl AppThreadIntegration {
     }
 
     pub fn process_main_render(&mut self) -> bool {
-        self.main_state.process_render()
+        if !self.perf_trace.enabled {
+            return self.main_state.process_render();
+        }
+        let started = Instant::now();
+        let has_work = self.main_state.process_render();
+        let elapsed = started.elapsed();
+        if elapsed >= self.perf_trace.slow_threshold {
+            eprintln!(
+                "[PERF][pipeline][submit_to_gpu_render] elapsed_ms={:.3} has_work={}",
+                duration_ms(elapsed),
+                has_work
+            );
+        }
+        has_work
     }
 
     pub fn set_surface(&mut self, surface: SurfaceRuntime) {
@@ -473,8 +603,22 @@ impl AppThreadIntegration {
     }
 
     pub fn present_to_screen(&mut self) {
+        let started = if self.perf_trace.enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if let Err(e) = self.main_state.present_to_screen() {
             eprintln!("Screen present failed: {e:?}");
+        }
+        if let Some(started) = started {
+            let elapsed = started.elapsed();
+            if elapsed >= self.perf_trace.slow_threshold {
+                eprintln!(
+                    "[PERF][pipeline][show_on_screen] elapsed_ms={:.3}",
+                    duration_ms(elapsed)
+                );
+            }
         }
     }
 
@@ -578,6 +722,10 @@ impl AppThreadIntegration {
         }
         Ok(())
     }
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn current_time_ns() -> u64 {

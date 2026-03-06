@@ -1,5 +1,8 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use wgpu::util::DeviceExt;
 
 use document::{LeafBlendMode, RenderCmd};
 use glaphica_core::{ATLAS_TILE_SIZE, TileKey};
@@ -35,11 +38,43 @@ struct PipelineCache {
     multiply: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    params_buffer: wgpu::Buffer,
 }
 
 pub struct RenderExecutor {
     cache: Option<PipelineCache>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GpuExecTraceConfig {
+    enabled: bool,
+    max_events: u64,
+}
+
+fn gpu_exec_trace_config() -> GpuExecTraceConfig {
+    static CONFIG: OnceLock<GpuExecTraceConfig> = OnceLock::new();
+    *CONFIG.get_or_init(|| {
+        let enabled = std::env::var("GLAPHICA_DEBUG_GPU_EXEC_TRACE")
+            .ok()
+            .is_some_and(|value| value != "0");
+        let max_events = std::env::var("GLAPHICA_DEBUG_GPU_EXEC_TRACE_MAX")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(400);
+        GpuExecTraceConfig {
+            enabled,
+            max_events,
+        }
+    })
+}
+
+fn should_trace_gpu_exec_event() -> bool {
+    static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let config = gpu_exec_trace_config();
+    if !config.enabled {
+        return false;
+    }
+    let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    seq <= config.max_events
 }
 
 impl RenderExecutor {
@@ -124,18 +159,48 @@ impl RenderExecutor {
         &self,
         context: &mut RenderContext<'_>,
         clear_op: &ClearOp,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), RenderExecutorError> {
         let resolved = context.atlas_storage.resolve(clear_op.tile_key).ok_or(
             RenderExecutorError::MissingTileBackend {
                 tile_key: clear_op.tile_key,
             },
         )?;
+        if should_trace_gpu_exec_event() {
+            eprintln!(
+                "[PERF][gpu_exec_trace][clear] tile={:?} layer={} texel=({}, {})",
+                clear_op.tile_key,
+                resolved.address.layer,
+                resolved.address.texel_offset.0,
+                resolved.address.texel_offset.1
+            );
+        }
         let bytes_per_pixel = texture_bytes_per_pixel(resolved.format);
-        let bytes_per_row = bytes_per_pixel * ATLAS_TILE_SIZE;
-        let clear_data = vec![0u8; (bytes_per_row * ATLAS_TILE_SIZE) as usize];
-
-        context.gpu_context.queue.write_texture(
+        let unpadded_bytes_per_row = bytes_per_pixel * ATLAS_TILE_SIZE;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256).saturating_mul(256);
+        let clear_size = usize::try_from(padded_bytes_per_row.saturating_mul(ATLAS_TILE_SIZE))
+            .unwrap_or(0);
+        if clear_size == 0 {
+            return Ok(());
+        }
+        let clear_data = vec![0u8; clear_size];
+        let clear_buffer = context
+            .gpu_context
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("glaphica-clear-tile-buffer"),
+                contents: &clear_data,
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &clear_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(ATLAS_TILE_SIZE),
+                },
+            },
             wgpu::TexelCopyTextureInfo {
                 texture: resolved.texture2d_array,
                 mip_level: 0,
@@ -145,12 +210,6 @@ impl RenderExecutor {
                     z: resolved.address.layer,
                 },
                 aspect: wgpu::TextureAspect::All,
-            },
-            &clear_data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(ATLAS_TILE_SIZE),
             },
             wgpu::Extent3d {
                 width: ATLAS_TILE_SIZE,
@@ -204,6 +263,19 @@ impl RenderExecutor {
                 tile_key: copy_op.dst_tile_key,
             },
         )?;
+        if should_trace_gpu_exec_event() {
+            eprintln!(
+                "[PERF][gpu_exec_trace][copy] src={:?}@({}, {}, l{}) dst={:?}@({}, {}, l{})",
+                copy_op.src_tile_key,
+                src_resolved.address.texel_offset.0,
+                src_resolved.address.texel_offset.1,
+                src_resolved.address.layer,
+                copy_op.dst_tile_key,
+                dst_resolved.address.texel_offset.0,
+                dst_resolved.address.texel_offset.1,
+                dst_resolved.address.layer
+            );
+        }
 
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
@@ -278,6 +350,25 @@ impl RenderExecutor {
                 tile_key: write_op.dst_tile_key,
             },
         )?;
+        let src_resolved = context.atlas_storage.resolve(write_op.src_tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: write_op.src_tile_key,
+            },
+        )?;
+        if should_trace_gpu_exec_event() {
+            eprintln!(
+                "[PERF][gpu_exec_trace][write] src={:?}@({}, {}, l{}) dst={:?}@({}, {}, l{}) opacity={:.3}",
+                write_op.src_tile_key,
+                src_resolved.address.texel_offset.0,
+                src_resolved.address.texel_offset.1,
+                src_resolved.address.layer,
+                write_op.dst_tile_key,
+                dst_resolved.address.texel_offset.0,
+                dst_resolved.address.texel_offset.1,
+                dst_resolved.address.layer,
+                write_op.opacity
+            );
+        }
 
         self.ensure_pipelines(context, dst_resolved.format);
         let cache = self.cache.as_ref().unwrap();
@@ -285,7 +376,6 @@ impl RenderExecutor {
             context,
             &cache.bind_group_layout,
             &cache.sampler,
-            &cache.params_buffer,
             write_op.src_tile_key,
             write_op.opacity,
         );
@@ -414,19 +504,11 @@ impl RenderExecutor {
             ..Default::default()
         });
 
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("glaphica-render-params"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         self.cache = Some(PipelineCache {
             normal,
             multiply,
             bind_group_layout,
             sampler,
-            params_buffer,
         });
     }
 
@@ -564,7 +646,6 @@ fn encode_cmd(
                 context,
                 &cache.bind_group_layout,
                 &cache.sampler,
-                &cache.params_buffer,
                 src_tile_key,
                 source.config.opacity,
             );
@@ -620,7 +701,6 @@ fn create_bind_group(
     context: &RenderContext<'_>,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    params_buffer: &wgpu::Buffer,
     src_tile_key: TileKey,
     opacity: f32,
 ) -> wgpu::BindGroup {
@@ -647,11 +727,20 @@ fn create_bind_group(
         opacity,
     };
     let params_bytes: [u8; 16] = params.encode();
+    let params_buffer = context
+        .gpu_context
+        .device
+        .create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-render-params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
     context
         .gpu_context
         .queue
-        .write_buffer(params_buffer, 0, &params_bytes);
+        .write_buffer(&params_buffer, 0, &params_bytes);
 
     context
         .gpu_context
@@ -719,5 +808,177 @@ fn texture_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
         wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm => 4,
         wgpu::TextureFormat::Rgba16Float => 8,
         _ => 4,
+    }
+}
+
+#[cfg(all(test, feature = "blocking"))]
+mod tests {
+    use crate::atlas_runtime::AtlasStorageRuntime;
+    use crate::context::{GpuContext, GpuContextInitDescriptor};
+
+    use super::{RenderContext, RenderExecutor};
+    use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, TileKey};
+    use thread_protocol::ClearOp;
+
+    #[test]
+    fn clear_tile_does_not_modify_neighbor_tile_in_same_layer() {
+        let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
+        else {
+            eprintln!("skip test: gpu context init failed");
+            return;
+        };
+
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(1);
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                0,
+                BackendKind::Leaf,
+                AtlasLayout::Small11,
+                Default::default(),
+            )
+            .is_err()
+        {
+            eprintln!("skip test: atlas backend init failed");
+            return;
+        }
+
+        // slot=0 and slot=1 are neighbors in the same parity/layer for Small11.
+        let left_tile = TileKey::from_parts(0, 0, 0);
+        let right_tile = TileKey::from_parts(0, 0, 1);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, left_tile, [255, 0, 0, 255]);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, right_tile, [0, 255, 0, 255]);
+
+        let executor = RenderExecutor::new();
+        let mut context = RenderContext {
+            gpu_context: &gpu_context,
+            atlas_storage: &atlas_storage,
+        };
+        let clear_result = executor.clear_tile(
+            &mut context,
+            &ClearOp {
+                tile_key: left_tile,
+            },
+        );
+        assert!(clear_result.is_ok());
+
+        let left_pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, left_tile);
+        let right_pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, right_tile);
+
+        assert_eq!(left_pixel, [0, 0, 0, 0]);
+        assert_eq!(right_pixel, [0, 255, 0, 255]);
+    }
+
+    fn fill_tile_rgba8(
+        gpu_context: &GpuContext,
+        atlas_storage: &AtlasStorageRuntime,
+        key: TileKey,
+        color: [u8; 4],
+    ) {
+        let Some(resolved) = atlas_storage.resolve(key) else {
+            return;
+        };
+        let pixel_count = (ATLAS_TILE_SIZE * ATLAS_TILE_SIZE) as usize;
+        let mut data = Vec::with_capacity(pixel_count * 4);
+        for _ in 0..pixel_count {
+            data.extend_from_slice(&color);
+        }
+        gpu_context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: resolved.address.texel_offset.0,
+                    y: resolved.address.texel_offset.1,
+                    z: resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ATLAS_TILE_SIZE * 4),
+                rows_per_image: Some(ATLAS_TILE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn sample_tile_pixel_rgba8(
+        gpu_context: &GpuContext,
+        atlas_storage: &AtlasStorageRuntime,
+        key: TileKey,
+    ) -> [u8; 4] {
+        let Some(resolved) = atlas_storage.resolve(key) else {
+            return [0, 0, 0, 0];
+        };
+        let width = ATLAS_TILE_SIZE;
+        let height = ATLAS_TILE_SIZE;
+        let bytes_per_row = width * 4;
+        let buffer_size = (bytes_per_row * height) as u64;
+
+        let buffer = gpu_context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render-executor-test-readback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("render-executor-test-readback-encoder"),
+                });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: resolved.address.texel_offset.0,
+                    y: resolved.address.texel_offset.1,
+                    z: resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu_context.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if sender.send(result).is_err() {
+                eprintln!("readback map callback send failed");
+            }
+        });
+        let _ = gpu_context
+            .device
+            .poll(wgpu::PollType::wait_indefinitely());
+        if receiver.recv().is_err() {
+            return [0, 0, 0, 0];
+        }
+
+        let mapped = slice.get_mapped_range();
+        let pixel = [mapped[0], mapped[1], mapped[2], mapped[3]];
+        drop(mapped);
+        buffer.unmap();
+        pixel
     }
 }

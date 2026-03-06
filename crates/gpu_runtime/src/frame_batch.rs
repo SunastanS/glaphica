@@ -124,6 +124,14 @@ impl FrameBatch {
         Ok(())
     }
 
+    pub fn push_command(
+        &mut self,
+        cmd: &GpuCmdMsg,
+        ctx: &mut FrameBatchContext<'_>,
+    ) -> Result<(), FrameBatchError> {
+        self.encode_gpu_cmd(cmd, ctx)
+    }
+
     fn execute_render_commands(
         &mut self,
         ctx: &mut FrameBatchContext<'_>,
@@ -156,19 +164,32 @@ impl FrameBatch {
             self.gpu_context.queue.submit(Some(self.encoder.finish()));
         }
     }
+
+    pub fn submit_only(self) {
+        self.submit();
+    }
+
+    pub fn finish(mut self, ctx: &mut FrameBatchContext<'_>) -> Result<(), FrameBatchError> {
+        self.execute_render_commands(ctx)?;
+        ctx.image_dirty_tracker.clear();
+        ctx.tile_dirty_tracker.clear();
+        self.submit();
+        Ok(())
+    }
 }
 
 impl<'a> FrameHandler<FrameBatchContext<'a>> for FrameBatch {
     type Error = FrameBatchError;
 
     fn handle(&mut self, cmd: &GpuCmdMsg, ctx: &mut FrameBatchContext<'a>) {
-        self.encode_gpu_cmd(cmd, ctx).unwrap();
+        if let Err(error) = self.push_command(cmd, ctx) {
+            eprintln!("frame batch command failed: {error:?}");
+        }
     }
 
-    fn finalize_frame(mut self, ctx: &mut FrameBatchContext<'a>) {
-        self.execute_render_commands(ctx).unwrap();
-        ctx.image_dirty_tracker.clear();
-        ctx.tile_dirty_tracker.clear();
-        self.submit();
+    fn finalize_frame(self, ctx: &mut FrameBatchContext<'a>) {
+        if let Err(error) = self.finish(ctx) {
+            eprintln!("frame batch finalize failed: {error:?}");
+        }
     }
 }

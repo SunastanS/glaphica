@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::{fmt::Display, path::Path};
 
 use brushes::{BrushGpuPipelineRegistry, BrushLayoutRegistry, BrushRegistryError, BrushSpec};
@@ -8,15 +9,39 @@ use glaphica_core::{
     TileDirtyTracker,
 };
 use gpu_runtime::{
-    GpuContext, GpuContextInitDescriptor, RenderContext, RenderExecutor,
+    FrameBatch, FrameBatchContext, GpuContext, GpuContextInitDescriptor, RenderContext,
+    RenderExecutor,
     atlas_runtime::AtlasStorageRuntime,
     brush_runtime::BrushGpuRuntime,
     surface_runtime::{SurfaceError, SurfaceRuntime},
-    wgpu_brush_executor::{WgpuBrushContext, WgpuBrushExecutorError},
+    wgpu_brush_executor::WgpuBrushExecutorError,
 };
-use thread_protocol::GpuCmdMsg;
+use thread_protocol::{GpuCmdMsg, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg};
 
 use crate::{config, screen_blitter::ScreenBlitter};
+
+#[derive(Debug, Clone, Copy)]
+struct GpuCmdTraceConfig {
+    enabled: bool,
+    max_commands: usize,
+}
+
+fn gpu_cmd_trace_config() -> GpuCmdTraceConfig {
+    static CONFIG: OnceLock<GpuCmdTraceConfig> = OnceLock::new();
+    *CONFIG.get_or_init(|| {
+        let enabled = std::env::var("GLAPHICA_DEBUG_GPU_CMD_TRACE")
+            .ok()
+            .is_some_and(|value| value != "0");
+        let max_commands = std::env::var("GLAPHICA_DEBUG_GPU_CMD_TRACE_MAX")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(64);
+        GpuCmdTraceConfig {
+            enabled,
+            max_commands,
+        }
+    })
+}
 
 pub struct MainThreadState {
     gpu_context: Arc<GpuContext>,
@@ -247,74 +272,62 @@ impl MainThreadState {
     }
 
     pub fn process_gpu_commands(&mut self, commands: &[GpuCmdMsg]) {
+        let trace_config = gpu_cmd_trace_config();
+        if trace_config.enabled {
+            trace_gpu_commands(commands, trace_config.max_commands);
+        }
+        let mut frame_batch = FrameBatch::new(&self.gpu_context);
         for cmd in commands {
             match cmd {
-                GpuCmdMsg::DrawOp(draw_op) => {
-                    let mut context = WgpuBrushContext {
-                        gpu_context: &self.gpu_context,
-                        atlas_storage: &self.atlas_storage,
-                    };
-                    if let Err(e) =
-                        self.brush_runtime
-                            .apply_draw_op(&mut context, draw_op, &self.brush_layouts)
-                    {
-                        eprintln!("Draw operation failed: {e}");
-                    }
-                    self.image_dirty_tracker
-                        .mark(draw_op.node_id, draw_op.tile_index);
-                    self.tile_dirty_tracker.mark(draw_op.tile_key);
-                }
-                GpuCmdMsg::CopyOp(copy_op) => {
-                    let mut context = RenderContext {
-                        gpu_context: &self.gpu_context,
-                        atlas_storage: &self.atlas_storage,
-                    };
-                    if let Err(e) = self.render_executor.copy_tile(&mut context, copy_op) {
-                        eprintln!("Copy operation failed: {e}");
-                    }
-                    self.tile_dirty_tracker.mark(copy_op.dst_tile_key);
-                }
-                GpuCmdMsg::WriteOp(write_op) => {
-                    let mut context = RenderContext {
-                        gpu_context: &self.gpu_context,
-                        atlas_storage: &self.atlas_storage,
-                    };
-                    if let Err(e) = self.render_executor.write_tile(&mut context, write_op) {
-                        eprintln!("Write operation failed: {e}");
-                    }
-                    self.tile_dirty_tracker.mark(write_op.dst_tile_key);
-                }
-                GpuCmdMsg::ClearOp(clear_op) => {
-                    let mut context = RenderContext {
-                        gpu_context: &self.gpu_context,
-                        atlas_storage: &self.atlas_storage,
-                    };
-                    if let Err(e) = self.render_executor.clear_tile(&mut context, clear_op) {
-                        eprintln!("Clear operation failed: {e}");
-                    }
-                    self.tile_dirty_tracker.mark(clear_op.tile_key);
-                }
                 GpuCmdMsg::RenderTreeUpdated(msg) => {
-                    for branch_id in &msg.dirty_branch_caches {
-                        let tree = self.shared_tree.read();
-                        if let Some(node) = tree.nodes.get(branch_id) {
-                            let cache = match &node.kind {
-                                document::FlatNodeKind::Branch { cache, .. } => cache,
-                                document::FlatNodeKind::Leaf { .. } => continue,
-                            };
-                            for tile_index in 0..cache.tile_count() {
-                                self.image_dirty_tracker.mark(*branch_id, tile_index);
-                            }
-                        }
-                    }
+                    self.apply_render_tree_updated(msg);
                 }
                 GpuCmdMsg::TileSlotKeyUpdate(op) => {
-                    for (node_id, tile_index, tile_key) in &op.updates {
-                        self.image_dirty_tracker.mark(*node_id, *tile_index);
-                        self.tile_dirty_tracker.mark(*tile_key);
+                    self.apply_tile_slot_key_update(op);
+                }
+                _ => {
+                    let mut context = FrameBatchContext {
+                        gpu_context: &self.gpu_context,
+                        atlas_storage: &self.atlas_storage,
+                        render_executor: &mut self.render_executor,
+                        brush_runtime: &mut self.brush_runtime,
+                        brush_layouts: &self.brush_layouts,
+                        shared_tree: &self.shared_tree,
+                        image_dirty_tracker: &mut self.image_dirty_tracker,
+                        tile_dirty_tracker: &mut self.tile_dirty_tracker,
+                    };
+                    if let Err(error) = frame_batch.push_command(cmd, &mut context) {
+                        eprintln!("GPU command processing failed: {error:?}");
                     }
                 }
             }
+        }
+
+        frame_batch.submit_only();
+        self.brush_runtime
+            .executor_mut()
+            .clear_transient_draw_resources();
+    }
+
+    fn apply_render_tree_updated(&mut self, msg: &RenderTreeUpdatedMsg) {
+        let tree = self.shared_tree.read();
+        for branch_id in &msg.dirty_branch_caches {
+            if let Some(node) = tree.nodes.get(branch_id) {
+                let cache = match &node.kind {
+                    document::FlatNodeKind::Branch { cache, .. } => cache,
+                    document::FlatNodeKind::Leaf { .. } => continue,
+                };
+                for tile_index in 0..cache.tile_count() {
+                    self.image_dirty_tracker.mark(*branch_id, tile_index);
+                }
+            }
+        }
+    }
+
+    fn apply_tile_slot_key_update(&mut self, op: &TileSlotKeyUpdateMsg) {
+        for (node_id, tile_index, tile_key) in &op.updates {
+            self.image_dirty_tracker.mark(*node_id, *tile_index);
+            self.tile_dirty_tracker.mark(*tile_key);
         }
     }
 
@@ -453,6 +466,65 @@ impl MainThreadState {
             .write_image_data(&pixels)
             .map_err(ScreenshotError::Png)?;
         Ok(())
+    }
+}
+
+fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
+    eprintln!("[PERF][gpu_cmd_trace] frame_cmd_count={}", commands.len());
+    for (index, cmd) in commands.iter().take(max_commands).enumerate() {
+        match cmd {
+            GpuCmdMsg::DrawOp(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] DrawOp node={} tile_index={} tile_key={:?} origin_tile={:?} ref_tile={:?} input_len={}",
+                    index,
+                    op.node_id.0,
+                    op.tile_index,
+                    op.tile_key,
+                    op.origin_tile,
+                    op.ref_image.map(|ref_image| ref_image.tile_key),
+                    op.input.len()
+                );
+            }
+            GpuCmdMsg::CopyOp(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] CopyOp src={:?} dst={:?}",
+                    index, op.src_tile_key, op.dst_tile_key
+                );
+            }
+            GpuCmdMsg::WriteOp(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] WriteOp src={:?} dst={:?}",
+                    index, op.src_tile_key, op.dst_tile_key
+                );
+            }
+            GpuCmdMsg::ClearOp(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] ClearOp tile={:?}",
+                    index, op.tile_key
+                );
+            }
+            GpuCmdMsg::RenderTreeUpdated(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] RenderTreeUpdated generation={} dirty_branches={}",
+                    index,
+                    op.generation.0,
+                    op.dirty_branch_caches.len()
+                );
+            }
+            GpuCmdMsg::TileSlotKeyUpdate(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] TileSlotKeyUpdate updates={}",
+                    index,
+                    op.updates.len()
+                );
+            }
+        }
+    }
+    if commands.len() > max_commands {
+        eprintln!(
+            "[PERF][gpu_cmd_trace] omitted={} (increase GLAPHICA_DEBUG_GPU_CMD_TRACE_MAX to show more)",
+            commands.len() - max_commands
+        );
     }
 }
 

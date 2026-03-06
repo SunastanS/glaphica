@@ -1,0 +1,484 @@
+[PERF][gpu_cmd_trace] frame_cmd_count=8
+[PERF][gpu_cmd_trace][0] ClearOp tile=TileKey(2147483648)
+[PERF][gpu_cmd_trace][1] ClearOp tile=TileKey(144115188075855872)
+[PERF][gpu_cmd_trace][2] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][3] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][4] TileSlotKeyUpdate updates=1
+[PERF][gpu_cmd_trace][5] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][6] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][7] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(2147483648) layer=1 texel=(0, 0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(144115188075855872) layer=0 texel=(0, 0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][pipeline][engine_frame=1] total_ms=15.097 bottleneck=submit_to_gpu (15.042ms) samples=2 brush_inputs=2 gpu_cmds=8 stages_ms={input:0.001, smooth_resample:0.006, brush:0.044, send:0.001, accept:0.001, submit:15.042}
+[PERF][gpu_cmd_trace] frame_cmd_count=19
+[PERF][gpu_cmd_trace][0] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][1] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][2] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][3] ClearOp tile=TileKey(2147483649)
+[PERF][gpu_cmd_trace][4] ClearOp tile=TileKey(144115188075855873)
+[PERF][gpu_cmd_trace][5] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][6] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][7] ClearOp tile=TileKey(2147483650)
+[PERF][gpu_cmd_trace][8] ClearOp tile=TileKey(144115188075855874)
+[PERF][gpu_cmd_trace][9] DrawOp node=0 tile_index=29 tile_key=TileKey(144115188075855874) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][10] WriteOp src=TileKey(144115188075855874) dst=TileKey(2)
+[PERF][gpu_cmd_trace][11] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][12] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][13] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][14] ClearOp tile=TileKey(2147483651)
+[PERF][gpu_cmd_trace][15] ClearOp tile=TileKey(144115188075855875)
+[PERF][gpu_cmd_trace][16] DrawOp node=0 tile_index=46 tile_key=TileKey(144115188075855875) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][17] WriteOp src=TileKey(144115188075855875) dst=TileKey(3)
+[PERF][gpu_cmd_trace][18] TileSlotKeyUpdate updates=3
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][clear] tile=TileKey(2147483649) layer=1 texel=(64, 0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(144115188075855873) layer=0 texel=(64, 0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][clear] tile=TileKey(2147483650) layer=1 texel=(128, 0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(144115188075855874) layer=0 texel=(128, 0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=29 dst=TileKey(144115188075855874)@(128, 0, l0) src=TileKey(144115188075855874)@(128, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855874)@(128, 0, l0) dst=TileKey(2)@(128, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][clear] tile=TileKey(2147483651) layer=1 texel=(192, 0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(144115188075855875) layer=0 texel=(192, 0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=46 dst=TileKey(144115188075855875)@(192, 0, l0) src=TileKey(144115188075855875)@(192, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855875)@(192, 0, l0) dst=TileKey(3)@(192, 0, l0) opacity=1.000
+[PERF][pipeline][engine_frame=2] total_ms=5.753 bottleneck=submit_to_gpu (5.691ms) samples=4 brush_inputs=2 gpu_cmds=19 stages_ms={input:0.003, smooth_resample:0.008, brush:0.048, send:0.002, accept:0.002, submit:5.691}
+[PERF][gpu_cmd_trace] frame_cmd_count=42
+[PERF][gpu_cmd_trace][0] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][1] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][2] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][3] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][4] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][5] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][6] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][7] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][8] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][9] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][10] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][11] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][12] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][13] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][14] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][15] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][16] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][17] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][18] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][19] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][20] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][21] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][22] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][23] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][24] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][25] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][26] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][27] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][28] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][29] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][30] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][31] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][32] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][33] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][34] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][35] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][36] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][37] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][38] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][39] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][40] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][41] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][pipeline][engine_frame=3] total_ms=14.346 bottleneck=submit_to_gpu (14.261ms) samples=2 brush_inputs=7 gpu_cmds=42 stages_ms={input:0.004, smooth_resample:0.012, brush:0.058, send:0.009, accept:0.004, submit:14.261}
+[PERF][gpu_cmd_trace] frame_cmd_count=171
+[PERF][gpu_cmd_trace][0] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][1] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][2] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][3] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][4] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][5] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][6] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][7] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][8] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][9] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][10] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][11] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][12] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][13] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][14] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][15] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][16] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][17] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][18] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][19] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][20] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][21] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][22] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][23] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][24] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][25] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][26] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][27] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][28] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][29] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][30] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][31] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][32] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][33] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][34] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][35] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][36] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][37] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][38] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][39] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][40] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][41] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][42] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][43] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][44] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][45] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][46] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][47] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][48] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][49] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][50] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][51] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][52] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][53] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][54] ClearOp tile=TileKey(2147483652)
+[PERF][gpu_cmd_trace][55] ClearOp tile=TileKey(144115188075855876)
+[PERF][gpu_cmd_trace][56] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][57] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][58] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][59] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][60] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][61] ClearOp tile=TileKey(2147483653)
+[PERF][gpu_cmd_trace][62] ClearOp tile=TileKey(144115188075855877)
+[PERF][gpu_cmd_trace][63] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][64] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][65] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][66] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][67] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][68] TileSlotKeyUpdate updates=2
+[PERF][gpu_cmd_trace][69] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][70] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][71] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][72] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][73] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][74] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][75] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][76] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][77] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][78] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][79] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][80] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][81] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][82] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][83] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][84] CopyOp src=TileKey(2147483649) dst=TileKey(1)
+[PERF][gpu_cmd_trace][85] DrawOp node=0 tile_index=28 tile_key=TileKey(144115188075855873) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][86] WriteOp src=TileKey(144115188075855873) dst=TileKey(1)
+[PERF][gpu_cmd_trace][87] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][88] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][89] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][90] CopyOp src=TileKey(2147483648) dst=TileKey(0)
+[PERF][gpu_cmd_trace][91] DrawOp node=0 tile_index=45 tile_key=TileKey(144115188075855872) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][92] WriteOp src=TileKey(144115188075855872) dst=TileKey(0)
+[PERF][gpu_cmd_trace][93] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][94] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][95] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][96] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][97] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][98] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][99] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][100] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][101] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][102] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][103] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][104] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][105] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][106] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][107] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][108] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][109] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][110] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][111] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][112] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][113] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][114] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][115] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][116] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][117] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][118] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][119] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][120] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][121] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][122] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][123] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][124] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][125] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][126] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][127] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][128] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][129] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][130] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][131] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][132] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][133] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][134] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][135] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][136] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][137] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][138] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][139] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][140] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][141] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][142] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][143] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][144] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][145] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][146] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][147] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][148] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][149] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][150] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][151] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][152] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][153] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][154] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][155] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][156] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][157] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][158] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][159] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][160] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][161] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][162] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][163] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][164] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_cmd_trace][165] CopyOp src=TileKey(2147483652) dst=TileKey(4)
+[PERF][gpu_cmd_trace][166] DrawOp node=0 tile_index=27 tile_key=TileKey(144115188075855876) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][167] WriteOp src=TileKey(144115188075855876) dst=TileKey(4)
+[PERF][gpu_cmd_trace][168] CopyOp src=TileKey(2147483653) dst=TileKey(5)
+[PERF][gpu_cmd_trace][169] DrawOp node=0 tile_index=44 tile_key=TileKey(144115188075855877) origin_tile=TileKey(18446744073709551615) ref_tile=None input_len=6
+[PERF][gpu_cmd_trace][170] WriteOp src=TileKey(144115188075855877) dst=TileKey(5)
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][clear] tile=TileKey(2147483652) layer=1 texel=(256, 0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(144115188075855876) layer=0 texel=(256, 0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][clear] tile=TileKey(2147483653) layer=1 texel=(320, 0)
+[PERF][gpu_exec_trace][clear] tile=TileKey(144115188075855877) layer=0 texel=(320, 0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483649)@(64, 0, l1) dst=TileKey(1)@(64, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=28 dst=TileKey(144115188075855873)@(64, 0, l0) src=TileKey(144115188075855873)@(64, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855873)@(64, 0, l0) dst=TileKey(1)@(64, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483648)@(0, 0, l1) dst=TileKey(0)@(0, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=45 dst=TileKey(144115188075855872)@(0, 0, l0) src=TileKey(144115188075855872)@(0, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855872)@(0, 0, l0) dst=TileKey(0)@(0, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483652)@(256, 0, l1) dst=TileKey(4)@(256, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=27 dst=TileKey(144115188075855876)@(256, 0, l0) src=TileKey(144115188075855876)@(256, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855876)@(256, 0, l0) dst=TileKey(4)@(256, 0, l0) opacity=1.000
+[PERF][gpu_exec_trace][copy] src=TileKey(2147483653)@(320, 0, l1) dst=TileKey(5)@(320, 0, l0)
+[PERF][gpu_exec_trace][draw] node=0 tile_index=44 dst=TileKey(144115188075855877)@(320, 0, l0) src=TileKey(144115188075855877)@(320, 0, l0) origin=TileKey(18446744073709551615) ref=None
+[PERF][gpu_exec_trace][write] src=TileKey(144115188075855877)@(320, 0, l0) dst=TileKey(5)@(320, 0, l0) opacity=1.000

@@ -1,6 +1,8 @@
 use crate::context::GpuContext;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use brushes::{BrushDrawInputLayout, BrushGpuPipelineSpec, BrushPipelineError};
 use glaphica_core::{ATLAS_TILE_SIZE, BrushId, TextureFormat};
@@ -127,6 +129,15 @@ struct DummyCacheTexture {
     view: wgpu::TextureView,
 }
 
+#[derive(Debug)]
+struct TransientDrawResources {
+    _input_buffer: wgpu::Buffer,
+    _params_buffer: wgpu::Buffer,
+    _draw_bind_group: wgpu::BindGroup,
+    _atlas_bind_group: wgpu::BindGroup,
+    _attachment_view: wgpu::TextureView,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct BrushShaderParams {
@@ -166,6 +177,40 @@ pub struct WgpuBrushExecutor {
     atlas_bind_group_layouts: Vec<CachedAtlasBindGroupLayout>,
     atlas_sampler: Option<wgpu::Sampler>,
     dummy_cache_texture: Option<DummyCacheTexture>,
+    transient_draw_resources: Vec<TransientDrawResources>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GpuDrawExecTraceConfig {
+    enabled: bool,
+    max_events: u64,
+}
+
+fn gpu_draw_exec_trace_config() -> GpuDrawExecTraceConfig {
+    static CONFIG: OnceLock<GpuDrawExecTraceConfig> = OnceLock::new();
+    *CONFIG.get_or_init(|| {
+        let enabled = std::env::var("GLAPHICA_DEBUG_GPU_EXEC_TRACE")
+            .ok()
+            .is_some_and(|value| value != "0");
+        let max_events = std::env::var("GLAPHICA_DEBUG_GPU_EXEC_TRACE_MAX")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(400);
+        GpuDrawExecTraceConfig {
+            enabled,
+            max_events,
+        }
+    })
+}
+
+fn should_trace_gpu_draw_exec_event() -> bool {
+    static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let config = gpu_draw_exec_trace_config();
+    if !config.enabled {
+        return false;
+    }
+    let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    seq <= config.max_events
 }
 
 impl WgpuBrushExecutor {
@@ -195,6 +240,10 @@ impl WgpuBrushExecutor {
             replace_pipeline: None,
         });
         Ok(())
+    }
+
+    pub fn clear_transient_draw_resources(&mut self) {
+        self.transient_draw_resources.clear();
     }
 
     fn ensure_draw_bind_group_layout(&mut self, device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -489,6 +538,7 @@ impl WgpuBrushExecutor {
         context: &mut WgpuBrushContext<'_>,
         draw_op: &DrawOp,
         encoder: &mut wgpu::CommandEncoder,
+        retain_resources: bool,
     ) -> Result<(), BrushPipelineError> {
         let brush_index = Self::brush_index(draw_op.brush_id)?;
 
@@ -531,6 +581,23 @@ impl WgpuBrushExecutor {
                 backend_id: source_tile_key.backend_index(),
             },
         )?;
+        if should_trace_gpu_draw_exec_event() {
+            eprintln!(
+                "[PERF][gpu_exec_trace][draw] node={} tile_index={} dst={:?}@({}, {}, l{}) src={:?}@({}, {}, l{}) origin={:?} ref={:?}",
+                draw_op.node_id.0,
+                draw_op.tile_index,
+                draw_op.tile_key,
+                resolved.address.texel_offset.0,
+                resolved.address.texel_offset.1,
+                resolved.address.layer,
+                source_tile_key,
+                source_resolved.address.texel_offset.0,
+                source_resolved.address.texel_offset.1,
+                source_resolved.address.layer,
+                draw_op.origin_tile,
+                draw_op.ref_image.map(|image| image.tile_key)
+            );
+        }
 
         if source_resolved.format != resolved.format {
             return Err(WgpuBrushExecutorError::InconsistentSourceFormat {
@@ -744,6 +811,16 @@ impl WgpuBrushExecutor {
             pass.draw(0..3, 0..1);
         }
 
+        if retain_resources {
+            self.transient_draw_resources.push(TransientDrawResources {
+                _input_buffer: input_buffer,
+                _params_buffer: params_buffer,
+                _draw_bind_group: draw_bind_group,
+                _atlas_bind_group: atlas_bind_group,
+                _attachment_view: attachment_view,
+            });
+        }
+
         Ok(())
     }
 }
@@ -772,8 +849,9 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("glaphica-brush-draw-encoder"),
                 });
-        self.encode_draw(context, draw_op, &mut encoder)?;
+        self.encode_draw(context, draw_op, &mut encoder, false)?;
         context.gpu_context.queue.submit(Some(encoder.finish()));
+        self.clear_transient_draw_resources();
         Ok(())
     }
 
@@ -784,7 +862,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
         _layout: BrushDrawInputLayout,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), BrushPipelineError> {
-        self.encode_draw(context, draw_op, encoder)
+        self.encode_draw(context, draw_op, encoder, true)
     }
 }
 
