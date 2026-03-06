@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 
 use document::{LeafBlendMode, RenderCmd};
 use glaphica_core::{ATLAS_TILE_SIZE, TileKey};
-use thread_protocol::{ClearOp, CopyOp, WriteBlendMode, WriteOp};
+use thread_protocol::{ClearOp, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
 use crate::context::GpuContext;
@@ -36,7 +36,9 @@ pub struct RenderContext<'a> {
 struct PipelineCache {
     normal: wgpu::RenderPipeline,
     multiply: wgpu::RenderPipeline,
+    composite_normal: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    composite_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
 }
 
@@ -413,6 +415,98 @@ impl RenderExecutor {
         Ok(())
     }
 
+    pub fn composite_tile_with_encoder(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        context: &mut RenderContext<'_>,
+        composite_op: &CompositeOp,
+    ) -> Result<(), RenderExecutorError> {
+        self.encode_composite_tile(context, composite_op, encoder)
+    }
+
+    fn encode_composite_tile(
+        &mut self,
+        context: &mut RenderContext<'_>,
+        composite_op: &CompositeOp,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<(), RenderExecutorError> {
+        let base_resolved = context.atlas_storage.resolve(composite_op.base_tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: composite_op.base_tile_key,
+            },
+        )?;
+        let overlay_resolved =
+            context
+                .atlas_storage
+                .resolve(composite_op.overlay_tile_key)
+                .ok_or(RenderExecutorError::MissingTileBackend {
+                    tile_key: composite_op.overlay_tile_key,
+                })?;
+        let dst_resolved = context.atlas_storage.resolve(composite_op.dst_tile_key).ok_or(
+            RenderExecutorError::MissingTileBackend {
+                tile_key: composite_op.dst_tile_key,
+            },
+        )?;
+        if should_trace_gpu_exec_event() {
+            eprintln!(
+                "[PERF][gpu_exec_trace][composite] base={:?}@({}, {}, l{}) overlay={:?}@({}, {}, l{}) dst={:?}@({}, {}, l{}) opacity={:.3}",
+                composite_op.base_tile_key,
+                base_resolved.address.texel_offset.0,
+                base_resolved.address.texel_offset.1,
+                base_resolved.address.layer,
+                composite_op.overlay_tile_key,
+                overlay_resolved.address.texel_offset.0,
+                overlay_resolved.address.texel_offset.1,
+                overlay_resolved.address.layer,
+                composite_op.dst_tile_key,
+                dst_resolved.address.texel_offset.0,
+                dst_resolved.address.texel_offset.1,
+                dst_resolved.address.layer,
+                composite_op.opacity
+            );
+        }
+
+        self.ensure_pipelines(context, dst_resolved.format);
+        let cache = self.cache.as_ref().unwrap();
+        let bind_group = create_composite_bind_group(
+            context,
+            &cache.composite_bind_group_layout,
+            composite_op,
+        );
+        let dst_view = create_render_attachment_view(&dst_resolved);
+        let pipeline = match composite_op.blend_mode {
+            WriteBlendMode::Normal => &cache.composite_normal,
+        };
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("glaphica-render-composite-op-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_scissor_rect(
+            dst_resolved.address.texel_offset.0,
+            dst_resolved.address.texel_offset.1,
+            ATLAS_TILE_SIZE,
+            ATLAS_TILE_SIZE,
+        );
+        pass.draw(0..3, 0..1);
+
+        Ok(())
+    }
+
     fn detect_format(
         &self,
         context: &RenderContext<'_>,
@@ -473,6 +567,49 @@ impl RenderExecutor {
             immediate_size: 0,
         });
 
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glaphica-render-composite-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("glaphica-render-composite-pipeline-layout"),
+                bind_group_layouts: &[&composite_bind_group_layout],
+                immediate_size: 0,
+            });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glaphica-render-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("render_shader.wgsl").into()),
@@ -492,6 +629,40 @@ impl RenderExecutor {
             format,
             LeafBlendMode::Multiply,
         );
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glaphica-render-composite-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("render_composite_shader.wgsl").into(),
+            ),
+        });
+        let composite_normal = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glaphica-render-pipeline-composite-normal"),
+            layout: Some(&composite_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_composite_normal"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("glaphica-render-sampler"),
@@ -507,7 +678,9 @@ impl RenderExecutor {
         self.cache = Some(PipelineCache {
             normal,
             multiply,
+            composite_normal,
             bind_group_layout,
+            composite_bind_group_layout,
             sampler,
         });
     }
@@ -765,6 +938,95 @@ fn create_bind_group(
         })
 }
 
+fn create_composite_bind_group(
+    context: &RenderContext<'_>,
+    layout: &wgpu::BindGroupLayout,
+    composite_op: &CompositeOp,
+) -> wgpu::BindGroup {
+    let base_resolved = context
+        .atlas_storage
+        .resolve(composite_op.base_tile_key)
+        .unwrap();
+    let overlay_resolved = context
+        .atlas_storage
+        .resolve(composite_op.overlay_tile_key)
+        .unwrap();
+
+    let base_view = base_resolved
+        .texture2d_array
+        .create_view(&wgpu::TextureViewDescriptor {
+            label: Some("glaphica-render-composite-base-view"),
+            format: Some(base_resolved.format),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: base_resolved.address.layer,
+            array_layer_count: Some(1),
+        });
+    let overlay_view = overlay_resolved
+        .texture2d_array
+        .create_view(&wgpu::TextureViewDescriptor {
+            label: Some("glaphica-render-composite-overlay-view"),
+            format: Some(overlay_resolved.format),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: overlay_resolved.address.layer,
+            array_layer_count: Some(1),
+        });
+
+    let params = CompositeParams {
+        base_x: base_resolved.address.texel_offset.0,
+        base_y: base_resolved.address.texel_offset.1,
+        overlay_x: overlay_resolved.address.texel_offset.0,
+        overlay_y: overlay_resolved.address.texel_offset.1,
+        opacity: composite_op.opacity,
+        _pad0: 0.0,
+        _pad1: 0.0,
+    };
+    let params_bytes: [u8; 32] = params.encode();
+    let params_buffer = context
+        .gpu_context
+        .device
+        .create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-render-composite-params"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+    context
+        .gpu_context
+        .queue
+        .write_buffer(&params_buffer, 0, &params_bytes);
+
+    context
+        .gpu_context
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-render-composite-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&base_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&overlay_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        })
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct RenderParams {
@@ -781,6 +1043,32 @@ impl RenderParams {
         bytes[4..8].copy_from_slice(&self.src_x.to_ne_bytes());
         bytes[8..12].copy_from_slice(&self.src_y.to_ne_bytes());
         bytes[12..16].copy_from_slice(&self.opacity.to_ne_bytes());
+        bytes
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CompositeParams {
+    base_x: u32,
+    base_y: u32,
+    overlay_x: u32,
+    overlay_y: u32,
+    opacity: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+impl CompositeParams {
+    fn encode(&self) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0..4].copy_from_slice(&self.base_x.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&self.base_y.to_ne_bytes());
+        bytes[8..12].copy_from_slice(&self.overlay_x.to_ne_bytes());
+        bytes[12..16].copy_from_slice(&self.overlay_y.to_ne_bytes());
+        bytes[16..20].copy_from_slice(&self.opacity.to_ne_bytes());
+        bytes[20..24].copy_from_slice(&self._pad0.to_ne_bytes());
+        bytes[24..28].copy_from_slice(&self._pad1.to_ne_bytes());
         bytes
     }
 }

@@ -104,6 +104,19 @@ impl FrameBatch {
                 ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
                 self.has_commands = true;
             }
+            GpuCmdMsg::CompositeOp(composite_op) => {
+                let mut render_ctx = RenderContext {
+                    gpu_context: ctx.gpu_context,
+                    atlas_storage: ctx.atlas_storage,
+                };
+
+                ctx.render_executor
+                    .composite_tile_with_encoder(&mut self.encoder, &mut render_ctx, composite_op)
+                    .map_err(FrameBatchError::RenderError)?;
+
+                ctx.tile_dirty_tracker.mark(composite_op.dst_tile_key);
+                self.has_commands = true;
+            }
 
             GpuCmdMsg::ClearOp(clear_op) => {
                 let mut render_ctx = RenderContext {

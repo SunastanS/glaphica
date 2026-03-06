@@ -9,9 +9,9 @@ use glaphica_core::{
 };
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
-    ClearOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg, InputControlEvent,
-    InputRingSample, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode,
-    WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg,
+    InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
+    WriteBlendMode, WriteOp,
 };
 
 use crate::StrokeControl;
@@ -112,6 +112,7 @@ pub enum TraceGpuCmd {
     DrawOp(TraceDrawOp),
     CopyOp(TraceCopyOp),
     WriteOp(TraceWriteOp),
+    CompositeOp(TraceCompositeOp),
     ClearOp(TraceClearOp),
     RenderTreeUpdated(TraceRenderTreeUpdatedMsg),
     TileSlotKeyUpdate(TraceTileSlotKeyUpdateMsg),
@@ -154,6 +155,17 @@ pub struct TraceCopyOp {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TraceWriteOp {
     pub src_tile_key: TraceTileKey,
+    pub dst_tile_key: TraceTileKey,
+    #[serde(default = "trace_write_blend_mode_normal")]
+    pub blend_mode: TraceWriteBlendMode,
+    #[serde(default = "trace_write_opacity_one")]
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TraceCompositeOp {
+    pub base_tile_key: TraceTileKey,
+    pub overlay_tile_key: TraceTileKey,
     pub dst_tile_key: TraceTileKey,
     #[serde(default = "trace_write_blend_mode_normal")]
     pub blend_mode: TraceWriteBlendMode,
@@ -404,6 +416,15 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 },
                 opacity: write_op.opacity,
             }),
+            GpuCmdMsg::CompositeOp(composite_op) => Self::CompositeOp(TraceCompositeOp {
+                base_tile_key: composite_op.base_tile_key.into(),
+                overlay_tile_key: composite_op.overlay_tile_key.into(),
+                dst_tile_key: composite_op.dst_tile_key.into(),
+                blend_mode: match composite_op.blend_mode {
+                    WriteBlendMode::Normal => TraceWriteBlendMode::Normal,
+                },
+                opacity: composite_op.opacity,
+            }),
             GpuCmdMsg::ClearOp(clear_op) => Self::ClearOp(TraceClearOp {
                 tile_key: clear_op.tile_key.into(),
             }),
@@ -467,6 +488,15 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                     TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
                 },
                 opacity: write_op.opacity,
+            }),
+            TraceGpuCmd::CompositeOp(composite_op) => Self::CompositeOp(CompositeOp {
+                base_tile_key: composite_op.base_tile_key.into(),
+                overlay_tile_key: composite_op.overlay_tile_key.into(),
+                dst_tile_key: composite_op.dst_tile_key.into(),
+                blend_mode: match composite_op.blend_mode {
+                    TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
+                },
+                opacity: composite_op.opacity,
             }),
             TraceGpuCmd::ClearOp(clear_op) => Self::ClearOp(ClearOp {
                 tile_key: clear_op.tile_key.into(),

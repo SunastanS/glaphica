@@ -69,6 +69,23 @@ pub struct WriteOp {
     pub opacity: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompositeOp {
+    /// Base tile in atlas space.
+    ///
+    /// The other source tile is composited onto this base.
+    pub base_tile_key: TileKey,
+    /// Overlay tile in atlas space.
+    ///
+    /// This tile is drawn onto `base_tile_key` using `blend_mode` and `opacity`.
+    pub overlay_tile_key: TileKey,
+    /// Destination tile in atlas space.
+    pub dst_tile_key: TileKey,
+    pub blend_mode: WriteBlendMode,
+    /// Global composite opacity multiplier in [0, 1].
+    pub opacity: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClearOp {
     /// Tile to clear to transparent.
@@ -94,6 +111,8 @@ pub enum GpuCmdMsg {
     CopyOp(CopyOp),
     /// Blend `src` onto `dst` with configured write blend mode.
     WriteOp(WriteOp),
+    /// Composite overlay onto base and write the result to destination.
+    CompositeOp(CompositeOp),
     /// Clear one tile to transparent.
     ClearOp(ClearOp),
     RenderTreeUpdated(RenderTreeUpdatedMsg),

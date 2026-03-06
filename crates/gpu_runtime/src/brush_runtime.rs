@@ -158,6 +158,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
             }
             GpuCmdMsg::CopyOp(_)
             | GpuCmdMsg::WriteOp(_)
+            | GpuCmdMsg::CompositeOp(_)
             | GpuCmdMsg::ClearOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => Ok(BrushGpuApplyOutcome::IgnoredNonDraw),

@@ -196,6 +196,10 @@ impl EngineThreadState {
                 gpu_cmds.push(thread_protocol::GpuCmdMsg::WriteOp(write_op));
             }
 
+            if let Some(composite_op) = output.composite_op {
+                gpu_cmds.push(thread_protocol::GpuCmdMsg::CompositeOp(composite_op));
+            }
+
             if let Some(draw_op) = &output.draw_op {
                 gpu_cmds.push(thread_protocol::GpuCmdMsg::DrawOp(draw_op.clone()));
             }

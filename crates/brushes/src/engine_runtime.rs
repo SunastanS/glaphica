@@ -5,8 +5,8 @@ use std::fmt::{Display, Formatter};
 use glaphica_core::{BackendId, BrushId, BrushInput, CanvasVec2, NodeId, TileKey};
 use images::Image;
 use thread_protocol::{
-    ClearOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg, RefImage,
-    WriteBlendMode, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg,
+    RefImage, WriteBlendMode, WriteOp,
 };
 
 use crate::brush_registry::BrushRegistry;
@@ -31,6 +31,7 @@ pub struct StrokeDrawOutput {
     pub draw_op: Option<DrawOp>,
     pub copy_op: Option<CopyOp>,
     pub write_op: Option<WriteOp>,
+    pub composite_op: Option<CompositeOp>,
     pub tile_key_update: Option<(NodeId, usize, TileKey)>,
 }
 
@@ -496,6 +497,7 @@ impl BrushEngineRuntime {
                         draw_op: None,
                         copy_op: None,
                         write_op: None,
+                        composite_op: None,
                         tile_key_update: None,
                     });
                 }
@@ -521,6 +523,7 @@ impl BrushEngineRuntime {
                         }),
                         copy_op,
                         write_op: None,
+                        composite_op: None,
                         tile_key_update,
                     });
                     continue;
@@ -547,6 +550,7 @@ impl BrushEngineRuntime {
                     }),
                     copy_op,
                     write_op: None,
+                    composite_op: None,
                     tile_key_update,
                 });
 
@@ -556,16 +560,36 @@ impl BrushEngineRuntime {
                     .pipeline
                     .stroke_buffer_write_opacity(brush_input)
                     .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+                let (copy_op, composite_op, write_op) = if let Some(copy_op) = copy_op {
+                    (
+                        None,
+                        Some(CompositeOp {
+                            base_tile_key: copy_op.src_tile_key,
+                            overlay_tile_key: buffer_tile_key,
+                            dst_tile_key: copy_op.dst_tile_key,
+                            blend_mode: WriteBlendMode::Normal,
+                            opacity: write_opacity,
+                        }),
+                        None,
+                    )
+                } else {
+                    (
+                        None,
+                        None,
+                        Some(WriteOp {
+                            src_tile_key: buffer_tile_key,
+                            dst_tile_key: final_tile_key,
+                            blend_mode: WriteBlendMode::Normal,
+                            opacity: write_opacity,
+                        }),
+                    )
+                };
                 output.push(StrokeDrawOutput {
                     clear_op: None,
                     draw_op: None,
-                    copy_op: None,
-                    write_op: Some(WriteOp {
-                        src_tile_key: buffer_tile_key,
-                        dst_tile_key: final_tile_key,
-                        blend_mode: WriteBlendMode::Normal,
-                        opacity: write_opacity,
-                    }),
+                    copy_op,
+                    write_op,
+                    composite_op,
                     tile_key_update: None,
                 });
             } else {
@@ -582,6 +606,7 @@ impl BrushEngineRuntime {
                         draw_op: None,
                         copy_op: None,
                         write_op: None,
+                        composite_op: None,
                         tile_key_update: None,
                     });
                 }
@@ -600,6 +625,7 @@ impl BrushEngineRuntime {
                     }),
                     copy_op,
                     write_op: None,
+                    composite_op: None,
                     tile_key_update,
                 });
             }

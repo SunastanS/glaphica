@@ -497,6 +497,12 @@ fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
                     index, op.src_tile_key, op.dst_tile_key
                 );
             }
+            GpuCmdMsg::CompositeOp(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] CompositeOp base={:?} overlay={:?} dst={:?} opacity={:.3}",
+                    index, op.base_tile_key, op.overlay_tile_key, op.dst_tile_key, op.opacity
+                );
+            }
             GpuCmdMsg::ClearOp(op) => {
                 eprintln!(
                     "[PERF][gpu_cmd_trace][{}] ClearOp tile={:?}",

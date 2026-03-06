@@ -55,8 +55,8 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg, RefImage,
-    RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg,
+    RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
 };
 
 mod gpu_feedback;
