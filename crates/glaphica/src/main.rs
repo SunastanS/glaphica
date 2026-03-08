@@ -117,17 +117,12 @@ impl App {
         self.render_frame();
 
         if let Some(screenshot_path) = &self.run_config.screenshot_path {
-            let (width, height) = match &self.window {
-                Some(window) => {
-                    let size = window.inner_size();
-                    (size.width.max(1), size.height.max(1))
+            if let Some(integration) = &mut self.integration {
+                let (width, height) = integration.document_size();
+                if let Err(error) = integration.save_screenshot(screenshot_path, width, height)
+                {
+                    eprintln!("Screenshot save failed: {error}");
                 }
-                None => (1024, 1024),
-            };
-            if let Some(integration) = &mut self.integration
-                && let Err(error) = integration.save_screenshot(screenshot_path, width, height)
-            {
-                eprintln!("Screenshot save failed: {error}");
             }
         }
 

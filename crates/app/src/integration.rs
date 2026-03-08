@@ -152,6 +152,7 @@ pub struct AppThreadIntegration {
     next_stroke_id: u64,
     perf_trace: PerfTraceConfig,
     perf_frame_seq: u64,
+    document_layout: ImageLayout,
 }
 
 impl AppThreadIntegration {
@@ -318,7 +319,12 @@ impl AppThreadIntegration {
             next_stroke_id: 1,
             perf_trace: PerfTraceConfig::from_env(),
             perf_frame_seq: 0,
+            document_layout: layout,
         })
+    }
+
+    pub fn document_size(&self) -> (u32, u32) {
+        (self.document_layout.size_x(), self.document_layout.size_y())
     }
 
     pub fn main_state(&self) -> &MainThreadState {
