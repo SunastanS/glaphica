@@ -21,6 +21,13 @@ pub enum DrawFrameMergePolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuCmdFrameMergeTag {
+    None,
+    KeepFirstInFrameByDstTile,
+    KeepLastInFrameByDstTile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefImage {
     pub tile_key: TileKey,
 }
@@ -56,6 +63,7 @@ pub struct CopyOp {
     ///
     /// Semantics are full-tile replacement (not blending).
     pub dst_tile_key: TileKey,
+    pub frame_merge: GpuCmdFrameMergeTag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,6 +77,7 @@ pub struct WriteOp {
     pub blend_mode: WriteBlendMode,
     /// Global write opacity multiplier in [0, 1].
     pub opacity: f32,
+    pub frame_merge: GpuCmdFrameMergeTag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

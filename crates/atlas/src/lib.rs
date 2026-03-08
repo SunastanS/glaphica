@@ -183,7 +183,10 @@ impl ParityPool {
         }
 
         let index = self.next_index;
-        self.next_index = self.next_index.checked_add(1).expect("index overflow");
+        self.next_index = self
+            .next_index
+            .checked_add(1)
+            .expect("ParityPool index overflow: this indicates a logic bug in slot allocation");
         Some(index)
     }
 

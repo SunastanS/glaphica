@@ -5,8 +5,8 @@ use std::fmt::{Display, Formatter};
 use glaphica_core::{BackendId, BrushId, BrushInput, CanvasVec2, NodeId, TileKey};
 use images::Image;
 use thread_protocol::{
-    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg,
-    RefImage, WriteBlendMode, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag,
+    GpuCmdMsg, RefImage, WriteBlendMode, WriteOp,
 };
 
 use crate::brush_registry::BrushRegistry;
@@ -70,6 +70,14 @@ pub trait EngineBrushPipeline: Send {
         _brush_input: &BrushInput,
     ) -> Result<f32, BrushPipelineError> {
         Ok(1.0)
+    }
+
+    fn stroke_buffer_copy_frame_merge_tag(&self) -> GpuCmdFrameMergeTag {
+        GpuCmdFrameMergeTag::None
+    }
+
+    fn stroke_buffer_write_frame_merge_tag(&self) -> GpuCmdFrameMergeTag {
+        GpuCmdFrameMergeTag::None
     }
 }
 
@@ -435,6 +443,15 @@ impl BrushEngineRuntime {
         )> = Vec::new();
         let stroke_buffer_backend = self.pipelines.get(brush_id)?.stroke_buffer_backend;
         let uses_stroke_buffer = stroke_buffer_backend.is_some();
+        let (copy_frame_merge_tag, write_frame_merge_tag) = if uses_stroke_buffer {
+            let registration = self.pipelines.get_mut(brush_id)?;
+            (
+                registration.pipeline.stroke_buffer_copy_frame_merge_tag(),
+                registration.pipeline.stroke_buffer_write_frame_merge_tag(),
+            )
+        } else {
+            (GpuCmdFrameMergeTag::None, GpuCmdFrameMergeTag::None)
+        };
 
         for affected_tile in affected_tiles {
             let stroke_key = StrokeTileKey {
@@ -443,8 +460,7 @@ impl BrushEngineRuntime {
             };
 
             let (final_tile_key, origin_tile, copy_op, origin_init_clear_op, tile_key_update) =
-                self
-                .prepare_tile_for_stroke(
+                self.prepare_tile_for_stroke(
                     stroke_key,
                     affected_tile.tile_key,
                     affected_tile.tile_index,
@@ -509,7 +525,10 @@ impl BrushEngineRuntime {
                         .get_mut(brush_id)?
                         .pipeline
                         .encode_draw_input(brush_input, final_tile_key, tile_canvas_origin)
-                        .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+                        .map_err(|source| EngineBrushDispatchError::Pipeline {
+                            brush_id,
+                            source,
+                        })?;
                     output.push(StrokeDrawOutput {
                         clear_op: None,
                         draw_op: Some(DrawOp {
@@ -535,8 +554,18 @@ impl BrushEngineRuntime {
                     .pipelines
                     .get_mut(brush_id)?
                     .pipeline
-                    .encode_stroke_buffer_dab_input(brush_input, buffer_tile_key, tile_canvas_origin)
+                    .encode_stroke_buffer_dab_input(
+                        brush_input,
+                        buffer_tile_key,
+                        tile_canvas_origin,
+                    )
                     .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
+
+                let copy_op = copy_op.map(|copy_op| CopyOp {
+                    src_tile_key: copy_op.src_tile_key,
+                    dst_tile_key: copy_op.dst_tile_key,
+                    frame_merge: copy_frame_merge_tag,
+                });
 
                 output.push(StrokeDrawOutput {
                     clear_op,
@@ -585,6 +614,7 @@ impl BrushEngineRuntime {
                             dst_tile_key: final_tile_key,
                             blend_mode: WriteBlendMode::Normal,
                             opacity: write_opacity,
+                            frame_merge: write_frame_merge_tag,
                         }),
                     )
                 };
@@ -692,6 +722,7 @@ impl BrushEngineRuntime {
                     Some(CopyOp {
                         src_tile_key: restore_tile,
                         dst_tile_key: current_tile_key,
+                        frame_merge: GpuCmdFrameMergeTag::None,
                     })
                 },
                 None,
@@ -733,6 +764,7 @@ impl BrushEngineRuntime {
             Some(CopyOp {
                 src_tile_key: current_tile_key,
                 dst_tile_key: new_tile_key,
+                frame_merge: GpuCmdFrameMergeTag::None,
             })
         };
 
@@ -755,10 +787,10 @@ impl BrushEngineRuntime {
 #[cfg(test)]
 mod tests {
     use glaphica_core::{
-        BrushId, BrushInput, BrushInputFlags, CanvasVec2, IMAGE_TILE_SIZE, MappedCursor, NodeId,
-        RadianVec2, StrokeId, TileKey,
+        BrushId, BrushInput, BrushInputFlags, CanvasVec2, MappedCursor, NodeId, RadianVec2,
+        StrokeId, TileKey, IMAGE_TILE_SIZE,
     };
-    use images::{Image, layout::ImageLayout};
+    use images::{layout::ImageLayout, Image};
 
     use super::{BrushEngineRuntime, EngineBrushPipeline, TileSlotAllocator};
 
@@ -834,23 +866,17 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(
-            image
-                .set_tile_key(0, TileKey::from_parts(1, 1, 100))
-                .is_ok()
-        );
-        assert!(
-            image
-                .set_tile_key(1, TileKey::from_parts(1, 1, 101))
-                .is_ok()
-        );
+        assert!(image
+            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+            .is_ok());
+        assert!(image
+            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+            .is_ok());
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(
-            runtime
-                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-                .is_ok()
-        );
+        assert!(runtime
+            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+            .is_ok());
 
         let brush_input = build_test_brush_input(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 10.0));
         let mut draw_ops = Vec::new();
@@ -878,38 +904,28 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(
-            write_image
-                .set_tile_key(0, TileKey::from_parts(1, 1, 100))
-                .is_ok()
-        );
-        assert!(
-            write_image
-                .set_tile_key(1, TileKey::from_parts(1, 1, 101))
-                .is_ok()
-        );
+        assert!(write_image
+            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+            .is_ok());
+        assert!(write_image
+            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+            .is_ok());
 
         let mut read_image = match Image::new(layout, glaphica_core::BackendId::new(2)) {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(
-            read_image
-                .set_tile_key(0, TileKey::from_parts(2, 3, 200))
-                .is_ok()
-        );
-        assert!(
-            read_image
-                .set_tile_key(1, TileKey::from_parts(2, 3, 201))
-                .is_ok()
-        );
+        assert!(read_image
+            .set_tile_key(0, TileKey::from_parts(2, 3, 200))
+            .is_ok());
+        assert!(read_image
+            .set_tile_key(1, TileKey::from_parts(2, 3, 201))
+            .is_ok());
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(
-            runtime
-                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-                .is_ok()
-        );
+        assert!(runtime
+            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+            .is_ok());
 
         let brush_input = build_test_brush_input(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 10.0));
         let mut draw_ops = Vec::new();
@@ -946,11 +962,9 @@ mod tests {
         assert!(image.set_tile_key(0, existing_key).is_ok());
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(
-            runtime
-                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-                .is_ok()
-        );
+        assert!(runtime
+            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+            .is_ok());
         runtime.begin_stroke();
 
         let mut allocator = TestAllocator {
@@ -974,16 +988,14 @@ mod tests {
         assert_eq!(allocator.parity_requests, vec![true]);
         assert_eq!(output.len(), 1);
         let draw_op = output[0].draw_op.as_ref().expect("draw op must exist");
-        assert_eq!(
-            draw_op.tile_key,
-            TileKey::from_parts(1, 0, 0x8000_0001)
-        );
+        assert_eq!(draw_op.tile_key, TileKey::from_parts(1, 0, 0x8000_0001));
         assert_eq!(draw_op.origin_tile, existing_key);
         assert_eq!(
             output[0].copy_op,
             Some(thread_protocol::CopyOp {
                 src_tile_key: existing_key,
                 dst_tile_key: TileKey::from_parts(1, 0, 0x8000_0001),
+                frame_merge: thread_protocol::GpuCmdFrameMergeTag::None,
             })
         );
         assert_eq!(output[0].write_op, None);

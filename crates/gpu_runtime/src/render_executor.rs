@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use wgpu::util::DeviceExt;
 
 use document::{LeafBlendMode, RenderCmd};
-use glaphica_core::{ATLAS_TILE_SIZE, TileKey};
+use glaphica_core::{TileKey, ATLAS_TILE_SIZE};
 use thread_protocol::{ClearOp, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
@@ -14,6 +14,7 @@ use crate::context::GpuContext;
 #[derive(Debug)]
 pub enum RenderExecutorError {
     MissingTileBackend { tile_key: TileKey },
+    PipelineNotInitialized,
 }
 
 impl Display for RenderExecutorError {
@@ -21,6 +22,12 @@ impl Display for RenderExecutorError {
         match self {
             Self::MissingTileBackend { tile_key } => {
                 write!(f, "missing atlas backend for tile key {:?}", tile_key)
+            }
+            Self::PipelineNotInitialized => {
+                write!(
+                    f,
+                    "render pipeline not initialized, ensure_pipelines must be called first"
+                )
             }
         }
     }
@@ -95,7 +102,10 @@ impl RenderExecutor {
 
         let format = self.detect_format(context, cmds);
         self.ensure_pipelines(context, format);
-        let cache = self.cache.as_ref().unwrap();
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or(RenderExecutorError::PipelineNotInitialized)?;
 
         let mut encoder =
             context
@@ -123,7 +133,10 @@ impl RenderExecutor {
 
         let format = self.detect_format(context, cmds);
         self.ensure_pipelines(context, format);
-        let cache = self.cache.as_ref().unwrap();
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or(RenderExecutorError::PipelineNotInitialized)?;
 
         for cmd in cmds {
             encode_cmd(context, cmd, cache, encoder)?;
@@ -180,20 +193,21 @@ impl RenderExecutor {
         let bytes_per_pixel = texture_bytes_per_pixel(resolved.format);
         let unpadded_bytes_per_row = bytes_per_pixel * ATLAS_TILE_SIZE;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256).saturating_mul(256);
-        let clear_size = usize::try_from(padded_bytes_per_row.saturating_mul(ATLAS_TILE_SIZE))
-            .unwrap_or(0);
+        let clear_size =
+            usize::try_from(padded_bytes_per_row.saturating_mul(ATLAS_TILE_SIZE)).unwrap_or(0);
         if clear_size == 0 {
             return Ok(());
         }
         let clear_data = vec![0u8; clear_size];
-        let clear_buffer = context
-            .gpu_context
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("glaphica-clear-tile-buffer"),
-                contents: &clear_data,
-                usage: wgpu::BufferUsages::COPY_SRC,
-            });
+        let clear_buffer =
+            context
+                .gpu_context
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("glaphica-clear-tile-buffer"),
+                    contents: &clear_data,
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                });
         encoder.copy_buffer_to_texture(
             wgpu::TexelCopyBufferInfo {
                 buffer: &clear_buffer,
@@ -342,7 +356,11 @@ impl RenderExecutor {
         write_op: &WriteOp,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), RenderExecutorError> {
-        if context.atlas_storage.resolve(write_op.src_tile_key).is_none() {
+        if context
+            .atlas_storage
+            .resolve(write_op.src_tile_key)
+            .is_none()
+        {
             return Err(RenderExecutorError::MissingTileBackend {
                 tile_key: write_op.src_tile_key,
             });
@@ -373,14 +391,17 @@ impl RenderExecutor {
         }
 
         self.ensure_pipelines(context, dst_resolved.format);
-        let cache = self.cache.as_ref().unwrap();
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or(RenderExecutorError::PipelineNotInitialized)?;
         let bind_group = create_bind_group(
             context,
             &cache.bind_group_layout,
             &cache.sampler,
             write_op.src_tile_key,
             write_op.opacity,
-        );
+        )?;
         let dst_view = create_render_attachment_view(&dst_resolved);
         let pipeline = match write_op.blend_mode {
             WriteBlendMode::Normal => &cache.normal,
@@ -430,23 +451,24 @@ impl RenderExecutor {
         composite_op: &CompositeOp,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), RenderExecutorError> {
-        let base_resolved = context.atlas_storage.resolve(composite_op.base_tile_key).ok_or(
-            RenderExecutorError::MissingTileBackend {
+        let base_resolved = context
+            .atlas_storage
+            .resolve(composite_op.base_tile_key)
+            .ok_or(RenderExecutorError::MissingTileBackend {
                 tile_key: composite_op.base_tile_key,
-            },
-        )?;
-        let overlay_resolved =
-            context
-                .atlas_storage
-                .resolve(composite_op.overlay_tile_key)
-                .ok_or(RenderExecutorError::MissingTileBackend {
-                    tile_key: composite_op.overlay_tile_key,
-                })?;
-        let dst_resolved = context.atlas_storage.resolve(composite_op.dst_tile_key).ok_or(
-            RenderExecutorError::MissingTileBackend {
+            })?;
+        let overlay_resolved = context
+            .atlas_storage
+            .resolve(composite_op.overlay_tile_key)
+            .ok_or(RenderExecutorError::MissingTileBackend {
+                tile_key: composite_op.overlay_tile_key,
+            })?;
+        let dst_resolved = context
+            .atlas_storage
+            .resolve(composite_op.dst_tile_key)
+            .ok_or(RenderExecutorError::MissingTileBackend {
                 tile_key: composite_op.dst_tile_key,
-            },
-        )?;
+            })?;
         if should_trace_gpu_exec_event() {
             eprintln!(
                 "[PERF][gpu_exec_trace][composite] base={:?}@({}, {}, l{}) overlay={:?}@({}, {}, l{}) dst={:?}@({}, {}, l{}) opacity={:.3}",
@@ -467,12 +489,12 @@ impl RenderExecutor {
         }
 
         self.ensure_pipelines(context, dst_resolved.format);
-        let cache = self.cache.as_ref().unwrap();
-        let bind_group = create_composite_bind_group(
-            context,
-            &cache.composite_bind_group_layout,
-            composite_op,
-        );
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or(RenderExecutorError::PipelineNotInitialized)?;
+        let bind_group =
+            create_composite_bind_group(context, &cache.composite_bind_group_layout, composite_op)?;
         let dst_view = create_render_attachment_view(&dst_resolved);
         let pipeline = match composite_op.blend_mode {
             WriteBlendMode::Normal => &cache.composite_normal,
@@ -631,9 +653,7 @@ impl RenderExecutor {
         );
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glaphica-render-composite-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("render_composite_shader.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("render_composite_shader.wgsl").into()),
         });
         let composite_normal = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glaphica-render-pipeline-composite-normal"),
@@ -821,7 +841,7 @@ fn encode_cmd(
                 &cache.sampler,
                 src_tile_key,
                 source.config.opacity,
-            );
+            )?;
             bind_groups.push((bind_group, source.config.blend_mode));
         }
 
@@ -876,8 +896,12 @@ fn create_bind_group(
     sampler: &wgpu::Sampler,
     src_tile_key: TileKey,
     opacity: f32,
-) -> wgpu::BindGroup {
-    let src_resolved = context.atlas_storage.resolve(src_tile_key).unwrap();
+) -> Result<wgpu::BindGroup, RenderExecutorError> {
+    let src_resolved = context.atlas_storage.resolve(src_tile_key).ok_or(
+        RenderExecutorError::MissingTileBackend {
+            tile_key: src_tile_key,
+        },
+    )?;
 
     let src_view = src_resolved
         .texture2d_array
@@ -915,7 +939,7 @@ fn create_bind_group(
         .queue
         .write_buffer(&params_buffer, 0, &params_bytes);
 
-    context
+    Ok(context
         .gpu_context
         .device
         .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -935,22 +959,26 @@ fn create_bind_group(
                     resource: params_buffer.as_entire_binding(),
                 },
             ],
-        })
+        }))
 }
 
 fn create_composite_bind_group(
     context: &RenderContext<'_>,
     layout: &wgpu::BindGroupLayout,
     composite_op: &CompositeOp,
-) -> wgpu::BindGroup {
+) -> Result<wgpu::BindGroup, RenderExecutorError> {
     let base_resolved = context
         .atlas_storage
         .resolve(composite_op.base_tile_key)
-        .unwrap();
+        .ok_or(RenderExecutorError::MissingTileBackend {
+            tile_key: composite_op.base_tile_key,
+        })?;
     let overlay_resolved = context
         .atlas_storage
         .resolve(composite_op.overlay_tile_key)
-        .unwrap();
+        .ok_or(RenderExecutorError::MissingTileBackend {
+            tile_key: composite_op.overlay_tile_key,
+        })?;
 
     let base_view = base_resolved
         .texture2d_array
@@ -1004,7 +1032,7 @@ fn create_composite_bind_group(
         .queue
         .write_buffer(&params_buffer, 0, &params_bytes);
 
-    context
+    Ok(context
         .gpu_context
         .device
         .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1024,7 +1052,7 @@ fn create_composite_bind_group(
                     resource: params_buffer.as_entire_binding(),
                 },
             ],
-        })
+        }))
 }
 
 #[repr(C)]
@@ -1105,7 +1133,7 @@ mod tests {
     use crate::context::{GpuContext, GpuContextInitDescriptor};
 
     use super::{RenderContext, RenderExecutor};
-    use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, TileKey};
+    use glaphica_core::{AtlasLayout, BackendKind, TileKey, ATLAS_TILE_SIZE};
     use thread_protocol::ClearOp;
 
     #[test]
@@ -1256,9 +1284,7 @@ mod tests {
                 eprintln!("readback map callback send failed");
             }
         });
-        let _ = gpu_context
-            .device
-            .poll(wgpu::PollType::wait_indefinitely());
+        let _ = gpu_context.device.poll(wgpu::PollType::wait_indefinitely());
         if receiver.recv().is_err() {
             return [0, 0, 0, 0];
         }

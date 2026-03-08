@@ -3,6 +3,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use std::fmt::{Display, Formatter};
 
 use glaphica_core::{BackendKind, BrushInput, CanvasVec2, RadianVec2, TextureFormat, TileKey};
+use thread_protocol::GpuCmdFrameMergeTag;
 
 use crate::brush_spec::BrushSpec;
 use crate::config::{
@@ -600,6 +601,14 @@ impl EngineBrushPipeline for RoundBrush {
     ) -> Result<f32, BrushPipelineError> {
         Ok(self.base_opacity)
     }
+
+    fn stroke_buffer_copy_frame_merge_tag(&self) -> GpuCmdFrameMergeTag {
+        GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile
+    }
+
+    fn stroke_buffer_write_frame_merge_tag(&self) -> GpuCmdFrameMergeTag {
+        GpuCmdFrameMergeTag::KeepLastInFrameByDstTile
+    }
 }
 
 impl BrushSpec for RoundBrush {
@@ -710,8 +719,7 @@ mod tests {
 
     #[test]
     fn decode_resolves_fields_from_layout() {
-        let decoded =
-            decode_round_draw_input(ROUND_DRAW_LAYOUT, &[1.0, 2.0, 3.0, 0.4, 0.9, 1.0]);
+        let decoded = decode_round_draw_input(ROUND_DRAW_LAYOUT, &[1.0, 2.0, 3.0, 0.4, 0.9, 1.0]);
         assert!(decoded.is_ok());
         let decoded = match decoded {
             Ok(decoded) => decoded,

@@ -719,6 +719,7 @@ pub enum InitError {
     GpuContext(gpu_runtime::GpuContextInitError),
     Atlas(gpu_runtime::atlas_runtime::AtlasStorageRuntimeRegisterError),
     Document(document::ImageCreateError),
+    BackendManager(atlas::AtlasBackendManagerError),
 }
 
 #[derive(Debug)]

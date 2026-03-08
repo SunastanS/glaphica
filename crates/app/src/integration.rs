@@ -8,8 +8,8 @@ use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
 use thread_protocol::{
-    DrawFrameMergePolicy, GpuCmdMsg, GpuFeedbackFrame, InputControlEvent, InputControlOp,
-    InputRingSample, MergeItem, MergeVecIndex, TileKey,
+    DrawFrameMergePolicy, GpuCmdFrameMergeTag, GpuCmdMsg, GpuFeedbackFrame, InputControlEvent,
+    InputControlOp, InputRingSample, MergeItem, MergeVecIndex, TileKey,
 };
 use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 
@@ -159,6 +159,14 @@ impl AppThreadIntegration {
         draw_op.frame_merge == DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
     }
 
+    fn should_keep_first_copy_in_frame(copy_op: &thread_protocol::CopyOp) -> bool {
+        copy_op.frame_merge == GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile
+    }
+
+    fn should_keep_last_write_in_frame(write_op: &thread_protocol::WriteOp) -> bool {
+        write_op.frame_merge == GpuCmdFrameMergeTag::KeepLastInFrameByDstTile
+    }
+
     fn compact_frame_mergeable_draws(commands: &mut Vec<GpuCmdMsg>) {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         struct CompositeKey {
@@ -201,6 +209,44 @@ impl AppThreadIntegration {
                         })
                         .copied()
                         == Some(index)
+                }
+                _ => true,
+            };
+            if keep {
+                compacted.push(cmd);
+            }
+        }
+        *commands = compacted;
+    }
+
+    fn compact_frame_mergeable_copy_write(commands: &mut Vec<GpuCmdMsg>) {
+        let mut first_copy_indices: HashMap<TileKey, usize> = HashMap::new();
+        let mut last_write_indices: HashMap<TileKey, usize> = HashMap::new();
+
+        for (index, cmd) in commands.iter().enumerate() {
+            match cmd {
+                GpuCmdMsg::CopyOp(copy_op) if Self::should_keep_first_copy_in_frame(copy_op) => {
+                    first_copy_indices.entry(copy_op.dst_tile_key).or_insert(index);
+                }
+                GpuCmdMsg::WriteOp(write_op) if Self::should_keep_last_write_in_frame(write_op) => {
+                    last_write_indices.insert(write_op.dst_tile_key, index);
+                }
+                _ => {}
+            }
+        }
+
+        if first_copy_indices.is_empty() && last_write_indices.is_empty() {
+            return;
+        }
+
+        let mut compacted = Vec::with_capacity(commands.len());
+        for (index, cmd) in commands.drain(..).enumerate() {
+            let keep = match &cmd {
+                GpuCmdMsg::CopyOp(copy_op) if Self::should_keep_first_copy_in_frame(copy_op) => {
+                    first_copy_indices.get(&copy_op.dst_tile_key).copied() == Some(index)
+                }
+                GpuCmdMsg::WriteOp(write_op) if Self::should_keep_last_write_in_frame(write_op) => {
+                    last_write_indices.get(&write_op.dst_tile_key).copied() == Some(index)
                 }
                 _ => true,
             };
@@ -455,6 +501,7 @@ impl AppThreadIntegration {
                 }
 
                 Self::compact_frame_mergeable_draws(&mut self.gpu_commands);
+                Self::compact_frame_mergeable_copy_write(&mut self.gpu_commands);
 
                 let pending_gpu_cmds = std::mem::take(&mut self.gpu_commands);
                 generated_gpu_command_count = pending_gpu_cmds.len();

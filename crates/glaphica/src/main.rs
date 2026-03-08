@@ -155,27 +155,47 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes().with_title("glaphica"))
-                .expect("failed to create window"),
-        );
+        let window = match event_loop.create_window(
+            Window::default_attributes().with_title("glaphica"),
+        ) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                eprintln!("failed to create window: {error}");
+                event_loop.exit();
+                return;
+            }
+        };
         self.window = Some(window.clone());
         if self.started_at.is_none() {
             self.started_at = Some(Instant::now());
         }
 
         if self.integration.is_none() {
-            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-            let mut integration = rt
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(error) => {
+                    eprintln!("failed to create tokio runtime: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            };
+            let integration = rt
                 .block_on(async {
                     AppThreadIntegration::new(
                         "test-document".to_string(),
                         ImageLayout::new(1024, 1024),
                     )
                     .await
-                })
-                .expect("failed to init app");
+                });
+
+            let mut integration = match integration {
+                Ok(i) => i,
+                Err(error) => {
+                    eprintln!("failed to init app: {error:?}");
+                    event_loop.exit();
+                    return;
+                }
+            };
 
             // registe a fallback brush
             let default_brush = match RoundBrush::with_default_curves(3.0, 0.8) {
@@ -209,14 +229,26 @@ impl ApplicationHandler for App {
             let adapter = &gpu_context.adapter;
             let device = &gpu_context.device;
 
-            let surface = instance
-                .create_surface(window.clone())
-                .expect("failed to create surface");
+            let surface = match instance.create_surface(window.clone()) {
+                Ok(surface) => surface,
+                Err(error) => {
+                    eprintln!("failed to create surface: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            };
 
             let size = (window.inner_size().width, window.inner_size().height);
 
-            let surface_runtime = SurfaceRuntime::new(surface, adapter, device, size.0, size.1)
-                .expect("failed to init surface");
+            let surface_runtime = match SurfaceRuntime::new(surface, adapter, device, size.0, size.1)
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("failed to init surface: {error:?}");
+                    event_loop.exit();
+                    return;
+                }
+            };
             let surface_format = surface_runtime.format();
 
             integration.set_surface(surface_runtime);
@@ -695,7 +727,7 @@ impl EguiOverlay {
 }
 
 fn main() {
-    let event_loop = EventLoop::new().expect("failed to create event loop");
+    let event_loop = EventLoop::new().expect("failed to create event loop: winit backend initialization failed");
     let run_config = RunConfig::from_args(std::env::args().skip(1).collect());
     let sigint_flag = Arc::new(AtomicBool::new(false));
     {
@@ -707,7 +739,7 @@ fn main() {
         }
     }
     let mut app = App::new(run_config, sigint_flag);
-    event_loop.run_app(&mut app).expect("failed to run app");
+    event_loop.run_app(&mut app).expect("failed to run app: event loop terminated unexpectedly");
 }
 
 fn current_time_ns() -> u64 {

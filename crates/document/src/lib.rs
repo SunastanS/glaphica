@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glaphica_core::{BackendId, NodeId, RenderTreeGeneration};
-use images::Image;
 use images::layout::ImageLayout;
+use images::Image;
 
 pub use images::ImageCreateError;
 pub use shared_tree::{
@@ -212,7 +212,8 @@ impl UiLayerTree {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
                 },
-                image: Image::new(self.layout, leaf_backend).unwrap(),
+                image: Image::new(self.layout, leaf_backend)
+                    .expect("fallback image creation should succeed with valid layout and backend"),
             })
         });
         Ok(RenderLayerTree {

@@ -9,9 +9,9 @@ use glaphica_core::{
 };
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
-    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg,
-    InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
-    WriteBlendMode, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag,
+    GpuCmdMsg, InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg,
+    TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
 };
 
 use crate::StrokeControl;
@@ -149,15 +149,26 @@ pub enum TraceDrawFrameMergePolicy {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceGpuCmdFrameMergeTag {
+    None,
+    KeepFirstInFrameByDstTile,
+    KeepLastInFrameByDstTile,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TraceCopyOp {
     pub src_tile_key: TraceTileKey,
     pub dst_tile_key: TraceTileKey,
+    #[serde(default = "trace_gpu_cmd_frame_merge_none")]
+    pub frame_merge: TraceGpuCmdFrameMergeTag,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TraceWriteOp {
     pub src_tile_key: TraceTileKey,
     pub dst_tile_key: TraceTileKey,
+    #[serde(default = "trace_gpu_cmd_frame_merge_none")]
+    pub frame_merge: TraceGpuCmdFrameMergeTag,
     #[serde(default = "trace_write_blend_mode_normal")]
     pub blend_mode: TraceWriteBlendMode,
     #[serde(default = "trace_write_opacity_one")]
@@ -318,6 +329,10 @@ fn trace_draw_frame_merge_none() -> TraceDrawFrameMergePolicy {
     TraceDrawFrameMergePolicy::None
 }
 
+fn trace_gpu_cmd_frame_merge_none() -> TraceGpuCmdFrameMergeTag {
+    TraceGpuCmdFrameMergeTag::None
+}
+
 fn trace_write_blend_mode_normal() -> TraceWriteBlendMode {
     TraceWriteBlendMode::Normal
 }
@@ -410,10 +425,28 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
             GpuCmdMsg::CopyOp(copy_op) => Self::CopyOp(TraceCopyOp {
                 src_tile_key: copy_op.src_tile_key.into(),
                 dst_tile_key: copy_op.dst_tile_key.into(),
+                frame_merge: match copy_op.frame_merge {
+                    GpuCmdFrameMergeTag::None => TraceGpuCmdFrameMergeTag::None,
+                    GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile => {
+                        TraceGpuCmdFrameMergeTag::KeepFirstInFrameByDstTile
+                    }
+                    GpuCmdFrameMergeTag::KeepLastInFrameByDstTile => {
+                        TraceGpuCmdFrameMergeTag::KeepLastInFrameByDstTile
+                    }
+                },
             }),
             GpuCmdMsg::WriteOp(write_op) => Self::WriteOp(TraceWriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
                 dst_tile_key: write_op.dst_tile_key.into(),
+                frame_merge: match write_op.frame_merge {
+                    GpuCmdFrameMergeTag::None => TraceGpuCmdFrameMergeTag::None,
+                    GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile => {
+                        TraceGpuCmdFrameMergeTag::KeepFirstInFrameByDstTile
+                    }
+                    GpuCmdFrameMergeTag::KeepLastInFrameByDstTile => {
+                        TraceGpuCmdFrameMergeTag::KeepLastInFrameByDstTile
+                    }
+                },
                 blend_mode: match write_op.blend_mode {
                     WriteBlendMode::Normal => TraceWriteBlendMode::Normal,
                 },
@@ -484,10 +517,28 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
             TraceGpuCmd::CopyOp(copy_op) => Self::CopyOp(CopyOp {
                 src_tile_key: copy_op.src_tile_key.into(),
                 dst_tile_key: copy_op.dst_tile_key.into(),
+                frame_merge: match copy_op.frame_merge {
+                    TraceGpuCmdFrameMergeTag::None => GpuCmdFrameMergeTag::None,
+                    TraceGpuCmdFrameMergeTag::KeepFirstInFrameByDstTile => {
+                        GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile
+                    }
+                    TraceGpuCmdFrameMergeTag::KeepLastInFrameByDstTile => {
+                        GpuCmdFrameMergeTag::KeepLastInFrameByDstTile
+                    }
+                },
             }),
             TraceGpuCmd::WriteOp(write_op) => Self::WriteOp(WriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
                 dst_tile_key: write_op.dst_tile_key.into(),
+                frame_merge: match write_op.frame_merge {
+                    TraceGpuCmdFrameMergeTag::None => GpuCmdFrameMergeTag::None,
+                    TraceGpuCmdFrameMergeTag::KeepFirstInFrameByDstTile => {
+                        GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile
+                    }
+                    TraceGpuCmdFrameMergeTag::KeepLastInFrameByDstTile => {
+                        GpuCmdFrameMergeTag::KeepLastInFrameByDstTile
+                    }
+                },
                 blend_mode: match write_op.blend_mode {
                     TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
                 },

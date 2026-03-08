@@ -3,11 +3,11 @@ use glaphica_core::StrokeId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroU64;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use brushes::{BrushDrawInputLayout, BrushGpuPipelineSpec, BrushPipelineError};
-use glaphica_core::{ATLAS_TILE_SIZE, BrushId, TextureFormat};
+use glaphica_core::{BrushId, TextureFormat, ATLAS_TILE_SIZE};
 use thread_protocol::{DrawBlendMode, DrawOp};
 
 use crate::atlas_runtime::{AtlasBackendResource, AtlasStorageRuntime};
@@ -49,6 +49,10 @@ pub enum WgpuBrushExecutorError {
     DynamicOffsetOutOfRange {
         brush_id: BrushId,
         offset: u64,
+    },
+    InternalInvariantViolation {
+        brush_id: BrushId,
+        context: &'static str,
     },
 }
 
@@ -115,6 +119,11 @@ impl Display for WgpuBrushExecutorError {
                 f,
                 "dynamic offset {} exceeds u32 range for brush {}",
                 offset, brush_id.0
+            ),
+            Self::InternalInvariantViolation { brush_id, context } => write!(
+                f,
+                "internal invariant violated for brush {}: {}",
+                brush_id.0, context
             ),
         }
     }
@@ -837,7 +846,17 @@ impl WgpuBrushExecutor {
         };
 
         {
-            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            let brush_context = self
+                .brushes
+                .get_mut(brush_index)
+                .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                    brush_id: draw_op.brush_id,
+                    context: "brush context should exist after validation",
+                })?
+                .as_mut()
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?;
             if brush_context.cached_stroke_id != Some(draw_op.stroke_id) {
                 brush_context.cached_stroke_id = Some(draw_op.stroke_id);
                 brush_context.stroke_cached_bind_groups.clear();
@@ -869,7 +888,17 @@ impl WgpuBrushExecutor {
                 draw_op.brush_id,
                 DrawBlendMode::Alpha,
             )?;
-            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            let brush_context = self
+                .brushes
+                .get_mut(brush_index)
+                .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                    brush_id: draw_op.brush_id,
+                    context: "brush context should exist after validation",
+                })?
+                .as_mut()
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?;
             brush_context.alpha_pipeline = Some(pipeline);
         }
 
@@ -883,17 +912,49 @@ impl WgpuBrushExecutor {
                 draw_op.brush_id,
                 DrawBlendMode::Replace,
             )?;
-            let brush_context = self.brushes[brush_index].as_mut().unwrap();
+            let brush_context = self
+                .brushes
+                .get_mut(brush_index)
+                .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                    brush_id: draw_op.brush_id,
+                    context: "brush context should exist after validation",
+                })?
+                .as_mut()
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?;
             brush_context.replace_pipeline = Some(pipeline);
         }
 
         let pipeline = {
-            let brush_context = self.brushes[brush_index].as_ref().unwrap();
+            let brush_context = self
+                .brushes
+                .get(brush_index)
+                .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                    brush_id: draw_op.brush_id,
+                    context: "brush context should exist after validation",
+                })?
+                .as_ref()
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?;
             match draw_op.blend_mode {
-                DrawBlendMode::Alpha => brush_context.alpha_pipeline.as_ref().unwrap().clone(),
-                DrawBlendMode::Replace => {
-                    brush_context.replace_pipeline.as_ref().unwrap().clone()
-                }
+                DrawBlendMode::Alpha => brush_context
+                    .alpha_pipeline
+                    .as_ref()
+                    .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                        brush_id: draw_op.brush_id,
+                        context: "alpha pipeline should be created before draw",
+                    })?
+                    .clone(),
+                DrawBlendMode::Replace => brush_context
+                    .replace_pipeline
+                    .as_ref()
+                    .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                        brush_id: draw_op.brush_id,
+                        context: "replace pipeline should be created before draw",
+                    })?
+                    .clone(),
             }
         };
 
@@ -914,7 +975,9 @@ impl WgpuBrushExecutor {
             cache_tile_origin_y: cache_resolved
                 .map(|resolved| resolved.address.texel_offset.1)
                 .unwrap_or(0),
-            cache_tile_layer: cache_resolved.map(|resolved| resolved.address.layer).unwrap_or(0),
+            cache_tile_layer: cache_resolved
+                .map(|resolved| resolved.address.layer)
+                .unwrap_or(0),
             has_cache_tile: if cache_resolved.is_some() { 1 } else { 0 },
             _pad1: 0,
             _pad2: 0,
@@ -927,7 +990,17 @@ impl WgpuBrushExecutor {
         let input_stride = align_up_u64(input_binding_size, input_alignment.max(1));
         let params_stride = align_up_u64(BRUSH_SHADER_PARAMS_SIZE, params_alignment.max(1));
 
-        let brush_context = self.brushes[brush_index].as_mut().unwrap();
+        let brush_context = self
+            .brushes
+            .get_mut(brush_index)
+            .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                brush_id: draw_op.brush_id,
+                context: "brush context should exist after validation",
+            })?
+            .as_mut()
+            .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                brush_id: draw_op.brush_id,
+            })?;
         let should_recreate_ring = match brush_context.draw_ring.as_ref() {
             Some(ring) => {
                 ring.input_binding_size != input_binding_size
@@ -947,9 +1020,16 @@ impl WgpuBrushExecutor {
             ));
         }
 
-        let ring_ref = brush_context.draw_ring.as_ref().unwrap();
+        let ring_ref = brush_context.draw_ring.as_ref().ok_or(
+            WgpuBrushExecutorError::InternalInvariantViolation {
+                brush_id: draw_op.brush_id,
+                context: "draw ring should be initialized",
+            },
+        )?;
         let next_input_end = ring_ref.input_cursor.saturating_add(ring_ref.input_stride);
-        let next_params_end = ring_ref.params_cursor.saturating_add(ring_ref.params_stride);
+        let next_params_end = ring_ref
+            .params_cursor
+            .saturating_add(ring_ref.params_stride);
         let input_capacity = ring_ref.input_buffer.size();
         let params_capacity = ring_ref.params_buffer.size();
         if next_input_end > input_capacity || next_params_end > params_capacity {
@@ -972,7 +1052,12 @@ impl WgpuBrushExecutor {
             ));
         }
 
-        let ring = brush_context.draw_ring.as_mut().unwrap();
+        let ring = brush_context.draw_ring.as_mut().ok_or(
+            WgpuBrushExecutorError::InternalInvariantViolation {
+                brush_id: draw_op.brush_id,
+                context: "draw ring should be initialized",
+            },
+        )?;
         let stroke_changed = ring.last_stroke_id != Some(draw_op.stroke_id);
         let input_offset = ring.input_cursor;
         let params_offset = ring.params_cursor;
@@ -1072,7 +1157,12 @@ impl WgpuBrushExecutor {
                 &[call.input_dynamic_offset, call.params_dynamic_offset],
             );
             pass.set_bind_group(1, &call.atlas_bind_group, &[]);
-            pass.set_scissor_rect(call.scissor_x, call.scissor_y, ATLAS_TILE_SIZE, ATLAS_TILE_SIZE);
+            pass.set_scissor_rect(
+                call.scissor_x,
+                call.scissor_y,
+                ATLAS_TILE_SIZE,
+                ATLAS_TILE_SIZE,
+            );
             pass.draw(0..3, 0..1);
         }
 
@@ -1157,19 +1247,20 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
                 .ok_or(WgpuBrushExecutorError::MissingTargetAtlasBackend {
                     brush_id: draw_ops[start].brush_id,
                 })?;
-            let attachment_view = backend
-                .texture2d_array
-                .create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("glaphica-brush-atlas-layer-view"),
-                    format: Some(pass_key.format),
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
-                    aspect: wgpu::TextureAspect::All,
-                    base_mip_level: 0,
-                    mip_level_count: Some(1),
-                    base_array_layer: pass_key.layer,
-                    array_layer_count: Some(1),
-                });
+            let attachment_view =
+                backend
+                    .texture2d_array
+                    .create_view(&wgpu::TextureViewDescriptor {
+                        label: Some("glaphica-brush-atlas-layer-view"),
+                        format: Some(pass_key.format),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                        aspect: wgpu::TextureAspect::All,
+                        base_mip_level: 0,
+                        mip_level_count: Some(1),
+                        base_array_layer: pass_key.layer,
+                        array_layer_count: Some(1),
+                    });
 
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1271,7 +1362,7 @@ fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 60] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrushShaderParams, encode_input_bytes, encode_shader_params_bytes};
+    use super::{encode_input_bytes, encode_shader_params_bytes, BrushShaderParams};
 
     #[test]
     fn encode_input_bytes_keeps_empty_input_buffer_non_zero_sized() {
