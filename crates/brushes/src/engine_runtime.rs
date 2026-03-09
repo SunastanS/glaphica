@@ -593,37 +593,21 @@ impl BrushEngineRuntime {
                     .pipeline
                     .stroke_buffer_write_opacity(brush_input)
                     .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
-                let (copy_op, composite_op, write_op) = if let Some(copy_op) = copy_op {
-                    (
-                        None,
-                        Some(CompositeOp {
-                            base_tile_key: copy_op.src_tile_key,
-                            overlay_tile_key: buffer_tile_key,
-                            dst_tile_key: copy_op.dst_tile_key,
-                            blend_mode: WriteBlendMode::Normal,
-                            opacity: write_opacity,
-                        }),
-                        None,
-                    )
-                } else {
-                    (
-                        None,
-                        None,
-                        Some(WriteOp {
-                            src_tile_key: buffer_tile_key,
-                            dst_tile_key: final_tile_key,
-                            blend_mode: WriteBlendMode::Normal,
-                            opacity: write_opacity,
-                            frame_merge: write_frame_merge_tag,
-                        }),
-                    )
-                };
+                let write_dst_tile_key = copy_op
+                    .map(|copy_op| copy_op.dst_tile_key)
+                    .unwrap_or(final_tile_key);
                 output.push(StrokeDrawOutput {
                     clear_op: None,
                     draw_op: None,
-                    copy_op,
-                    write_op,
-                    composite_op,
+                    copy_op: None,
+                    write_op: Some(WriteOp {
+                        src_tile_key: buffer_tile_key,
+                        dst_tile_key: write_dst_tile_key,
+                        blend_mode: WriteBlendMode::Normal,
+                        opacity: write_opacity,
+                        frame_merge: write_frame_merge_tag,
+                    }),
+                    composite_op: None,
                     tile_key_update: None,
                 });
             } else {
