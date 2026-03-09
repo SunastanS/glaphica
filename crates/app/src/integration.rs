@@ -280,6 +280,33 @@ impl AppThreadIntegration {
         *commands = non_writes;
     }
 
+    fn move_setup_ops_before_draws(commands: &mut Vec<GpuCmdMsg>) {
+        let mut setup_ops = Vec::with_capacity(commands.len());
+        let mut draw_ops = Vec::new();
+        let mut other_ops = Vec::new();
+
+        for cmd in commands.drain(..) {
+            match &cmd {
+                GpuCmdMsg::ClearOp(_) => setup_ops.push(cmd),
+                GpuCmdMsg::CopyOp(copy_op) if Self::should_keep_first_copy_in_frame(copy_op) => {
+                    setup_ops.push(cmd);
+                }
+                GpuCmdMsg::DrawOp(_) => draw_ops.push(cmd),
+                _ => other_ops.push(cmd),
+            }
+        }
+
+        if draw_ops.is_empty() {
+            setup_ops.extend(other_ops);
+            *commands = setup_ops;
+            return;
+        }
+
+        setup_ops.extend(draw_ops);
+        setup_ops.extend(other_ops);
+        *commands = setup_ops;
+    }
+
     fn move_metadata_updates_to_end(commands: &mut Vec<GpuCmdMsg>) {
         let mut gpu_commands = Vec::with_capacity(commands.len());
         let mut deferred_updates = Vec::new();
@@ -552,6 +579,7 @@ impl AppThreadIntegration {
 
                 Self::compact_frame_mergeable_draws(&mut self.gpu_commands);
                 Self::compact_frame_mergeable_copy_write(&mut self.gpu_commands);
+                Self::move_setup_ops_before_draws(&mut self.gpu_commands);
                 Self::move_mergeable_writes_to_end(&mut self.gpu_commands);
                 Self::move_metadata_updates_to_end(&mut self.gpu_commands);
 
@@ -954,6 +982,54 @@ mod tests {
 
         assert!(matches!(commands[0], GpuCmdMsg::CopyOp(_)));
         assert!(matches!(commands[1], GpuCmdMsg::DrawOp(_)));
+        assert!(matches!(commands[2], GpuCmdMsg::DrawOp(_)));
+        assert!(matches!(commands[3], GpuCmdMsg::WriteOp(_)));
+        assert!(matches!(commands[4], GpuCmdMsg::TileSlotKeyUpdate(_)));
+    }
+
+    #[test]
+    fn move_setup_ops_before_draws_builds_setup_draw_write_update_phases() {
+        let dst_tile = TileKey::from_parts(0, 0, 1);
+        let buffer_tile = TileKey::from_parts(2, 0, 9);
+        let mut commands = vec![
+            GpuCmdMsg::DrawOp(DrawOp {
+                node_id: NodeId(1),
+                tile_index: 3,
+                tile_key: buffer_tile,
+                blend_mode: DrawBlendMode::Alpha,
+                frame_merge: DrawFrameMergePolicy::None,
+                origin_tile: TileKey::EMPTY,
+                ref_image: None,
+                input: vec![1.0],
+                brush_id: BrushId(2),
+                stroke_id: StrokeId(4),
+            }),
+            GpuCmdMsg::CopyOp(CopyOp {
+                src_tile_key: TileKey::from_parts(0, 0, 7),
+                dst_tile_key: dst_tile,
+                frame_merge: GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile,
+            }),
+            GpuCmdMsg::ClearOp(thread_protocol::ClearOp {
+                tile_key: buffer_tile,
+            }),
+            GpuCmdMsg::WriteOp(WriteOp {
+                src_tile_key: buffer_tile,
+                dst_tile_key: dst_tile,
+                blend_mode: WriteBlendMode::Normal,
+                opacity: 0.8,
+                frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
+            }),
+            GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {
+                updates: vec![(NodeId(1), 3, dst_tile)],
+            }),
+        ];
+
+        AppThreadIntegration::move_setup_ops_before_draws(&mut commands);
+        AppThreadIntegration::move_mergeable_writes_to_end(&mut commands);
+        AppThreadIntegration::move_metadata_updates_to_end(&mut commands);
+
+        assert!(matches!(commands[0], GpuCmdMsg::CopyOp(_)));
+        assert!(matches!(commands[1], GpuCmdMsg::ClearOp(_)));
         assert!(matches!(commands[2], GpuCmdMsg::DrawOp(_)));
         assert!(matches!(commands[3], GpuCmdMsg::WriteOp(_)));
         assert!(matches!(commands[4], GpuCmdMsg::TileSlotKeyUpdate(_)));

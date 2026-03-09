@@ -7,6 +7,10 @@ struct DrawInput {
     stage: f32,
 }
 
+struct DrawInputs {
+    values: array<DrawInput>,
+}
+
 struct ShaderParams {
     input_len: u32,
     tile_origin_x: u32,
@@ -25,7 +29,7 @@ struct ShaderParams {
     _pad2: u32,
 }
 
-@group(0) @binding(0) var<storage, read> draw_input: DrawInput;
+@group(0) @binding(0) var<storage, read> draw_input: DrawInputs;
 @group(0) @binding(1) var<uniform> params: ShaderParams;
 @group(1) @binding(0) var source_atlas: texture_2d_array<f32>;
 @group(1) @binding(1) var cache_atlas: texture_2d_array<f32>;
@@ -47,24 +51,32 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Brush input uses image-tile coordinates (62x62), atlas tile is 64x64 with 1px gutter.
     let tile_local_x = pos.x - f32(params.tile_origin_x) - 1.0;
     let tile_local_y = pos.y - f32(params.tile_origin_y) - 1.0;
+    let input_count = params.input_len / 6u;
 
-    let center = vec2<f32>(draw_input.center_local_x, draw_input.center_local_y);
-    let pixel = vec2<f32>(tile_local_x, tile_local_y);
-    let radius = max(draw_input.radius_px, 0.0);
-    let hardness = clamp(draw_input.hardness, 0.0, 1.0);
-    let opacity = clamp(draw_input.opacity, 0.0, 1.0);
-    let dist = distance(pixel, center);
+    var buffer_alpha = 0.0;
+    var stage = 0.0;
+    for (var index = 0u; index < input_count; index = index + 1u) {
+        let dab = draw_input.values[index];
+        stage = dab.stage;
+        let center = vec2<f32>(dab.center_local_x, dab.center_local_y);
+        let pixel = vec2<f32>(tile_local_x, tile_local_y);
+        let radius = max(dab.radius_px, 0.0);
+        let hardness = clamp(dab.hardness, 0.0, 1.0);
+        let opacity = clamp(dab.opacity, 0.0, 1.0);
+        let dist = distance(pixel, center);
 
-    let softness = max((1.0 - hardness) * radius, 0.0001);
-    let inner_radius = max(radius - softness, 0.0);
-    let falloff = 1.0 - smoothstep(inner_radius, radius, dist);
-    let alpha = falloff * opacity;
+        let softness = max((1.0 - hardness) * radius, 0.0001);
+        let inner_radius = max(radius - softness, 0.0);
+        let falloff = 1.0 - smoothstep(inner_radius, radius, dist);
+        let alpha = falloff * opacity;
+        buffer_alpha = buffer_alpha + (1.0 - buffer_alpha) * alpha;
+    }
 
-    if (draw_input.stage < 0.5) {
-        if (alpha <= 0.0) {
+    if (stage < 0.5) {
+        if (buffer_alpha <= 0.0) {
             discard;
         }
-        return vec4<f32>(1.0, 0.0, 0.0, alpha);
+        return vec4<f32>(1.0, 0.0, 0.0, buffer_alpha);
     }
 
     let source_texel = vec2<i32>(
@@ -78,7 +90,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         0,
     );
     let accum_alpha = clamp(source_sample.a, 0.0, 1.0);
-    let effective_alpha = clamp(accum_alpha * opacity, 0.0, 1.0);
+    let effective_alpha = clamp(accum_alpha * buffer_alpha, 0.0, 1.0);
 
     var origin = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     if (params.has_cache_tile != 0u) {

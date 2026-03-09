@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 use std::{fmt::Display, path::Path};
 
 use brushes::{
-    BrushDrawInputLayout, BrushGpuPipelineRegistry, BrushLayoutRegistry, BrushRegistryError,
-    BrushSpec,
+    BrushDrawInputLayout, BrushDrawKind, BrushGpuPipelineRegistry, BrushLayoutRegistry,
+    BrushRegistryError, BrushSpec,
 };
 use document::{FlatRenderTree, SharedRenderTree, View};
 use glaphica_core::{
@@ -174,6 +174,65 @@ fn prevalidate_draw_layouts_parallel(
         }
     }
     prevalidated
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MergeableRoundDrawKey {
+    node_id: NodeId,
+    tile_index: usize,
+    tile_key: TileKey,
+    brush_id: BrushId,
+    stroke_id: glaphica_core::StrokeId,
+}
+
+fn compact_round_draws(
+    commands: &[GpuCmdMsg],
+    prevalidated_layouts: &[Option<BrushDrawInputLayout>],
+) -> (Vec<GpuCmdMsg>, Vec<Option<BrushDrawInputLayout>>) {
+    let mut compacted_commands = Vec::with_capacity(commands.len());
+    let mut compacted_layouts = Vec::with_capacity(commands.len());
+    let mut merged_indices: HashMap<MergeableRoundDrawKey, usize> = HashMap::new();
+
+    for (cmd, layout) in commands.iter().zip(prevalidated_layouts.iter().copied()) {
+        let can_merge = match (cmd, layout) {
+            (GpuCmdMsg::DrawOp(draw_op), Some(layout))
+                if layout.kind() == BrushDrawKind::Round
+                    && draw_op.blend_mode == thread_protocol::DrawBlendMode::Alpha
+                    && draw_op.origin_tile == TileKey::EMPTY
+                    && draw_op.ref_image.is_none() =>
+            {
+                Some(MergeableRoundDrawKey {
+                    node_id: draw_op.node_id,
+                    tile_index: draw_op.tile_index,
+                    tile_key: draw_op.tile_key,
+                    brush_id: draw_op.brush_id,
+                    stroke_id: draw_op.stroke_id,
+                })
+            }
+            _ => None,
+        };
+
+        if let Some(key) = can_merge {
+            if let Some(existing_index) = merged_indices.get(&key).copied() {
+                let GpuCmdMsg::DrawOp(existing_draw) = &mut compacted_commands[existing_index] else {
+                    debug_assert!(false, "merged round draw index must reference draw op");
+                    continue;
+                };
+                let GpuCmdMsg::DrawOp(draw_op) = cmd else {
+                    debug_assert!(false, "mergeable round key must come from draw op");
+                    continue;
+                };
+                existing_draw.input.extend_from_slice(&draw_op.input);
+                continue;
+            }
+            merged_indices.insert(key, compacted_commands.len());
+        }
+
+        compacted_commands.push(cmd.clone());
+        compacted_layouts.push(layout);
+    }
+
+    (compacted_commands, compacted_layouts)
 }
 
 pub struct MainThreadState {
@@ -413,6 +472,8 @@ impl MainThreadState {
         let draw_lane_plan = build_draw_lane_plan(commands);
         let prevalidated_draw_layouts =
             prevalidate_draw_layouts_parallel(commands, &self.brush_layouts, &draw_lane_plan);
+        let (commands, prevalidated_draw_layouts) =
+            compact_round_draws(commands, &prevalidated_draw_layouts);
         let mut frame_batch = FrameBatch::new(&self.gpu_context);
         let mut index = 0usize;
         while index < commands.len() {
@@ -759,3 +820,43 @@ impl Display for ScreenshotError {
 }
 
 impl std::error::Error for ScreenshotError {}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_round_draws;
+    use brushes::builtin_brushes::round::ROUND_DRAW_LAYOUT;
+    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use thread_protocol::{DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
+
+    #[test]
+    fn compact_round_draws_merges_same_tile_inputs() {
+        let tile_key = TileKey::from_parts(2, 0, 9);
+        let draw = |input: Vec<f32>| {
+            GpuCmdMsg::DrawOp(DrawOp {
+                node_id: NodeId(1),
+                tile_index: 3,
+                tile_key,
+                blend_mode: DrawBlendMode::Alpha,
+                frame_merge: DrawFrameMergePolicy::None,
+                origin_tile: TileKey::EMPTY,
+                ref_image: None,
+                input,
+                brush_id: BrushId(2),
+                stroke_id: StrokeId(4),
+            })
+        };
+
+        let commands = vec![draw(vec![1.0; 6]), draw(vec![2.0; 6])];
+        let layouts = vec![Some(ROUND_DRAW_LAYOUT), Some(ROUND_DRAW_LAYOUT)];
+        let (commands, layouts) = compact_round_draws(&commands, &layouts);
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(layouts.len(), 1);
+        let GpuCmdMsg::DrawOp(draw_op) = &commands[0] else {
+            panic!("expected merged draw op");
+        };
+        assert_eq!(draw_op.input.len(), 12);
+        assert_eq!(&draw_op.input[..6], &[1.0; 6]);
+        assert_eq!(&draw_op.input[6..], &[2.0; 6]);
+    }
+}
