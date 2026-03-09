@@ -1,11 +1,11 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
 use document::{LeafBlendMode, RenderCmd};
-use glaphica_core::{TileKey, ATLAS_TILE_SIZE};
+use glaphica_core::{ATLAS_TILE_SIZE, TileKey};
 use thread_protocol::{ClearOp, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
@@ -51,6 +51,30 @@ struct PipelineCache {
 
 pub struct RenderExecutor {
     cache: Option<PipelineCache>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderPassKey {
+    backend_id: u8,
+    layer: u32,
+    format: wgpu::TextureFormat,
+}
+
+struct PreparedRenderSource {
+    bind_group: wgpu::BindGroup,
+    blend_mode: LeafBlendMode,
+}
+
+struct PreparedRenderTile {
+    pass_key: RenderPassKey,
+    scissor_x: u32,
+    scissor_y: u32,
+    sources: Vec<PreparedRenderSource>,
+}
+
+struct PreparedRenderPass {
+    key: RenderPassKey,
+    tiles: Vec<PreparedRenderTile>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,60 +205,144 @@ impl RenderExecutor {
                 tile_key: clear_op.tile_key,
             },
         )?;
+        encode_clear_resolved_tile(context.gpu_context, &resolved, encoder);
+        Ok(())
+    }
+}
+
+fn encode_clear_resolved_tile(
+    gpu_context: &GpuContext,
+    resolved: &AtlasResolvedAddress<'_>,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    if should_trace_gpu_exec_event() {
+        eprintln!(
+            "[PERF][gpu_exec_trace][clear] layer={} texel=({}, {})",
+            resolved.address.layer,
+            resolved.address.texel_offset.0,
+            resolved.address.texel_offset.1
+        );
+    }
+    let bytes_per_pixel = texture_bytes_per_pixel(resolved.format);
+    let unpadded_bytes_per_row = bytes_per_pixel * ATLAS_TILE_SIZE;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256).saturating_mul(256);
+    let clear_size =
+        usize::try_from(padded_bytes_per_row.saturating_mul(ATLAS_TILE_SIZE)).unwrap_or(0);
+    if clear_size == 0 {
+        return;
+    }
+    let clear_data = vec![0u8; clear_size];
+    let clear_buffer = gpu_context
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glaphica-clear-tile-buffer"),
+            contents: &clear_data,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+    encoder.copy_buffer_to_texture(
+        wgpu::TexelCopyBufferInfo {
+            buffer: &clear_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(ATLAS_TILE_SIZE),
+            },
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: resolved.texture2d_array,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: resolved.address.texel_offset.0,
+                y: resolved.address.texel_offset.1,
+                z: resolved.address.layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width: ATLAS_TILE_SIZE,
+            height: ATLAS_TILE_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+impl RenderExecutor {
+    fn prepare_render_passes(
+        context: &mut RenderContext<'_>,
+        cmd: &RenderCmd,
+        cache: &PipelineCache,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<Vec<PreparedRenderPass>, RenderExecutorError> {
+        let mut passes = Vec::<PreparedRenderPass>::new();
         if should_trace_gpu_exec_event() {
             eprintln!(
-                "[PERF][gpu_exec_trace][clear] tile={:?} layer={} texel=({}, {})",
-                clear_op.tile_key,
-                resolved.address.layer,
-                resolved.address.texel_offset.0,
-                resolved.address.texel_offset.1
+                "[PERF][gpu_exec_trace][render_cmd] dst_tiles={}",
+                cmd.to.len()
             );
         }
-        let bytes_per_pixel = texture_bytes_per_pixel(resolved.format);
-        let unpadded_bytes_per_row = bytes_per_pixel * ATLAS_TILE_SIZE;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256).saturating_mul(256);
-        let clear_size =
-            usize::try_from(padded_bytes_per_row.saturating_mul(ATLAS_TILE_SIZE)).unwrap_or(0);
-        if clear_size == 0 {
-            return Ok(());
-        }
-        let clear_data = vec![0u8; clear_size];
-        let clear_buffer =
-            context
-                .gpu_context
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("glaphica-clear-tile-buffer"),
-                    contents: &clear_data,
-                    usage: wgpu::BufferUsages::COPY_SRC,
-                });
-        encoder.copy_buffer_to_texture(
-            wgpu::TexelCopyBufferInfo {
-                buffer: &clear_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(ATLAS_TILE_SIZE),
-                },
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: resolved.texture2d_array,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: resolved.address.texel_offset.0,
-                    y: resolved.address.texel_offset.1,
-                    z: resolved.address.layer,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: ATLAS_TILE_SIZE,
-                height: ATLAS_TILE_SIZE,
-                depth_or_array_layers: 1,
-            },
-        );
 
-        Ok(())
+        for (tile_idx, &dst_tile_key) in cmd.to.iter().enumerate() {
+            if dst_tile_key == TileKey::EMPTY {
+                continue;
+            }
+
+            let dst_resolved = context.atlas_storage.resolve(dst_tile_key).ok_or(
+                RenderExecutorError::MissingTileBackend {
+                    tile_key: dst_tile_key,
+                },
+            )?;
+            encode_clear_resolved_tile(context.gpu_context, &dst_resolved, encoder);
+
+            let mut sources = Vec::new();
+            for source in &cmd.from {
+                if tile_idx >= source.tile_keys.len() {
+                    continue;
+                }
+                let src_tile_key = source.tile_keys[tile_idx];
+                if src_tile_key == TileKey::EMPTY {
+                    continue;
+                }
+
+                let bind_group = create_bind_group(
+                    context,
+                    &cache.bind_group_layout,
+                    &cache.sampler,
+                    src_tile_key,
+                    source.config.opacity,
+                )?;
+                sources.push(PreparedRenderSource {
+                    bind_group,
+                    blend_mode: source.config.blend_mode,
+                });
+            }
+
+            if sources.is_empty() {
+                continue;
+            }
+
+            let pass_key = RenderPassKey {
+                backend_id: dst_tile_key.backend_index(),
+                layer: dst_resolved.address.layer,
+                format: dst_resolved.format,
+            };
+            let prepared_tile = PreparedRenderTile {
+                pass_key,
+                scissor_x: dst_resolved.address.texel_offset.0,
+                scissor_y: dst_resolved.address.texel_offset.1,
+                sources,
+            };
+
+            if let Some(existing) = passes.iter_mut().find(|pass| pass.key == pass_key) {
+                existing.tiles.push(prepared_tile);
+            } else {
+                passes.push(PreparedRenderPass {
+                    key: pass_key,
+                    tiles: vec![prepared_tile],
+                });
+            }
+        }
+
+        Ok(passes)
     }
 
     pub fn copy_tile(
@@ -802,86 +910,60 @@ fn encode_cmd(
         }
     }
 
-    for (tile_idx, &dst_tile_key) in cmd.to.iter().enumerate() {
-        if dst_tile_key == TileKey::EMPTY {
-            continue;
-        }
-
-        let mut src_keys = Vec::new();
-        for source in &cmd.from {
-            if tile_idx >= source.tile_keys.len() {
-                continue;
-            }
-            let src_tile_key = source.tile_keys[tile_idx];
-            if src_tile_key == TileKey::EMPTY {
-                continue;
-            }
-            src_keys.push(src_tile_key);
-        }
-
-        let dst_resolved = context.atlas_storage.resolve(dst_tile_key).ok_or(
-            RenderExecutorError::MissingTileBackend {
-                tile_key: dst_tile_key,
-            },
-        )?;
-
-        let mut bind_groups: Vec<(wgpu::BindGroup, LeafBlendMode)> = Vec::new();
-        for source in &cmd.from {
-            if tile_idx >= source.tile_keys.len() {
-                continue;
-            }
-            let src_tile_key = source.tile_keys[tile_idx];
-            if src_tile_key == TileKey::EMPTY {
-                continue;
-            }
-
-            let bind_group = create_bind_group(
-                context,
-                &cache.bind_group_layout,
-                &cache.sampler,
-                src_tile_key,
-                source.config.opacity,
-            )?;
-            bind_groups.push((bind_group, source.config.blend_mode));
-        }
-
-        if bind_groups.is_empty() {
-            continue;
-        }
-
-        let dst_view = create_render_attachment_view(&dst_resolved);
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("glaphica-render-composite-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &dst_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+    let passes = RenderExecutor::prepare_render_passes(context, cmd, cache, encoder)?;
+    for prepared_pass in passes {
+        let backend = context
+            .atlas_storage
+            .backend_resource(prepared_pass.key.backend_id)
+            .ok_or(RenderExecutorError::MissingTileBackend {
+                tile_key: TileKey::from_parts(prepared_pass.key.backend_id, 0, 0),
+            })?;
+        let dst_view = backend
+            .texture2d_array
+            .create_view(&wgpu::TextureViewDescriptor {
+                label: Some("glaphica-render-attachment-view"),
+                format: Some(prepared_pass.key.format),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                aspect: wgpu::TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                base_array_layer: prepared_pass.key.layer,
+                array_layer_count: Some(1),
             });
 
-            for (bind_group, blend_mode) in &bind_groups {
-                let pipeline = match blend_mode {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("glaphica-render-composite-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        for tile in prepared_pass.tiles {
+            debug_assert_eq!(tile.pass_key, prepared_pass.key);
+            pass.set_scissor_rect(
+                tile.scissor_x,
+                tile.scissor_y,
+                ATLAS_TILE_SIZE,
+                ATLAS_TILE_SIZE,
+            );
+            for source in tile.sources {
+                let pipeline = match source.blend_mode {
                     LeafBlendMode::Normal => &cache.normal,
                     LeafBlendMode::Multiply => &cache.multiply,
                 };
                 pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.set_scissor_rect(
-                    dst_resolved.address.texel_offset.0,
-                    dst_resolved.address.texel_offset.1,
-                    ATLAS_TILE_SIZE,
-                    ATLAS_TILE_SIZE,
-                );
+                pass.set_bind_group(0, &source.bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -1129,11 +1211,12 @@ fn texture_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
 
 #[cfg(all(test, feature = "blocking"))]
 mod tests {
-    use crate::atlas_runtime::AtlasStorageRuntime;
+    use crate::atlas_runtime::{AtlasStorageRuntime, AtlasTextureConfig};
     use crate::context::{GpuContext, GpuContextInitDescriptor};
 
     use super::{RenderContext, RenderExecutor};
-    use glaphica_core::{AtlasLayout, BackendKind, TileKey, ATLAS_TILE_SIZE};
+    use document::{LeafBlendMode, NodeConfig, RenderCmd, RenderSource};
+    use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, TileKey};
     use thread_protocol::ClearOp;
 
     #[test]
@@ -1182,6 +1265,82 @@ mod tests {
         let right_pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, right_tile);
 
         assert_eq!(left_pixel, [0, 0, 0, 0]);
+        assert_eq!(right_pixel, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn execute_preserves_neighbor_tile_in_same_layer() {
+        let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
+        else {
+            eprintln!("skip test: gpu context init failed");
+            return;
+        };
+
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(2);
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                0,
+                BackendKind::Leaf,
+                AtlasLayout::Small11,
+                Default::default(),
+            )
+            .is_err()
+        {
+            eprintln!("skip test: source atlas backend init failed");
+            return;
+        }
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                1,
+                BackendKind::BranchCache,
+                AtlasLayout::Small11,
+                AtlasTextureConfig {
+                    usage: wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        {
+            eprintln!("skip test: destination atlas backend init failed");
+            return;
+        }
+
+        let src_tile = TileKey::from_parts(0, 0, 0);
+        let left_dst = TileKey::from_parts(1, 0, 0);
+        let right_dst = TileKey::from_parts(1, 0, 1);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, src_tile, [255, 0, 0, 255]);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, left_dst, [0, 0, 255, 255]);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, right_dst, [0, 255, 0, 255]);
+
+        let mut executor = RenderExecutor::new();
+        let mut context = RenderContext {
+            gpu_context: &gpu_context,
+            atlas_storage: &atlas_storage,
+        };
+        let render_result = executor.execute(
+            &mut context,
+            &[RenderCmd {
+                from: vec![RenderSource {
+                    tile_keys: vec![src_tile],
+                    config: NodeConfig {
+                        opacity: 1.0,
+                        blend_mode: LeafBlendMode::Normal,
+                    },
+                }],
+                to: vec![left_dst],
+            }],
+        );
+        assert!(render_result.is_ok());
+
+        let left_pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, left_dst);
+        let right_pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, right_dst);
+
+        assert_eq!(left_pixel, [255, 0, 0, 255]);
         assert_eq!(right_pixel, [0, 255, 0, 255]);
     }
 

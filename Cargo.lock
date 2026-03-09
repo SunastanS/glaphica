@@ -784,14 +784,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frame_scheduler"
-version = "0.1.0"
-dependencies = [
- "rtrb",
- "thread_protocol",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -937,7 +929,6 @@ dependencies = [
  "atlas",
  "brushes",
  "document",
- "frame_scheduler",
  "glaphica_core",
  "pollster",
  "thread_protocol",

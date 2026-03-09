@@ -3,7 +3,6 @@ use std::sync::Arc;
 use brushes::BrushDrawInputLayout;
 use brushes::BrushLayoutRegistry;
 use document::SharedRenderTree;
-use frame_scheduler::FrameHandler;
 use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
 use thread_protocol::{DrawOp, GpuCmdMsg};
 
@@ -194,7 +193,8 @@ impl FrameBatch {
             .map_err(FrameBatchError::BrushError)?;
 
         for draw_op in draw_ops {
-            ctx.image_dirty_tracker.mark(draw_op.node_id, draw_op.tile_index);
+            ctx.image_dirty_tracker
+                .mark(draw_op.node_id, draw_op.tile_index);
             ctx.tile_dirty_tracker.mark(draw_op.tile_key);
         }
         self.has_commands = true;
@@ -244,21 +244,5 @@ impl FrameBatch {
         ctx.tile_dirty_tracker.clear();
         self.submit();
         Ok(())
-    }
-}
-
-impl<'a> FrameHandler<FrameBatchContext<'a>> for FrameBatch {
-    type Error = FrameBatchError;
-
-    fn handle(&mut self, cmd: &GpuCmdMsg, ctx: &mut FrameBatchContext<'a>) {
-        if let Err(error) = self.push_command(cmd, ctx) {
-            eprintln!("frame batch command failed: {error:?}");
-        }
-    }
-
-    fn finalize_frame(self, ctx: &mut FrameBatchContext<'a>) {
-        if let Err(error) = self.finish(ctx) {
-            eprintln!("frame batch finalize failed: {error:?}");
-        }
     }
 }

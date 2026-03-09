@@ -3,11 +3,11 @@ use glaphica_core::StrokeId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use brushes::{BrushDrawInputLayout, BrushGpuPipelineSpec, BrushPipelineError};
-use glaphica_core::{BrushId, TextureFormat, ATLAS_TILE_SIZE};
+use glaphica_core::{ATLAS_TILE_SIZE, BrushId, TextureFormat};
 use thread_protocol::{DrawBlendMode, DrawOp};
 
 use crate::atlas_runtime::{AtlasBackendResource, AtlasStorageRuntime};
@@ -1362,7 +1362,7 @@ fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 60] {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_input_bytes, encode_shader_params_bytes, BrushShaderParams};
+    use super::{BrushShaderParams, encode_input_bytes, encode_shader_params_bytes};
 
     #[test]
     fn encode_input_bytes_keeps_empty_input_buffer_non_zero_sized() {
