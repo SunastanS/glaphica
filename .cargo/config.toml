@@ -1,2 +1,2 @@
 [build]
-rustflags = ["-A", "dead_code"]
+rustflags = ["-W", "dead_code"]
