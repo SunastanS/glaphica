@@ -55,6 +55,9 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     var buffer_alpha = 0.0;
     var stage = 0.0;
+    // Packed same-tile dabs are resolved analytically here so the runtime can submit one draw
+    // call per tile instead of one draw call per dab. For the round buffer stage, repeated red
+    // alpha writes compose to 1 - product(1 - alpha_i), so order does not matter.
     for (var index = 0u; index < input_count; index = index + 1u) {
         let dab = draw_input.values[index];
         stage = dab.stage;

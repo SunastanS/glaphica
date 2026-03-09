@@ -264,6 +264,9 @@ impl AppThreadIntegration {
 
         for cmd in commands.drain(..) {
             match &cmd {
+                // After frame compaction only the final write to each destination remains.
+                // Delaying these writes preserves the final image while keeping the buffered
+                // stroke draw phase contiguous enough for GPU batching.
                 GpuCmdMsg::WriteOp(write_op) if Self::should_keep_last_write_in_frame(write_op) => {
                     deferred_writes.push(cmd);
                 }
@@ -287,6 +290,8 @@ impl AppThreadIntegration {
 
         for cmd in commands.drain(..) {
             match &cmd {
+                // Buffered stroke setup must finish before the batched draw phase starts, otherwise
+                // buffer clears and origin copies would race with packed round draws.
                 GpuCmdMsg::ClearOp(_) => setup_ops.push(cmd),
                 GpuCmdMsg::CopyOp(copy_op) if Self::should_keep_first_copy_in_frame(copy_op) => {
                     setup_ops.push(cmd);

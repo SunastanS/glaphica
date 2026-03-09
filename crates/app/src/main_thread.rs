@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 use std::{fmt::Display, path::Path};
 
 use brushes::{
@@ -44,6 +45,15 @@ fn gpu_cmd_trace_config() -> GpuCmdTraceConfig {
             enabled,
             max_commands,
         }
+    })
+}
+
+fn pipeline_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLAPHICA_DEBUG_PIPELINE_TRACE")
+            .ok()
+            .is_some_and(|value| value != "0")
     })
 }
 
@@ -185,6 +195,12 @@ struct MergeableRoundDrawKey {
     stroke_id: glaphica_core::StrokeId,
 }
 
+#[derive(Debug)]
+struct PendingVisibleTileUpdateBatch {
+    submission_index: wgpu::SubmissionIndex,
+    updates: Vec<(NodeId, usize, TileKey)>,
+}
+
 fn compact_round_draws(
     commands: &[GpuCmdMsg],
     prevalidated_layouts: &[Option<BrushDrawInputLayout>],
@@ -201,6 +217,9 @@ fn compact_round_draws(
                     && draw_op.origin_tile == TileKey::EMPTY
                     && draw_op.ref_image.is_none() =>
             {
+                // Round stroke-buffer draws only accumulate an alpha mask into a transient tile.
+                // Within one frame that makes same-tile dabs mergeable as a single packed draw:
+                // no origin/ref sampling is involved and the final write happens later.
                 Some(MergeableRoundDrawKey {
                     node_id: draw_op.node_id,
                     tile_index: draw_op.tile_index,
@@ -248,6 +267,7 @@ pub struct MainThreadState {
     view: View,
     image_dirty_tracker: ImageDirtyTracker,
     tile_dirty_tracker: TileDirtyTracker,
+    pending_visible_tile_updates: VecDeque<PendingVisibleTileUpdateBatch>,
     next_brush_cache_backend_id: u8,
 }
 
@@ -306,6 +326,7 @@ impl MainThreadState {
             view: View::default(),
             image_dirty_tracker: ImageDirtyTracker::default(),
             tile_dirty_tracker: TileDirtyTracker::default(),
+            pending_visible_tile_updates: VecDeque::new(),
             next_brush_cache_backend_id: 2,
         })
     }
@@ -393,6 +414,7 @@ impl MainThreadState {
             u32,
         ),
     {
+        self.promote_completed_tile_updates();
         let surface = self
             .surface_runtime
             .as_mut()
@@ -437,6 +459,7 @@ impl MainThreadState {
     }
 
     pub fn process_render(&mut self) -> bool {
+        self.promote_completed_tile_updates();
         let tree = self.shared_tree.read();
         let cmds = tree.build_render_cmds(&self.image_dirty_tracker);
 
@@ -464,6 +487,7 @@ impl MainThreadState {
     }
 
     pub fn process_gpu_commands(&mut self, commands: &[GpuCmdMsg]) {
+        self.promote_completed_tile_updates();
         let trace_config = gpu_cmd_trace_config();
         if trace_config.enabled {
             trace_gpu_commands(commands, trace_config.max_commands);
@@ -472,9 +496,26 @@ impl MainThreadState {
         let draw_lane_plan = build_draw_lane_plan(commands);
         let prevalidated_draw_layouts =
             prevalidate_draw_layouts_parallel(commands, &self.brush_layouts, &draw_lane_plan);
+        let original_draw_count = commands
+            .iter()
+            .filter(|cmd| matches!(cmd, GpuCmdMsg::DrawOp(_)))
+            .count();
         let (commands, prevalidated_draw_layouts) =
             compact_round_draws(commands, &prevalidated_draw_layouts);
+        if pipeline_trace_enabled() {
+            let compacted_draw_count = commands
+                .iter()
+                .filter(|cmd| matches!(cmd, GpuCmdMsg::DrawOp(_)))
+                .count();
+            if compacted_draw_count != original_draw_count {
+                eprintln!(
+                    "[PERF][gpu_draw_compact] before={} after={}",
+                    original_draw_count, compacted_draw_count
+                );
+            }
+        }
         let mut frame_batch = FrameBatch::new(&self.gpu_context);
+        let mut deferred_visible_tile_updates = Vec::new();
         let mut index = 0usize;
         while index < commands.len() {
             let cmd = &commands[index];
@@ -484,7 +525,7 @@ impl MainThreadState {
                     index += 1;
                 }
                 GpuCmdMsg::TileSlotKeyUpdate(op) => {
-                    self.apply_tile_slot_key_update(op);
+                    self.defer_tile_slot_key_update(op, &mut deferred_visible_tile_updates);
                     index += 1;
                 }
                 GpuCmdMsg::DrawOp(_) if prevalidated_draw_layouts[index].is_some() => {
@@ -521,6 +562,33 @@ impl MainThreadState {
                         index += 1;
                     }
                 }
+                GpuCmdMsg::WriteOp(_) => {
+                    let mut write_ops: Vec<&thread_protocol::WriteOp> = Vec::new();
+                    let mut end = index;
+                    while end < commands.len() {
+                        let GpuCmdMsg::WriteOp(write_op) = &commands[end] else {
+                            break;
+                        };
+                        write_ops.push(write_op);
+                        end += 1;
+                    }
+                    let mut context = FrameBatchContext {
+                        gpu_context: &self.gpu_context,
+                        atlas_storage: &self.atlas_storage,
+                        render_executor: &mut self.render_executor,
+                        brush_runtime: &mut self.brush_runtime,
+                        brush_layouts: &self.brush_layouts,
+                        shared_tree: &self.shared_tree,
+                        image_dirty_tracker: &mut self.image_dirty_tracker,
+                        tile_dirty_tracker: &mut self.tile_dirty_tracker,
+                    };
+                    if let Err(error) =
+                        frame_batch.push_write_batch(&write_ops, &mut context)
+                    {
+                        eprintln!("GPU command processing failed: {error:?}");
+                    }
+                    index = end;
+                }
                 _ => {
                     let mut context = FrameBatchContext {
                         gpu_context: &self.gpu_context,
@@ -544,7 +612,17 @@ impl MainThreadState {
             }
         }
 
-        frame_batch.submit_only();
+        if let Some(submission_index) = frame_batch.submit_only() {
+            if !deferred_visible_tile_updates.is_empty() {
+                self.pending_visible_tile_updates
+                    .push_back(PendingVisibleTileUpdateBatch {
+                        submission_index,
+                        updates: deferred_visible_tile_updates,
+                    });
+            }
+        } else if !deferred_visible_tile_updates.is_empty() {
+            self.apply_visible_tile_updates(&deferred_visible_tile_updates);
+        }
         self.brush_runtime
             .executor_mut()
             .clear_transient_draw_resources();
@@ -565,11 +643,61 @@ impl MainThreadState {
         }
     }
 
-    fn apply_tile_slot_key_update(&mut self, op: &TileSlotKeyUpdateMsg) {
-        for (node_id, tile_index, tile_key) in &op.updates {
-            self.image_dirty_tracker.mark(*node_id, *tile_index);
-            self.tile_dirty_tracker.mark(*tile_key);
+    fn defer_tile_slot_key_update(
+        &mut self,
+        op: &TileSlotKeyUpdateMsg,
+        deferred_updates: &mut Vec<(NodeId, usize, TileKey)>,
+    ) {
+        deferred_updates.extend(op.updates.iter().copied());
+    }
+
+    fn promote_completed_tile_updates(&mut self) {
+        while let Some(batch) = self.pending_visible_tile_updates.front() {
+            let poll = self.gpu_context.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(batch.submission_index.clone()),
+                timeout: Some(Duration::ZERO),
+            });
+            match poll {
+                Ok(status) if status.wait_finished() => {}
+                Ok(_) | Err(wgpu::PollError::Timeout) => break,
+                Err(error) => {
+                    eprintln!("GPU poll failed while promoting tile updates: {error}");
+                    break;
+                }
+            }
+
+            if let Some(batch) = self.pending_visible_tile_updates.pop_front() {
+                self.apply_visible_tile_updates(&batch.updates);
+            }
         }
+    }
+
+    fn apply_visible_tile_updates(&mut self, updates: &[(NodeId, usize, TileKey)]) {
+        if updates.is_empty() {
+            return;
+        }
+
+        let tree = self.shared_tree.read();
+        let mut new_nodes = (*tree.nodes).clone();
+
+        for (node_id, tile_index, tile_key) in updates {
+            if let Some(node) = new_nodes.get_mut(node_id) {
+                let image = match &mut node.kind {
+                    document::FlatNodeKind::Leaf { image } => image,
+                    document::FlatNodeKind::Branch { cache, .. } => cache,
+                };
+                if image.set_tile_key(*tile_index, *tile_key).is_ok() {
+                    self.image_dirty_tracker.mark(*node_id, *tile_index);
+                    self.tile_dirty_tracker.mark(*tile_key);
+                }
+            }
+        }
+
+        self.shared_tree.update(FlatRenderTree {
+            generation: RenderTreeGeneration(tree.generation.0 + 1),
+            nodes: Arc::new(new_nodes),
+            root_id: tree.root_id,
+        });
     }
 
     pub fn save_screenshot(
@@ -578,6 +706,7 @@ impl MainThreadState {
         width: u32,
         height: u32,
     ) -> Result<(), ScreenshotError> {
+        self.promote_completed_tile_updates();
         if width == 0 || height == 0 {
             return Err(ScreenshotError::InvalidSize);
         }

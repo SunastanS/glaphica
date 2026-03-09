@@ -159,9 +159,6 @@ impl EngineThreadState {
     ) -> Result<Vec<thread_protocol::GpuCmdMsg>, brushes::EngineBrushDispatchError> {
         self.stroke_outputs.clear();
 
-        let generation = self.shared_tree.generation();
-        let new_generation = RenderTreeGeneration(generation.0 + 1);
-
         let image = self.document.get_leaf_image_mut(node_id);
         let image = match image {
             Some(img) => img,
@@ -250,12 +247,6 @@ impl EngineThreadState {
             gpu_cmds.push(thread_protocol::GpuCmdMsg::TileSlotKeyUpdate(
                 thread_protocol::TileSlotKeyUpdateMsg { updates: tile_keys },
             ));
-
-            let tree = self.shared_tree.read();
-            let new_tree =
-                self.document
-                    .sync_tile_keys_to_flat_tree(&tree, &tile_updates, new_generation);
-            self.shared_tree.update(new_tree);
         }
         Ok(gpu_cmds)
     }

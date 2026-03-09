@@ -4,7 +4,7 @@ use brushes::BrushDrawInputLayout;
 use brushes::BrushLayoutRegistry;
 use document::SharedRenderTree;
 use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
-use thread_protocol::{DrawOp, GpuCmdMsg};
+use thread_protocol::{DrawOp, GpuCmdMsg, WriteOp};
 
 use crate::RenderExecutor;
 use crate::atlas_runtime::AtlasStorageRuntime;
@@ -201,6 +201,30 @@ impl FrameBatch {
         Ok(())
     }
 
+    pub fn push_write_batch(
+        &mut self,
+        write_ops: &[&WriteOp],
+        ctx: &mut FrameBatchContext<'_>,
+    ) -> Result<(), FrameBatchError> {
+        if write_ops.is_empty() {
+            return Ok(());
+        }
+
+        let mut render_ctx = RenderContext {
+            gpu_context: ctx.gpu_context,
+            atlas_storage: ctx.atlas_storage,
+        };
+        ctx.render_executor
+            .write_tiles_with_encoder(&mut self.encoder, &mut render_ctx, write_ops)
+            .map_err(FrameBatchError::RenderError)?;
+
+        for write_op in write_ops {
+            ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
+        }
+        self.has_commands = true;
+        Ok(())
+    }
+
     fn execute_render_commands(
         &mut self,
         ctx: &mut FrameBatchContext<'_>,
@@ -228,21 +252,22 @@ impl FrameBatch {
         Ok(())
     }
 
-    fn submit(self) {
+    fn submit(self) -> Option<wgpu::SubmissionIndex> {
         if self.has_commands {
-            self.gpu_context.queue.submit(Some(self.encoder.finish()));
+            return Some(self.gpu_context.queue.submit(Some(self.encoder.finish())));
         }
+        None
     }
 
-    pub fn submit_only(self) {
-        self.submit();
+    pub fn submit_only(self) -> Option<wgpu::SubmissionIndex> {
+        self.submit()
     }
 
     pub fn finish(mut self, ctx: &mut FrameBatchContext<'_>) -> Result<(), FrameBatchError> {
         self.execute_render_commands(ctx)?;
         ctx.image_dirty_tracker.clear();
         ctx.tile_dirty_tracker.clear();
-        self.submit();
+        let _ = self.submit();
         Ok(())
     }
 }

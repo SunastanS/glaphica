@@ -280,6 +280,15 @@ fn should_trace_gpu_draw_exec_event() -> bool {
     seq <= config.max_events
 }
 
+fn pipeline_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLAPHICA_DEBUG_PIPELINE_TRACE")
+            .ok()
+            .is_some_and(|value| value != "0")
+    })
+}
+
 const BRUSH_SHADER_PARAMS_SIZE: u64 = 60;
 const BRUSH_RING_INITIAL_SLOTS: u64 = 128;
 
@@ -1233,6 +1242,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             calls.push(self.prepare_draw_call(context, draw_op)?);
         }
 
+        let mut pass_count = 0usize;
         let mut start = 0usize;
         while start < calls.len() {
             let pass_key = calls[start].pass_key;
@@ -1240,6 +1250,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             while end < calls.len() && calls[end].pass_key == pass_key {
                 end += 1;
             }
+            pass_count += 1;
 
             let backend = context
                 .atlas_storage
@@ -1304,6 +1315,15 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
             });
 
             start = end;
+        }
+
+        if pipeline_trace_enabled() {
+            eprintln!(
+                "[PERF][gpu_draw_submit] draw_ops={} draw_calls={} render_passes={}",
+                draw_ops.len(),
+                calls.len(),
+                pass_count
+            );
         }
 
         Ok(())

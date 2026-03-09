@@ -77,6 +77,21 @@ struct PreparedRenderPass {
     tiles: Vec<PreparedRenderTile>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WritePassKey {
+    backend_id: u8,
+    layer: u32,
+    format: wgpu::TextureFormat,
+}
+
+struct PreparedWriteCall {
+    pass_key: WritePassKey,
+    scissor_x: u32,
+    scissor_y: u32,
+    bind_group: wgpu::BindGroup,
+    blend_mode: WriteBlendMode,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct GpuExecTraceConfig {
     enabled: bool,
@@ -458,6 +473,89 @@ impl RenderExecutor {
         self.encode_write_tile(context, write_op, encoder)
     }
 
+    pub fn write_tiles_with_encoder(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        context: &mut RenderContext<'_>,
+        write_ops: &[&WriteOp],
+    ) -> Result<(), RenderExecutorError> {
+        if write_ops.is_empty() {
+            return Ok(());
+        }
+
+        let prepared = self.prepare_write_calls(context, write_ops)?;
+        let mut start = 0usize;
+        while start < prepared.len() {
+            let pass_key = prepared[start].pass_key;
+            let mut end = start + 1;
+            while end < prepared.len() && prepared[end].pass_key == pass_key {
+                end += 1;
+            }
+
+            // Buffered stroke writes only sample transient source tiles and blend into disjoint
+            // destination tiles, so grouping by destination layer preserves the same result while
+            // avoiding one render pass per tile.
+            let backend = context
+                .atlas_storage
+                .backend_resource(pass_key.backend_id)
+                .ok_or(RenderExecutorError::MissingTileBackend {
+                    tile_key: TileKey::from_parts(pass_key.backend_id, 0, 0),
+                })?;
+            let dst_view = backend
+                .texture2d_array
+                .create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("glaphica-render-write-attachment-view"),
+                    format: Some(pass_key.format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    usage: Some(wgpu::TextureUsages::RENDER_ATTACHMENT),
+                    aspect: wgpu::TextureAspect::All,
+                    base_mip_level: 0,
+                    mip_level_count: Some(1),
+                    base_array_layer: pass_key.layer,
+                    array_layer_count: Some(1),
+                });
+
+            let cache = self
+                .cache
+                .as_ref()
+                .ok_or(RenderExecutorError::PipelineNotInitialized)?;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-render-write-pass-batch"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            for call in &prepared[start..end] {
+                let pipeline = match call.blend_mode {
+                    WriteBlendMode::Normal => &cache.normal,
+                };
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &call.bind_group, &[]);
+                pass.set_scissor_rect(
+                    call.scissor_x,
+                    call.scissor_y,
+                    ATLAS_TILE_SIZE,
+                    ATLAS_TILE_SIZE,
+                );
+                pass.draw(0..3, 0..1);
+            }
+            start = end;
+        }
+
+        Ok(())
+    }
+
     fn encode_write_tile(
         &mut self,
         context: &mut RenderContext<'_>,
@@ -542,6 +640,70 @@ impl RenderExecutor {
         pass.draw(0..3, 0..1);
 
         Ok(())
+    }
+
+    fn prepare_write_calls(
+        &mut self,
+        context: &mut RenderContext<'_>,
+        write_ops: &[&WriteOp],
+    ) -> Result<Vec<PreparedWriteCall>, RenderExecutorError> {
+        let mut prepared = Vec::with_capacity(write_ops.len());
+        for write_op in write_ops {
+            if context.atlas_storage.resolve(write_op.src_tile_key).is_none() {
+                return Err(RenderExecutorError::MissingTileBackend {
+                    tile_key: write_op.src_tile_key,
+                });
+            }
+            let dst_resolved = context.atlas_storage.resolve(write_op.dst_tile_key).ok_or(
+                RenderExecutorError::MissingTileBackend {
+                    tile_key: write_op.dst_tile_key,
+                },
+            )?;
+            let src_resolved = context.atlas_storage.resolve(write_op.src_tile_key).ok_or(
+                RenderExecutorError::MissingTileBackend {
+                    tile_key: write_op.src_tile_key,
+                },
+            )?;
+            if should_trace_gpu_exec_event() {
+                eprintln!(
+                    "[PERF][gpu_exec_trace][write] src={:?}@({}, {}, l{}) dst={:?}@({}, {}, l{}) opacity={:.3}",
+                    write_op.src_tile_key,
+                    src_resolved.address.texel_offset.0,
+                    src_resolved.address.texel_offset.1,
+                    src_resolved.address.layer,
+                    write_op.dst_tile_key,
+                    dst_resolved.address.texel_offset.0,
+                    dst_resolved.address.texel_offset.1,
+                    dst_resolved.address.layer,
+                    write_op.opacity
+                );
+            }
+
+            self.ensure_pipelines(context, dst_resolved.format);
+            let cache = self
+                .cache
+                .as_ref()
+                .ok_or(RenderExecutorError::PipelineNotInitialized)?;
+            let bind_group = create_bind_group(
+                context,
+                &cache.bind_group_layout,
+                &cache.sampler,
+                write_op.src_tile_key,
+                write_op.opacity,
+            )?;
+            prepared.push(PreparedWriteCall {
+                pass_key: WritePassKey {
+                    backend_id: write_op.dst_tile_key.backend_index(),
+                    layer: dst_resolved.address.layer,
+                    format: dst_resolved.format,
+                },
+                scissor_x: dst_resolved.address.texel_offset.0,
+                scissor_y: dst_resolved.address.texel_offset.1,
+                bind_group,
+                blend_mode: write_op.blend_mode,
+            });
+        }
+        Ok(prepared)
     }
 
     pub fn composite_tile_with_encoder(
