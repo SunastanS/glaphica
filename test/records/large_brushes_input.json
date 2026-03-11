@@ -1,0 +1,3422 @@
+{
+  "version": 1,
+  "frames": [
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": true
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606775723084,
+          "device": "Cursor",
+          "cursor_x": 199.36526,
+          "cursor_y": 116.68108,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606775727737,
+          "device": "Cursor",
+          "cursor_x": 199.36526,
+          "cursor_y": 121.10969,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606775729039,
+          "device": "Cursor",
+          "cursor_x": 198.35417,
+          "cursor_y": 128.17911,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606810035569,
+          "device": "Cursor",
+          "cursor_x": 197.0951,
+          "cursor_y": 142.03998,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606810041695,
+          "device": "Cursor",
+          "cursor_x": 195.69974,
+          "cursor_y": 155.9935,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606810042798,
+          "device": "Cursor",
+          "cursor_x": 191.51367,
+          "cursor_y": 174.13309,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606810043774,
+          "device": "Cursor",
+          "cursor_x": 185.93227,
+          "cursor_y": 192.27267,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606833248164,
+          "device": "Cursor",
+          "cursor_x": 181.74622,
+          "cursor_y": 210.41226,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606833253566,
+          "device": "Cursor",
+          "cursor_x": 176.1648,
+          "cursor_y": 229.94719,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606833254719,
+          "device": "Cursor",
+          "cursor_x": 169.18803,
+          "cursor_y": 249.48213,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606833255756,
+          "device": "Cursor",
+          "cursor_x": 162.21127,
+          "cursor_y": 270.4124,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606861335138,
+          "device": "Cursor",
+          "cursor_x": 153.83916,
+          "cursor_y": 289.94736,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606861340588,
+          "device": "Cursor",
+          "cursor_x": 145.46704,
+          "cursor_y": 308.08694,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606861341747,
+          "device": "Cursor",
+          "cursor_x": 139.88564,
+          "cursor_y": 324.83118,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606876858958,
+          "device": "Cursor",
+          "cursor_x": 134.34511,
+          "cursor_y": 337.2994,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606876862798,
+          "device": "Cursor",
+          "cursor_x": 130.66049,
+          "cursor_y": 345.89774,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606876863917,
+          "device": "Cursor",
+          "cursor_x": 127.09853,
+          "cursor_y": 353.0162,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606907728023,
+          "device": "Cursor",
+          "cursor_x": 126.082,
+          "cursor_y": 357.09326,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606907733241,
+          "device": "Cursor",
+          "cursor_x": 124.55583,
+          "cursor_y": 359.37704,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019606907734390,
+          "device": "Cursor",
+          "cursor_x": 124.55583,
+          "cursor_y": 360.78604,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019606923138207,
+          "device": "Cursor",
+          "cursor_x": 124.55583,
+          "cursor_y": 361.4837,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": false
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": true
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617469568349,
+          "device": "Cursor",
+          "cursor_x": 601.9327,
+          "cursor_y": 150.60832,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617469572872,
+          "device": "Cursor",
+          "cursor_x": 614.46356,
+          "cursor_y": 157.57146,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617495878089,
+          "device": "Cursor",
+          "cursor_x": 626.9945,
+          "cursor_y": 168.70975,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617495882709,
+          "device": "Cursor",
+          "cursor_x": 638.15735,
+          "cursor_y": 185.45398,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617495883801,
+          "device": "Cursor",
+          "cursor_x": 647.9248,
+          "cursor_y": 204.9889,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617495884799,
+          "device": "Cursor",
+          "cursor_x": 654.90155,
+          "cursor_y": 224.52385,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617515233036,
+          "device": "Cursor",
+          "cursor_x": 661.8783,
+          "cursor_y": 248.24484,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617515239183,
+          "device": "Cursor",
+          "cursor_x": 664.669,
+          "cursor_y": 271.96585,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617515240382,
+          "device": "Cursor",
+          "cursor_x": 666.0644,
+          "cursor_y": 297.08218,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617537467226,
+          "device": "Cursor",
+          "cursor_x": 664.669,
+          "cursor_y": 322.19855,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617537472264,
+          "device": "Cursor",
+          "cursor_x": 657.69226,
+          "cursor_y": 344.52417,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617563448803,
+          "device": "Cursor",
+          "cursor_x": 643.7387,
+          "cursor_y": 368.24518,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617563453817,
+          "device": "Cursor",
+          "cursor_x": 622.8085,
+          "cursor_y": 390.5708,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617563454900,
+          "device": "Cursor",
+          "cursor_x": 596.29675,
+          "cursor_y": 411.5011,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617563455856,
+          "device": "Cursor",
+          "cursor_x": 561.4129,
+          "cursor_y": 432.4314,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617587540324,
+          "device": "Cursor",
+          "cursor_x": 520.9477,
+          "cursor_y": 449.17563,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617587545255,
+          "device": "Cursor",
+          "cursor_x": 474.90106,
+          "cursor_y": 461.7338,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617587546341,
+          "device": "Cursor",
+          "cursor_x": 426.06372,
+          "cursor_y": 468.71057,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617625597846,
+          "device": "Cursor",
+          "cursor_x": 377.22638,
+          "cursor_y": 472.8966,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617625603943,
+          "device": "Cursor",
+          "cursor_x": 333.97046,
+          "cursor_y": 475.68732,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617625605056,
+          "device": "Cursor",
+          "cursor_x": 299.08664,
+          "cursor_y": 475.68732,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617625606020,
+          "device": "Cursor",
+          "cursor_x": 275.36566,
+          "cursor_y": 475.68732,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617625607182,
+          "device": "Cursor",
+          "cursor_x": 261.48843,
+          "cursor_y": 475.68732,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617653280934,
+          "device": "Cursor",
+          "cursor_x": 257.2397,
+          "cursor_y": 475.68732,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617653288934,
+          "device": "Cursor",
+          "cursor_x": 256.52838,
+          "cursor_y": 475.68732,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617702770329,
+          "device": "Cursor",
+          "cursor_x": 257.18246,
+          "cursor_y": 475.03598,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617702774306,
+          "device": "Cursor",
+          "cursor_x": 258.48514,
+          "cursor_y": 473.73056,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617702775412,
+          "device": "Cursor",
+          "cursor_x": 261.76642,
+          "cursor_y": 472.08994,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617719349060,
+          "device": "Cursor",
+          "cursor_x": 269.06476,
+          "cursor_y": 468.96402,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617719355755,
+          "device": "Cursor",
+          "cursor_x": 278.36346,
+          "cursor_y": 465.47562,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617719356896,
+          "device": "Cursor",
+          "cursor_x": 291.35223,
+          "cursor_y": 461.57846,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617736668856,
+          "device": "Cursor",
+          "cursor_x": 308.0883,
+          "cursor_y": 460.1831,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617736675431,
+          "device": "Cursor",
+          "cursor_x": 324.83252,
+          "cursor_y": 458.78775,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617752111614,
+          "device": "Cursor",
+          "cursor_x": 342.9721,
+          "cursor_y": 458.78775,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617752116694,
+          "device": "Cursor",
+          "cursor_x": 358.32098,
+          "cursor_y": 457.3924,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617769942145,
+          "device": "Cursor",
+          "cursor_x": 370.87918,
+          "cursor_y": 457.3924,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617769947794,
+          "device": "Cursor",
+          "cursor_x": 379.82904,
+          "cursor_y": 457.3924,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019617783997163,
+          "device": "Cursor",
+          "cursor_x": 382.44806,
+          "cursor_y": 457.3924,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019617784001218,
+          "device": "Cursor",
+          "cursor_x": 383.14572,
+          "cursor_y": 457.3924,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": false
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": true
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624101814703,
+          "device": "Cursor",
+          "cursor_x": 540.0684,
+          "cursor_y": 748.39154,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624133796270,
+          "device": "Cursor",
+          "cursor_x": 539.4225,
+          "cursor_y": 747.0943,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624133801137,
+          "device": "Cursor",
+          "cursor_x": 537.3104,
+          "cursor_y": 745.68805,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624133802234,
+          "device": "Cursor",
+          "cursor_x": 533.0889,
+          "cursor_y": 743.1535,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624133803234,
+          "device": "Cursor",
+          "cursor_x": 523.56946,
+          "cursor_y": 740.77435,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624164569954,
+          "device": "Cursor",
+          "cursor_x": 508.22055,
+          "cursor_y": 737.98364,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624164575643,
+          "device": "Cursor",
+          "cursor_x": 490.081,
+          "cursor_y": 735.19293,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624164576754,
+          "device": "Cursor",
+          "cursor_x": 470.54605,
+          "cursor_y": 733.79755,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624164577721,
+          "device": "Cursor",
+          "cursor_x": 448.2204,
+          "cursor_y": 732.4022,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624205939233,
+          "device": "Cursor",
+          "cursor_x": 427.2901,
+          "cursor_y": 732.4022,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624205946025,
+          "device": "Cursor",
+          "cursor_x": 409.15054,
+          "cursor_y": 733.79755,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624205947161,
+          "device": "Cursor",
+          "cursor_x": 392.4063,
+          "cursor_y": 736.58826,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624205948150,
+          "device": "Cursor",
+          "cursor_x": 381.24347,
+          "cursor_y": 740.77435,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624205950042,
+          "device": "Cursor",
+          "cursor_x": 372.111,
+          "cursor_y": 745.9933,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624205951015,
+          "device": "Cursor",
+          "cursor_x": 366.8239,
+          "cursor_y": 749.1655,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624243583632,
+          "device": "Cursor",
+          "cursor_x": 364.09317,
+          "cursor_y": 752.8065,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624243589108,
+          "device": "Cursor",
+          "cursor_x": 363.19928,
+          "cursor_y": 756.37665,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624243590180,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 757.9301,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624243591172,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 760.02313,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624243639218,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 761.41846,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624273841867,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 763.5497,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624273847049,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 764.9722,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624273848152,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 766.3676,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624273849137,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 767.76294,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624296152945,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 768.46063,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019624296157111,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 769.1583,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019624317288484,
+          "device": "Cursor",
+          "cursor_x": 362.42258,
+          "cursor_y": 769.84784,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": false
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": true
+        }
+      ],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638025590012,
+          "device": "Cursor",
+          "cursor_x": 275.6818,
+          "cursor_y": 147.99203,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638073205588,
+          "device": "Cursor",
+          "cursor_x": 277.07715,
+          "cursor_y": 147.99203,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638073212299,
+          "device": "Cursor",
+          "cursor_x": 277.76663,
+          "cursor_y": 147.99203,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638073213435,
+          "device": "Cursor",
+          "cursor_x": 278.45615,
+          "cursor_y": 150.06053,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638073214456,
+          "device": "Cursor",
+          "cursor_x": 278.45615,
+          "cursor_y": 152.90302,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638073368071,
+          "device": "Cursor",
+          "cursor_x": 279.3773,
+          "cursor_y": 159.35652,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638101050309,
+          "device": "Cursor",
+          "cursor_x": 280.55734,
+          "cursor_y": 167.62508,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638101055835,
+          "device": "Cursor",
+          "cursor_x": 279.32825,
+          "cursor_y": 177.46068,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638101056909,
+          "device": "Cursor",
+          "cursor_x": 276.9763,
+          "cursor_y": 186.87114,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638129668345,
+          "device": "Cursor",
+          "cursor_x": 274.608,
+          "cursor_y": 196.34154,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638129675400,
+          "device": "Cursor",
+          "cursor_x": 270.66177,
+          "cursor_y": 206.86392,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638129676501,
+          "device": "Cursor",
+          "cursor_x": 265.60364,
+          "cursor_y": 214.45387,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638129677489,
+          "device": "Cursor",
+          "cursor_x": 263.61145,
+          "cursor_y": 219.43027,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638167892830,
+          "device": "Cursor",
+          "cursor_x": 262.03076,
+          "cursor_y": 221.01367,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638167903538,
+          "device": "Cursor",
+          "cursor_x": 261.3331,
+          "cursor_y": 222.40901,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638167904653,
+          "device": "Cursor",
+          "cursor_x": 261.3331,
+          "cursor_y": 223.0958,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638197930115,
+          "device": "Cursor",
+          "cursor_x": 262.02258,
+          "cursor_y": 222.40901,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638197935361,
+          "device": "Cursor",
+          "cursor_x": 264.9223,
+          "cursor_y": 220.2315,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638197936443,
+          "device": "Cursor",
+          "cursor_x": 270.77625,
+          "cursor_y": 216.32887,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638197937422,
+          "device": "Cursor",
+          "cursor_x": 285.1413,
+          "cursor_y": 208.49365,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638229622747,
+          "device": "Cursor",
+          "cursor_x": 301.88553,
+          "cursor_y": 201.51689,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638229629949,
+          "device": "Cursor",
+          "cursor_x": 320.02512,
+          "cursor_y": 194.54012,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638229631119,
+          "device": "Cursor",
+          "cursor_x": 339.56006,
+          "cursor_y": 190.35406,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638229632210,
+          "device": "Cursor",
+          "cursor_x": 359.09497,
+          "cursor_y": 186.168,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638229634176,
+          "device": "Cursor",
+          "cursor_x": 374.44385,
+          "cursor_y": 184.77266,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638267798709,
+          "device": "Cursor",
+          "cursor_x": 386.79492,
+          "cursor_y": 184.77266,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638267804583,
+          "device": "Cursor",
+          "cursor_x": 393.47736,
+          "cursor_y": 185.8873,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638267805752,
+          "device": "Cursor",
+          "cursor_x": 395.97644,
+          "cursor_y": 186.72124,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638267806821,
+          "device": "Cursor",
+          "cursor_x": 397.42358,
+          "cursor_y": 188.16838,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638267808887,
+          "device": "Cursor",
+          "cursor_x": 398.14578,
+          "cursor_y": 190.3377,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638308948119,
+          "device": "Cursor",
+          "cursor_x": 398.88705,
+          "cursor_y": 193.30011,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638308954363,
+          "device": "Cursor",
+          "cursor_x": 398.03403,
+          "cursor_y": 196.71219,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638308955572,
+          "device": "Cursor",
+          "cursor_x": 397.08835,
+          "cursor_y": 202.39442,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638308956722,
+          "device": "Cursor",
+          "cursor_x": 393.94336,
+          "cursor_y": 209.73366,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638308958773,
+          "device": "Cursor",
+          "cursor_x": 389.53384,
+          "cursor_y": 216.34523,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638350412712,
+          "device": "Cursor",
+          "cursor_x": 383.60904,
+          "cursor_y": 222.27275,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638350418468,
+          "device": "Cursor",
+          "cursor_x": 376.50146,
+          "cursor_y": 227.00932,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638350419543,
+          "device": "Cursor",
+          "cursor_x": 370.03162,
+          "cursor_y": 231.32347,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638350420523,
+          "device": "Cursor",
+          "cursor_x": 363.6735,
+          "cursor_y": 234.50116,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638350422158,
+          "device": "Cursor",
+          "cursor_x": 358.3646,
+          "cursor_y": 236.62689,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638350423127,
+          "device": "Cursor",
+          "cursor_x": 355.69653,
+          "cursor_y": 237.51535,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638385435131,
+          "device": "Cursor",
+          "cursor_x": 354.30118,
+          "cursor_y": 237.51535,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638385440382,
+          "device": "Cursor",
+          "cursor_x": 353.60352,
+          "cursor_y": 238.21303,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638417645691,
+          "device": "Cursor",
+          "cursor_x": 354.95526,
+          "cursor_y": 237.53716,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638417652880,
+          "device": "Cursor",
+          "cursor_x": 357.71597,
+          "cursor_y": 236.84764,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638447467704,
+          "device": "Cursor",
+          "cursor_x": 363.0712,
+          "cursor_y": 235.06258,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638447473929,
+          "device": "Cursor",
+          "cursor_x": 376.0409,
+          "cursor_y": 232.4681,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638447475045,
+          "device": "Cursor",
+          "cursor_x": 392.78513,
+          "cursor_y": 231.07274,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638447476059,
+          "device": "Cursor",
+          "cursor_x": 412.32004,
+          "cursor_y": 231.07274,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638488096919,
+          "device": "Cursor",
+          "cursor_x": 431.85498,
+          "cursor_y": 232.4681,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638488107822,
+          "device": "Cursor",
+          "cursor_x": 449.99457,
+          "cursor_y": 235.2588,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638488109017,
+          "device": "Cursor",
+          "cursor_x": 466.7388,
+          "cursor_y": 239.44485,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638488110098,
+          "device": "Cursor",
+          "cursor_x": 479.20978,
+          "cursor_y": 244.98811,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638488112287,
+          "device": "Cursor",
+          "cursor_x": 486.8515,
+          "cursor_y": 252.62712,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638529092570,
+          "device": "Cursor",
+          "cursor_x": 493.1115,
+          "cursor_y": 258.88715,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638529100562,
+          "device": "Cursor",
+          "cursor_x": 495.31357,
+          "cursor_y": 264.39496,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638529102481,
+          "device": "Cursor",
+          "cursor_x": 496.2974,
+          "cursor_y": 271.2818,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638529104220,
+          "device": "Cursor",
+          "cursor_x": 495.27814,
+          "cursor_y": 277.39737,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638529107018,
+          "device": "Cursor",
+          "cursor_x": 492.86624,
+          "cursor_y": 287.04218,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638529108765,
+          "device": "Cursor",
+          "cursor_x": 487.68,
+          "cursor_y": 296.12015,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638571779766,
+          "device": "Cursor",
+          "cursor_x": 481.73883,
+          "cursor_y": 304.43777,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638571786328,
+          "device": "Cursor",
+          "cursor_x": 474.47592,
+          "cursor_y": 311.69797,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638571787468,
+          "device": "Cursor",
+          "cursor_x": 465.15814,
+          "cursor_y": 318.35315,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638571788533,
+          "device": "Cursor",
+          "cursor_x": 456.13196,
+          "cursor_y": 322.22305,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638571791110,
+          "device": "Cursor",
+          "cursor_x": 448.39484,
+          "cursor_y": 324.4333,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638605610719,
+          "device": "Cursor",
+          "cursor_x": 440.78033,
+          "cursor_y": 326.61078,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638605618521,
+          "device": "Cursor",
+          "cursor_x": 434.0298,
+          "cursor_y": 326.61078,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638605619668,
+          "device": "Cursor",
+          "cursor_x": 430.1353,
+          "cursor_y": 327.5837,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638605620688,
+          "device": "Cursor",
+          "cursor_x": 428.7127,
+          "cursor_y": 327.5837,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638638720897,
+          "device": "Cursor",
+          "cursor_x": 427.31735,
+          "cursor_y": 327.5837,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638638728554,
+          "device": "Cursor",
+          "cursor_x": 427.31735,
+          "cursor_y": 326.88605,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638638729724,
+          "device": "Cursor",
+          "cursor_x": 427.31735,
+          "cursor_y": 326.18835,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638638731110,
+          "device": "Cursor",
+          "cursor_x": 428.7127,
+          "cursor_y": 324.79303,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638638733422,
+          "device": "Cursor",
+          "cursor_x": 431.80048,
+          "cursor_y": 322.4765,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638671458904,
+          "device": "Cursor",
+          "cursor_x": 436.81503,
+          "cursor_y": 319.46777,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638671465764,
+          "device": "Cursor",
+          "cursor_x": 446.35358,
+          "cursor_y": 314.69852,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638671466816,
+          "device": "Cursor",
+          "cursor_x": 459.5413,
+          "cursor_y": 310.7414,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638671467784,
+          "device": "Cursor",
+          "cursor_x": 473.45938,
+          "cursor_y": 306.56622,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638708139969,
+          "device": "Cursor",
+          "cursor_x": 490.2036,
+          "cursor_y": 305.17087,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638708146102,
+          "device": "Cursor",
+          "cursor_x": 505.5525,
+          "cursor_y": 303.7755,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638708147304,
+          "device": "Cursor",
+          "cursor_x": 522.29675,
+          "cursor_y": 303.7755,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638708148321,
+          "device": "Cursor",
+          "cursor_x": 534.64777,
+          "cursor_y": 303.7755,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638708150118,
+          "device": "Cursor",
+          "cursor_x": 546.99884,
+          "cursor_y": 306.5199,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638749157783,
+          "device": "Cursor",
+          "cursor_x": 554.5261,
+          "cursor_y": 309.0299,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638749163706,
+          "device": "Cursor",
+          "cursor_x": 558.3879,
+          "cursor_y": 312.88892,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638749164862,
+          "device": "Cursor",
+          "cursor_x": 561.09406,
+          "cursor_y": 316.49722,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638749165905,
+          "device": "Cursor",
+          "cursor_x": 562.9255,
+          "cursor_y": 320.16275,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638749167892,
+          "device": "Cursor",
+          "cursor_x": 563.8466,
+          "cursor_y": 324.7685,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638749168899,
+          "device": "Cursor",
+          "cursor_x": 563.8466,
+          "cursor_y": 330.30902,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638785193817,
+          "device": "Cursor",
+          "cursor_x": 563.8466,
+          "cursor_y": 336.10846,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638785199784,
+          "device": "Cursor",
+          "cursor_x": 562.71564,
+          "cursor_y": 344.01727,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638785200851,
+          "device": "Cursor",
+          "cursor_x": 560.3364,
+          "cursor_y": 352.35123,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638785201868,
+          "device": "Cursor",
+          "cursor_x": 557.1506,
+          "cursor_y": 358.72025,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638817902031,
+          "device": "Cursor",
+          "cursor_x": 553.0626,
+          "cursor_y": 363.8302,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638817907634,
+          "device": "Cursor",
+          "cursor_x": 548.6313,
+          "cursor_y": 369.37073,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638817908784,
+          "device": "Cursor",
+          "cursor_x": 545.628,
+          "cursor_y": 372.374,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638817909816,
+          "device": "Cursor",
+          "cursor_x": 543.33057,
+          "cursor_y": 373.9056,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638817911752,
+          "device": "Cursor",
+          "cursor_x": 542.62744,
+          "cursor_y": 375.31186,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638853228654,
+          "device": "Cursor",
+          "cursor_x": 541.92975,
+          "cursor_y": 375.31186,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638853234782,
+          "device": "Cursor",
+          "cursor_x": 541.92975,
+          "cursor_y": 376.00955,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638884460107,
+          "device": "Cursor",
+          "cursor_x": 541.92975,
+          "cursor_y": 375.36365,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638884466050,
+          "device": "Cursor",
+          "cursor_x": 543.8702,
+          "cursor_y": 374.71774,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638884467204,
+          "device": "Cursor",
+          "cursor_x": 548.18164,
+          "cursor_y": 374.71774,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638916364165,
+          "device": "Cursor",
+          "cursor_x": 556.96796,
+          "cursor_y": 373.61945,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638916370105,
+          "device": "Cursor",
+          "cursor_x": 572.9001,
+          "cursor_y": 373.61945,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638916371273,
+          "device": "Cursor",
+          "cursor_x": 591.0397,
+          "cursor_y": 375.0148,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638916372327,
+          "device": "Cursor",
+          "cursor_x": 609.17926,
+          "cursor_y": 379.20087,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638952418028,
+          "device": "Cursor",
+          "cursor_x": 625.92346,
+          "cursor_y": 383.38693,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638952423842,
+          "device": "Cursor",
+          "cursor_x": 636.9582,
+          "cursor_y": 390.28467,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638952424942,
+          "device": "Cursor",
+          "cursor_x": 645.58923,
+          "cursor_y": 395.21472,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638952425922,
+          "device": "Cursor",
+          "cursor_x": 649.0394,
+          "cursor_y": 400.96783,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638952427843,
+          "device": "Cursor",
+          "cursor_x": 651.1679,
+          "cursor_y": 407.3532,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019638993961595,
+          "device": "Cursor",
+          "cursor_x": 652.19806,
+          "cursor_y": 414.5616,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638993968470,
+          "device": "Cursor",
+          "cursor_x": 652.19806,
+          "cursor_y": 420.669,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638993969533,
+          "device": "Cursor",
+          "cursor_x": 649.90607,
+          "cursor_y": 428.68954,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638993970491,
+          "device": "Cursor",
+          "cursor_x": 647.58685,
+          "cursor_y": 435.64996,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019638993972326,
+          "device": "Cursor",
+          "cursor_x": 643.2618,
+          "cursor_y": 443.2181,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639030985628,
+          "device": "Cursor",
+          "cursor_x": 638.60425,
+          "cursor_y": 451.36948,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639030992445,
+          "device": "Cursor",
+          "cursor_x": 632.0445,
+          "cursor_y": 460.55374,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639030993582,
+          "device": "Cursor",
+          "cursor_x": 623.8413,
+          "cursor_y": 470.125,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639030994637,
+          "device": "Cursor",
+          "cursor_x": 616.404,
+          "cursor_y": 477.5596,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639030996908,
+          "device": "Cursor",
+          "cursor_x": 609.37274,
+          "cursor_y": 483.42172,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639073389792,
+          "device": "Cursor",
+          "cursor_x": 604.86237,
+          "cursor_y": 487.9321,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639073396575,
+          "device": "Cursor",
+          "cursor_x": 600.8916,
+          "cursor_y": 490.9081,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639073397767,
+          "device": "Cursor",
+          "cursor_x": 599.3872,
+          "cursor_y": 491.66028,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639073398829,
+          "device": "Cursor",
+          "cursor_x": 598.6896,
+          "cursor_y": 492.35797,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639073401240,
+          "device": "Cursor",
+          "cursor_x": 598.6896,
+          "cursor_y": 493.05563,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639110544775,
+          "device": "Cursor",
+          "cursor_x": 599.3791,
+          "cursor_y": 493.05563,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639110550834,
+          "device": "Cursor",
+          "cursor_x": 602.1834,
+          "cursor_y": 493.05563,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639110551962,
+          "device": "Cursor",
+          "cursor_x": 609.4763,
+          "cursor_y": 495.1405,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639110552981,
+          "device": "Cursor",
+          "cursor_x": 624.6698,
+          "cursor_y": 500.66467,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639110554784,
+          "device": "Cursor",
+          "cursor_x": 642.8094,
+          "cursor_y": 507.64145,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639153627301,
+          "device": "Cursor",
+          "cursor_x": 662.34436,
+          "cursor_y": 517.40894,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639153633437,
+          "device": "Cursor",
+          "cursor_x": 683.27466,
+          "cursor_y": 529.9671,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639153634610,
+          "device": "Cursor",
+          "cursor_x": 702.8096,
+          "cursor_y": 543.9206,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639153635675,
+          "device": "Cursor",
+          "cursor_x": 719.55383,
+          "cursor_y": 557.87415,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639153637426,
+          "device": "Cursor",
+          "cursor_x": 733.5073,
+          "cursor_y": 571.82764,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639153638485,
+          "device": "Cursor",
+          "cursor_x": 741.87946,
+          "cursor_y": 584.3858,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209922779,
+          "device": "Cursor",
+          "cursor_x": 745.9783,
+          "cursor_y": 595.3115,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209928810,
+          "device": "Cursor",
+          "cursor_x": 747.1202,
+          "cursor_y": 603.3185,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209930005,
+          "device": "Cursor",
+          "cursor_x": 747.1202,
+          "cursor_y": 610.7749,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209931092,
+          "device": "Cursor",
+          "cursor_x": 744.7383,
+          "cursor_y": 619.11975,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209933214,
+          "device": "Cursor",
+          "cursor_x": 739.9336,
+          "cursor_y": 626.32544,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209934273,
+          "device": "Cursor",
+          "cursor_x": 735.6085,
+          "cursor_y": 632.81165,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639209935314,
+          "device": "Cursor",
+          "cursor_x": 729.10596,
+          "cursor_y": 637.1476,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260429875,
+          "device": "Cursor",
+          "cursor_x": 723.3774,
+          "cursor_y": 641.7288,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260436431,
+          "device": "Cursor",
+          "cursor_x": 716.6677,
+          "cursor_y": 645.0837,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260437634,
+          "device": "Cursor",
+          "cursor_x": 710.6557,
+          "cursor_y": 646.0866,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260438706,
+          "device": "Cursor",
+          "cursor_x": 707.1537,
+          "cursor_y": 646.0866,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260440553,
+          "device": "Cursor",
+          "cursor_x": 704.7936,
+          "cursor_y": 646.8742,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260441610,
+          "device": "Cursor",
+          "cursor_x": 703.36554,
+          "cursor_y": 646.8742,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639260442694,
+          "device": "Cursor",
+          "cursor_x": 702.66785,
+          "cursor_y": 646.8742,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639307258998,
+          "device": "Cursor",
+          "cursor_x": 702.66785,
+          "cursor_y": 646.1765,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639307265080,
+          "device": "Cursor",
+          "cursor_x": 704.06323,
+          "cursor_y": 645.4788,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639307266194,
+          "device": "Cursor",
+          "cursor_x": 706.9139,
+          "cursor_y": 644.76483,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639307267188,
+          "device": "Cursor",
+          "cursor_x": 714.7954,
+          "cursor_y": 642.79443,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639307269027,
+          "device": "Cursor",
+          "cursor_x": 728.39197,
+          "cursor_y": 641.4372,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639341665104,
+          "device": "Cursor",
+          "cursor_x": 743.74084,
+          "cursor_y": 640.0419,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639341671624,
+          "device": "Cursor",
+          "cursor_x": 759.0897,
+          "cursor_y": 640.0419,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639341672799,
+          "device": "Cursor",
+          "cursor_x": 774.4386,
+          "cursor_y": 641.4372,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639341673857,
+          "device": "Cursor",
+          "cursor_x": 791.1828,
+          "cursor_y": 644.2279,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639341675665,
+          "device": "Cursor",
+          "cursor_x": 806.5317,
+          "cursor_y": 649.8093,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639382638829,
+          "device": "Cursor",
+          "cursor_x": 823.27594,
+          "cursor_y": 655.39075,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639382646452,
+          "device": "Cursor",
+          "cursor_x": 835.8123,
+          "cursor_y": 662.3539,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639382647574,
+          "device": "Cursor",
+          "cursor_x": 845.5634,
+          "cursor_y": 669.31976,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639382648591,
+          "device": "Cursor",
+          "cursor_x": 850.3463,
+          "cursor_y": 674.10266,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639382650612,
+          "device": "Cursor",
+          "cursor_x": 853.05255,
+          "cursor_y": 677.71094,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639419804989,
+          "device": "Cursor",
+          "cursor_x": 853.88104,
+          "cursor_y": 681.0249,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639419811692,
+          "device": "Cursor",
+          "cursor_x": 853.88104,
+          "cursor_y": 684.3934,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639419812917,
+          "device": "Cursor",
+          "cursor_x": 852.99255,
+          "cursor_y": 688.8438,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639419814095,
+          "device": "Cursor",
+          "cursor_x": 851.28925,
+          "cursor_y": 692.24493,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639419816283,
+          "device": "Cursor",
+          "cursor_x": 848.6348,
+          "cursor_y": 696.67084,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639459186425,
+          "device": "Cursor",
+          "cursor_x": 845.3372,
+          "cursor_y": 703.26605,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639459195535,
+          "device": "Cursor",
+          "cursor_x": 839.5487,
+          "cursor_y": 709.05457,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639459196740,
+          "device": "Cursor",
+          "cursor_x": 834.2125,
+          "cursor_y": 714.39075,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639459197850,
+          "device": "Cursor",
+          "cursor_x": 827.58734,
+          "cursor_y": 719.9122,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639459200521,
+          "device": "Cursor",
+          "cursor_x": 821.4881,
+          "cursor_y": 726.0114,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639459201570,
+          "device": "Cursor",
+          "cursor_x": 815.7323,
+          "cursor_y": 730.6171,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639492947028,
+          "device": "Cursor",
+          "cursor_x": 811.8542,
+          "cursor_y": 734.49255,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639492953380,
+          "device": "Cursor",
+          "cursor_x": 809.35236,
+          "cursor_y": 736.16315,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639492954527,
+          "device": "Cursor",
+          "cursor_x": 808.64105,
+          "cursor_y": 737.583,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639492955550,
+          "device": "Cursor",
+          "cursor_x": 807.9434,
+          "cursor_y": 738.9784,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [],
+      "samples": [
+        {
+          "epoch": 0,
+          "time_ns": 1773019639528286783,
+          "device": "Cursor",
+          "cursor_x": 807.2457,
+          "cursor_y": 738.9784,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        },
+        {
+          "epoch": 0,
+          "time_ns": 1773019639528293008,
+          "device": "Cursor",
+          "cursor_x": 807.2457,
+          "cursor_y": 739.676,
+          "tilt_x": 0.0,
+          "tilt_y": 0.0,
+          "pressure": 1.0,
+          "twist": 0.0
+        }
+      ]
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": false
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": true
+        }
+      ],
+      "samples": []
+    },
+    {
+      "controls": [
+        {
+          "node_id": 0,
+          "begin": false
+        }
+      ],
+      "samples": []
+    }
+  ]
+}

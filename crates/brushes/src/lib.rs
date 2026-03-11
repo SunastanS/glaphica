@@ -14,7 +14,10 @@ pub mod resampler_distance;
 
 pub use brush_registry::{BrushRegistry, BrushRegistryError};
 pub use brush_spec::{BrushSpec, BrushSpecRegisterError};
-pub use config::{BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint};
+pub use config::{
+    BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint,
+    eval_unit_interval_curve_polynomial,
+};
 pub use draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
 pub use engine_runtime::{
     BrushEngineRuntime, EngineBrushDispatchError, EngineBrushPipeline, StrokeDrawOutput,

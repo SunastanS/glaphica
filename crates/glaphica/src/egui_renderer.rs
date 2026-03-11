@@ -398,7 +398,13 @@ impl EguiRenderer {
         match self.texture_size(texture_id) {
             Some([current_width, current_height]) => {
                 if !is_partial_update && (current_width != width || current_height != height) {
-                    self.create_or_replace_texture(device, texture_id, width, height, delta.options);
+                    self.create_or_replace_texture(
+                        device,
+                        texture_id,
+                        width,
+                        height,
+                        delta.options,
+                    );
                 } else if current_width < required_width || current_height < required_height {
                     eprintln!(
                         "skip egui texture delta: update region {}x{} at ({}, {}) exceeds texture {}x{}",

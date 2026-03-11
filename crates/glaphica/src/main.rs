@@ -6,9 +6,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod egui_renderer;
 
 use app::{AppThreadIntegration, trace::TraceRecorder};
-use brushes::builtin_brushes::round::RoundBrush;
-use brushes::{BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint};
-use egui::{Color32, SidePanel, TopBottomPanel};
+use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
+use brushes::{
+    BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint,
+    eval_unit_interval_curve_polynomial,
+};
+use egui::{Color32, Pos2, Rect, Sense, Shape, SidePanel, Stroke, TopBottomPanel, vec2};
 use egui_renderer::EguiRenderer;
 use glaphica_core::{BrushId, CanvasVec2, InputDeviceKind, MappedCursor, RadianVec2};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
@@ -22,7 +25,68 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const DEFAULT_BRUSH_ID: BrushId = BrushId(0);
+const ROUND_BRUSH_ID: BrushId = BrushId(0);
+const PIXEL_RECT_BRUSH_ID: BrushId = BrushId(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrushKind {
+    Round,
+    PixelRect,
+}
+
+impl BrushKind {
+    const ALL: [Self; 2] = [Self::Round, Self::PixelRect];
+
+    const fn brush_id(self) -> BrushId {
+        match self {
+            Self::Round => ROUND_BRUSH_ID,
+            Self::PixelRect => PIXEL_RECT_BRUSH_ID,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Round => "Round",
+            Self::PixelRect => "PixelRect",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrushUiState {
+    kind: BrushKind,
+    items: Vec<BrushConfigItem>,
+    values: Vec<BrushConfigValue>,
+    visible: Vec<bool>,
+    dirty: bool,
+}
+
+impl BrushUiState {
+    fn new(kind: BrushKind, items: Vec<BrushConfigItem>) -> Self {
+        let values = items
+            .iter()
+            .map(|item| item.default_value.clone())
+            .collect::<Vec<_>>();
+        let visible = items.iter().map(|item| !item.default_hidden).collect();
+        Self {
+            kind,
+            items,
+            values,
+            visible,
+            dirty: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        for (item, value) in self.items.iter().zip(self.values.iter_mut()) {
+            *value = item.default_value.clone();
+        }
+        for (item, visible) in self.items.iter().zip(self.visible.iter_mut()) {
+            *visible = !item.default_hidden;
+        }
+        self.dirty = true;
+    }
+}
 
 struct App {
     window: Option<Arc<Window>>,
@@ -42,7 +106,8 @@ struct App {
     middle_pan_active: bool,
     middle_pan_last_position: Option<(f32, f32)>,
     ctrl_pressed: bool,
-    brush_config_items: Vec<BrushConfigItem>,
+    active_brush_kind: BrushKind,
+    brush_states: Vec<BrushUiState>,
 }
 
 impl App {
@@ -65,7 +130,8 @@ impl App {
             middle_pan_active: false,
             middle_pan_last_position: None,
             ctrl_pressed: false,
-            brush_config_items: Vec::new(),
+            active_brush_kind: BrushKind::Round,
+            brush_states: Vec::new(),
         }
     }
 
@@ -88,18 +154,37 @@ impl App {
                     overlay.paint(window, device, queue, encoder, view, format, width, height);
                 },
             );
-            if let Some(values) = overlay.take_pending_brush_update() {
-                match RoundBrush::from_config_values(&values) {
-                    Ok(updated_brush) => {
-                        if let Err(error) =
-                            integration.update_brush(DEFAULT_BRUSH_ID, updated_brush)
-                        {
-                            eprintln!("failed to update brush: {error:?}");
+            let selected_brush_kind = overlay.selected_brush_kind();
+            if self.active_brush_kind != selected_brush_kind {
+                self.active_brush_kind = selected_brush_kind;
+                integration.set_active_brush(self.active_brush_kind.brush_id());
+            }
+            if let Some((brush_kind, values)) = overlay.take_pending_brush_update() {
+                match brush_kind {
+                    BrushKind::Round => match RoundBrush::from_config_values(&values) {
+                        Ok(updated_brush) => {
+                            if let Err(error) =
+                                integration.update_brush(brush_kind.brush_id(), updated_brush)
+                            {
+                                eprintln!("failed to update brush: {error:?}");
+                            }
                         }
-                    }
-                    Err(error) => {
-                        eprintln!("failed to build brush from config: {error}");
-                    }
+                        Err(error) => {
+                            eprintln!("failed to build round brush from config: {error}");
+                        }
+                    },
+                    BrushKind::PixelRect => match PixelRectBrush::from_config_values(&values) {
+                        Ok(updated_brush) => {
+                            if let Err(error) =
+                                integration.update_brush(brush_kind.brush_id(), updated_brush)
+                            {
+                                eprintln!("failed to update brush: {error:?}");
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("failed to build pixel rect brush from config: {error}");
+                        }
+                    },
                 }
             }
         } else {
@@ -119,8 +204,7 @@ impl App {
         if let Some(screenshot_path) = &self.run_config.screenshot_path {
             if let Some(integration) = &mut self.integration {
                 let (width, height) = integration.document_size();
-                if let Err(error) = integration.save_screenshot(screenshot_path, width, height)
-                {
+                if let Err(error) = integration.save_screenshot(screenshot_path, width, height) {
                     eprintln!("Screenshot save failed: {error}");
                 }
             }
@@ -150,16 +234,15 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = match event_loop.create_window(
-            Window::default_attributes().with_title("glaphica"),
-        ) {
-            Ok(window) => Arc::new(window),
-            Err(error) => {
-                eprintln!("failed to create window: {error}");
-                event_loop.exit();
-                return;
-            }
-        };
+        let window =
+            match event_loop.create_window(Window::default_attributes().with_title("glaphica")) {
+                Ok(window) => Arc::new(window),
+                Err(error) => {
+                    eprintln!("failed to create window: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            };
         self.window = Some(window.clone());
         if self.started_at.is_none() {
             self.started_at = Some(Instant::now());
@@ -174,14 +257,10 @@ impl ApplicationHandler for App {
                     return;
                 }
             };
-            let integration = rt
-                .block_on(async {
-                    AppThreadIntegration::new(
-                        "test-document".to_string(),
-                        ImageLayout::new(1024, 1024),
-                    )
+            let integration = rt.block_on(async {
+                AppThreadIntegration::new("test-document".to_string(), ImageLayout::new(1024, 1024))
                     .await
-                });
+            });
 
             let mut integration = match integration {
                 Ok(i) => i,
@@ -193,7 +272,7 @@ impl ApplicationHandler for App {
             };
 
             // registe a fallback brush
-            let default_brush = match RoundBrush::with_default_curves(3.0, 0.8) {
+            let round_brush = match RoundBrush::with_default_curves(3.0, 0.8) {
                 Ok(brush) => brush,
                 Err(error) => {
                     eprintln!("failed to build default brush: {error}");
@@ -201,13 +280,22 @@ impl ApplicationHandler for App {
                     return;
                 }
             };
-            self.brush_config_items = default_brush.config_items();
-            if let Err(error) = integration.register_brush(DEFAULT_BRUSH_ID, default_brush) {
-                eprintln!("failed to register default brush: {error:?}");
+            let pixel_rect_brush = PixelRectBrush::new(8);
+            self.brush_states = vec![
+                BrushUiState::new(BrushKind::Round, round_brush.config_items()),
+                BrushUiState::new(BrushKind::PixelRect, pixel_rect_brush.config_items()),
+            ];
+            if let Err(error) = integration.register_brush(ROUND_BRUSH_ID, round_brush) {
+                eprintln!("failed to register round brush: {error:?}");
                 event_loop.exit();
                 return;
             }
-            integration.set_active_brush(DEFAULT_BRUSH_ID);
+            if let Err(error) = integration.register_brush(PIXEL_RECT_BRUSH_ID, pixel_rect_brush) {
+                eprintln!("failed to register pixel rect brush: {error:?}");
+                event_loop.exit();
+                return;
+            }
+            integration.set_active_brush(self.active_brush_kind.brush_id());
 
             if self.run_config.record_input_path.is_some()
                 || self.run_config.record_output_path.is_some()
@@ -235,15 +323,15 @@ impl ApplicationHandler for App {
 
             let size = (window.inner_size().width, window.inner_size().height);
 
-            let surface_runtime = match SurfaceRuntime::new(surface, adapter, device, size.0, size.1)
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    eprintln!("failed to init surface: {error:?}");
-                    event_loop.exit();
-                    return;
-                }
-            };
+            let surface_runtime =
+                match SurfaceRuntime::new(surface, adapter, device, size.0, size.1) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        eprintln!("failed to init surface: {error:?}");
+                        event_loop.exit();
+                        return;
+                    }
+                };
             let surface_format = surface_runtime.format();
 
             integration.set_surface(surface_runtime);
@@ -252,7 +340,8 @@ impl ApplicationHandler for App {
                 &window,
                 device,
                 surface_format,
-                self.brush_config_items.clone(),
+                self.brush_states.clone(),
+                self.active_brush_kind,
             ));
         }
 
@@ -327,6 +416,10 @@ impl ApplicationHandler for App {
                 match button {
                     MouseButton::Left => match state {
                         ElementState::Pressed => {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                overlay.flush_selected_brush_if_dirty();
+                            }
+                            self.render_frame();
                             self.stroke_active = true;
                             if let Some(integration) = &mut self.integration {
                                 integration.begin_stroke(glaphica_core::NodeId(0));
@@ -497,9 +590,10 @@ struct EguiOverlay {
     renderer: EguiRenderer,
     left_panel_collapsed: bool,
     right_panel_collapsed: bool,
-    brush_config_items: Vec<BrushConfigItem>,
-    brush_config_values: Vec<BrushConfigValue>,
-    pending_brush_update: Option<Vec<BrushConfigValue>>,
+    brush_states: Vec<BrushUiState>,
+    selected_brush_index: usize,
+    pending_brush_update: Option<(BrushKind, Vec<BrushConfigValue>)>,
+    config_panel_rect: Option<Rect>,
 }
 
 impl EguiOverlay {
@@ -508,7 +602,8 @@ impl EguiOverlay {
         window: &Window,
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
-        brush_config_items: Vec<BrushConfigItem>,
+        brush_states: Vec<BrushUiState>,
+        active_brush_kind: BrushKind,
     ) -> Self {
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(
@@ -520,19 +615,20 @@ impl EguiOverlay {
             None,
         );
         let renderer = EguiRenderer::new(device, surface_format);
-        let brush_config_values = brush_config_items
+        let selected_brush_index = brush_states
             .iter()
-            .map(|item| item.default_value.clone())
-            .collect();
+            .position(|state| state.kind == active_brush_kind)
+            .unwrap_or(0);
         Self {
             ctx,
             state,
             renderer,
             left_panel_collapsed: false,
             right_panel_collapsed: false,
-            brush_config_items,
-            brush_config_values,
+            brush_states,
+            selected_brush_index,
             pending_brush_update: None,
+            config_panel_rect: None,
         }
     }
 
@@ -544,8 +640,33 @@ impl EguiOverlay {
         self.state.on_window_event(window, event)
     }
 
-    fn take_pending_brush_update(&mut self) -> Option<Vec<BrushConfigValue>> {
+    fn selected_brush_kind(&self) -> BrushKind {
+        self.brush_states
+            .get(self.selected_brush_index)
+            .map(|state| state.kind)
+            .unwrap_or(BrushKind::Round)
+    }
+
+    fn take_pending_brush_update(&mut self) -> Option<(BrushKind, Vec<BrushConfigValue>)> {
         self.pending_brush_update.take()
+    }
+
+    fn flush_selected_brush_if_dirty(&mut self) {
+        self.queue_brush_update_if_dirty(self.selected_brush_index);
+    }
+
+    fn queue_brush_update_if_dirty(&mut self, index: usize) {
+        if self.pending_brush_update.is_some() {
+            return;
+        }
+        let Some(brush_state) = self.brush_states.get_mut(index) else {
+            return;
+        };
+        if !brush_state.dirty {
+            return;
+        }
+        brush_state.dirty = false;
+        self.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
     }
 
     fn paint(
@@ -562,9 +683,10 @@ impl EguiOverlay {
         let raw_input = self.state.take_egui_input(window);
         let left_panel_collapsed = &mut self.left_panel_collapsed;
         let right_panel_collapsed = &mut self.right_panel_collapsed;
-        let brush_config_items = &self.brush_config_items;
-        let brush_config_values = &mut self.brush_config_values;
+        let brush_states = &mut self.brush_states;
+        let selected_brush_index = &mut self.selected_brush_index;
         let pending_brush_update = &mut self.pending_brush_update;
+        let config_panel_rect = &mut self.config_panel_rect;
         let full_output = self.ctx.run(raw_input, |ctx| {
             if *left_panel_collapsed {
                 SidePanel::left("overlay-left-panel-collapsed")
@@ -596,12 +718,12 @@ impl EguiOverlay {
                             );
                         });
                         ui.separator();
-                        ui.label("Brush");
-                        ui.label("Eraser");
-                        ui.label("Move");
+                        ui.label("Brushes");
+                        ui.label("Edit in right panel");
                     });
             }
             if *right_panel_collapsed {
+                *config_panel_rect = None;
                 SidePanel::right("overlay-right-panel-collapsed")
                     .resizable(false)
                     .exact_width(28.0)
@@ -612,7 +734,7 @@ impl EguiOverlay {
                         }
                     });
             } else {
-                SidePanel::right("overlay-right-panel")
+                let panel = SidePanel::right("overlay-right-panel")
                     .resizable(true)
                     .default_width(240.0)
                     .min_width(180.0)
@@ -623,75 +745,147 @@ impl EguiOverlay {
                             if ui.button(">").clicked() {
                                 *right_panel_collapsed = true;
                             }
-                            ui.heading("Inspector");
+                            ui.heading("Brush Config");
                         });
                         ui.separator();
-                        ui.label("Brush Config");
-                        ui.separator();
-                        for (item, value) in brush_config_items
-                            .iter()
-                            .zip(brush_config_values.iter_mut())
-                        {
-                            ui.label(item.label);
-                            match (&item.kind, value) {
-                                (
-                                    BrushConfigKind::ScalarF32 { min, max },
-                                    BrushConfigValue::ScalarF32(current),
-                                ) => {
-                                    ui.add(egui::Slider::new(current, *min..=*max));
+                        let previous_index = *selected_brush_index;
+                        let selected_label = brush_states
+                            .get(*selected_brush_index)
+                            .map(|state| state.kind.label())
+                            .unwrap_or("Unknown");
+                        egui::ComboBox::from_label("Engine")
+                            .selected_text(selected_label)
+                            .show_ui(ui, |ui| {
+                                for kind in BrushKind::ALL {
+                                    if let Some(index) =
+                                        brush_states.iter().position(|state| state.kind == kind)
+                                        && ui
+                                            .selectable_label(
+                                                *selected_brush_index == index,
+                                                kind.label(),
+                                            )
+                                            .clicked()
+                                    {
+                                        *selected_brush_index = index;
+                                    }
                                 }
-                                (
-                                    BrushConfigKind::UnitIntervalCurve,
-                                    BrushConfigValue::UnitIntervalCurve(points),
-                                ) => {
+                            });
+                        if previous_index != *selected_brush_index
+                            && pending_brush_update.is_none()
+                            && brush_states
+                                .get(previous_index)
+                                .map(|state| state.dirty)
+                                .unwrap_or(false)
+                        {
+                            let previous = &mut brush_states[previous_index];
+                            previous.dirty = false;
+                            *pending_brush_update = Some((previous.kind, previous.values.clone()));
+                        }
+                        if let Some(brush_state) = brush_states.get_mut(*selected_brush_index) {
+                            ui.separator();
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui.small_button("+ point").clicked() {
-                                            let x = points
-                                                .last()
-                                                .map(|point| (point.x + 0.1).min(1.0))
-                                                .unwrap_or(1.0);
-                                            let y =
-                                                points.last().map(|point| point.y).unwrap_or(1.0);
-                                            points.push(UnitIntervalPoint::new(x, y));
+                                        let hidden_items = brush_state
+                                            .items
+                                            .iter()
+                                            .zip(brush_state.visible.iter())
+                                            .enumerate()
+                                            .filter(|(_, (item, visible))| {
+                                                item.default_hidden && !**visible
+                                            })
+                                            .map(|(index, (item, _))| (index, item.label))
+                                            .collect::<Vec<_>>();
+                                        ui.add_enabled_ui(!hidden_items.is_empty(), |ui| {
+                                            ui.menu_button("+", |ui| {
+                                                for (index, label) in &hidden_items {
+                                                    if ui.button(*label).clicked() {
+                                                        if let Some(visible) =
+                                                            brush_state.visible.get_mut(*index)
+                                                        {
+                                                            *visible = true;
+                                                            brush_state.dirty = true;
+                                                        }
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        if ui.button("Reset").clicked() {
+                                            brush_state.reset();
                                         }
-                                        if points.len() > 2 && ui.small_button("- point").clicked()
-                                        {
-                                            points.pop();
+                                        if ui.button("Apply").clicked() {
+                                            brush_state.dirty = false;
+                                            *pending_brush_update = Some((
+                                                brush_state.kind,
+                                                brush_state.values.clone(),
+                                            ));
                                         }
                                     });
-                                    for point in points.iter_mut() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("x");
-                                            ui.add(egui::Slider::new(&mut point.x, 0.0..=1.0));
-                                            ui.label("y");
-                                            ui.add(egui::Slider::new(&mut point.y, 0.0..=1.0));
+                                    ui.separator();
+
+                                    for index in 0..brush_state.items.len() {
+                                        if !brush_state.visible.get(index).copied().unwrap_or(false)
+                                        {
+                                            continue;
+                                        }
+                                        let item_key = brush_state.items[index].key;
+                                        let item_label = brush_state.items[index].label;
+                                        let default_hidden =
+                                            brush_state.items[index].default_hidden;
+                                        let item_kind = brush_state.items[index].kind.clone();
+                                        ui.group(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(item_label);
+                                                if default_hidden
+                                                    && ui.small_button("Hide").clicked()
+                                                    && let Some(visible) =
+                                                        brush_state.visible.get_mut(index)
+                                                {
+                                                    *visible = false;
+                                                    brush_state.dirty = true;
+                                                }
+                                            });
+                                            match (&item_kind, &mut brush_state.values[index]) {
+                                                (
+                                                    BrushConfigKind::ScalarF32 { min, max },
+                                                    BrushConfigValue::ScalarF32(current),
+                                                ) => {
+                                                    render_scalar_config(
+                                                        ui,
+                                                        item_key,
+                                                        current,
+                                                        *min,
+                                                        *max,
+                                                        &mut brush_state.dirty,
+                                                    );
+                                                }
+                                                (
+                                                    BrushConfigKind::UnitIntervalCurve,
+                                                    BrushConfigValue::UnitIntervalCurve(points),
+                                                ) => {
+                                                    render_curve_config(
+                                                        ui,
+                                                        item_key,
+                                                        points,
+                                                        &mut brush_state.dirty,
+                                                    );
+                                                }
+                                                _ => {
+                                                    ui.colored_label(
+                                                        Color32::from_rgb(220, 90, 90),
+                                                        "Config type mismatch",
+                                                    );
+                                                }
+                                            }
                                         });
+                                        ui.add_space(8.0);
                                     }
-                                    points.sort_by(|a, b| a.x.total_cmp(&b.x));
-                                }
-                                _ => {
-                                    ui.colored_label(
-                                        Color32::from_rgb(220, 90, 90),
-                                        "Config type mismatch",
-                                    );
-                                }
-                            }
-                            ui.separator();
+                                });
                         }
-                        ui.horizontal(|ui| {
-                            if ui.button("Reset").clicked() {
-                                for (item, value) in brush_config_items
-                                    .iter()
-                                    .zip(brush_config_values.iter_mut())
-                                {
-                                    *value = item.default_value.clone();
-                                }
-                            }
-                            if ui.button("Apply").clicked() {
-                                *pending_brush_update = Some(brush_config_values.clone());
-                            }
-                        });
                     });
+                *config_panel_rect = Some(panel.response.rect);
             }
             TopBottomPanel::bottom("overlay-bottom-bar")
                 .exact_height(48.0)
@@ -700,6 +894,18 @@ impl EguiOverlay {
         });
         self.state
             .handle_platform_output(window, full_output.platform_output);
+
+        let pointer_pos = self.ctx.input(|input| input.pointer.latest_pos());
+        if pending_brush_update.is_none()
+            && let (Some(rect), Some(pointer_pos)) = (*config_panel_rect, pointer_pos)
+            && !rect.contains(pointer_pos)
+            && let Some(brush_state) = brush_states.get(*selected_brush_index)
+            && brush_state.dirty
+        {
+            let brush_state = &mut brush_states[*selected_brush_index];
+            brush_state.dirty = false;
+            *pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
+        }
 
         if target_width == 0 || target_height == 0 {
             return;
@@ -721,8 +927,178 @@ impl EguiOverlay {
     }
 }
 
+fn render_scalar_config(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    dirty: &mut bool,
+) {
+    ui.push_id(key, |ui| {
+        if ui
+            .add(egui::Slider::new(value, min..=max).show_value(true))
+            .changed()
+        {
+            *dirty = true;
+        }
+    });
+}
+
+fn render_curve_config(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    points: &mut Vec<UnitIntervalPoint>,
+    dirty: &mut bool,
+) {
+    ui.push_id(key, |ui| {
+        ui.horizontal(|ui| {
+            if ui.small_button("+ point").clicked() {
+                insert_curve_point(points);
+                *dirty = true;
+            }
+            if points.len() > 2 && ui.small_button("- point").clicked() {
+                points.remove(points.len().saturating_sub(2));
+                *dirty = true;
+            }
+        });
+
+        let desired_size = vec2(ui.available_width().max(120.0), 160.0);
+        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        paint_curve_editor(&painter, rect, points);
+        interact_with_curve(ui, key, rect, &response, points, dirty);
+    });
+}
+
+fn insert_curve_point(points: &mut Vec<UnitIntervalPoint>) {
+    if points.len() < 2 {
+        points.push(UnitIntervalPoint::new(1.0, 1.0));
+        return;
+    }
+
+    let mut insert_index = 1usize;
+    let mut max_gap = 0.0f32;
+    for index in 0..points.len() - 1 {
+        let gap = points[index + 1].x - points[index].x;
+        if gap > max_gap {
+            max_gap = gap;
+            insert_index = index + 1;
+        }
+    }
+    let prev = points[insert_index - 1];
+    let next = points[insert_index];
+    points.insert(
+        insert_index,
+        UnitIntervalPoint::new((prev.x + next.x) * 0.5, (prev.y + next.y) * 0.5),
+    );
+}
+
+fn paint_curve_editor(painter: &egui::Painter, rect: Rect, points: &[UnitIntervalPoint]) {
+    let bg = Color32::from_rgb(18, 18, 18);
+    let grid = Color32::from_rgb(48, 48, 48);
+    let line = Color32::from_rgb(128, 214, 255);
+    let point_fill = Color32::from_rgb(244, 174, 68);
+    let point_stroke = Stroke::new(1.0, Color32::BLACK);
+
+    painter.rect_filled(rect, 6.0, bg);
+    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, grid), egui::StrokeKind::Inside);
+
+    for step in 1..4 {
+        let t = step as f32 / 4.0;
+        let x = egui::lerp(rect.left()..=rect.right(), t);
+        let y = egui::lerp(rect.bottom()..=rect.top(), t);
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(1.0, grid),
+        );
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            Stroke::new(1.0, grid),
+        );
+    }
+
+    let mut curve = Vec::with_capacity(65);
+    for step in 0..=64 {
+        let x = step as f32 / 64.0;
+        let y = eval_unit_interval_curve_polynomial(points, x).unwrap_or(0.0);
+        curve.push(curve_pos(rect, x, y));
+    }
+    painter.add(Shape::line(curve, Stroke::new(2.0, line)));
+
+    for point in points {
+        painter.circle(
+            curve_pos(rect, point.x, point.y),
+            5.0,
+            point_fill,
+            point_stroke,
+        );
+    }
+}
+
+fn interact_with_curve(
+    ui: &mut egui::Ui,
+    key: &'static str,
+    rect: Rect,
+    response: &egui::Response,
+    points: &mut [UnitIntervalPoint],
+    dirty: &mut bool,
+) {
+    let drag_id = ui.id().with(key).with("curve_drag_index");
+    if response.drag_started()
+        && let Some(pointer_pos) = response.interact_pointer_pos()
+    {
+        let closest = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                (
+                    index,
+                    curve_pos(rect, point.x, point.y).distance(pointer_pos),
+                )
+            })
+            .min_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs));
+        if let Some((index, distance)) = closest
+            && distance <= 14.0
+        {
+            ui.memory_mut(|memory| memory.data.insert_temp(drag_id, index));
+        }
+    }
+
+    if response.dragged()
+        && let Some(pointer_pos) = response.interact_pointer_pos()
+        && let Some(index) = ui.memory(|memory| memory.data.get_temp::<usize>(drag_id))
+    {
+        let mut x = ((pointer_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        let y = ((rect.bottom() - pointer_pos.y) / rect.height()).clamp(0.0, 1.0);
+        if index == 0 {
+            x = 0.0;
+        } else if index + 1 == points.len() {
+            x = 1.0;
+        } else {
+            let min_x = points[index - 1].x + 0.01;
+            let max_x = points[index + 1].x - 0.01;
+            x = x.clamp(min_x, max_x);
+        }
+        points[index] = UnitIntervalPoint::new(x, y);
+        *dirty = true;
+    }
+
+    if response.drag_stopped() {
+        ui.memory_mut(|memory| memory.data.remove::<usize>(drag_id));
+    }
+}
+
+fn curve_pos(rect: Rect, x: f32, y: f32) -> Pos2 {
+    Pos2::new(
+        egui::lerp(rect.left()..=rect.right(), x),
+        egui::lerp(rect.bottom()..=rect.top(), y),
+    )
+}
+
 fn main() {
-    let event_loop = EventLoop::new().expect("failed to create event loop: winit backend initialization failed");
+    let event_loop =
+        EventLoop::new().expect("failed to create event loop: winit backend initialization failed");
     let run_config = RunConfig::from_args(std::env::args().skip(1).collect());
     let sigint_flag = Arc::new(AtomicBool::new(false));
     {
@@ -734,7 +1110,9 @@ fn main() {
         }
     }
     let mut app = App::new(run_config, sigint_flag);
-    event_loop.run_app(&mut app).expect("failed to run app: event loop terminated unexpectedly");
+    event_loop
+        .run_app(&mut app)
+        .expect("failed to run app: event loop terminated unexpectedly");
 }
 
 fn current_time_ns() -> u64 {

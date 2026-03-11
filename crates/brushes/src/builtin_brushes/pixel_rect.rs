@@ -3,12 +3,13 @@ use std::fmt::{Display, Formatter};
 
 use glaphica_core::{BrushInput, CanvasVec2, TileKey};
 
+use crate::BrushPipelineError;
 use crate::brush_spec::BrushSpec;
+use crate::config::{BrushConfigItem, BrushConfigKind, BrushConfigValue};
 use crate::draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
 use crate::engine_runtime::EngineBrushPipeline;
 use crate::gpu_pipeline_spec::BrushGpuPipelineSpec;
 use crate::resampler_distance::BrushResamplerDistancePolicy;
-use crate::BrushPipelineError;
 
 pub const PIXEL_RECT_DRAW_LAYOUT: BrushDrawInputLayout = BrushDrawInputLayout::new(
     BrushDrawKind::PixelRect,
@@ -132,7 +133,53 @@ impl PixelRectBrush {
     pub const fn radius_px(self) -> u32 {
         self.radius_px
     }
+
+    pub fn config_items(&self) -> Vec<BrushConfigItem> {
+        vec![BrushConfigItem {
+            key: "radius_px",
+            label: "Size",
+            default_hidden: false,
+            kind: BrushConfigKind::ScalarF32 {
+                min: 1.0,
+                max: 128.0,
+            },
+            default_value: BrushConfigValue::ScalarF32(self.radius_px as f32),
+        }]
+    }
+
+    pub fn from_config_values(values: &[BrushConfigValue]) -> Result<Self, PixelRectConfigError> {
+        if values.len() != 1 {
+            return Err(PixelRectConfigError::InvalidConfigLength);
+        }
+        let radius_px = match values.first() {
+            Some(BrushConfigValue::ScalarF32(value)) => *value,
+            _ => return Err(PixelRectConfigError::ConfigTypeMismatch),
+        };
+        if !(1.0..=128.0).contains(&radius_px) {
+            return Err(PixelRectConfigError::RadiusOutOfRange);
+        }
+        Ok(Self::new(radius_px.round() as u32))
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelRectConfigError {
+    InvalidConfigLength,
+    ConfigTypeMismatch,
+    RadiusOutOfRange,
+}
+
+impl Display for PixelRectConfigError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidConfigLength => write!(f, "pixel rect brush config item count is invalid"),
+            Self::ConfigTypeMismatch => write!(f, "pixel rect brush config value type mismatch"),
+            Self::RadiusOutOfRange => write!(f, "pixel rect brush size must be in [1, 128]"),
+        }
+    }
+}
+
+impl Error for PixelRectConfigError {}
 
 impl BrushResamplerDistancePolicy for PixelRectBrush {
     fn brush_size(&self) -> u32 {
@@ -196,7 +243,7 @@ mod tests {
         BrushEngineRuntime, BrushGpuPipelineRegistry, BrushLayoutRegistry, EngineBrushPipeline,
     };
 
-    use super::{decode_pixel_rect_draw_input, PixelRectBrush, PIXEL_RECT_DRAW_LAYOUT};
+    use super::{PIXEL_RECT_DRAW_LAYOUT, PixelRectBrush, decode_pixel_rect_draw_input};
 
     fn build_input(center: CanvasVec2) -> BrushInput {
         BrushInput {

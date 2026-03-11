@@ -5,16 +5,16 @@ use std::fmt::{Display, Formatter};
 use glaphica_core::{BackendKind, BrushInput, CanvasVec2, RadianVec2, TextureFormat, TileKey};
 use thread_protocol::GpuCmdFrameMergeTag;
 
+use crate::BrushPipelineError;
 use crate::brush_spec::BrushSpec;
 use crate::config::{
-    eval_unit_interval_curve_polynomial, BrushConfigItem, BrushConfigKind, BrushConfigValue,
-    UnitIntervalPoint,
+    BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint,
+    eval_unit_interval_curve_polynomial,
 };
 use crate::draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
 use crate::engine_runtime::EngineBrushPipeline;
 use crate::gpu_pipeline_spec::BrushGpuPipelineSpec;
 use crate::resampler_distance::BrushResamplerDistancePolicy;
-use crate::BrushPipelineError;
 
 pub const ROUND_DRAW_LAYOUT: BrushDrawInputLayout = BrushDrawInputLayout::new(
     BrushDrawKind::Round,
@@ -361,6 +361,7 @@ impl RoundBrush {
             BrushConfigItem {
                 key: "base_radius_px",
                 label: "Base Radius",
+                default_hidden: false,
                 kind: BrushConfigKind::ScalarF32 {
                     min: 0.1,
                     max: 128.0,
@@ -370,12 +371,14 @@ impl RoundBrush {
             BrushConfigItem {
                 key: "base_hardness",
                 label: "Base Hardness",
+                default_hidden: false,
                 kind: BrushConfigKind::ScalarF32 { min: 0.0, max: 1.0 },
                 default_value: BrushConfigValue::ScalarF32(self.base_hardness),
             },
             BrushConfigItem {
                 key: "base_opacity",
                 label: "Base Opacity",
+                default_hidden: false,
                 kind: BrushConfigKind::ScalarF32 { min: 0.0, max: 1.0 },
                 default_value: BrushConfigValue::ScalarF32(self.base_opacity),
             },
@@ -658,6 +661,7 @@ fn curve_item(key: &'static str, label: &'static str, curve: &ModulationCurve) -
     BrushConfigItem {
         key,
         label,
+        default_hidden: true,
         kind: BrushConfigKind::UnitIntervalCurve,
         default_value: BrushConfigValue::UnitIntervalCurve(curve.points().to_vec()),
     }
@@ -690,8 +694,8 @@ mod tests {
     };
 
     use super::{
-        decode_round_draw_input, CurvePoint, ModulationCurve, RoundBrush, RoundBrushCurves,
-        ROUND_DRAW_LAYOUT,
+        CurvePoint, ModulationCurve, ROUND_DRAW_LAYOUT, RoundBrush, RoundBrushCurves,
+        decode_round_draw_input,
     };
 
     fn build_input(center: CanvasVec2, pressure: f32, tilt: RadianVec2, twist: f32) -> BrushInput {

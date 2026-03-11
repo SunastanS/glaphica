@@ -227,7 +227,9 @@ impl AppThreadIntegration {
         for (index, cmd) in commands.iter().enumerate() {
             match cmd {
                 GpuCmdMsg::CopyOp(copy_op) if Self::should_keep_first_copy_in_frame(copy_op) => {
-                    first_copy_indices.entry(copy_op.dst_tile_key).or_insert(index);
+                    first_copy_indices
+                        .entry(copy_op.dst_tile_key)
+                        .or_insert(index);
                 }
                 GpuCmdMsg::WriteOp(write_op) if Self::should_keep_last_write_in_frame(write_op) => {
                     last_write_indices.insert(write_op.dst_tile_key, index);

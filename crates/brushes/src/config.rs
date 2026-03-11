@@ -26,6 +26,7 @@ pub enum BrushConfigValue {
 pub struct BrushConfigItem {
     pub key: &'static str,
     pub label: &'static str,
+    pub default_hidden: bool,
     pub kind: BrushConfigKind,
     pub default_value: BrushConfigValue,
 }

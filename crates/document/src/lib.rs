@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glaphica_core::{BackendId, NodeId, RenderTreeGeneration};
-use images::layout::ImageLayout;
 use images::Image;
+use images::layout::ImageLayout;
 
 pub use images::ImageCreateError;
 pub use shared_tree::{

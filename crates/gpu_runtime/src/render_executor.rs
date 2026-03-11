@@ -649,7 +649,11 @@ impl RenderExecutor {
     ) -> Result<Vec<PreparedWriteCall>, RenderExecutorError> {
         let mut prepared = Vec::with_capacity(write_ops.len());
         for write_op in write_ops {
-            if context.atlas_storage.resolve(write_op.src_tile_key).is_none() {
+            if context
+                .atlas_storage
+                .resolve(write_op.src_tile_key)
+                .is_none()
+            {
                 return Err(RenderExecutorError::MissingTileBackend {
                     tile_key: write_op.src_tile_key,
                 });

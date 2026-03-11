@@ -10,8 +10,8 @@ use brushes::{
 };
 use document::{FlatRenderTree, SharedRenderTree, View};
 use glaphica_core::{
-    AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId,
-    RenderTreeGeneration, TileDirtyTracker, TileKey,
+    AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId, RenderTreeGeneration,
+    TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
     FrameBatch, FrameBatchContext, GpuContext, GpuContextInitDescriptor, RenderContext,
@@ -233,7 +233,8 @@ fn compact_round_draws(
 
         if let Some(key) = can_merge {
             if let Some(existing_index) = merged_indices.get(&key).copied() {
-                let GpuCmdMsg::DrawOp(existing_draw) = &mut compacted_commands[existing_index] else {
+                let GpuCmdMsg::DrawOp(existing_draw) = &mut compacted_commands[existing_index]
+                else {
                     debug_assert!(false, "merged round draw index must reference draw op");
                     continue;
                 };
@@ -554,7 +555,9 @@ impl MainThreadState {
                             image_dirty_tracker: &mut self.image_dirty_tracker,
                             tile_dirty_tracker: &mut self.tile_dirty_tracker,
                         };
-                        if let Err(error) = frame_batch.push_draw_batch(&draw_ops, &layouts, &mut context) {
+                        if let Err(error) =
+                            frame_batch.push_draw_batch(&draw_ops, &layouts, &mut context)
+                        {
                             eprintln!("GPU command processing failed: {error:?}");
                         }
                         index = end;
@@ -582,9 +585,7 @@ impl MainThreadState {
                         image_dirty_tracker: &mut self.image_dirty_tracker,
                         tile_dirty_tracker: &mut self.tile_dirty_tracker,
                     };
-                    if let Err(error) =
-                        frame_batch.push_write_batch(&write_ops, &mut context)
-                    {
+                    if let Err(error) = frame_batch.push_write_batch(&write_ops, &mut context) {
                         eprintln!("GPU command processing failed: {error:?}");
                     }
                     index = end;
