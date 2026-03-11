@@ -612,6 +612,10 @@ impl EngineBrushPipeline for RoundBrush {
     fn stroke_buffer_write_frame_merge_tag(&self) -> GpuCmdFrameMergeTag {
         GpuCmdFrameMergeTag::KeepLastInFrameByDstTile
     }
+
+    fn restore_origin_before_each_dab(&self) -> bool {
+        true
+    }
 }
 
 impl BrushSpec for RoundBrush {

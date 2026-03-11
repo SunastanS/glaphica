@@ -79,6 +79,10 @@ pub trait EngineBrushPipeline: Send {
     fn stroke_buffer_write_frame_merge_tag(&self) -> GpuCmdFrameMergeTag {
         GpuCmdFrameMergeTag::None
     }
+
+    fn restore_origin_before_each_dab(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -443,14 +447,21 @@ impl BrushEngineRuntime {
         )> = Vec::new();
         let stroke_buffer_backend = self.pipelines.get(brush_id)?.stroke_buffer_backend;
         let uses_stroke_buffer = stroke_buffer_backend.is_some();
-        let (copy_frame_merge_tag, write_frame_merge_tag) = if uses_stroke_buffer {
+        let (copy_frame_merge_tag, write_frame_merge_tag, restore_origin_before_each_dab) =
+            if uses_stroke_buffer {
             let registration = self.pipelines.get_mut(brush_id)?;
             (
                 registration.pipeline.stroke_buffer_copy_frame_merge_tag(),
                 registration.pipeline.stroke_buffer_write_frame_merge_tag(),
+                registration.pipeline.restore_origin_before_each_dab(),
             )
         } else {
-            (GpuCmdFrameMergeTag::None, GpuCmdFrameMergeTag::None)
+            let registration = self.pipelines.get_mut(brush_id)?;
+            (
+                GpuCmdFrameMergeTag::None,
+                GpuCmdFrameMergeTag::None,
+                registration.pipeline.restore_origin_before_each_dab(),
+            )
         };
 
         for affected_tile in affected_tiles {
@@ -467,6 +478,7 @@ impl BrushEngineRuntime {
                     node_id,
                     image,
                     allocator,
+                    restore_origin_before_each_dab,
                 );
 
             let (buffer_tile_key, clear_op) = if let Some(buffer_backend) = stroke_buffer_backend {
@@ -679,6 +691,7 @@ impl BrushEngineRuntime {
         node_id: NodeId,
         image: &mut Image,
         allocator: &mut A,
+        restore_each_dab: bool,
     ) -> (
         TileKey,
         TileKey,
@@ -690,6 +703,9 @@ impl BrushEngineRuntime {
         A: TileSlotAllocator,
     {
         if let Some(origin_tile) = self.stroke_tiles.get(&stroke_key).copied() {
+            if !restore_each_dab {
+                return (current_tile_key, origin_tile, None, None, None);
+            }
             let restore_tile = self
                 .stroke_restore_tiles
                 .get(&stroke_key)
@@ -1001,5 +1017,63 @@ mod tests {
             })
         );
         assert_eq!(output[0].write_op, None);
+    }
+
+    #[test]
+    fn non_stroke_buffer_followup_dab_does_not_restore_origin_tile() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let mut image = match Image::new(layout, glaphica_core::BackendId::new(1)) {
+            Ok(image) => image,
+            Err(_) => return,
+        };
+        let existing_key = TileKey::from_parts(1, 0, 0x0000_0007);
+        let stroke_tile = TileKey::from_parts(1, 0, 0x8000_0001);
+        assert!(image.set_tile_key(0, existing_key).is_ok());
+
+        let mut runtime = BrushEngineRuntime::new(4);
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
+        runtime.begin_stroke();
+
+        let mut first_allocator = TestAllocator {
+            regular_alloc: None,
+            odd_alloc: Some(stroke_tile),
+            even_alloc: None,
+            parity_requests: Vec::new(),
+        };
+        let brush_input = build_test_brush_input(CanvasVec2::new(10.0, 10.0));
+        let mut first_output = Vec::new();
+        let first_result = runtime.build_stroke_draw_outputs_for_image(
+            BrushId(2),
+            &brush_input,
+            NodeId(9),
+            &mut image,
+            None,
+            &mut first_allocator,
+            &mut first_output,
+        );
+        assert!(first_result.is_ok());
+        assert_eq!(image.tile_key(0), Some(stroke_tile));
+
+        let mut second_allocator = TestAllocator::default();
+        let mut second_output = Vec::new();
+        let second_result = runtime.build_stroke_draw_outputs_for_image(
+            BrushId(2),
+            &brush_input,
+            NodeId(9),
+            &mut image,
+            None,
+            &mut second_allocator,
+            &mut second_output,
+        );
+        assert!(second_result.is_ok());
+        assert_eq!(second_output.len(), 1);
+        assert_eq!(second_output[0].copy_op, None);
+        let draw_op = second_output[0].draw_op.as_ref().expect("draw op must exist");
+        assert_eq!(draw_op.tile_key, stroke_tile);
+        assert_eq!(draw_op.origin_tile, existing_key);
     }
 }
