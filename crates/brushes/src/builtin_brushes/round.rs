@@ -584,9 +584,9 @@ impl EngineBrushPipeline for RoundBrush {
         let local_y = brush_input.cursor.cursor.y - tile_canvas_origin.y;
         let radius_px = self.modulated_radius_px(brush_input);
         let hardness = self.modulated_hardness(brush_input);
-        // Stroke buffer stores the cumulative dab mask C/C+ for this stroke+tile.
-        // Runtime must restore origin A -> target B (Copy) before each Write(C+) to B,
-        // otherwise writing C+ onto an already written B+ would double-accumulate opacity.
+        // Stroke buffer stores cumulative optical thickness for this stroke+tile.
+        // Runtime must restore origin A -> target B (Copy) before each Write(T(C)) to B,
+        // otherwise rewriting onto an already written B+ would double-apply transmission.
         let opacity = self.modulated_input_opacity(brush_input);
         Ok(vec![
             local_x,
@@ -634,7 +634,7 @@ impl BrushSpec for RoundBrush {
             vertex_entry: "vs_main",
             fragment_entry: "fs_main",
             uses_brush_cache_backend: true,
-            cache_backend_format: Some(TextureFormat::Rgba8Unorm),
+            cache_backend_format: Some(TextureFormat::Rgba16Float),
         }
     }
 

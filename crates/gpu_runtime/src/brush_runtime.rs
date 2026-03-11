@@ -299,6 +299,8 @@ mod tests {
             origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0, 3.0],
+            rgb: [1.0, 0.0, 0.0],
+            erase: false,
             brush_id: BrushId(2),
             stroke_id: StrokeId(1),
         };
@@ -329,6 +331,8 @@ mod tests {
             origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0],
+            rgb: [1.0, 0.0, 0.0],
+            erase: false,
             brush_id: BrushId(1),
             stroke_id: StrokeId(2),
         };

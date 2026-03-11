@@ -133,12 +133,17 @@ pub struct TraceDrawOp {
     pub origin_tile_key: TraceTileKey,
     pub ref_image_tile_key: Option<TraceTileKey>,
     pub input: Vec<f32>,
+    #[serde(default = "trace_rgb_red")]
+    pub rgb: [f32; 3],
+    #[serde(default)]
+    pub erase: bool,
     pub brush_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TraceDrawBlendMode {
     Alpha,
+    Additive,
     Replace,
 }
 
@@ -173,6 +178,10 @@ pub struct TraceWriteOp {
     pub blend_mode: TraceWriteBlendMode,
     #[serde(default = "trace_write_opacity_one")]
     pub opacity: f32,
+    #[serde(default = "trace_write_rgb_red")]
+    pub rgb: Option<[f32; 3]>,
+    #[serde(default)]
+    pub origin_tile_key: Option<TraceTileKey>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -189,6 +198,7 @@ pub struct TraceCompositeOp {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TraceWriteBlendMode {
     Normal,
+    Erase,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -341,6 +351,14 @@ fn trace_write_opacity_one() -> f32 {
     1.0
 }
 
+fn trace_rgb_red() -> [f32; 3] {
+    [1.0, 0.0, 0.0]
+}
+
+fn trace_write_rgb_red() -> Option<[f32; 3]> {
+    Some(trace_rgb_red())
+}
+
 impl From<TileKey> for TraceTileKey {
     fn from(value: TileKey) -> Self {
         Self {
@@ -409,6 +427,7 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 tile_key: TraceTileKey::from(draw_op.tile_key),
                 blend_mode: match draw_op.blend_mode {
                     DrawBlendMode::Alpha => TraceDrawBlendMode::Alpha,
+                    DrawBlendMode::Additive => TraceDrawBlendMode::Additive,
                     DrawBlendMode::Replace => TraceDrawBlendMode::Replace,
                 },
                 frame_merge: match draw_op.frame_merge {
@@ -420,6 +439,8 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 origin_tile_key: TraceTileKey::from(draw_op.origin_tile),
                 ref_image_tile_key: draw_op.ref_image.map(|ref_image| ref_image.tile_key.into()),
                 input: draw_op.input,
+                rgb: draw_op.rgb,
+                erase: draw_op.erase,
                 brush_id: draw_op.brush_id.0,
             }),
             GpuCmdMsg::CopyOp(copy_op) => Self::CopyOp(TraceCopyOp {
@@ -449,8 +470,11 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 },
                 blend_mode: match write_op.blend_mode {
                     WriteBlendMode::Normal => TraceWriteBlendMode::Normal,
+                    WriteBlendMode::Erase => TraceWriteBlendMode::Erase,
                 },
                 opacity: write_op.opacity,
+                rgb: write_op.rgb,
+                origin_tile_key: write_op.origin_tile_key.map(Into::into),
             }),
             GpuCmdMsg::CompositeOp(composite_op) => Self::CompositeOp(TraceCompositeOp {
                 base_tile_key: composite_op.base_tile_key.into(),
@@ -458,6 +482,7 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 dst_tile_key: composite_op.dst_tile_key.into(),
                 blend_mode: match composite_op.blend_mode {
                     WriteBlendMode::Normal => TraceWriteBlendMode::Normal,
+                    WriteBlendMode::Erase => TraceWriteBlendMode::Erase,
                 },
                 opacity: composite_op.opacity,
             }),
@@ -499,6 +524,7 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                 tile_key: draw_op.tile_key.into(),
                 blend_mode: match draw_op.blend_mode {
                     TraceDrawBlendMode::Alpha => DrawBlendMode::Alpha,
+                    TraceDrawBlendMode::Additive => DrawBlendMode::Additive,
                     TraceDrawBlendMode::Replace => DrawBlendMode::Replace,
                 },
                 frame_merge: match draw_op.frame_merge {
@@ -512,6 +538,8 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                     tile_key: tile_key.into(),
                 }),
                 input: draw_op.input,
+                rgb: draw_op.rgb,
+                erase: draw_op.erase,
                 brush_id: BrushId(draw_op.brush_id),
             }),
             TraceGpuCmd::CopyOp(copy_op) => Self::CopyOp(CopyOp {
@@ -541,8 +569,11 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                 },
                 blend_mode: match write_op.blend_mode {
                     TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
+                    TraceWriteBlendMode::Erase => WriteBlendMode::Erase,
                 },
                 opacity: write_op.opacity,
+                rgb: write_op.rgb,
+                origin_tile_key: write_op.origin_tile_key.map(Into::into),
             }),
             TraceGpuCmd::CompositeOp(composite_op) => Self::CompositeOp(CompositeOp {
                 base_tile_key: composite_op.base_tile_key.into(),
@@ -550,6 +581,7 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                 dst_tile_key: composite_op.dst_tile_key.into(),
                 blend_mode: match composite_op.blend_mode {
                     TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
+                    TraceWriteBlendMode::Erase => WriteBlendMode::Erase,
                 },
                 opacity: composite_op.opacity,
             }),

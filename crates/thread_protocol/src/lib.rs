@@ -288,6 +288,8 @@ mod tests {
                 tile_key: TileKey::from_parts(8, 9, 10),
             }),
             input: vec![1.0, 0.5, 9.0],
+            rgb: [1.0, 0.0, 0.0],
+            erase: false,
             brush_id: BrushId(7),
             stroke_id: StrokeId(17),
         });
@@ -305,6 +307,8 @@ mod tests {
                     })
                 );
                 assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
+                assert_eq!(draw_op.rgb, [1.0, 0.0, 0.0]);
+                assert!(!draw_op.erase);
                 assert_eq!(draw_op.brush_id, BrushId(7));
                 assert_eq!(draw_op.stroke_id, StrokeId(17));
             }
@@ -347,6 +351,8 @@ mod tests {
             dst_tile_key: TileKey::from_parts(4, 5, 6),
             blend_mode: WriteBlendMode::Normal,
             opacity: 0.7,
+            rgb: Some([1.0, 0.0, 0.0]),
+            origin_tile_key: None,
             frame_merge: GpuCmdFrameMergeTag::None,
         });
 
@@ -356,6 +362,8 @@ mod tests {
                 assert_eq!(write_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
                 assert_eq!(write_op.blend_mode, WriteBlendMode::Normal);
                 assert_eq!(write_op.opacity, 0.7);
+                assert_eq!(write_op.rgb, Some([1.0, 0.0, 0.0]));
+                assert_eq!(write_op.origin_tile_key, None);
                 assert_eq!(write_op.frame_merge, GpuCmdFrameMergeTag::None);
             }
             GpuCmdMsg::DrawOp(_)

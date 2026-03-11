@@ -232,17 +232,30 @@ impl BrushEngineRuntime {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         tile_index: usize,
         tile_key: TileKey,
     ) -> Result<DrawOp, EngineBrushDispatchError> {
-        self.build_draw_op_with_ref_tile(brush_id, brush_input, node_id, tile_index, tile_key, None)
+        self.build_draw_op_with_ref_tile(
+            brush_id,
+            brush_input,
+            rgb,
+            erase,
+            node_id,
+            tile_index,
+            tile_key,
+            None,
+        )
     }
 
     pub fn build_draw_op_with_ref_tile(
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         tile_index: usize,
         tile_key: TileKey,
@@ -257,11 +270,17 @@ impl BrushEngineRuntime {
             node_id,
             tile_index,
             tile_key,
-            blend_mode: DrawBlendMode::Alpha,
+            blend_mode: if erase {
+                DrawBlendMode::Replace
+            } else {
+                DrawBlendMode::Alpha
+            },
             frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::EMPTY,
             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
             input: encoded_input,
+            rgb,
+            erase,
             brush_id,
             stroke_id: brush_input.stroke,
         })
@@ -271,6 +290,8 @@ impl BrushEngineRuntime {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         tile_index: usize,
         tile_key: TileKey,
@@ -278,6 +299,8 @@ impl BrushEngineRuntime {
         Ok(GpuCmdMsg::DrawOp(self.build_draw_op(
             brush_id,
             brush_input,
+            rgb,
+            erase,
             node_id,
             tile_index,
             tile_key,
@@ -288,19 +311,30 @@ impl BrushEngineRuntime {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         image: &Image,
         output: &mut Vec<DrawOp>,
     ) -> Result<(), EngineBrushDispatchError> {
-        self.dispatch_draw_ops_for_image(brush_id, brush_input, node_id, image, None, |draw_op| {
-            output.push(draw_op)
-        })
+        self.dispatch_draw_ops_for_image(
+            brush_id,
+            brush_input,
+            rgb,
+            erase,
+            node_id,
+            image,
+            None,
+            |draw_op| output.push(draw_op),
+        )
     }
 
     pub fn build_draw_ops_for_image_with_ref_image(
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         image: &Image,
         ref_image: Option<&Image>,
@@ -309,6 +343,8 @@ impl BrushEngineRuntime {
         self.dispatch_draw_ops_for_image(
             brush_id,
             brush_input,
+            rgb,
+            erase,
             node_id,
             image,
             ref_image,
@@ -320,19 +356,30 @@ impl BrushEngineRuntime {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         image: &Image,
         output: &mut Vec<GpuCmdMsg>,
     ) -> Result<(), EngineBrushDispatchError> {
-        self.dispatch_draw_ops_for_image(brush_id, brush_input, node_id, image, None, |draw_op| {
-            output.push(GpuCmdMsg::DrawOp(draw_op))
-        })
+        self.dispatch_draw_ops_for_image(
+            brush_id,
+            brush_input,
+            rgb,
+            erase,
+            node_id,
+            image,
+            None,
+            |draw_op| output.push(GpuCmdMsg::DrawOp(draw_op)),
+        )
     }
 
     pub fn build_draw_cmds_for_image_with_ref_image(
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         image: &Image,
         ref_image: Option<&Image>,
@@ -341,6 +388,8 @@ impl BrushEngineRuntime {
         self.dispatch_draw_ops_for_image(
             brush_id,
             brush_input,
+            rgb,
+            erase,
             node_id,
             image,
             ref_image,
@@ -352,6 +401,8 @@ impl BrushEngineRuntime {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         image: &Image,
         ref_image: Option<&Image>,
@@ -389,13 +440,19 @@ impl BrushEngineRuntime {
                 node_id,
                 tile_index: affected_tile.tile_index,
                 tile_key: affected_tile.tile_key,
-                blend_mode: DrawBlendMode::Alpha,
+                blend_mode: if erase {
+                    DrawBlendMode::Replace
+                } else {
+                    DrawBlendMode::Alpha
+                },
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: affected_tile
                     .ref_tile_key
                     .map(|tile_key| RefImage { tile_key }),
                 input: encoded_input,
+                rgb,
+                erase,
                 brush_id,
                 stroke_id: brush_input.stroke,
             });
@@ -407,6 +464,8 @@ impl BrushEngineRuntime {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         image: &mut Image,
         ref_image: Option<&Image>,
@@ -443,26 +502,27 @@ impl BrushEngineRuntime {
             Option<ClearOp>,
             Option<ClearOp>,
             Option<TileKey>,
+            TileKey,
             Option<(NodeId, usize, TileKey)>,
         )> = Vec::new();
         let stroke_buffer_backend = self.pipelines.get(brush_id)?.stroke_buffer_backend;
         let uses_stroke_buffer = stroke_buffer_backend.is_some();
         let (copy_frame_merge_tag, write_frame_merge_tag, restore_origin_before_each_dab) =
             if uses_stroke_buffer {
-            let registration = self.pipelines.get_mut(brush_id)?;
-            (
-                registration.pipeline.stroke_buffer_copy_frame_merge_tag(),
-                registration.pipeline.stroke_buffer_write_frame_merge_tag(),
-                registration.pipeline.restore_origin_before_each_dab(),
-            )
-        } else {
-            let registration = self.pipelines.get_mut(brush_id)?;
-            (
-                GpuCmdFrameMergeTag::None,
-                GpuCmdFrameMergeTag::None,
-                registration.pipeline.restore_origin_before_each_dab(),
-            )
-        };
+                let registration = self.pipelines.get_mut(brush_id)?;
+                (
+                    registration.pipeline.stroke_buffer_copy_frame_merge_tag(),
+                    registration.pipeline.stroke_buffer_write_frame_merge_tag(),
+                    registration.pipeline.restore_origin_before_each_dab(),
+                )
+            } else {
+                let registration = self.pipelines.get_mut(brush_id)?;
+                (
+                    GpuCmdFrameMergeTag::None,
+                    GpuCmdFrameMergeTag::None,
+                    registration.pipeline.restore_origin_before_each_dab(),
+                )
+            };
 
         for affected_tile in affected_tiles {
             let stroke_key = StrokeTileKey {
@@ -470,16 +530,22 @@ impl BrushEngineRuntime {
                 tile_index: affected_tile.tile_index,
             };
 
-            let (final_tile_key, origin_tile, copy_op, origin_init_clear_op, tile_key_update) =
-                self.prepare_tile_for_stroke(
-                    stroke_key,
-                    affected_tile.tile_key,
-                    affected_tile.tile_index,
-                    node_id,
-                    image,
-                    allocator,
-                    restore_origin_before_each_dab,
-                );
+            let (
+                final_tile_key,
+                origin_tile,
+                copy_op,
+                origin_init_clear_op,
+                erase_origin_tile_key,
+                tile_key_update,
+            ) = self.prepare_tile_for_stroke(
+                stroke_key,
+                affected_tile.tile_key,
+                affected_tile.tile_index,
+                node_id,
+                image,
+                allocator,
+                restore_origin_before_each_dab,
+            );
 
             let (buffer_tile_key, clear_op) = if let Some(buffer_backend) = stroke_buffer_backend {
                 let (buffer_tile_key, clear_op) =
@@ -498,6 +564,7 @@ impl BrushEngineRuntime {
                 origin_init_clear_op,
                 clear_op,
                 buffer_tile_key,
+                erase_origin_tile_key,
                 tile_key_update,
             ));
         }
@@ -511,6 +578,7 @@ impl BrushEngineRuntime {
             origin_init_clear_op,
             clear_op,
             buffer_tile_key,
+            erase_origin_tile_key,
             tile_key_update,
         ) in prepared_tiles
         {
@@ -547,11 +615,17 @@ impl BrushEngineRuntime {
                             node_id,
                             tile_index,
                             tile_key: final_tile_key,
-                            blend_mode: DrawBlendMode::Alpha,
+                            blend_mode: if erase {
+                                DrawBlendMode::Replace
+                            } else {
+                                DrawBlendMode::Alpha
+                            },
                             frame_merge: DrawFrameMergePolicy::None,
                             origin_tile,
                             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
                             input: encoded_input,
+                            rgb,
+                            erase,
                             brush_id,
                             stroke_id: brush_input.stroke,
                         }),
@@ -585,11 +659,13 @@ impl BrushEngineRuntime {
                         node_id,
                         tile_index,
                         tile_key: buffer_tile_key,
-                        blend_mode: DrawBlendMode::Alpha,
+                        blend_mode: DrawBlendMode::Additive,
                         frame_merge: DrawFrameMergePolicy::None,
                         origin_tile: TileKey::EMPTY,
                         ref_image: None,
                         input: encoded_dab_input,
+                        rgb,
+                        erase: false,
                         brush_id,
                         stroke_id: brush_input.stroke,
                     }),
@@ -615,8 +691,18 @@ impl BrushEngineRuntime {
                     write_op: Some(WriteOp {
                         src_tile_key: buffer_tile_key,
                         dst_tile_key: write_dst_tile_key,
-                        blend_mode: WriteBlendMode::Normal,
+                        blend_mode: if erase {
+                            WriteBlendMode::Erase
+                        } else {
+                            WriteBlendMode::Normal
+                        },
                         opacity: write_opacity,
+                        rgb: if erase { None } else { Some(rgb) },
+                        origin_tile_key: if erase {
+                            Some(erase_origin_tile_key)
+                        } else {
+                            None
+                        },
                         frame_merge: write_frame_merge_tag,
                     }),
                     composite_op: None,
@@ -646,11 +732,17 @@ impl BrushEngineRuntime {
                         node_id,
                         tile_index,
                         tile_key: final_tile_key,
-                        blend_mode: DrawBlendMode::Alpha,
+                        blend_mode: if erase {
+                            DrawBlendMode::Replace
+                        } else {
+                            DrawBlendMode::Alpha
+                        },
                         frame_merge: DrawFrameMergePolicy::None,
                         origin_tile,
                         ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
                         input: encoded_input,
+                        rgb,
+                        erase,
                         brush_id,
                         stroke_id: brush_input.stroke,
                     }),
@@ -697,20 +789,28 @@ impl BrushEngineRuntime {
         TileKey,
         Option<CopyOp>,
         Option<ClearOp>,
+        TileKey,
         Option<(NodeId, usize, TileKey)>,
     )
     where
         A: TileSlotAllocator,
     {
         if let Some(origin_tile) = self.stroke_tiles.get(&stroke_key).copied() {
-            if !restore_each_dab {
-                return (current_tile_key, origin_tile, None, None, None);
-            }
             let restore_tile = self
                 .stroke_restore_tiles
                 .get(&stroke_key)
                 .copied()
                 .unwrap_or(origin_tile);
+            if !restore_each_dab {
+                return (
+                    current_tile_key,
+                    origin_tile,
+                    None,
+                    None,
+                    restore_tile,
+                    None,
+                );
+            }
             // Restore must stay in Copy(A->B) semantics. Clearing B would not preserve
             // the "replace from original snapshot" contract for this stroke.
             return (
@@ -726,6 +826,7 @@ impl BrushEngineRuntime {
                     })
                 },
                 None,
+                restore_tile,
                 None,
             );
         }
@@ -738,7 +839,7 @@ impl BrushEngineRuntime {
             allocator.alloc_with_parity(backend, !current_tile_key.slot_parity())
         };
         let Some(new_tile_key) = next_tile else {
-            return (current_tile_key, origin_tile, None, None, None);
+            return (current_tile_key, origin_tile, None, None, origin_tile, None);
         };
 
         let mut origin_init_clear_op = None;
@@ -769,7 +870,14 @@ impl BrushEngineRuntime {
         };
 
         if image.set_tile_key(tile_index, new_tile_key).is_err() {
-            return (current_tile_key, origin_tile, None, None, None);
+            return (
+                current_tile_key,
+                origin_tile,
+                None,
+                None,
+                restore_tile,
+                None,
+            );
         }
         self.stroke_tiles.insert(stroke_key, origin_tile);
         self.stroke_restore_tiles.insert(stroke_key, restore_tile);
@@ -779,6 +887,7 @@ impl BrushEngineRuntime {
             origin_tile,
             copy_op,
             origin_init_clear_op,
+            restore_tile,
             Some((node_id, tile_index, new_tile_key)),
         )
     }
@@ -889,6 +998,8 @@ mod tests {
         let build_result = runtime.build_draw_ops_for_image(
             BrushId(2),
             &brush_input,
+            [1.0, 0.0, 0.0],
+            false,
             NodeId(1),
             &image,
             &mut draw_ops,
@@ -948,6 +1059,8 @@ mod tests {
         let build_result = runtime.build_draw_ops_for_image_with_ref_image(
             BrushId(2),
             &brush_input,
+            [1.0, 0.0, 0.0],
+            false,
             NodeId(1),
             &write_image,
             Some(&read_image),
@@ -996,6 +1109,8 @@ mod tests {
         let build_result = runtime.build_stroke_draw_outputs_for_image(
             BrushId(2),
             &brush_input,
+            [1.0, 0.0, 0.0],
+            false,
             NodeId(9),
             &mut image,
             None,
@@ -1049,6 +1164,8 @@ mod tests {
         let first_result = runtime.build_stroke_draw_outputs_for_image(
             BrushId(2),
             &brush_input,
+            [1.0, 0.0, 0.0],
+            false,
             NodeId(9),
             &mut image,
             None,
@@ -1063,6 +1180,8 @@ mod tests {
         let second_result = runtime.build_stroke_draw_outputs_for_image(
             BrushId(2),
             &brush_input,
+            [1.0, 0.0, 0.0],
+            false,
             NodeId(9),
             &mut image,
             None,
@@ -1072,7 +1191,10 @@ mod tests {
         assert!(second_result.is_ok());
         assert_eq!(second_output.len(), 1);
         assert_eq!(second_output[0].copy_op, None);
-        let draw_op = second_output[0].draw_op.as_ref().expect("draw op must exist");
+        let draw_op = second_output[0]
+            .draw_op
+            .as_ref()
+            .expect("draw op must exist");
         assert_eq!(draw_op.tile_key, stroke_tile);
         assert_eq!(draw_op.origin_tile, existing_key);
     }

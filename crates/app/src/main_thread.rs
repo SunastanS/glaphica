@@ -11,7 +11,7 @@ use brushes::{
 use document::{FlatRenderTree, SharedRenderTree, View};
 use glaphica_core::{
     AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId, RenderTreeGeneration,
-    TileDirtyTracker, TileKey,
+    TextureFormat, TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
     FrameBatch, FrameBatchContext, GpuContext, GpuContextInitDescriptor, RenderContext,
@@ -213,11 +213,11 @@ fn compact_round_draws(
         let can_merge = match (cmd, layout) {
             (GpuCmdMsg::DrawOp(draw_op), Some(layout))
                 if layout.kind() == BrushDrawKind::Round
-                    && draw_op.blend_mode == thread_protocol::DrawBlendMode::Alpha
+                    && draw_op.blend_mode == thread_protocol::DrawBlendMode::Additive
                     && draw_op.origin_tile == TileKey::EMPTY
                     && draw_op.ref_image.is_none() =>
             {
-                // Round stroke-buffer draws only accumulate an alpha mask into a transient tile.
+                // Round stroke-buffer draws only accumulate thickness into a transient tile.
                 // Within one frame that makes same-tile dabs mergeable as a single packed draw:
                 // no origin/ref sampling is involved and the final write happens later.
                 Some(MergeableRoundDrawKey {
@@ -350,13 +350,17 @@ impl MainThreadState {
         let cache_backend_id = match brush.cache_backend_kind() {
             Some(kind) => {
                 let id = self.next_brush_cache_backend_id;
+                let mut texture_config = gpu_runtime::atlas_runtime::AtlasTextureConfig::default();
+                if let Some(format) = spec.cache_backend_format {
+                    texture_config.format = to_wgpu_texture_format(format);
+                }
                 self.atlas_storage
                     .create_backend(
                         &self.gpu_context.device,
                         id,
                         kind,
                         AtlasLayout::Small11,
-                        Default::default(),
+                        texture_config,
                     )
                     .map_err(|_| BrushRegisterError::CacheBackendAlloc { brush_id })?;
                 self.next_brush_cache_backend_id += 1;
@@ -840,6 +844,16 @@ impl MainThreadState {
     }
 }
 
+fn to_wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+        TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
+        TextureFormat::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
+    }
+}
+
 fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
     eprintln!("[PERF][gpu_cmd_trace] frame_cmd_count={}", commands.len());
     for (index, cmd) in commands.iter().take(max_commands).enumerate() {
@@ -971,6 +985,8 @@ mod tests {
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input,
+                rgb: [1.0, 0.0, 0.0],
+                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             })

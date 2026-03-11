@@ -14,9 +14,15 @@ struct ShaderParams {
     src_tile_origin_x: u32,
     src_tile_origin_y: u32,
     src_tile_layer: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    cache_tile_origin_x: u32,
+    cache_tile_origin_y: u32,
+    cache_tile_layer: u32,
+    has_cache_tile: u32,
+    erase: u32,
+    tint_r: f32,
+    tint_g: f32,
+    tint_b: f32,
+    _pad0: f32,
 }
 
 @group(0) @binding(0) var<storage, read> draw_input: DrawInput;
@@ -46,9 +52,13 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     
     let dx = tile_local_x - center_x;
     let dy = tile_local_y - center_y;
+    let tint = vec3<f32>(params.tint_r, params.tint_g, params.tint_b);
     
     if (abs(dx) <= half_size && abs(dy) <= half_size) {
-        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+        if (params.erase != 0u) {
+            return vec4<f32>(0.0);
+        }
+        return vec4<f32>(tint, 1.0);
     }
     discard;
 }

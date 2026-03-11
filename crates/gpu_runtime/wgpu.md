@@ -70,3 +70,15 @@ Currently provided:
 - `GpuContext::init(...)`
 - `GpuContext::init_with_surface(...)`
 - `GpuContext::init_blocking(...)` (behind `blocking` feature)
+
+## 7. Texture View Usage Scope
+
+`wgpu` tracks usage hazards at the texture subresource scope covered by a bound view, not only by the texel region a shader happens to sample.
+
+Practical rule for this repository:
+
+- When a pass writes one atlas layer as `RENDER_ATTACHMENT` and also samples from the same atlas texture, the sampling view must be narrowed to the exact layer(s) being read.
+- Do not create a `D2Array` sampling view that covers the whole atlas (`base_array_layer = 0`, `array_layer_count = None`) if the pass also writes another layer from that same texture.
+- Prefer `base_array_layer = resolved.address.layer` and `array_layer_count = Some(1)` for atlas read views unless there is a concrete need to sample multiple layers in one pass.
+
+Otherwise `wgpu` can report a conflicting `RESOURCE` + `COLOR_TARGET` usage even when the logical source tile and destination tile are on different layers.

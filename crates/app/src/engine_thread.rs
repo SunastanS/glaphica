@@ -154,6 +154,8 @@ impl EngineThreadState {
         &mut self,
         brush_id: BrushId,
         brush_input: &BrushInput,
+        rgb: [f32; 3],
+        erase: bool,
         node_id: NodeId,
         ref_image: Option<&Image>,
     ) -> Result<Vec<thread_protocol::GpuCmdMsg>, brushes::EngineBrushDispatchError> {
@@ -170,6 +172,8 @@ impl EngineThreadState {
         self.brush_runtime.build_stroke_draw_outputs_for_image(
             brush_id,
             brush_input,
+            rgb,
+            erase,
             node_id,
             image,
             ref_image,

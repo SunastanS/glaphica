@@ -148,6 +148,10 @@ pub struct AppThreadIntegration {
     trace_recorder: Option<TraceRecorder>,
     active_stroke_node: Option<NodeId>,
     current_brush_id: Option<BrushId>,
+    current_brush_color_rgb: [f32; 3],
+    current_brush_erase: bool,
+    active_stroke_color_rgb: [f32; 3],
+    active_stroke_erase: bool,
     brush_resampler_distances: Vec<Option<BrushResamplerDistance>>,
     next_stroke_id: u64,
     perf_trace: PerfTraceConfig,
@@ -393,6 +397,10 @@ impl AppThreadIntegration {
             trace_recorder: None,
             active_stroke_node: None,
             current_brush_id: None,
+            current_brush_color_rgb: [1.0, 0.0, 0.0],
+            current_brush_erase: false,
+            active_stroke_color_rgb: [1.0, 0.0, 0.0],
+            active_stroke_erase: false,
             brush_resampler_distances: vec![None; config::brush_processing::MAX_BRUSHES],
             next_stroke_id: 1,
             perf_trace: PerfTraceConfig::from_env(),
@@ -457,6 +465,8 @@ impl AppThreadIntegration {
             .input_control_queue
             .blocking_push(InputControlEvent::Control(control));
         self.active_stroke_node = Some(node_id);
+        self.active_stroke_color_rgb = self.current_brush_color_rgb;
+        self.active_stroke_erase = self.current_brush_erase;
         self.engine_state.begin_stroke(stroke_id);
     }
 
@@ -473,6 +483,14 @@ impl AppThreadIntegration {
 
     pub fn active_brush_id(&self) -> Option<BrushId> {
         self.current_brush_id
+    }
+
+    pub fn set_active_brush_color_rgb(&mut self, rgb: [f32; 3]) {
+        self.current_brush_color_rgb = rgb;
+    }
+
+    pub fn set_active_brush_erase(&mut self, erase: bool) {
+        self.current_brush_erase = erase;
     }
 
     pub fn end_stroke(&mut self) {
@@ -564,11 +582,15 @@ impl AppThreadIntegration {
                 }
 
                 let brush_inputs = self.brush_inputs.clone();
+                let stroke_rgb = self.active_stroke_color_rgb;
+                let stroke_erase = self.active_stroke_erase;
                 let brush_handling_started = Instant::now();
                 for brush_input in &brush_inputs {
                     match self.engine_state.process_stroke_input(
                         brush_id,
                         brush_input,
+                        stroke_rgb,
+                        stroke_erase,
                         node_id,
                         None,
                     ) {
@@ -911,6 +933,8 @@ mod tests {
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![value],
+                rgb: [1.0, 0.0, 0.0],
+                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             })
@@ -921,6 +945,8 @@ mod tests {
                 dst_tile_key: dst_tile,
                 blend_mode: WriteBlendMode::Normal,
                 opacity,
+                rgb: Some([1.0, 0.0, 0.0]),
+                origin_tile_key: None,
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             })
         };
@@ -957,6 +983,8 @@ mod tests {
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![1.0],
+                rgb: [1.0, 0.0, 0.0],
+                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
@@ -972,6 +1000,8 @@ mod tests {
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![2.0],
+                rgb: [1.0, 0.0, 0.0],
+                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
@@ -980,6 +1010,8 @@ mod tests {
                 dst_tile_key: dst_tile,
                 blend_mode: WriteBlendMode::Normal,
                 opacity: 0.8,
+                rgb: Some([1.0, 0.0, 0.0]),
+                origin_tile_key: None,
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             }),
         ];
@@ -1008,6 +1040,8 @@ mod tests {
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![1.0],
+                rgb: [1.0, 0.0, 0.0],
+                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
@@ -1024,6 +1058,8 @@ mod tests {
                 dst_tile_key: dst_tile,
                 blend_mode: WriteBlendMode::Normal,
                 opacity: 0.8,
+                rgb: Some([1.0, 0.0, 0.0]),
+                origin_tile_key: None,
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             }),
             GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {

@@ -55,6 +55,8 @@ impl BrushKind {
 #[derive(Debug, Clone)]
 struct BrushUiState {
     kind: BrushKind,
+    color_rgb: [f32; 3],
+    eraser: bool,
     items: Vec<BrushConfigItem>,
     values: Vec<BrushConfigValue>,
     visible: Vec<bool>,
@@ -70,6 +72,8 @@ impl BrushUiState {
         let visible = items.iter().map(|item| !item.default_hidden).collect();
         Self {
             kind,
+            color_rgb: [1.0, 0.0, 0.0],
+            eraser: false,
             items,
             values,
             visible,
@@ -159,6 +163,8 @@ impl App {
                 self.active_brush_kind = selected_brush_kind;
                 integration.set_active_brush(self.active_brush_kind.brush_id());
             }
+            integration.set_active_brush_color_rgb(overlay.selected_brush_color_rgb());
+            integration.set_active_brush_erase(overlay.selected_brush_erase());
             if let Some((brush_kind, values)) = overlay.take_pending_brush_update() {
                 match brush_kind {
                     BrushKind::Round => match RoundBrush::from_config_values(&values) {
@@ -647,6 +653,20 @@ impl EguiOverlay {
             .unwrap_or(BrushKind::Round)
     }
 
+    fn selected_brush_color_rgb(&self) -> [f32; 3] {
+        self.brush_states
+            .get(self.selected_brush_index)
+            .map(|state| state.color_rgb)
+            .unwrap_or([1.0, 0.0, 0.0])
+    }
+
+    fn selected_brush_erase(&self) -> bool {
+        self.brush_states
+            .get(self.selected_brush_index)
+            .map(|state| state.eraser)
+            .unwrap_or(false)
+    }
+
     fn take_pending_brush_update(&mut self) -> Option<(BrushKind, Vec<BrushConfigValue>)> {
         self.pending_brush_update.take()
     }
@@ -786,6 +806,30 @@ impl EguiOverlay {
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
+                                    ui.group(|ui| {
+                                        ui.label("Color");
+                                        ui.checkbox(&mut brush_state.eraser, "Eraser");
+                                        let mut srgb = [
+                                            (brush_state.color_rgb[0].clamp(0.0, 1.0) * 255.0)
+                                                .round()
+                                                as u8,
+                                            (brush_state.color_rgb[1].clamp(0.0, 1.0) * 255.0)
+                                                .round()
+                                                as u8,
+                                            (brush_state.color_rgb[2].clamp(0.0, 1.0) * 255.0)
+                                                .round()
+                                                as u8,
+                                        ];
+                                        if ui.color_edit_button_srgb(&mut srgb).changed() {
+                                            brush_state.color_rgb = [
+                                                f32::from(srgb[0]) / 255.0,
+                                                f32::from(srgb[1]) / 255.0,
+                                                f32::from(srgb[2]) / 255.0,
+                                            ];
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+
                                     ui.horizontal(|ui| {
                                         let hidden_items = brush_state
                                             .items

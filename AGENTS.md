@@ -29,6 +29,7 @@
 
 * No need to point to specific line number in final report, user can track all you edit automatically.
 * Be cautious when debugging, unless there are appearant logic or santax errors, agents should use logs or tests to first locate and reappear the error before fixing it.
+* For `wgpu` / atlas render-pass changes, check `crates/gpu_runtime/wgpu.md` first. In particular, texture read views must be narrowed to the exact sampled layer(s) to avoid false `RESOURCE` + `COLOR_TARGET` conflicts.
 
 # Project Structure
 

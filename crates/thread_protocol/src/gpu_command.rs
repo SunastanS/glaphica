@@ -4,6 +4,8 @@ use glaphica_core::{BrushId, NodeId, RenderTreeGeneration, StrokeId, TileKey};
 pub enum DrawBlendMode {
     /// Standard alpha compositing for brush dab rendering.
     Alpha,
+    /// Linear additive accumulation for stroke-buffer thickness fields.
+    Additive,
     /// Replace destination content in draw pipeline.
     Replace,
 }
@@ -12,6 +14,8 @@ pub enum DrawBlendMode {
 pub enum WriteBlendMode {
     /// Normal blend on top of destination.
     Normal,
+    /// Erase from the origin snapshot using source alpha as the erase mask.
+    Erase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +54,10 @@ pub struct DrawOp {
     pub ref_image: Option<RefImage>,
     /// Brush-defined draw payload.
     pub input: Vec<f32>,
+    /// App-owned brush RGB tint in [0, 1].
+    pub rgb: [f32; 3],
+    /// Whether this direct draw should erase instead of painting.
+    pub erase: bool,
     pub brush_id: BrushId,
     /// Stroke identity from input pipeline.
     pub stroke_id: StrokeId,
@@ -77,6 +85,10 @@ pub struct WriteOp {
     pub blend_mode: WriteBlendMode,
     /// Global write opacity multiplier in [0, 1].
     pub opacity: f32,
+    /// Optional app-owned RGB tint in [0, 1]. When absent, source rgb is preserved.
+    pub rgb: Option<[f32; 3]>,
+    /// Optional origin snapshot tile used by erase writes.
+    pub origin_tile_key: Option<TileKey>,
     pub frame_merge: GpuCmdFrameMergeTag,
 }
 

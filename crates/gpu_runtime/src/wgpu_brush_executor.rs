@@ -199,8 +199,11 @@ struct BrushShaderParams {
     cache_tile_origin_y: u32,
     cache_tile_layer: u32,
     has_cache_tile: u32,
-    _pad1: u32,
-    _pad2: u32,
+    erase: u32,
+    tint_r: f32,
+    tint_g: f32,
+    tint_b: f32,
+    _pad1: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +234,7 @@ struct BrushContext {
     spec: BrushGpuPipelineSpec,
     cache_backend_id: Option<u8>,
     alpha_pipeline: Option<wgpu::RenderPipeline>,
+    additive_pipeline: Option<wgpu::RenderPipeline>,
     replace_pipeline: Option<wgpu::RenderPipeline>,
     draw_ring: Option<BrushDrawRing>,
     stroke_cached_bind_groups: Vec<CachedStrokeAtlasBindGroup>,
@@ -289,7 +293,7 @@ fn pipeline_trace_enabled() -> bool {
     })
 }
 
-const BRUSH_SHADER_PARAMS_SIZE: u64 = 60;
+const BRUSH_SHADER_PARAMS_SIZE: u64 = 72;
 const BRUSH_RING_INITIAL_SLOTS: u64 = 128;
 
 fn align_up_u64(value: u64, alignment: u64) -> u64 {
@@ -430,6 +434,7 @@ impl WgpuBrushExecutor {
             spec,
             cache_backend_id,
             alpha_pipeline: None,
+            additive_pipeline: None,
             replace_pipeline: None,
             draw_ring: None,
             stroke_cached_bind_groups: Vec::new(),
@@ -642,6 +647,18 @@ impl WgpuBrushExecutor {
         let create_pipeline = || {
             let blend = match blend_mode {
                 DrawBlendMode::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+                DrawBlendMode::Additive => Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
                 DrawBlendMode::Replace => Some(wgpu::BlendState::REPLACE),
             };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -750,7 +767,13 @@ impl WgpuBrushExecutor {
             .map(|image| image.tile_key.backend_index())
             .unwrap_or(draw_op.tile_key.backend_index());
 
-        let (cache_backend_id, needs_alpha_pipeline, needs_replace_pipeline, spec) = {
+        let (
+            cache_backend_id,
+            needs_alpha_pipeline,
+            needs_additive_pipeline,
+            needs_replace_pipeline,
+            spec,
+        ) = {
             let brush_context = self
                 .brushes
                 .get(brush_index)
@@ -764,6 +787,7 @@ impl WgpuBrushExecutor {
             (
                 brush_context.cache_backend_id,
                 brush_context.alpha_pipeline.is_none(),
+                brush_context.additive_pipeline.is_none(),
                 brush_context.replace_pipeline.is_none(),
                 brush_context.spec,
             )
@@ -911,6 +935,30 @@ impl WgpuBrushExecutor {
             brush_context.alpha_pipeline = Some(pipeline);
         }
 
+        if needs_additive_pipeline {
+            let pipeline = Self::create_render_pipeline(
+                &context.gpu_context.device,
+                &spec,
+                resolved.format,
+                &draw_bind_group_layout,
+                &atlas_bind_group_layout,
+                draw_op.brush_id,
+                DrawBlendMode::Additive,
+            )?;
+            let brush_context = self
+                .brushes
+                .get_mut(brush_index)
+                .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                    brush_id: draw_op.brush_id,
+                    context: "brush context should exist after validation",
+                })?
+                .as_mut()
+                .ok_or(WgpuBrushExecutorError::BrushNotConfigured {
+                    brush_id: draw_op.brush_id,
+                })?;
+            brush_context.additive_pipeline = Some(pipeline);
+        }
+
         if needs_replace_pipeline {
             let pipeline = Self::create_render_pipeline(
                 &context.gpu_context.device,
@@ -956,6 +1004,14 @@ impl WgpuBrushExecutor {
                         context: "alpha pipeline should be created before draw",
                     })?
                     .clone(),
+                DrawBlendMode::Additive => brush_context
+                    .additive_pipeline
+                    .as_ref()
+                    .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
+                        brush_id: draw_op.brush_id,
+                        context: "additive pipeline should be created before draw",
+                    })?
+                    .clone(),
                 DrawBlendMode::Replace => brush_context
                     .replace_pipeline
                     .as_ref()
@@ -988,8 +1044,11 @@ impl WgpuBrushExecutor {
                 .map(|resolved| resolved.address.layer)
                 .unwrap_or(0),
             has_cache_tile: if cache_resolved.is_some() { 1 } else { 0 },
-            _pad1: 0,
-            _pad2: 0,
+            erase: if draw_op.erase { 1 } else { 0 },
+            tint_r: draw_op.rgb[0],
+            tint_g: draw_op.rgb[1],
+            tint_b: draw_op.rgb[2],
+            _pad1: 0.0,
         };
         let params_bytes = encode_shader_params_bytes(params);
         let limits = context.gpu_context.device.limits();
@@ -1360,8 +1419,8 @@ fn encode_input_bytes(input: &[f32]) -> Vec<u8> {
     bytes
 }
 
-fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 60] {
-    let mut bytes = [0u8; 60];
+fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 72] {
+    let mut bytes = [0u8; 72];
     bytes[0..4].copy_from_slice(&params.input_len.to_ne_bytes());
     bytes[4..8].copy_from_slice(&params.tile_origin_x.to_ne_bytes());
     bytes[8..12].copy_from_slice(&params.tile_origin_y.to_ne_bytes());
@@ -1375,8 +1434,11 @@ fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 60] {
     bytes[40..44].copy_from_slice(&params.cache_tile_origin_y.to_ne_bytes());
     bytes[44..48].copy_from_slice(&params.cache_tile_layer.to_ne_bytes());
     bytes[48..52].copy_from_slice(&params.has_cache_tile.to_ne_bytes());
-    bytes[52..56].copy_from_slice(&params._pad1.to_ne_bytes());
-    bytes[56..60].copy_from_slice(&params._pad2.to_ne_bytes());
+    bytes[52..56].copy_from_slice(&params.erase.to_ne_bytes());
+    bytes[56..60].copy_from_slice(&params.tint_r.to_ne_bytes());
+    bytes[60..64].copy_from_slice(&params.tint_g.to_ne_bytes());
+    bytes[64..68].copy_from_slice(&params.tint_b.to_ne_bytes());
+    bytes[68..72].copy_from_slice(&params._pad1.to_ne_bytes());
     bytes
 }
 
@@ -1406,11 +1468,14 @@ mod tests {
             cache_tile_origin_y: 400,
             cache_tile_layer: 10,
             has_cache_tile: 1,
-            _pad1: 0,
-            _pad2: 0,
+            erase: 0,
+            tint_r: 0.25,
+            tint_g: 0.5,
+            tint_b: 0.75,
+            _pad1: 0.0,
         };
         let encoded = encode_shader_params_bytes(params);
-        assert_eq!(encoded.len(), 60);
+        assert_eq!(encoded.len(), 72);
         assert_eq!(
             u32::from_ne_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]),
             3
@@ -1422,6 +1487,14 @@ mod tests {
         assert_eq!(
             u32::from_ne_bytes([encoded[40], encoded[41], encoded[42], encoded[43]]),
             400
+        );
+        assert_eq!(
+            f32::from_ne_bytes([encoded[64], encoded[65], encoded[66], encoded[67]]),
+            0.75
+        );
+        assert_eq!(
+            f32::from_ne_bytes([encoded[68], encoded[69], encoded[70], encoded[71]]),
+            0.0
         );
     }
 }

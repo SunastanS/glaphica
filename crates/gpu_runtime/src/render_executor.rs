@@ -43,6 +43,7 @@ pub struct RenderContext<'a> {
 struct PipelineCache {
     normal: wgpu::RenderPipeline,
     multiply: wgpu::RenderPipeline,
+    write_erase: wgpu::RenderPipeline,
     composite_normal: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     composite_bind_group_layout: wgpu::BindGroupLayout,
@@ -324,6 +325,8 @@ impl RenderExecutor {
                     &cache.sampler,
                     src_tile_key,
                     source.config.opacity,
+                    None,
+                    None,
                 )?;
                 sources.push(PreparedRenderSource {
                     bind_group,
@@ -539,6 +542,7 @@ impl RenderExecutor {
             for call in &prepared[start..end] {
                 let pipeline = match call.blend_mode {
                     WriteBlendMode::Normal => &cache.normal,
+                    WriteBlendMode::Erase => &cache.write_erase,
                 };
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &call.bind_group, &[]);
@@ -607,10 +611,13 @@ impl RenderExecutor {
             &cache.sampler,
             write_op.src_tile_key,
             write_op.opacity,
+            write_op.rgb,
+            write_op.origin_tile_key,
         )?;
         let dst_view = create_render_attachment_view(&dst_resolved);
         let pipeline = match write_op.blend_mode {
             WriteBlendMode::Normal => &cache.normal,
+            WriteBlendMode::Erase => &cache.write_erase,
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -694,6 +701,8 @@ impl RenderExecutor {
                 &cache.sampler,
                 write_op.src_tile_key,
                 write_op.opacity,
+                write_op.rgb,
+                write_op.origin_tile_key,
             )?;
             prepared.push(PreparedWriteCall {
                 pass_key: WritePassKey {
@@ -772,6 +781,7 @@ impl RenderExecutor {
         let dst_view = create_render_attachment_view(&dst_resolved);
         let pipeline = match composite_op.blend_mode {
             WriteBlendMode::Normal => &cache.composite_normal,
+            WriteBlendMode::Erase => &cache.composite_normal,
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -854,6 +864,16 @@ impl RenderExecutor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -925,6 +945,8 @@ impl RenderExecutor {
             format,
             LeafBlendMode::Multiply,
         );
+        let write_erase =
+            Self::create_write_erase_pipeline(device, &pipeline_layout, &shader, format);
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glaphica-render-composite-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("render_composite_shader.wgsl").into()),
@@ -972,6 +994,7 @@ impl RenderExecutor {
         self.cache = Some(PipelineCache {
             normal,
             multiply,
+            write_erase,
             composite_normal,
             bind_group_layout,
             composite_bind_group_layout,
@@ -1041,6 +1064,42 @@ impl RenderExecutor {
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    fn create_write_erase_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glaphica-render-pipeline-write-erase"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_erase"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -1144,6 +1203,8 @@ fn create_bind_group(
     sampler: &wgpu::Sampler,
     src_tile_key: TileKey,
     opacity: f32,
+    rgb: Option<[f32; 3]>,
+    origin_tile_key: Option<TileKey>,
 ) -> Result<wgpu::BindGroup, RenderExecutorError> {
     let src_resolved = context.atlas_storage.resolve(src_tile_key).ok_or(
         RenderExecutorError::MissingTileBackend {
@@ -1161,23 +1222,55 @@ fn create_bind_group(
             aspect: wgpu::TextureAspect::All,
             base_mip_level: 0,
             mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: None,
+            base_array_layer: src_resolved.address.layer,
+            array_layer_count: Some(1),
         });
 
+    let origin_resolved =
+        origin_tile_key.and_then(|tile_key| context.atlas_storage.resolve(tile_key));
+    let origin_view = origin_resolved
+        .map(|resolved| {
+            resolved
+                .texture2d_array
+                .create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("glaphica-render-origin-view"),
+                    format: Some(resolved.format),
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+                    aspect: wgpu::TextureAspect::All,
+                    base_mip_level: 0,
+                    mip_level_count: Some(1),
+                    base_array_layer: resolved.address.layer,
+                    array_layer_count: Some(1),
+                })
+        })
+        .unwrap_or_else(|| src_view.clone());
+
     let params = RenderParams {
-        src_layer: src_resolved.address.layer,
+        src_layer: 0,
         src_x: src_resolved.address.texel_offset.0,
         src_y: src_resolved.address.texel_offset.1,
+        origin_layer: 0,
+        origin_x: origin_resolved
+            .map(|resolved| resolved.address.texel_offset.0)
+            .unwrap_or(0),
+        origin_y: origin_resolved
+            .map(|resolved| resolved.address.texel_offset.1)
+            .unwrap_or(0),
+        has_origin: if origin_resolved.is_some() { 1 } else { 0 },
+        has_tint: if rgb.is_some() { 1 } else { 0 },
+        tint_r: rgb.map(|value| value[0]).unwrap_or(0.0),
+        tint_g: rgb.map(|value| value[1]).unwrap_or(0.0),
+        tint_b: rgb.map(|value| value[2]).unwrap_or(0.0),
         opacity,
     };
-    let params_bytes: [u8; 16] = params.encode();
+    let params_bytes: [u8; 48] = params.encode();
     let params_buffer = context
         .gpu_context
         .device
         .create_buffer(&wgpu::BufferDescriptor {
             label: Some("glaphica-render-params"),
-            size: 16,
+            size: 48,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1205,6 +1298,10 @@ fn create_bind_group(
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&origin_view),
                 },
             ],
         }))
@@ -1309,16 +1406,32 @@ struct RenderParams {
     src_layer: u32,
     src_x: u32,
     src_y: u32,
+    origin_layer: u32,
+    origin_x: u32,
+    origin_y: u32,
+    has_origin: u32,
+    has_tint: u32,
+    tint_r: f32,
+    tint_g: f32,
+    tint_b: f32,
     opacity: f32,
 }
 
 impl RenderParams {
-    fn encode(&self) -> [u8; 16] {
-        let mut bytes = [0u8; 16];
+    fn encode(&self) -> [u8; 48] {
+        let mut bytes = [0u8; 48];
         bytes[0..4].copy_from_slice(&self.src_layer.to_ne_bytes());
         bytes[4..8].copy_from_slice(&self.src_x.to_ne_bytes());
         bytes[8..12].copy_from_slice(&self.src_y.to_ne_bytes());
-        bytes[12..16].copy_from_slice(&self.opacity.to_ne_bytes());
+        bytes[12..16].copy_from_slice(&self.origin_layer.to_ne_bytes());
+        bytes[16..20].copy_from_slice(&self.origin_x.to_ne_bytes());
+        bytes[20..24].copy_from_slice(&self.origin_y.to_ne_bytes());
+        bytes[24..28].copy_from_slice(&self.has_origin.to_ne_bytes());
+        bytes[28..32].copy_from_slice(&self.has_tint.to_ne_bytes());
+        bytes[32..36].copy_from_slice(&self.tint_r.to_ne_bytes());
+        bytes[36..40].copy_from_slice(&self.tint_g.to_ne_bytes());
+        bytes[40..44].copy_from_slice(&self.tint_b.to_ne_bytes());
+        bytes[44..48].copy_from_slice(&self.opacity.to_ne_bytes());
         bytes
     }
 }
@@ -1383,7 +1496,7 @@ mod tests {
     use super::{RenderContext, RenderExecutor};
     use document::{LeafBlendMode, NodeConfig, RenderCmd, RenderSource};
     use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, TileKey};
-    use thread_protocol::ClearOp;
+    use thread_protocol::{ClearOp, WriteBlendMode, WriteOp};
 
     #[test]
     fn clear_tile_does_not_modify_neighbor_tile_in_same_layer() {
@@ -1508,6 +1621,59 @@ mod tests {
 
         assert_eq!(left_pixel, [255, 0, 0, 255]);
         assert_eq!(right_pixel, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn write_tile_erase_subtracts_alpha_from_origin_snapshot() {
+        let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
+        else {
+            eprintln!("skip test: gpu context init failed");
+            return;
+        };
+
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(1);
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                0,
+                BackendKind::Leaf,
+                AtlasLayout::Small11,
+                Default::default(),
+            )
+            .is_err()
+        {
+            eprintln!("skip test: atlas backend init failed");
+            return;
+        }
+
+        let mask_tile = TileKey::from_parts(0, 0, 0);
+        let origin_tile = TileKey::from_parts(0, 0, 1);
+        let dst_tile = TileKey::from_parts(0, 0, 2);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, mask_tile, [0, 0, 0, 64]);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, origin_tile, [128, 0, 0, 128]);
+        fill_tile_rgba8(&gpu_context, &atlas_storage, dst_tile, [0, 255, 0, 255]);
+
+        let mut executor = RenderExecutor::new();
+        let mut context = RenderContext {
+            gpu_context: &gpu_context,
+            atlas_storage: &atlas_storage,
+        };
+        let result = executor.write_tile(
+            &mut context,
+            &WriteOp {
+                src_tile_key: mask_tile,
+                dst_tile_key: dst_tile,
+                blend_mode: WriteBlendMode::Erase,
+                opacity: 1.0,
+                rgb: None,
+                origin_tile_key: Some(origin_tile),
+                frame_merge: thread_protocol::GpuCmdFrameMergeTag::None,
+            },
+        );
+        assert!(result.is_ok());
+
+        let pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, dst_tile);
+        assert_eq!(pixel, [64, 0, 0, 64]);
     }
 
     fn fill_tile_rgba8(

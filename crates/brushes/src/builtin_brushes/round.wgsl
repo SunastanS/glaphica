@@ -25,8 +25,11 @@ struct ShaderParams {
     cache_tile_origin_y: u32,
     cache_tile_layer: u32,
     has_cache_tile: u32,
-    _pad1: u32,
-    _pad2: u32,
+    erase: u32,
+    tint_r: f32,
+    tint_g: f32,
+    tint_b: f32,
+    _pad1: f32,
 }
 
 @group(0) @binding(0) var<storage, read> draw_input: DrawInputs;
@@ -34,6 +37,10 @@ struct ShaderParams {
 @group(1) @binding(0) var source_atlas: texture_2d_array<f32>;
 @group(1) @binding(1) var cache_atlas: texture_2d_array<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
+
+const PI: f32 = 3.141592653589793;
+const SOFT_KERNEL_SCALE_N2: f32 = 8.0 / (3.0 * PI);
+const HARD_BRUSH_THICKNESS: f32 = 4.0;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -46,6 +53,39 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
     return vec4<f32>(xy, 0.0, 1.0);
 }
 
+fn round_brush_soft_kernel(radius: f32, dist: f32) -> f32 {
+    if (radius <= 0.0 || dist >= radius) {
+        return 0.0;
+    }
+
+    let normalized_dist = dist / radius;
+    let radial_falloff = max(1.0 - normalized_dist * normalized_dist, 0.0);
+    return SOFT_KERNEL_SCALE_N2 * pow(radial_falloff, 1.5) / radius;
+}
+
+fn round_brush_hardness_response(hardness: f32) -> f32 {
+    let h = clamp(hardness, 0.0, 1.0);
+    return h * h * h * h * h * h;
+}
+
+fn round_brush_kernel(radius: f32, hardness: f32, dist: f32) -> f32 {
+    if (radius <= 0.0 || dist >= radius) {
+        return 0.0;
+    }
+
+    let normalized_dist = dist / radius;
+    let radial_falloff = max(1.0 - normalized_dist * normalized_dist, 0.0);
+    let hard_t = round_brush_hardness_response(hardness);
+    let exponent = mix(1.5, 0.0, hard_t);
+    let scale = mix(SOFT_KERNEL_SCALE_N2 / radius, 1.0, hard_t);
+    return scale * pow(radial_falloff, exponent);
+}
+
+fn round_brush_thickness_gain(hardness: f32) -> f32 {
+    let hard_t = round_brush_hardness_response(hardness);
+    return mix(1.0, HARD_BRUSH_THICKNESS, hard_t);
+}
+
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Brush input uses image-tile coordinates (62x62), atlas tile is 64x64 with 1px gutter.
@@ -53,11 +93,8 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let tile_local_y = pos.y - f32(params.tile_origin_y) - 1.0;
     let input_count = params.input_len / 6u;
 
-    var buffer_alpha = 0.0;
+    var thickness = 0.0;
     var stage = 0.0;
-    // Packed same-tile dabs are resolved analytically here so the runtime can submit one draw
-    // call per tile instead of one draw call per dab. For the round buffer stage, repeated red
-    // alpha writes compose to 1 - product(1 - alpha_i), so order does not matter.
     for (var index = 0u; index < input_count; index = index + 1u) {
         let dab = draw_input.values[index];
         stage = dab.stage;
@@ -65,21 +102,26 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let pixel = vec2<f32>(tile_local_x, tile_local_y);
         let radius = max(dab.radius_px, 0.0);
         let hardness = clamp(dab.hardness, 0.0, 1.0);
-        let opacity = clamp(dab.opacity, 0.0, 1.0);
-        let dist = distance(pixel, center);
+        let opacity = max(dab.opacity, 0.0);
+        if (radius <= 0.0 || opacity <= 0.0) {
+            continue;
+        }
 
-        let softness = max((1.0 - hardness) * radius, 0.0001);
-        let inner_radius = max(radius - softness, 0.0);
-        let falloff = 1.0 - smoothstep(inner_radius, radius, dist);
-        let alpha = falloff * opacity;
-        buffer_alpha = buffer_alpha + (1.0 - buffer_alpha) * alpha;
+        let dist = distance(pixel, center);
+        if (dist > radius) {
+            continue;
+        }
+
+        let kernel = round_brush_kernel(radius, hardness, dist);
+        let thickness_gain = round_brush_thickness_gain(hardness);
+        thickness = thickness + kernel * opacity * thickness_gain;
     }
 
     if (stage < 0.5) {
-        if (buffer_alpha <= 0.0) {
+        if (thickness <= 0.0) {
             discard;
         }
-        return vec4<f32>(1.0, 0.0, 0.0, buffer_alpha);
+        return vec4<f32>(0.0, 0.0, 0.0, thickness);
     }
 
     let source_texel = vec2<i32>(
@@ -92,8 +134,8 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         i32(params.src_tile_layer),
         0,
     );
-    let accum_alpha = clamp(source_sample.a, 0.0, 1.0);
-    let effective_alpha = clamp(accum_alpha * buffer_alpha, 0.0, 1.0);
+    let accum_thickness = max(source_sample.a, 0.0);
+    let effective_alpha = 1.0 - exp(-accum_thickness * max(thickness, 0.0));
 
     var origin = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     if (params.has_cache_tile != 0u) {
@@ -109,7 +151,8 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         );
     }
 
+    let tint = vec3<f32>(params.tint_r, params.tint_g, params.tint_b);
     let out_alpha = origin.a + (1.0 - origin.a) * effective_alpha;
-    let out_rgb = mix(origin.rgb, vec3<f32>(1.0, 0.0, 0.0), effective_alpha);
+    let out_rgb = mix(origin.rgb, tint, effective_alpha);
     return vec4<f32>(out_rgb, out_alpha);
 }
