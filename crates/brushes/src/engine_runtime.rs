@@ -13,11 +13,19 @@ use crate::brush_registry::BrushRegistry;
 use crate::{BrushPipelineError, BrushRegistryError};
 
 pub trait TileSlotAllocator {
-    fn alloc(&mut self, backend: BackendId) -> Option<TileKey>;
+    fn alloc_active(&mut self, backend: BackendId) -> Option<TileKey>;
 
-    fn alloc_with_parity(&mut self, backend: BackendId, _parity: bool) -> Option<TileKey> {
-        self.alloc(backend)
+    fn alloc_active_with_parity(&mut self, backend: BackendId, _parity: bool) -> Option<TileKey> {
+        self.alloc_active(backend)
     }
+
+    fn begin_stroke(&mut self) {}
+
+    fn end_stroke(&mut self) {}
+
+    fn replace(&mut self, _old: TileKey, _new: TileKey) {}
+
+    fn release(&mut self, _tile: TileKey) {}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +96,11 @@ pub trait EngineBrushPipeline: Send {
 #[derive(Debug)]
 pub enum EngineBrushDispatchError {
     Registry(BrushRegistryError),
+    StrokeBufferUnavailable {
+        brush_id: BrushId,
+        node_id: NodeId,
+        tile_index: usize,
+    },
     Pipeline {
         brush_id: BrushId,
         source: BrushPipelineError,
@@ -98,6 +111,15 @@ impl Display for EngineBrushDispatchError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Registry(err) => write!(f, "{err}"),
+            Self::StrokeBufferUnavailable {
+                brush_id,
+                node_id,
+                tile_index,
+            } => write!(
+                f,
+                "stroke buffer allocation failed for brush {} on node {} tile {}",
+                brush_id.0, node_id.0, tile_index
+            ),
             Self::Pipeline { brush_id, source } => {
                 write!(f, "engine brush pipeline {} failed: {source}", brush_id.0)
             }
@@ -109,6 +131,7 @@ impl Error for EngineBrushDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Registry(err) => Some(err),
+            Self::StrokeBufferUnavailable { .. } => None,
             Self::Pipeline { source, .. } => Some(source.as_ref()),
         }
     }
@@ -152,16 +175,37 @@ impl BrushEngineRuntime {
         }
     }
 
-    pub fn begin_stroke(&mut self) {
+    pub fn begin_stroke<A>(&mut self, allocator: &mut A)
+    where
+        A: TileSlotAllocator,
+    {
+        allocator.begin_stroke();
         self.stroke_tiles.clear();
         self.stroke_restore_tiles.clear();
         self.stroke_buffer_tiles.clear();
     }
 
-    pub fn end_stroke(&mut self) {
+    pub fn end_stroke<A>(&mut self, allocator: &mut A)
+    where
+        A: TileSlotAllocator,
+    {
+        for (&stroke_key, &restore_tile) in &self.stroke_restore_tiles {
+            let origin_tile = self
+                .stroke_tiles
+                .get(&stroke_key)
+                .copied()
+                .unwrap_or(TileKey::EMPTY);
+            if origin_tile == TileKey::EMPTY && restore_tile != TileKey::EMPTY {
+                allocator.release(restore_tile);
+            }
+        }
+        for &tile_key in self.stroke_buffer_tiles.values() {
+            allocator.release(tile_key);
+        }
         self.stroke_tiles.clear();
         self.stroke_restore_tiles.clear();
         self.stroke_buffer_tiles.clear();
+        allocator.end_stroke();
     }
 
     pub fn register_pipeline<P>(
@@ -600,41 +644,11 @@ impl BrushEngineRuntime {
                     });
                 }
                 if buffer_tile_key == TileKey::EMPTY {
-                    let encoded_input = self
-                        .pipelines
-                        .get_mut(brush_id)?
-                        .pipeline
-                        .encode_draw_input(brush_input, final_tile_key, tile_canvas_origin)
-                        .map_err(|source| EngineBrushDispatchError::Pipeline {
-                            brush_id,
-                            source,
-                        })?;
-                    output.push(StrokeDrawOutput {
-                        clear_op: None,
-                        draw_op: Some(DrawOp {
-                            node_id,
-                            tile_index,
-                            tile_key: final_tile_key,
-                            blend_mode: if erase {
-                                DrawBlendMode::Replace
-                            } else {
-                                DrawBlendMode::Alpha
-                            },
-                            frame_merge: DrawFrameMergePolicy::None,
-                            origin_tile,
-                            ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
-                            input: encoded_input,
-                            rgb,
-                            erase,
-                            brush_id,
-                            stroke_id: brush_input.stroke,
-                        }),
-                        copy_op,
-                        write_op: None,
-                        composite_op: None,
-                        tile_key_update,
+                    return Err(EngineBrushDispatchError::StrokeBufferUnavailable {
+                        brush_id,
+                        node_id,
+                        tile_index,
                     });
-                    continue;
                 }
                 let encoded_dab_input = self
                     .pipelines
@@ -768,7 +782,7 @@ impl BrushEngineRuntime {
         if let Some(tile_key) = self.stroke_buffer_tiles.get(&stroke_key).copied() {
             return (tile_key, None);
         }
-        let Some(tile_key) = allocator.alloc(buffer_backend) else {
+        let Some(tile_key) = allocator.alloc_active(buffer_backend) else {
             return (TileKey::EMPTY, None);
         };
         self.stroke_buffer_tiles.insert(stroke_key, tile_key);
@@ -834,9 +848,9 @@ impl BrushEngineRuntime {
 
         let backend = image.backend();
         let next_tile = if current_tile_key == TileKey::EMPTY {
-            allocator.alloc(backend)
+            allocator.alloc_active(backend)
         } else {
-            allocator.alloc_with_parity(backend, !current_tile_key.slot_parity())
+            allocator.alloc_active_with_parity(backend, !current_tile_key.slot_parity())
         };
         let Some(new_tile_key) = next_tile else {
             return (current_tile_key, origin_tile, None, None, origin_tile, None);
@@ -845,8 +859,8 @@ impl BrushEngineRuntime {
         let mut origin_init_clear_op = None;
         let restore_tile = if current_tile_key == TileKey::EMPTY {
             let snapshot = allocator
-                .alloc_with_parity(backend, !new_tile_key.slot_parity())
-                .or_else(|| allocator.alloc(backend));
+                .alloc_active_with_parity(backend, !new_tile_key.slot_parity())
+                .or_else(|| allocator.alloc_active(backend));
             if let Some(snapshot_tile) = snapshot {
                 origin_init_clear_op = Some(ClearOp {
                     tile_key: snapshot_tile,
@@ -881,6 +895,9 @@ impl BrushEngineRuntime {
         }
         self.stroke_tiles.insert(stroke_key, origin_tile);
         self.stroke_restore_tiles.insert(stroke_key, restore_tile);
+        if current_tile_key != TileKey::EMPTY {
+            allocator.replace(current_tile_key, new_tile_key);
+        }
 
         (
             new_tile_key,
@@ -901,7 +918,9 @@ mod tests {
     };
     use images::{Image, layout::ImageLayout};
 
-    use super::{BrushEngineRuntime, EngineBrushPipeline, TileSlotAllocator};
+    use super::{
+        BrushEngineRuntime, EngineBrushDispatchError, EngineBrushPipeline, TileSlotAllocator,
+    };
 
     struct TestEnginePipeline;
 
@@ -916,20 +935,39 @@ mod tests {
         }
     }
 
+    struct TestStrokeBufferPipeline;
+
+    impl EngineBrushPipeline for TestStrokeBufferPipeline {
+        fn encode_draw_input(
+            &mut self,
+            _brush_input: &BrushInput,
+            tile_key: TileKey,
+            _tile_canvas_origin: CanvasVec2,
+        ) -> Result<Vec<f32>, crate::BrushPipelineError> {
+            Ok(vec![tile_key.slot_index() as f32])
+        }
+
+        fn uses_stroke_buffer(&self) -> bool {
+            true
+        }
+    }
+
     #[derive(Default)]
     struct TestAllocator {
         regular_alloc: Option<TileKey>,
         odd_alloc: Option<TileKey>,
         even_alloc: Option<TileKey>,
         parity_requests: Vec<bool>,
+        replacements: Vec<(TileKey, TileKey)>,
+        releases: Vec<TileKey>,
     }
 
     impl TileSlotAllocator for TestAllocator {
-        fn alloc(&mut self, _backend: glaphica_core::BackendId) -> Option<TileKey> {
+        fn alloc_active(&mut self, _backend: glaphica_core::BackendId) -> Option<TileKey> {
             self.regular_alloc.take()
         }
 
-        fn alloc_with_parity(
+        fn alloc_active_with_parity(
             &mut self,
             _backend: glaphica_core::BackendId,
             parity: bool,
@@ -940,6 +978,14 @@ mod tests {
             } else {
                 self.even_alloc.take()
             }
+        }
+
+        fn replace(&mut self, old: TileKey, new: TileKey) {
+            self.replacements.push((old, new));
+        }
+
+        fn release(&mut self, tile: TileKey) {
+            self.releases.push(tile);
         }
     }
 
@@ -1096,14 +1142,16 @@ mod tests {
                 .register_pipeline(BrushId(2), 0, TestEnginePipeline)
                 .is_ok()
         );
-        runtime.begin_stroke();
 
         let mut allocator = TestAllocator {
             regular_alloc: None,
             odd_alloc: Some(TileKey::from_parts(1, 0, 0x8000_0001)),
             even_alloc: None,
             parity_requests: Vec::new(),
+            replacements: Vec::new(),
+            releases: Vec::new(),
         };
+        runtime.begin_stroke(&mut allocator);
         let brush_input = build_test_brush_input(CanvasVec2::new(10.0, 10.0));
         let mut output = Vec::new();
         let build_result = runtime.build_stroke_draw_outputs_for_image(
@@ -1151,14 +1199,16 @@ mod tests {
                 .register_pipeline(BrushId(2), 0, TestEnginePipeline)
                 .is_ok()
         );
-        runtime.begin_stroke();
 
         let mut first_allocator = TestAllocator {
             regular_alloc: None,
             odd_alloc: Some(stroke_tile),
             even_alloc: None,
             parity_requests: Vec::new(),
+            replacements: Vec::new(),
+            releases: Vec::new(),
         };
+        runtime.begin_stroke(&mut first_allocator);
         let brush_input = build_test_brush_input(CanvasVec2::new(10.0, 10.0));
         let mut first_output = Vec::new();
         let first_result = runtime.build_stroke_draw_outputs_for_image(
@@ -1197,5 +1247,53 @@ mod tests {
             .expect("draw op must exist");
         assert_eq!(draw_op.tile_key, stroke_tile);
         assert_eq!(draw_op.origin_tile, existing_key);
+        assert_eq!(first_allocator.replacements, vec![(existing_key, stroke_tile)]);
+        assert!(second_allocator.replacements.is_empty());
+    }
+
+    #[test]
+    fn stroke_buffer_brush_fails_fast_when_buffer_tile_cannot_be_allocated() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let mut image = match Image::new(layout, glaphica_core::BackendId::new(1)) {
+            Ok(image) => image,
+            Err(_) => return,
+        };
+
+        let mut runtime = BrushEngineRuntime::new(4);
+        assert!(
+            runtime
+                .register_pipeline_with_stroke_buffer_backend(
+                    BrushId(3),
+                    0,
+                    Some(glaphica_core::BackendId::new(2)),
+                    TestStrokeBufferPipeline,
+                )
+                .is_ok()
+        );
+        let mut allocator = TestAllocator::default();
+        runtime.begin_stroke(&mut allocator);
+
+        let brush_input = build_test_brush_input(CanvasVec2::new(10.0, 10.0));
+        let mut output = Vec::new();
+        let result = runtime.build_stroke_draw_outputs_for_image(
+            BrushId(3),
+            &brush_input,
+            [1.0, 0.0, 0.0],
+            false,
+            NodeId(9),
+            &mut image,
+            None,
+            &mut allocator,
+            &mut output,
+        );
+
+        assert!(matches!(
+            result,
+            Err(EngineBrushDispatchError::StrokeBufferUnavailable {
+                brush_id: BrushId(3),
+                node_id: NodeId(9),
+                tile_index: 0,
+            })
+        ));
     }
 }

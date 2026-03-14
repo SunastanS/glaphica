@@ -1,38 +1,134 @@
-use atlas::BackendManager;
+use atlas::{BackendManager, EditSession};
 use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
 use document::{Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{
     BackendId, BrushId, BrushInput, NodeId, RenderTreeGeneration, StrokeId, TileKey,
 };
 use images::Image;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use stroke_input::{InputProcessingConfig, StrokeInputProcessor};
 
-pub struct EngineBackendManager(BackendManager);
+pub struct EngineBackendManager {
+    manager: BackendManager,
+    stroke_edits: HashMap<u8, EditSession>,
+}
 
 impl EngineBackendManager {
     pub fn new() -> Self {
-        Self(BackendManager::new())
+        Self {
+            manager: BackendManager::new(),
+            stroke_edits: HashMap::new(),
+        }
     }
 
     pub fn inner(&self) -> &BackendManager {
-        &self.0
+        &self.manager
     }
 
     pub fn inner_mut(&mut self) -> &mut BackendManager {
-        &mut self.0
+        &mut self.manager
+    }
+
+    fn retire_tiles<I>(&mut self, keys: I)
+    where
+        I: IntoIterator<Item = TileKey>,
+    {
+        let mut sessions: HashMap<u8, EditSession> = HashMap::new();
+        for key in keys {
+            let backend = key.backend();
+            let Some(backend_ref) = self.manager.backend_mut(backend) else {
+                continue;
+            };
+            let session = sessions
+                .entry(backend.raw())
+                .or_insert_with(|| backend_ref.begin_edit());
+            if let Err(error) = backend_ref.release_key(session, key) {
+                eprintln!("failed to retire tile key: {error:?}");
+            }
+        }
+
+        for (backend, session) in sessions {
+            if let Some(backend_ref) = self.manager.backend_mut(BackendId::new(backend)) {
+                if let Err(error) = backend_ref.finish_edit(session) {
+                    eprintln!("failed to finish tile retirement session: {error:?}");
+                }
+            }
+        }
+    }
+
+    fn ensure_stroke_edit_session(&mut self, backend: BackendId) -> Option<&mut EditSession> {
+        if !self.stroke_edits.contains_key(&backend.raw()) {
+            let session = self.manager.backend(backend)?.begin_edit();
+            self.stroke_edits.insert(backend.raw(), session);
+        }
+        self.stroke_edits.get_mut(&backend.raw())
     }
 }
 
 impl TileSlotAllocator for EngineBackendManager {
-    fn alloc(&mut self, backend: BackendId) -> Option<TileKey> {
-        self.0.backend_mut(backend).and_then(|b| b.alloc().ok())
+    fn alloc_active(&mut self, backend: BackendId) -> Option<TileKey> {
+        self.manager
+            .backend_mut(backend)
+            .and_then(|b| b.alloc_active().ok().map(|tile| tile.key()))
     }
 
-    fn alloc_with_parity(&mut self, backend: BackendId, parity: bool) -> Option<TileKey> {
-        self.0
+    fn alloc_active_with_parity(&mut self, backend: BackendId, parity: bool) -> Option<TileKey> {
+        self.manager
             .backend_mut(backend)
-            .and_then(|b| b.alloc_with_parity(parity).ok())
+            .and_then(|b| b.alloc_active_with_parity(parity).ok().map(|tile| tile.key()))
+    }
+
+    fn begin_stroke(&mut self) {
+        self.stroke_edits.clear();
+    }
+
+    fn end_stroke(&mut self) {
+        let stroke_edits = std::mem::take(&mut self.stroke_edits);
+        for (backend, session) in stroke_edits {
+            if let Some(backend) = self.manager.backend_mut(BackendId::new(backend)) {
+                if let Err(error) = backend.finish_edit(session) {
+                    eprintln!("failed to finish backend edit session: {error:?}");
+                }
+            }
+        }
+    }
+
+    fn replace(&mut self, old: TileKey, new: TileKey) {
+        let backend = old.backend();
+        let backend_key = backend.raw();
+        if self.ensure_stroke_edit_session(backend).is_none() {
+            return;
+        }
+        let Some(mut session) = self.stroke_edits.remove(&backend_key) else {
+            return;
+        };
+        let Some(backend) = self.manager.backend_mut(backend) else {
+            self.stroke_edits.insert(backend_key, session);
+            return;
+        };
+        if let Err(error) = backend.replace_key(&mut session, old, new) {
+            eprintln!("failed to register tile replacement: {error:?}");
+        }
+        self.stroke_edits.insert(backend_key, session);
+    }
+
+    fn release(&mut self, tile: TileKey) {
+        let backend = tile.backend();
+        let backend_key = backend.raw();
+        if self.ensure_stroke_edit_session(backend).is_none() {
+            return;
+        }
+        let Some(mut session) = self.stroke_edits.remove(&backend_key) else {
+            return;
+        };
+        let Some(backend) = self.manager.backend_mut(backend) else {
+            self.stroke_edits.insert(backend_key, session);
+            return;
+        };
+        if let Err(error) = backend.release_key(&mut session, tile) {
+            eprintln!("failed to register tile release: {error:?}");
+        }
+        self.stroke_edits.insert(backend_key, session);
     }
 }
 
@@ -110,12 +206,12 @@ impl EngineThreadState {
     pub fn begin_stroke(&mut self, stroke_id: StrokeId) {
         self.active_stroke_id = Some(stroke_id);
         self.input_processor.begin_stroke(stroke_id);
-        self.brush_runtime.begin_stroke();
+        self.brush_runtime.begin_stroke(&mut self.backend_manager);
     }
 
     pub fn end_stroke(&mut self) {
         self.input_processor.end_stroke();
-        self.brush_runtime.end_stroke();
+        self.brush_runtime.end_stroke(&mut self.backend_manager);
         self.active_stroke_id = None;
     }
 
@@ -263,7 +359,9 @@ impl EngineThreadState {
 
         let old_tree = self.shared_tree.read();
         let mut new_tree = self.document.build_flat_render_tree(new_generation)?;
+        new_tree.carry_forward_render_caches(&old_tree);
         allocate_missing_render_cache_tiles(&mut new_tree, &mut self.backend_manager);
+        retire_stale_render_cache_tiles(&old_tree, &new_tree, &mut self.backend_manager);
 
         let dirty_render_caches = new_tree.diff_render_cache_dirty(&old_tree);
 
@@ -274,6 +372,34 @@ impl EngineThreadState {
             dirty_render_caches,
         })
     }
+}
+
+fn retire_stale_render_cache_tiles(
+    old_tree: &FlatRenderTree,
+    new_tree: &FlatRenderTree,
+    backend_manager: &mut EngineBackendManager,
+) {
+    let old_keys = collect_render_cache_tile_keys(old_tree);
+    let new_keys = collect_render_cache_tile_keys(new_tree);
+    backend_manager.retire_tiles(old_keys.difference(&new_keys).copied());
+}
+
+fn collect_render_cache_tile_keys(tree: &FlatRenderTree) -> std::collections::HashSet<TileKey> {
+    let mut keys = std::collections::HashSet::new();
+    for node in tree.nodes.values() {
+        let Some(render_cache) = node.kind.render_cache() else {
+            continue;
+        };
+        for tile_index in 0..render_cache.tile_count() {
+            let Some(tile_key) = render_cache.tile_key(tile_index) else {
+                continue;
+            };
+            if tile_key != TileKey::EMPTY {
+                keys.insert(tile_key);
+            }
+        }
+    }
+    keys
 }
 
 fn allocate_missing_render_cache_tiles(
@@ -297,7 +423,8 @@ fn allocate_missing_render_cache_tiles(
             if tile_key != TileKey::EMPTY {
                 continue;
             }
-            let Some(new_tile_key) = backend_manager.alloc_with_parity(render_cache.backend(), parity)
+            let Some(new_tile_key) =
+                backend_manager.alloc_active_with_parity(render_cache.backend(), parity)
             else {
                 eprintln!(
                     "failed to allocate render cache tile for node={} tile_index={tile_index} parity={parity}",
@@ -329,4 +456,72 @@ fn cache_node_parity(
     };
     memo.insert(node_id, parity);
     parity
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EngineBackendManager, collect_render_cache_tile_keys, retire_stale_render_cache_tiles};
+    use document::{FlatNodeKind, FlatRenderNode, FlatRenderTree, LeafBlendMode, NodeConfig};
+    use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
+    use images::{Image, layout::ImageLayout};
+    use std::{collections::HashMap, sync::Arc};
+
+    fn build_branch_tree(layout: ImageLayout, tile_keys: &[TileKey]) -> FlatRenderTree {
+        let mut render_cache = Image::new(layout, BackendId::new(1)).unwrap();
+        for (tile_index, tile_key) in tile_keys.iter().copied().enumerate() {
+            render_cache.set_tile_key(tile_index, tile_key).unwrap();
+        }
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            NodeId(1),
+            FlatRenderNode {
+                parent_id: None,
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Branch {
+                    children: Vec::new(),
+                    render_cache,
+                },
+            },
+        );
+
+        FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(nodes),
+            root_id: Some(NodeId(1)),
+        }
+    }
+
+    #[test]
+    fn retire_stale_render_cache_tiles_only_retires_removed_keys() {
+        let layout = ImageLayout::new(512, 256);
+        let mut backend_manager = EngineBackendManager::new();
+        backend_manager
+            .inner_mut()
+            .add_backend(glaphica_core::AtlasLayout::Small11)
+            .unwrap();
+        backend_manager
+            .inner_mut()
+            .add_backend(glaphica_core::AtlasLayout::Small11)
+            .unwrap();
+
+        let backend = backend_manager.inner_mut().backend_mut(BackendId::new(1)).unwrap();
+        let kept = backend.alloc_active().unwrap().key();
+        let removed = backend.alloc_active().unwrap().key();
+
+        let old_tree = build_branch_tree(layout, &[kept, removed]);
+        let new_tree = build_branch_tree(layout, &[kept, TileKey::EMPTY]);
+
+        assert_eq!(collect_render_cache_tile_keys(&old_tree).len(), 2);
+        assert_eq!(collect_render_cache_tile_keys(&new_tree).len(), 1);
+
+        retire_stale_render_cache_tiles(&old_tree, &new_tree, &mut backend_manager);
+
+        let backend = backend_manager.inner().backend(BackendId::new(1)).unwrap();
+        assert_eq!(backend.tile_state(kept).unwrap(), atlas::TileState::Active);
+        assert_eq!(backend.tile_state(removed).unwrap(), atlas::TileState::Cached);
+    }
 }
