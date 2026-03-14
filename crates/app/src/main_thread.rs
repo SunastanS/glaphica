@@ -14,7 +14,7 @@ use glaphica_core::{
     TextureFormat, TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
-    FrameBatch, FrameBatchContext, GpuContext, GpuContextInitDescriptor, RenderContext,
+    FrameBatch, FrameBatchContext, FrameBatchPerfStats, GpuContext, GpuContextInitDescriptor, RenderContext,
     RenderExecutor,
     atlas_runtime::AtlasStorageRuntime,
     brush_runtime::{BrushGpuRuntime, validate_draw_op_layout},
@@ -24,6 +24,24 @@ use gpu_runtime::{
 use thread_protocol::{GpuCmdMsg, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg};
 
 use crate::{config, screen_blitter::ScreenBlitter};
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GpuSubmitPerfStats {
+    pub frame_batch: FrameBatchPerfStats,
+    pub dirty_tile_count: usize,
+    pub dirty_rect_count: usize,
+    pub dirty_bbox_tile_area: usize,
+    pub dirty_node_count: usize,
+}
+
+#[derive(Default)]
+struct DirtyNodeBounds {
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+    has_any: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct GpuCmdTraceConfig {
@@ -491,8 +509,9 @@ impl MainThreadState {
         self.tile_dirty_tracker.clear();
     }
 
-    pub fn process_gpu_commands(&mut self, commands: &[GpuCmdMsg]) {
+    pub fn process_gpu_commands(&mut self, commands: &[GpuCmdMsg]) -> GpuSubmitPerfStats {
         self.promote_completed_tile_updates();
+        let mut submit_perf = GpuSubmitPerfStats::default();
         let trace_config = gpu_cmd_trace_config();
         if trace_config.enabled {
             trace_gpu_commands(commands, trace_config.max_commands);
@@ -617,7 +636,33 @@ impl MainThreadState {
             }
         }
 
-        if let Some(submission_index) = frame_batch.submit_only() {
+        let dirty_summary = summarize_dirty_tracker(&self.shared_tree.read(), &self.image_dirty_tracker);
+        submit_perf.dirty_tile_count = dirty_summary.0;
+        submit_perf.dirty_rect_count = dirty_summary.1;
+        submit_perf.dirty_bbox_tile_area = dirty_summary.2;
+        submit_perf.dirty_node_count = dirty_summary.3;
+        let mut context = FrameBatchContext {
+            gpu_context: &self.gpu_context,
+            atlas_storage: &self.atlas_storage,
+            render_executor: &mut self.render_executor,
+            brush_runtime: &mut self.brush_runtime,
+            brush_layouts: &self.brush_layouts,
+            shared_tree: &self.shared_tree,
+            image_dirty_tracker: &mut self.image_dirty_tracker,
+            tile_dirty_tracker: &mut self.tile_dirty_tracker,
+        };
+        let submission_index = match frame_batch.finish(&mut context) {
+            Ok((submission_index, frame_batch_perf)) => {
+                submit_perf.frame_batch = frame_batch_perf;
+                submission_index
+            }
+            Err(error) => {
+                eprintln!("GPU command processing failed during frame finalize: {error:?}");
+                None
+            }
+        };
+
+        if let Some(submission_index) = submission_index {
             if !deferred_visible_tile_updates.is_empty() {
                 self.pending_visible_tile_updates
                     .push_back(PendingVisibleTileUpdateBatch {
@@ -631,18 +676,18 @@ impl MainThreadState {
         self.brush_runtime
             .executor_mut()
             .clear_transient_draw_resources();
+        submit_perf
     }
 
     fn apply_render_tree_updated(&mut self, msg: &RenderTreeUpdatedMsg) {
         let tree = self.shared_tree.read();
-        for branch_id in &msg.dirty_branch_caches {
-            if let Some(node) = tree.nodes.get(branch_id) {
-                let cache = match &node.kind {
-                    document::FlatNodeKind::Branch { cache, .. } => cache,
-                    document::FlatNodeKind::Leaf { .. } => continue,
+        for node_id in &msg.dirty_render_caches {
+            if let Some(node) = tree.nodes.get(node_id) {
+                let Some(render_cache) = node.kind.render_cache() else {
+                    continue;
                 };
-                for tile_index in 0..cache.tile_count() {
-                    self.image_dirty_tracker.mark(*branch_id, tile_index);
+                for tile_index in 0..render_cache.tile_count() {
+                    self.image_dirty_tracker.mark(*node_id, tile_index);
                 }
             }
         }
@@ -687,9 +732,8 @@ impl MainThreadState {
 
         for (node_id, tile_index, tile_key) in updates {
             if let Some(node) = new_nodes.get_mut(node_id) {
-                let image = match &mut node.kind {
-                    document::FlatNodeKind::Leaf { image } => image,
-                    document::FlatNodeKind::Branch { cache, .. } => cache,
+                let Some(image) = node.kind.render_image_mut() else {
+                    continue;
                 };
                 if image.set_tile_key(*tile_index, *tile_key).is_ok() {
                     self.image_dirty_tracker.mark(*node_id, *tile_index);
@@ -854,6 +898,53 @@ fn to_wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
     }
 }
 
+fn summarize_dirty_tracker(
+    tree: &FlatRenderTree,
+    dirty: &ImageDirtyTracker,
+) -> (usize, usize, usize, usize) {
+    let mut by_node = HashMap::<NodeId, DirtyNodeBounds>::new();
+    let mut dirty_tile_count = 0usize;
+
+    for key in dirty.iter() {
+        let Some(node) = tree.nodes.get(&key.node_id) else {
+            continue;
+        };
+        let Some(image) = node.kind.render_image() else {
+            continue;
+        };
+        let layout = image.layout();
+        let tile_x = layout.tile_x();
+        let tile_index = key.tile_index as u32;
+        let tile_coord_x = tile_index % tile_x;
+        let tile_coord_y = tile_index / tile_x;
+        let entry = by_node.entry(key.node_id).or_default();
+        if entry.has_any {
+            entry.min_x = entry.min_x.min(tile_coord_x);
+            entry.min_y = entry.min_y.min(tile_coord_y);
+            entry.max_x = entry.max_x.max(tile_coord_x);
+            entry.max_y = entry.max_y.max(tile_coord_y);
+        } else {
+            entry.min_x = tile_coord_x;
+            entry.min_y = tile_coord_y;
+            entry.max_x = tile_coord_x;
+            entry.max_y = tile_coord_y;
+            entry.has_any = true;
+        }
+        dirty_tile_count += 1;
+    }
+
+    let dirty_rect_count = by_node.len();
+    let dirty_bbox_tile_area = by_node
+        .values()
+        .map(|bounds| {
+            let width = bounds.max_x - bounds.min_x + 1;
+            let height = bounds.max_y - bounds.min_y + 1;
+            (width as usize) * (height as usize)
+        })
+        .sum();
+    (dirty_tile_count, dirty_rect_count, dirty_bbox_tile_area, by_node.len())
+}
+
 fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
     eprintln!("[PERF][gpu_cmd_trace] frame_cmd_count={}", commands.len());
     for (index, cmd) in commands.iter().take(max_commands).enumerate() {
@@ -896,10 +987,10 @@ fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
             }
             GpuCmdMsg::RenderTreeUpdated(op) => {
                 eprintln!(
-                    "[PERF][gpu_cmd_trace][{}] RenderTreeUpdated generation={} dirty_branches={}",
+                    "[PERF][gpu_cmd_trace][{}] RenderTreeUpdated generation={} dirty_render_caches={}",
                     index,
                     op.generation.0,
-                    op.dirty_branch_caches.len()
+                    op.dirty_render_caches.len()
                 );
             }
             GpuCmdMsg::TileSlotKeyUpdate(op) => {

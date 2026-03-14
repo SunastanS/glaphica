@@ -246,9 +246,8 @@ impl ScreenBlitter {
             return;
         };
 
-        let image = match &root_node.kind {
-            document::FlatNodeKind::Leaf { image } => image,
-            document::FlatNodeKind::Branch { cache, .. } => cache,
+        let Some(image) = root_node.kind.render_image() else {
+            return;
         };
 
         let doc_width = image.layout().size_x() as f32;
@@ -273,19 +272,6 @@ impl ScreenBlitter {
         let Some(bind_group_layout) = &self.bind_group_layout else {
             return;
         };
-
-        let source_backend = match atlas_storage.backend_resource(0) {
-            Some(b) => b,
-            None => return,
-        };
-
-        let source_view =
-            source_backend
-                .texture2d_array
-                .create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
-                    ..Default::default()
-                });
 
         let sampler = self.sampler.get_or_insert_with(|| {
             device.create_sampler(&wgpu::SamplerDescriptor {
@@ -368,6 +354,17 @@ impl ScreenBlitter {
                 let Some(atlas_address) = atlas_storage.resolve(tile_key) else {
                     continue;
                 };
+                let Some(source_backend) = atlas_storage.backend_resource(tile_key.backend_index())
+                else {
+                    continue;
+                };
+                let source_view =
+                    source_backend
+                        .texture2d_array
+                        .create_view(&wgpu::TextureViewDescriptor {
+                            dimension: Some(wgpu::TextureViewDimension::D2Array),
+                            ..Default::default()
+                        });
 
                 let Some(canvas_origin) = image.tile_canvas_origin(tile_index) else {
                     continue;

@@ -118,7 +118,7 @@ pub struct ClearOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderTreeUpdatedMsg {
     pub generation: RenderTreeGeneration,
-    pub dirty_branch_caches: Vec<NodeId>,
+    pub dirty_render_caches: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

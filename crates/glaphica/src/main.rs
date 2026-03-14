@@ -428,7 +428,9 @@ impl ApplicationHandler for App {
                             self.render_frame();
                             self.stroke_active = true;
                             if let Some(integration) = &mut self.integration {
-                                integration.begin_stroke(glaphica_core::NodeId(0));
+                                if let Some(node_id) = integration.active_document_node() {
+                                    integration.begin_stroke(node_id);
+                                }
                             }
                         }
                         ElementState::Released => {

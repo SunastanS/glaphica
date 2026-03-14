@@ -4,14 +4,14 @@ mod view;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glaphica_core::{BackendId, NodeId, RenderTreeGeneration};
+use glaphica_core::{BackendId, CanvasVec2, ImageDirtyTracker, NodeId, RenderTreeGeneration};
 use images::Image;
 use images::layout::ImageLayout;
 
 pub use images::ImageCreateError;
 pub use shared_tree::{
-    FlatNodeKind, FlatRenderNode, FlatRenderTree, NodeConfig, RenderCmd, RenderSource,
-    SharedRenderTree,
+    FlatLeafContent, FlatNodeKind, FlatRenderNode, FlatRenderTree, MaterializeParametricCmd,
+    NodeConfig, ParametricMesh, ParametricVertex, RenderCmd, RenderSource, SharedRenderTree,
 };
 pub use view::View;
 
@@ -20,7 +20,7 @@ pub struct Document {
     layout: ImageLayout,
     metadata: Metadata,
     leaf_backend: BackendId,
-    branch_cache_backend: BackendId,
+    render_cache_backend: BackendId,
     next_node_id: NodeId,
     active_node: Option<NodeId>,
 }
@@ -34,18 +34,41 @@ impl Document {
         name: String,
         layout: ImageLayout,
         leaf_backend: BackendId,
-        branch_cache_backend: BackendId,
+        render_cache_backend: BackendId,
     ) -> Result<Self, ImageCreateError> {
-        let initial_id = NodeId(0);
+        let background_id = NodeId(0);
+        let paint_layer_id = NodeId(1);
+        let root_id = NodeId(2);
         let image = Image::new(layout, leaf_backend)?;
         let layer_tree = UiLayerTree {
-            root: UiLayerNode::Leaf(UiLeafNode {
-                id: initial_id,
-                config: LeafConfig {
+            root: UiLayerNode::Branch(UiBranchNode {
+                id: root_id,
+                config: BranchConfig {
                     opacity: 1.0,
-                    blend_mode: LeafBlendMode::Normal,
+                    blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
                 },
-                image,
+                children: vec![
+                    UiLayerNode::Leaf(UiLeafNode {
+                        id: background_id,
+                        config: LeafConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                        content: UiLeafContent::Special(SpecialLayer::SolidColor(
+                            SolidColorLayer {
+                                color: [1.0, 1.0, 1.0, 1.0],
+                            },
+                        )),
+                    }),
+                    UiLayerNode::Leaf(UiLeafNode {
+                        id: paint_layer_id,
+                        config: LeafConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                        content: UiLeafContent::Raster { image },
+                    }),
+                ],
             }),
             layout,
         };
@@ -54,7 +77,39 @@ impl Document {
             layout,
             metadata: Metadata { name },
             leaf_backend,
-            branch_cache_backend,
+            render_cache_backend,
+            next_node_id: NodeId(root_id.0 + 1),
+            active_node: Some(paint_layer_id),
+        })
+    }
+
+    pub fn new_solid_color(
+        name: String,
+        layout: ImageLayout,
+        leaf_backend: BackendId,
+        render_cache_backend: BackendId,
+        color: [f32; 4],
+    ) -> Result<Self, ImageCreateError> {
+        let initial_id = NodeId(0);
+        let layer_tree = UiLayerTree {
+            root: UiLayerNode::Leaf(UiLeafNode {
+                id: initial_id,
+                config: LeafConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                content: UiLeafContent::Special(SpecialLayer::SolidColor(SolidColorLayer {
+                    color,
+                })),
+            }),
+            layout,
+        };
+        Ok(Self {
+            layer_tree,
+            layout,
+            metadata: Metadata { name },
+            leaf_backend,
+            render_cache_backend,
             next_node_id: NodeId(initial_id.0 + 1),
             active_node: Some(initial_id),
         })
@@ -64,8 +119,8 @@ impl Document {
         self.leaf_backend
     }
 
-    pub fn branch_cache_backend(&self) -> BackendId {
-        self.branch_cache_backend
+    pub fn render_cache_backend(&self) -> BackendId {
+        self.render_cache_backend
     }
 
     pub fn layout(&self) -> ImageLayout {
@@ -86,7 +141,7 @@ impl Document {
     ) -> Result<FlatRenderTree, ImageCreateError> {
         let render_tree = self
             .layer_tree
-            .infer_render_tree(self.leaf_backend, self.branch_cache_backend)?;
+            .infer_render_tree(self.leaf_backend, self.render_cache_backend)?;
         Ok(render_tree.flatten(generation))
     }
 
@@ -108,6 +163,26 @@ impl Document {
 
     pub fn get_leaf_image_mut(&mut self, node_id: NodeId) -> Option<&mut Image> {
         self.layer_tree.get_leaf_image_mut(node_id)
+    }
+
+    pub fn get_solid_color(&self, node_id: NodeId) -> Option<[f32; 4]> {
+        self.layer_tree.get_solid_color(node_id)
+    }
+
+    pub fn set_solid_color(
+        &mut self,
+        node_id: NodeId,
+        color: [f32; 4],
+    ) -> Option<ImageDirtyTracker> {
+        if !self.layer_tree.set_solid_color(node_id, color) {
+            return None;
+        }
+
+        let mut dirty = ImageDirtyTracker::default();
+        for tile_index in 0..self.layout.total_tiles() as usize {
+            dirty.mark(node_id, tile_index);
+        }
+        Some(dirty)
     }
 
     /// Incrementally syncs tile keys from UiLayerTree to FlatRenderTree.
@@ -157,10 +232,16 @@ impl Document {
 
             if let Some(node) = new_nodes.get_mut(node_id) {
                 let image = match &mut node.kind {
-                    FlatNodeKind::Leaf { image } => image,
-                    FlatNodeKind::Branch { cache, .. } => cache,
+                    FlatNodeKind::Leaf { content } => match content {
+                        FlatLeafContent::Raster { image } => image,
+                        FlatLeafContent::Parametric { render_cache, .. } => render_cache,
+                    },
+                    //TODO: We should update that after definede the parametric layer kind
+                    FlatNodeKind::Branch { render_cache, .. } => render_cache,
                 };
-                let _ = image.set_tile_key(*tile_index, new_tile_key);
+                if image.set_tile_key(*tile_index, new_tile_key).is_err() {
+                    continue;
+                }
             }
         }
 
@@ -192,17 +273,25 @@ impl UiLayerTree {
         get_leaf_image_from_node_mut(&mut self.root, node_id)
     }
 
+    pub fn get_solid_color(&self, node_id: NodeId) -> Option<[f32; 4]> {
+        get_solid_color_from_node(&self.root, node_id)
+    }
+
+    pub fn set_solid_color(&mut self, node_id: NodeId, color: [f32; 4]) -> bool {
+        set_solid_color_from_node(&mut self.root, node_id, color)
+    }
+
     pub fn infer_render_tree(
         &self,
         leaf_backend: BackendId,
-        branch_cache_backend: BackendId,
+        render_cache_backend: BackendId,
     ) -> Result<RenderLayerTree, ImageCreateError> {
         let rendered_nodes = infer_render_nodes(
             &self.root,
             1.0,
             true,
             leaf_backend,
-            branch_cache_backend,
+            render_cache_backend,
             self.layout,
         )?;
         let root = rendered_nodes.into_iter().next().unwrap_or_else(|| {
@@ -212,8 +301,11 @@ impl UiLayerTree {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
                 },
-                image: Image::new(self.layout, leaf_backend)
-                    .expect("fallback image creation should succeed with valid layout and backend"),
+                content: RenderLeafContent::Raster {
+                    image: Image::new(self.layout, leaf_backend).expect(
+                        "fallback image creation should succeed with valid layout and backend",
+                    ),
+                },
             })
         });
         Ok(RenderLayerTree {
@@ -235,7 +327,10 @@ fn get_leaf_image_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&Imag
         }
         UiLayerNode::Leaf(leaf) => {
             if leaf.id == node_id {
-                Some(&leaf.image)
+                match &leaf.content {
+                    UiLeafContent::Raster { image } => Some(image),
+                    UiLeafContent::Special(_) => None,
+                }
             } else {
                 None
             }
@@ -255,9 +350,52 @@ fn get_leaf_image_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Opti
         }
         UiLayerNode::Leaf(leaf) => {
             if leaf.id == node_id {
-                Some(&mut leaf.image)
+                match &mut leaf.content {
+                    UiLeafContent::Raster { image } => Some(image),
+                    UiLeafContent::Special(_) => None,
+                }
             } else {
                 None
+            }
+        }
+    }
+}
+
+fn get_solid_color_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<[f32; 4]> {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            for child in &branch.children {
+                if let Some(color) = get_solid_color_from_node(child, node_id) {
+                    return Some(color);
+                }
+            }
+            None
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.id != node_id {
+                return None;
+            }
+            match leaf.content {
+                UiLeafContent::Raster { .. } => None,
+                UiLeafContent::Special(SpecialLayer::SolidColor(layer)) => Some(layer.color),
+            }
+        }
+    }
+}
+
+fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f32; 4]) -> bool {
+    match node {
+        UiLayerNode::Branch(branch) => branch
+            .children
+            .iter_mut()
+            .any(|child| set_solid_color_from_node(child, node_id, color)),
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.id != node_id {
+                return false;
+            }
+            match &mut leaf.content {
+                UiLeafContent::Raster { .. } => false,
+                UiLeafContent::Special(layer) => layer.set_solid_color(color),
             }
         }
     }
@@ -307,7 +445,7 @@ fn flatten_node(
                     },
                     kind: FlatNodeKind::Branch {
                         children: child_ids,
-                        cache: branch.cache.clone(),
+                        render_cache: branch.render_cache.clone(),
                     },
                 },
             );
@@ -315,6 +453,19 @@ fn flatten_node(
         }
         RenderLayerNode::Leaf(leaf) => {
             let id = leaf.id;
+            let kind = match &leaf.content {
+                RenderLeafContent::Raster { image } => FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Raster {
+                        image: image.clone(),
+                    },
+                },
+                RenderLeafContent::Parametric { mesh, render_cache } => FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric {
+                        mesh: mesh.clone(),
+                        render_cache: render_cache.clone(),
+                    },
+                },
+            };
             nodes.insert(
                 id,
                 FlatRenderNode {
@@ -323,9 +474,7 @@ fn flatten_node(
                         opacity: leaf.config.opacity,
                         blend_mode: leaf.config.blend_mode,
                     },
-                    kind: FlatNodeKind::Leaf {
-                        image: leaf.image.clone(),
-                    },
+                    kind,
                 },
             );
             Some(id)
@@ -338,7 +487,7 @@ fn infer_render_nodes(
     parent_opacity: f32,
     is_bottom: bool,
     leaf_backend: BackendId,
-    branch_cache_backend: BackendId,
+    render_cache_backend: BackendId,
     layout: ImageLayout,
 ) -> Result<Vec<RenderLayerNode>, ImageCreateError> {
     match node {
@@ -347,10 +496,16 @@ fn infer_render_nodes(
             parent_opacity,
             is_bottom,
             leaf_backend,
-            branch_cache_backend,
+            render_cache_backend,
             layout,
         ),
-        UiLayerNode::Leaf(leaf) => Ok(infer_render_leaf(leaf, parent_opacity, is_bottom)),
+        UiLayerNode::Leaf(leaf) => infer_render_leaf(
+            leaf,
+            parent_opacity,
+            is_bottom,
+            render_cache_backend,
+            layout,
+        ),
     }
 }
 
@@ -359,7 +514,7 @@ fn infer_render_branch(
     parent_opacity: f32,
     is_bottom: bool,
     leaf_backend: BackendId,
-    branch_cache_backend: BackendId,
+    render_cache_backend: BackendId,
     layout: ImageLayout,
 ) -> Result<Vec<RenderLayerNode>, ImageCreateError> {
     let combined_opacity = parent_opacity * branch.config.opacity;
@@ -372,7 +527,7 @@ fn infer_render_branch(
                 combined_opacity,
                 i == 0 && is_bottom,
                 leaf_backend,
-                branch_cache_backend,
+                render_cache_backend,
                 layout,
             )?;
             result.extend(nodes);
@@ -386,7 +541,7 @@ fn infer_render_branch(
             combined_opacity,
             is_bottom,
             leaf_backend,
-            branch_cache_backend,
+            render_cache_backend,
             layout,
         );
     }
@@ -398,7 +553,7 @@ fn infer_render_branch(
             1.0,
             i == 0 && is_bottom,
             leaf_backend,
-            branch_cache_backend,
+            render_cache_backend,
             layout,
         )?;
         rendered_children.extend(nodes);
@@ -413,7 +568,7 @@ fn infer_render_branch(
         BranchBlendMode::Penetrate => unreachable!(),
     };
 
-    let cache = Image::new(layout, branch_cache_backend)?;
+    let render_cache = Image::new(layout, render_cache_backend)?;
 
     Ok(vec![RenderLayerNode::Branch(RenderBranchNode {
         id: branch.id,
@@ -422,7 +577,7 @@ fn infer_render_branch(
             blend_mode: BranchBlendMode::Base(blend_mode),
         },
         children: rendered_children,
-        cache,
+        render_cache,
     })])
 }
 
@@ -430,21 +585,33 @@ fn infer_render_leaf(
     leaf: &UiLeafNode,
     parent_opacity: f32,
     is_bottom: bool,
-) -> Vec<RenderLayerNode> {
+    render_cache_backend: BackendId,
+    layout: ImageLayout,
+) -> Result<Vec<RenderLayerNode>, ImageCreateError> {
     let blend_mode = if is_bottom {
         LeafBlendMode::Normal
     } else {
         leaf.config.blend_mode
     };
 
-    vec![RenderLayerNode::Leaf(RenderLeafNode {
+    let content = match &leaf.content {
+        UiLeafContent::Raster { image } => RenderLeafContent::Raster {
+            image: image.clone(),
+        },
+        UiLeafContent::Special(layer) => RenderLeafContent::Parametric {
+            mesh: layer.to_parametric_mesh(layout),
+            render_cache: Image::new(layout, render_cache_backend)?,
+        },
+    };
+
+    Ok(vec![RenderLayerNode::Leaf(RenderLeafNode {
         id: leaf.id,
         config: LeafConfig {
             opacity: parent_opacity * leaf.config.opacity,
             blend_mode,
         },
-        image: leaf.image.clone(),
-    })]
+        content,
+    })])
 }
 
 #[derive(Clone, PartialEq)]
@@ -464,7 +631,69 @@ pub struct UiBranchNode {
 pub struct UiLeafNode {
     id: NodeId,
     config: LeafConfig,
-    image: Image,
+    content: UiLeafContent,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum UiLeafContent {
+    Raster { image: Image },
+    Special(SpecialLayer),
+}
+
+#[derive(Clone, PartialEq)]
+pub enum SpecialLayer {
+    SolidColor(SolidColorLayer),
+}
+
+impl SpecialLayer {
+    fn to_parametric_mesh(&self, layout: ImageLayout) -> ParametricMesh {
+        match self {
+            Self::SolidColor(layer) => layer.to_parametric_mesh(layout),
+        }
+    }
+
+    fn set_solid_color(&mut self, color: [f32; 4]) -> bool {
+        match self {
+            Self::SolidColor(layer) => {
+                layer.color = color;
+                true
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct SolidColorLayer {
+    color: [f32; 4],
+}
+
+impl SolidColorLayer {
+    fn to_parametric_mesh(&self, layout: ImageLayout) -> ParametricMesh {
+        let width = layout.size_x() as f32;
+        let height = layout.size_y() as f32;
+        let color = self.color;
+        ParametricMesh {
+            vertices: vec![
+                ParametricVertex {
+                    position: CanvasVec2::new(0.0, 0.0),
+                    color,
+                },
+                ParametricVertex {
+                    position: CanvasVec2::new(width, 0.0),
+                    color,
+                },
+                ParametricVertex {
+                    position: CanvasVec2::new(0.0, height),
+                    color,
+                },
+                ParametricVertex {
+                    position: CanvasVec2::new(width, height),
+                    color,
+                },
+            ],
+            indices: vec![0, 1, 2, 2, 1, 3],
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -478,14 +707,25 @@ pub struct RenderBranchNode {
     id: NodeId,
     config: BranchConfig,
     children: Vec<RenderLayerNode>,
-    cache: Image,
+    render_cache: Image,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct RenderLeafNode {
     id: NodeId,
     config: LeafConfig,
-    image: Image,
+    content: RenderLeafContent,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum RenderLeafContent {
+    Raster {
+        image: Image,
+    },
+    Parametric {
+        mesh: ParametricMesh,
+        render_cache: Image,
+    },
 }
 
 #[derive(Clone, PartialEq)]
@@ -538,7 +778,7 @@ mod tests {
                 opacity: 1.0,
                 blend_mode: LeafBlendMode::Normal,
             },
-            image: leaf_image,
+            content: UiLeafContent::Raster { image: leaf_image },
         };
 
         let ui_tree = UiLayerTree {
@@ -550,7 +790,7 @@ mod tests {
             layer_tree: ui_tree,
             layout,
             leaf_backend: BackendId::new(1),
-            branch_cache_backend: BackendId::new(2),
+            render_cache_backend: BackendId::new(2),
             next_node_id: NodeId(1),
             active_node: None,
             metadata: Metadata {
@@ -569,11 +809,13 @@ mod tests {
                     blend_mode: LeafBlendMode::Normal,
                 },
                 kind: FlatNodeKind::Leaf {
-                    image: {
-                        let mut img = Image::new(layout, BackendId::new(1)).unwrap();
-                        img.set_tile_key(0, TileKey::from_parts(1, 1, 100)).unwrap();
-                        img.set_tile_key(1, TileKey::from_parts(1, 1, 101)).unwrap();
-                        img
+                    content: FlatLeafContent::Raster {
+                        image: {
+                            let mut img = Image::new(layout, BackendId::new(1)).unwrap();
+                            img.set_tile_key(0, TileKey::from_parts(1, 1, 100)).unwrap();
+                            img.set_tile_key(1, TileKey::from_parts(1, 1, 101)).unwrap();
+                            img
+                        },
                     },
                 },
             },
@@ -600,8 +842,13 @@ mod tests {
         // Verify that both tiles are preserved correctly
         let new_node = new_tree.nodes.get(&NodeId(0)).unwrap();
         let new_image = match &new_node.kind {
-            FlatNodeKind::Leaf { image } => image,
-            FlatNodeKind::Branch { .. } => panic!("Expected leaf node"),
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Raster { image },
+            } => image,
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Parametric { .. },
+            }
+            | FlatNodeKind::Branch { .. } => panic!("Expected raster leaf node"),
         };
 
         // Tile 0 should keep its original key (from old_tree)
@@ -617,5 +864,177 @@ mod tests {
             Some(TileKey::from_parts(1, 1, 201)),
             "Tile 1 should have updated key from document"
         );
+    }
+
+    #[test]
+    fn test_flatten_preserves_parametric_mesh() {
+        let layout = ImageLayout::new(128, 128);
+        let render_cache = Image::new(layout, BackendId::new(2)).unwrap();
+        let mesh = ParametricMesh {
+            vertices: vec![
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(0.0, 0.0),
+                    color: [1.0, 0.0, 0.0, 1.0],
+                },
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(128.0, 0.0),
+                    color: [0.0, 1.0, 0.0, 1.0],
+                },
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(0.0, 128.0),
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+
+        let tree = RenderLayerTree {
+            root: RenderLayerNode::Leaf(RenderLeafNode {
+                id: NodeId(7),
+                config: LeafConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                content: RenderLeafContent::Parametric {
+                    mesh: mesh.clone(),
+                    render_cache,
+                },
+            }),
+            layout,
+        };
+
+        let flat = tree.flatten(RenderTreeGeneration(1));
+        let node = flat.nodes.get(&NodeId(7)).unwrap();
+        let flat_mesh = match &node.kind {
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Parametric { mesh, .. },
+            } => mesh,
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Raster { .. },
+            }
+            | FlatNodeKind::Branch { .. } => panic!("Expected parametric leaf node"),
+        };
+
+        assert_eq!(flat_mesh.vertices.len(), 3);
+        assert_eq!(flat_mesh.indices, vec![0, 1, 2]);
+        assert_eq!(flat_mesh, &mesh);
+    }
+
+    #[test]
+    fn test_solid_color_leaf_infers_parametric_mesh() {
+        let layout = ImageLayout::new(128, 64);
+        let tree = UiLayerTree {
+            root: UiLayerNode::Leaf(UiLeafNode {
+                id: NodeId(9),
+                config: LeafConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                content: UiLeafContent::Special(SpecialLayer::SolidColor(SolidColorLayer {
+                    color: [0.2, 0.4, 0.6, 1.0],
+                })),
+            }),
+            layout,
+        };
+
+        let render_tree = tree
+            .infer_render_tree(BackendId::new(1), BackendId::new(2))
+            .unwrap();
+        let flat = render_tree.flatten(RenderTreeGeneration(2));
+        let node = flat.nodes.get(&NodeId(9)).unwrap();
+
+        let (mesh, render_cache) = match &node.kind {
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Parametric { mesh, render_cache },
+            } => (mesh, render_cache),
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Raster { .. },
+            }
+            | FlatNodeKind::Branch { .. } => {
+                panic!("expected solid color leaf to lower to parametric")
+            }
+        };
+
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 2, 1, 3]);
+        assert_eq!(mesh.vertices[0].position, CanvasVec2::new(0.0, 0.0));
+        assert_eq!(mesh.vertices[3].position, CanvasVec2::new(128.0, 64.0));
+        assert_eq!(mesh.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
+        assert_eq!(*render_cache.layout(), layout);
+    }
+
+    #[test]
+    fn test_set_solid_color_marks_all_tiles_dirty() {
+        let layout = ImageLayout::new(256, 128);
+        let mut doc = Document::new_solid_color(
+            "solid".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+            [0.1, 0.2, 0.3, 1.0],
+        )
+        .unwrap();
+
+        let dirty = doc
+            .set_solid_color(NodeId(0), [0.7, 0.6, 0.5, 1.0])
+            .expect("solid color node should exist");
+
+        let mut keys = dirty.iter().collect::<Vec<_>>();
+        keys.sort_by_key(|key| key.tile_index);
+
+        assert_eq!(doc.get_solid_color(NodeId(0)), Some([0.7, 0.6, 0.5, 1.0]));
+        assert_eq!(keys.len(), layout.total_tiles() as usize);
+        assert_eq!(keys[0].node_id, NodeId(0));
+        assert_eq!(keys[0].tile_index, 0);
+        assert_eq!(keys[1].tile_index, 1);
+    }
+
+    #[test]
+    fn test_rebuild_after_solid_color_change_updates_mesh_color() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new_solid_color(
+            "solid".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+            [0.1, 0.2, 0.3, 1.0],
+        )
+        .unwrap();
+        doc.set_solid_color(NodeId(0), [0.8, 0.1, 0.4, 1.0]);
+
+        let flat = doc.build_flat_render_tree(RenderTreeGeneration(3)).unwrap();
+        let node = flat.nodes.get(&NodeId(0)).unwrap();
+        let mesh = match &node.kind {
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Parametric { mesh, .. },
+            } => mesh,
+            FlatNodeKind::Leaf {
+                content: FlatLeafContent::Raster { .. },
+            }
+            | FlatNodeKind::Branch { .. } => panic!("expected parametric leaf node"),
+        };
+
+        assert_eq!(mesh.vertices[0].color, [0.8, 0.1, 0.4, 1.0]);
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|vertex| vertex.color == [0.8, 0.1, 0.4, 1.0])
+        );
+    }
+
+    #[test]
+    fn test_default_document_has_white_background_and_active_raster_layer() {
+        let layout = ImageLayout::new(64, 64);
+        let doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        assert_eq!(doc.active_node(), Some(NodeId(1)));
+        assert_eq!(doc.get_solid_color(NodeId(0)), Some([1.0, 1.0, 1.0, 1.0]));
+        assert!(doc.get_leaf_image(NodeId(1)).is_some());
     }
 }

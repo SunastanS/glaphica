@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
-use document::{Document, SharedRenderTree};
+use document::{Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
@@ -125,6 +125,10 @@ struct EngineFramePerf {
     send_inline_submit: Duration,
     accept_by_app_thread: Duration,
     submit_to_gpu: Duration,
+    submit_collect_render_tree: Duration,
+    submit_materialize_parametric: Duration,
+    submit_composite_render_tree: Duration,
+    submit_queue: Duration,
     sample_count: usize,
     brush_input_count: usize,
     generated_gpu_command_count: usize,
@@ -132,6 +136,15 @@ struct EngineFramePerf {
     inline_submit_batches: usize,
     pending_send_gpu_command_count: usize,
     gpu_command_count: usize,
+    submit_parametric_cmd_count: usize,
+    submit_parametric_tile_count: usize,
+    submit_render_cmd_count: usize,
+    submit_render_tile_count: usize,
+    submit_render_source_count: usize,
+    submit_dirty_tile_count: usize,
+    submit_dirty_rect_count: usize,
+    submit_dirty_bbox_tile_area: usize,
+    submit_dirty_node_count: usize,
 }
 
 pub struct AppThreadIntegration {
@@ -351,10 +364,11 @@ impl AppThreadIntegration {
         )
         .map_err(crate::InitError::Document)?;
 
-        let initial_tree = document
-            .build_flat_render_tree(glaphica_core::RenderTreeGeneration(0))
-            .map_err(crate::InitError::Document)?;
-        let shared_tree = Arc::new(SharedRenderTree::new(initial_tree));
+        let shared_tree = Arc::new(SharedRenderTree::new(FlatRenderTree {
+            generation: glaphica_core::RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::new()),
+            root_id: None,
+        }));
 
         main_state.set_shared_tree(shared_tree.clone());
 
@@ -372,7 +386,13 @@ impl AppThreadIntegration {
         engine_state
             .backend_manager_mut()
             .add_backend(AtlasLayout::Small11)
-            .expect("failed to add branch cache backend to engine");
+            .expect("failed to add render cache backend to engine");
+        let initial_render_tree = engine_state
+            .rebuild_render_tree()
+            .map_err(crate::InitError::Document)?;
+        let _ = main_state.process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(
+            initial_render_tree,
+        )]);
 
         let (main_channels, engine_channels) = create_thread_channels(
             config::thread_channels::MAIN_TO_ENGINE_INPUT_RING,
@@ -468,6 +488,10 @@ impl AppThreadIntegration {
         self.active_stroke_color_rgb = self.current_brush_color_rgb;
         self.active_stroke_erase = self.current_brush_erase;
         self.engine_state.begin_stroke(stroke_id);
+    }
+
+    pub fn active_document_node(&self) -> Option<NodeId> {
+        self.engine_state.document().active_node()
     }
 
     pub fn set_active_brush(&mut self, brush_id: BrushId) {
@@ -655,9 +679,25 @@ impl AppThreadIntegration {
         let has_commands = !self.gpu_commands.is_empty();
         if has_commands {
             let submit_to_gpu_started = Instant::now();
-            self.main_state.process_gpu_commands(&self.gpu_commands);
+            let submit_stats = self.main_state.process_gpu_commands(&self.gpu_commands);
             if let Some(perf) = perf.as_deref_mut() {
                 perf.submit_to_gpu = submit_to_gpu_started.elapsed();
+                perf.submit_collect_render_tree = submit_stats.frame_batch.render_tree_collect;
+                perf.submit_materialize_parametric =
+                    submit_stats.frame_batch.parametric_materialize;
+                perf.submit_composite_render_tree =
+                    submit_stats.frame_batch.render_tree_composite;
+                perf.submit_queue = submit_stats.frame_batch.queue_submit;
+                perf.submit_parametric_cmd_count = submit_stats.frame_batch.parametric_cmd_count;
+                perf.submit_parametric_tile_count =
+                    submit_stats.frame_batch.parametric_dst_tile_count;
+                perf.submit_render_cmd_count = submit_stats.frame_batch.render_cmd_count;
+                perf.submit_render_tile_count = submit_stats.frame_batch.render_dst_tile_count;
+                perf.submit_render_source_count = submit_stats.frame_batch.render_source_count;
+                perf.submit_dirty_tile_count = submit_stats.dirty_tile_count;
+                perf.submit_dirty_rect_count = submit_stats.dirty_rect_count;
+                perf.submit_dirty_bbox_tile_area = submit_stats.dirty_bbox_tile_area;
+                perf.submit_dirty_node_count = submit_stats.dirty_node_count;
             }
         }
 
@@ -694,7 +734,7 @@ impl AppThreadIntegration {
         };
         self.perf_frame_seq += 1;
         eprintln!(
-            "[PERF][pipeline][engine_frame={}] total_ms={:.3} bottleneck={} ({:.3}ms) samples={} brush_inputs={} gpu_cmds={} generated_gpu_cmds={} pending_send_gpu_cmds={} inline_submit_cmds={} inline_submit_batches={} inline_submit_ms={:.3} stages_ms={{input:{:.3}, smooth_resample:{:.3}, brush:{:.3}, send:{:.3}, accept:{:.3}, submit:{:.3}}}",
+            "[PERF][pipeline][engine_frame={}] total_ms={:.3} bottleneck={} ({:.3}ms) samples={} brush_inputs={} gpu_cmds={} generated_gpu_cmds={} pending_send_gpu_cmds={} inline_submit_cmds={} inline_submit_batches={} inline_submit_ms={:.3} stages_ms={{input:{:.3}, smooth_resample:{:.3}, brush:{:.3}, send:{:.3}, accept:{:.3}, submit:{:.3}}} submit_ms={{collect:{:.3}, materialize:{:.3}, composite:{:.3}, queue:{:.3}}} dirty={{tiles:{}, rects:{}, bbox_tiles:{}, nodes:{}}} render_work={{parametric_cmds:{}, parametric_tiles:{}, render_cmds:{}, render_tiles:{}, render_sources:{}}}",
             self.perf_frame_seq,
             duration_ms(total),
             bottleneck,
@@ -713,6 +753,19 @@ impl AppThreadIntegration {
             duration_ms(perf.send_to_app_thread),
             duration_ms(perf.accept_by_app_thread),
             duration_ms(perf.submit_to_gpu),
+            duration_ms(perf.submit_collect_render_tree),
+            duration_ms(perf.submit_materialize_parametric),
+            duration_ms(perf.submit_composite_render_tree),
+            duration_ms(perf.submit_queue),
+            perf.submit_dirty_tile_count,
+            perf.submit_dirty_rect_count,
+            perf.submit_dirty_bbox_tile_area,
+            perf.submit_dirty_node_count,
+            perf.submit_parametric_cmd_count,
+            perf.submit_parametric_tile_count,
+            perf.submit_render_cmd_count,
+            perf.submit_render_tile_count,
+            perf.submit_render_source_count,
         );
     }
 
@@ -820,7 +873,8 @@ impl AppThreadIntegration {
 
     pub fn rebuild_render_tree(&mut self) -> Result<(), document::ImageCreateError> {
         let msg = self.engine_state.rebuild_render_tree()?;
-        self.main_state
+        let _ = self
+            .main_state
             .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
         Ok(())
     }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use brushes::BrushDrawInputLayout;
 use brushes::BrushLayoutRegistry;
@@ -17,6 +18,19 @@ pub struct FrameBatch {
     encoder: wgpu::CommandEncoder,
     gpu_context: Arc<GpuContext>,
     has_commands: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FrameBatchPerfStats {
+    pub render_tree_collect: Duration,
+    pub parametric_materialize: Duration,
+    pub render_tree_composite: Duration,
+    pub queue_submit: Duration,
+    pub parametric_cmd_count: usize,
+    pub parametric_dst_tile_count: usize,
+    pub render_cmd_count: usize,
+    pub render_dst_tile_count: usize,
+    pub render_source_count: usize,
 }
 
 pub struct FrameBatchContext<'a> {
@@ -228,13 +242,52 @@ impl FrameBatch {
     fn execute_render_commands(
         &mut self,
         ctx: &mut FrameBatchContext<'_>,
+        stats: &mut FrameBatchPerfStats,
     ) -> Result<(), FrameBatchError> {
         if ctx.image_dirty_tracker.is_empty() {
             return Ok(());
         }
 
+        let collect_started = std::time::Instant::now();
         let tree = ctx.shared_tree.read();
+        let parametric_cmds = tree.build_parametric_cmds(ctx.image_dirty_tracker);
         let render_cmds = tree.build_render_cmds(ctx.image_dirty_tracker);
+        stats.render_tree_collect = collect_started.elapsed();
+        stats.parametric_cmd_count = parametric_cmds.len();
+        stats.parametric_dst_tile_count = parametric_cmds
+            .iter()
+            .map(|cmd| cmd.dst_tile_keys.len())
+            .sum();
+        stats.render_cmd_count = render_cmds.len();
+        stats.render_dst_tile_count = render_cmds.iter().map(|cmd| cmd.to.len()).sum();
+        stats.render_source_count = render_cmds
+            .iter()
+            .map(|cmd| cmd.from.iter().map(|source| source.tile_keys.len()).sum::<usize>())
+            .sum();
+
+        if !parametric_cmds.is_empty() {
+            let mut render_ctx = RenderContext {
+                gpu_context: ctx.gpu_context,
+                atlas_storage: ctx.atlas_storage,
+            };
+
+            let materialize_started = std::time::Instant::now();
+            ctx.render_executor
+                .materialize_parametric_with_encoder(
+                    &mut self.encoder,
+                    &mut render_ctx,
+                    &parametric_cmds,
+                )
+                .map_err(FrameBatchError::RenderError)?;
+            stats.parametric_materialize = materialize_started.elapsed();
+
+            for cmd in &parametric_cmds {
+                for &dst_tile_key in &cmd.dst_tile_keys {
+                    ctx.tile_dirty_tracker.mark(dst_tile_key);
+                }
+            }
+            self.has_commands = true;
+        }
 
         if !render_cmds.is_empty() {
             let mut render_ctx = RenderContext {
@@ -242,9 +295,11 @@ impl FrameBatch {
                 atlas_storage: ctx.atlas_storage,
             };
 
+            let composite_started = std::time::Instant::now();
             ctx.render_executor
                 .execute_with_encoder(&mut self.encoder, &mut render_ctx, &render_cmds)
                 .map_err(FrameBatchError::RenderError)?;
+            stats.render_tree_composite = composite_started.elapsed();
 
             self.has_commands = true;
         }
@@ -263,11 +318,17 @@ impl FrameBatch {
         self.submit()
     }
 
-    pub fn finish(mut self, ctx: &mut FrameBatchContext<'_>) -> Result<(), FrameBatchError> {
-        self.execute_render_commands(ctx)?;
+    pub fn finish(
+        mut self,
+        ctx: &mut FrameBatchContext<'_>,
+    ) -> Result<(Option<wgpu::SubmissionIndex>, FrameBatchPerfStats), FrameBatchError> {
+        let mut stats = FrameBatchPerfStats::default();
+        self.execute_render_commands(ctx, &mut stats)?;
         ctx.image_dirty_tracker.clear();
         ctx.tile_dirty_tracker.clear();
-        let _ = self.submit();
-        Ok(())
+        let submit_started = std::time::Instant::now();
+        let submission = self.submit();
+        stats.queue_submit = submit_started.elapsed();
+        Ok((submission, stats))
     }
 }

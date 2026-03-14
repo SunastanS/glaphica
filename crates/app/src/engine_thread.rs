@@ -1,6 +1,6 @@
 use atlas::BackendManager;
 use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
-use document::{Document, SharedRenderTree};
+use document::{Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{
     BackendId, BrushId, BrushInput, NodeId, RenderTreeGeneration, StrokeId, TileKey,
 };
@@ -262,15 +262,71 @@ impl EngineThreadState {
         let new_generation = RenderTreeGeneration(generation.0 + 1);
 
         let old_tree = self.shared_tree.read();
-        let new_tree = self.document.build_flat_render_tree(new_generation)?;
+        let mut new_tree = self.document.build_flat_render_tree(new_generation)?;
+        allocate_missing_render_cache_tiles(&mut new_tree, &mut self.backend_manager);
 
-        let dirty_branch_caches = new_tree.diff_branch_cache_dirty(&old_tree);
+        let dirty_render_caches = new_tree.diff_render_cache_dirty(&old_tree);
 
         self.shared_tree.update(new_tree);
 
         Ok(thread_protocol::RenderTreeUpdatedMsg {
             generation: new_generation,
-            dirty_branch_caches,
+            dirty_render_caches,
         })
     }
+}
+
+fn allocate_missing_render_cache_tiles(
+    tree: &mut FlatRenderTree,
+    backend_manager: &mut EngineBackendManager,
+) {
+    let mut parities = std::collections::HashMap::new();
+    for node_id in tree.nodes.keys().copied() {
+        cache_node_parity(tree, node_id, &mut parities);
+    }
+    let nodes = Arc::make_mut(&mut tree.nodes);
+    for (node_id, node) in nodes.iter_mut() {
+        let Some(render_cache) = node.kind.render_cache_mut() else {
+            continue;
+        };
+        let parity = *parities.get(node_id).unwrap_or(&false);
+        for tile_index in 0..render_cache.tile_count() {
+            let Some(tile_key) = render_cache.tile_key(tile_index) else {
+                continue;
+            };
+            if tile_key != TileKey::EMPTY {
+                continue;
+            }
+            let Some(new_tile_key) = backend_manager.alloc_with_parity(render_cache.backend(), parity)
+            else {
+                eprintln!(
+                    "failed to allocate render cache tile for node={} tile_index={tile_index} parity={parity}",
+                    node_id.0,
+                );
+                continue;
+            };
+            if let Err(error) = render_cache.set_tile_key(tile_index, new_tile_key) {
+                eprintln!(
+                    "failed to assign render cache tile for node={} tile_index={tile_index}: {error}",
+                    node_id.0
+                );
+            }
+        }
+    }
+}
+
+fn cache_node_parity(
+    tree: &FlatRenderTree,
+    node_id: NodeId,
+    memo: &mut std::collections::HashMap<NodeId, bool>,
+) -> bool {
+    if let Some(&parity) = memo.get(&node_id) {
+        return parity;
+    }
+    let parity = match tree.nodes.get(&node_id).and_then(|node| node.parent_id) {
+        Some(parent_id) => !cache_node_parity(tree, parent_id, memo),
+        None => false,
+    };
+    memo.insert(node_id, parity);
+    parity
 }

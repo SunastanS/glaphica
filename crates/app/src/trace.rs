@@ -209,7 +209,7 @@ pub struct TraceClearOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceRenderTreeUpdatedMsg {
     pub generation: u64,
-    pub dirty_branch_caches: Vec<u64>,
+    pub dirty_render_caches: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,8 +492,8 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
             GpuCmdMsg::RenderTreeUpdated(message) => {
                 Self::RenderTreeUpdated(TraceRenderTreeUpdatedMsg {
                     generation: message.generation.0,
-                    dirty_branch_caches: message
-                        .dirty_branch_caches
+                    dirty_render_caches: message
+                        .dirty_render_caches
                         .into_iter()
                         .map(|node_id| node_id.0)
                         .collect(),
@@ -591,8 +591,8 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
             TraceGpuCmd::RenderTreeUpdated(message) => {
                 Self::RenderTreeUpdated(RenderTreeUpdatedMsg {
                     generation: RenderTreeGeneration(message.generation),
-                    dirty_branch_caches: message
-                        .dirty_branch_caches
+                    dirty_render_caches: message
+                        .dirty_render_caches
                         .into_iter()
                         .map(NodeId)
                         .collect(),

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use glaphica_core::{ImageDirtyTracker, NodeId, RenderTreeGeneration, TileKey};
+use glaphica_core::{CanvasVec2, ImageDirtyTracker, NodeId, RenderTreeGeneration, TileKey};
 use images::Image;
 
 use crate::LeafBlendMode;
@@ -17,6 +17,14 @@ pub struct RenderCmd {
     pub to: Vec<TileKey>,
 }
 
+pub struct MaterializeParametricCmd {
+    pub node_id: NodeId,
+    pub mesh: ParametricMesh,
+    pub tile_indices: Vec<usize>,
+    pub tile_origins: Vec<CanvasVec2>,
+    pub dst_tile_keys: Vec<TileKey>,
+}
+
 pub struct FlatRenderTree {
     pub generation: RenderTreeGeneration,
     pub nodes: Arc<HashMap<NodeId, FlatRenderNode>>,
@@ -24,6 +32,34 @@ pub struct FlatRenderTree {
 }
 
 impl FlatRenderTree {
+    pub fn build_parametric_cmds(
+        &self,
+        dirty: &ImageDirtyTracker,
+    ) -> Vec<MaterializeParametricCmd> {
+        let mut groups: HashMap<NodeId, Vec<usize>> = HashMap::new();
+
+        for key in dirty.iter() {
+            let Some(node) = self.nodes.get(&key.node_id) else {
+                continue;
+            };
+            let FlatNodeKind::Leaf {
+                content: FlatLeafContent::Parametric { .. },
+            } = &node.kind
+            else {
+                continue;
+            };
+            groups.entry(key.node_id).or_default().push(key.tile_index);
+        }
+
+        let mut cmds = Vec::new();
+        for (node_id, tile_indices) in groups {
+            if let Some(cmd) = self.build_parametric_cmd(node_id, &tile_indices) {
+                cmds.push(cmd);
+            }
+        }
+        cmds
+    }
+
     pub fn build_render_cmds(&self, dirty: &ImageDirtyTracker) -> Vec<RenderCmd> {
         let mut groups: HashMap<NodeId, Vec<usize>> = HashMap::new();
 
@@ -44,14 +80,15 @@ impl FlatRenderTree {
         cmds
     }
 
-    pub fn diff_branch_cache_dirty(&self, old: &FlatRenderTree) -> Vec<NodeId> {
+    //TODO: we need somewhat store the render diff while building it.
+    pub fn diff_render_cache_dirty(&self, old: &FlatRenderTree) -> Vec<NodeId> {
         let mut dirty = Vec::new();
 
         for (node_id, node) in &*self.nodes {
             let old_node = match old.nodes.get(node_id) {
                 Some(n) => n,
                 None => {
-                    if matches!(node.kind, FlatNodeKind::Branch { .. }) {
+                    if node.kind.render_cache().is_some() {
                         dirty.push(*node_id);
                     }
                     continue;
@@ -92,25 +129,40 @@ impl FlatRenderTree {
                 }
                 a_children == b_children
             }
-            (FlatNodeKind::Leaf { .. }, FlatNodeKind::Leaf { .. }) => true,
+            (
+                FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Raster { .. },
+                },
+                FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Raster { .. },
+                },
+            ) => true,
+            (
+                FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric { mesh: a_mesh, .. },
+                },
+                FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric { mesh: b_mesh, .. },
+                },
+            ) => a_mesh == b_mesh,
             _ => false,
         }
     }
 
     fn build_render_cmd(&self, branch_id: NodeId, tile_indices: &[usize]) -> Option<RenderCmd> {
         let branch = self.nodes.get(&branch_id)?;
-        let (children, cache) = match &branch.kind {
-            FlatNodeKind::Branch { children, cache } => (children, cache),
+        let (children, render_cache) = match &branch.kind {
+            FlatNodeKind::Branch {
+                children,
+                render_cache,
+            } => (children, render_cache),
             FlatNodeKind::Leaf { .. } => return None,
         };
 
         let mut from: Vec<RenderSource> = Vec::with_capacity(children.len());
         for &child_id in children {
             let child = self.nodes.get(&child_id)?;
-            let image = match &child.kind {
-                FlatNodeKind::Leaf { image } => image,
-                FlatNodeKind::Branch { cache, .. } => cache,
-            };
+            let image = child.kind.render_image()?;
 
             let mut tile_keys = Vec::with_capacity(tile_indices.len());
             for &idx in tile_indices {
@@ -126,11 +178,55 @@ impl FlatRenderTree {
 
         let mut to = Vec::with_capacity(tile_indices.len());
         for &idx in tile_indices {
-            let key = cache.tile_key(idx).unwrap_or(TileKey::EMPTY);
+            let key = render_cache.tile_key(idx).unwrap_or(TileKey::EMPTY);
             to.push(key);
         }
 
         Some(RenderCmd { from, to })
+    }
+
+    fn build_parametric_cmd(
+        &self,
+        node_id: NodeId,
+        tile_indices: &[usize],
+    ) -> Option<MaterializeParametricCmd> {
+        let node = self.nodes.get(&node_id)?;
+        let FlatNodeKind::Leaf {
+            content: FlatLeafContent::Parametric { mesh, render_cache },
+        } = &node.kind
+        else {
+            return None;
+        };
+
+        let mut filtered_indices = Vec::with_capacity(tile_indices.len());
+        let mut tile_origins = Vec::with_capacity(tile_indices.len());
+        let mut dst_tile_keys = Vec::with_capacity(tile_indices.len());
+        for &tile_index in tile_indices {
+            let Some(dst_tile_key) = render_cache.tile_key(tile_index) else {
+                continue;
+            };
+            if dst_tile_key == TileKey::EMPTY {
+                continue;
+            }
+            let Some(tile_origin) = render_cache.tile_canvas_origin(tile_index) else {
+                continue;
+            };
+            filtered_indices.push(tile_index);
+            tile_origins.push(tile_origin);
+            dst_tile_keys.push(dst_tile_key);
+        }
+
+        if dst_tile_keys.is_empty() {
+            return None;
+        }
+
+        Some(MaterializeParametricCmd {
+            node_id,
+            mesh: mesh.clone(),
+            tile_indices: filtered_indices,
+            tile_origins,
+            dst_tile_keys,
+        })
     }
 }
 
@@ -149,8 +245,103 @@ pub struct NodeConfig {
 
 #[derive(Clone)]
 pub enum FlatNodeKind {
-    Leaf { image: Image },
-    Branch { children: Vec<NodeId>, cache: Image },
+    Leaf {
+        content: FlatLeafContent,
+    },
+    Branch {
+        children: Vec<NodeId>,
+        render_cache: Image,
+    },
+}
+
+#[derive(Clone)]
+pub enum FlatLeafContent {
+    Raster {
+        image: Image,
+    },
+    Parametric {
+        mesh: ParametricMesh,
+        render_cache: Image,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParametricMesh {
+    pub vertices: Vec<ParametricVertex>,
+    pub indices: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ParametricVertex {
+    pub position: CanvasVec2,
+    pub color: [f32; 4],
+}
+
+impl FlatNodeKind {
+    pub fn render_image(&self) -> Option<&Image> {
+        match self {
+            Self::Leaf { content } => content.render_image(),
+            Self::Branch { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn render_image_mut(&mut self) -> Option<&mut Image> {
+        match self {
+            Self::Leaf { content } => content.render_image_mut(),
+            Self::Branch { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn render_cache(&self) -> Option<&Image> {
+        match self {
+            Self::Leaf { content } => content.render_cache(),
+            Self::Branch { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn render_cache_mut(&mut self) -> Option<&mut Image> {
+        match self {
+            Self::Leaf { content } => content.render_cache_mut(),
+            Self::Branch { render_cache, .. } => Some(render_cache),
+        }
+    }
+}
+
+impl FlatLeafContent {
+    pub fn render_image(&self) -> Option<&Image> {
+        match self {
+            Self::Raster { image } => Some(image),
+            Self::Parametric { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn render_image_mut(&mut self) -> Option<&mut Image> {
+        match self {
+            Self::Raster { image } => Some(image),
+            Self::Parametric { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn render_cache(&self) -> Option<&Image> {
+        match self {
+            Self::Raster { .. } => None,
+            Self::Parametric { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn render_cache_mut(&mut self) -> Option<&mut Image> {
+        match self {
+            Self::Raster { .. } => None,
+            Self::Parametric { render_cache, .. } => Some(render_cache),
+        }
+    }
+
+    pub fn parametric_mesh(&self) -> Option<&ParametricMesh> {
+        match self {
+            Self::Raster { .. } => None,
+            Self::Parametric { mesh, .. } => Some(mesh),
+        }
+    }
 }
 
 pub struct SharedRenderTree {
@@ -206,12 +397,12 @@ mod tests {
             .set_tile_key(1, TileKey::from_parts(2, 1, 201))
             .unwrap();
 
-        // Branch cache
-        let mut cache_image = Image::new(layout, BackendId::new(3)).unwrap();
-        cache_image
+        // Render cache
+        let mut render_cache = Image::new(layout, BackendId::new(3)).unwrap();
+        render_cache
             .set_tile_key(0, TileKey::from_parts(3, 1, 300))
             .unwrap();
-        cache_image
+        render_cache
             .set_tile_key(1, TileKey::from_parts(3, 1, 301))
             .unwrap();
 
@@ -227,7 +418,9 @@ mod tests {
                     blend_mode: LeafBlendMode::Normal,
                 },
                 kind: FlatNodeKind::Leaf {
-                    image: child1_image,
+                    content: FlatLeafContent::Raster {
+                        image: child1_image,
+                    },
                 },
             },
         );
@@ -241,7 +434,9 @@ mod tests {
                     blend_mode: LeafBlendMode::Normal,
                 },
                 kind: FlatNodeKind::Leaf {
-                    image: child2_image,
+                    content: FlatLeafContent::Raster {
+                        image: child2_image,
+                    },
                 },
             },
         );
@@ -257,7 +452,7 @@ mod tests {
                 },
                 kind: FlatNodeKind::Branch {
                     children: vec![NodeId(1), NodeId(2)],
-                    cache: cache_image,
+                    render_cache,
                 },
             },
         );
@@ -306,6 +501,133 @@ mod tests {
             cmds[0].from[1].tile_keys.len(),
             2,
             "Source 2 should have 2 tile keys"
+        );
+    }
+
+    #[test]
+    fn test_raster_dirty_under_parametric_background_does_not_materialize_background() {
+        let layout = ImageLayout::new(256, 128);
+
+        let mut background_cache = Image::new(layout, BackendId::new(1)).unwrap();
+        background_cache
+            .set_tile_key(0, TileKey::from_parts(1, 0, 10))
+            .unwrap();
+        background_cache
+            .set_tile_key(1, TileKey::from_parts(1, 0, 11))
+            .unwrap();
+
+        let background_mesh = ParametricMesh {
+            vertices: vec![
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(0.0, 0.0),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(256.0, 0.0),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(0.0, 128.0),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                ParametricVertex {
+                    position: glaphica_core::CanvasVec2::new(256.0, 128.0),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2, 2, 1, 3],
+        };
+
+        let mut raster_image = Image::new(layout, BackendId::new(2)).unwrap();
+        raster_image
+            .set_tile_key(0, TileKey::from_parts(2, 0, 20))
+            .unwrap();
+        raster_image
+            .set_tile_key(1, TileKey::from_parts(2, 0, 21))
+            .unwrap();
+
+        let mut root_cache = Image::new(layout, BackendId::new(3)).unwrap();
+        root_cache
+            .set_tile_key(0, TileKey::from_parts(3, 0, 30))
+            .unwrap();
+        root_cache
+            .set_tile_key(1, TileKey::from_parts(3, 0, 31))
+            .unwrap();
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            NodeId(1),
+            FlatRenderNode {
+                parent_id: Some(NodeId(100)),
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric {
+                        mesh: background_mesh,
+                        render_cache: background_cache,
+                    },
+                },
+            },
+        );
+        nodes.insert(
+            NodeId(2),
+            FlatRenderNode {
+                parent_id: Some(NodeId(100)),
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Raster { image: raster_image },
+                },
+            },
+        );
+        nodes.insert(
+            NodeId(100),
+            FlatRenderNode {
+                parent_id: None,
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Branch {
+                    children: vec![NodeId(1), NodeId(2)],
+                    render_cache: root_cache,
+                },
+            },
+        );
+
+        let tree = FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(nodes),
+            root_id: Some(NodeId(100)),
+        };
+
+        let mut dirty_tracker = ImageDirtyTracker::default();
+        dirty_tracker.mark(NodeId(2), 0);
+        dirty_tracker.mark(NodeId(2), 1);
+
+        let parametric_cmds = tree.build_parametric_cmds(&dirty_tracker);
+        let render_cmds = tree.build_render_cmds(&dirty_tracker);
+
+        assert!(
+            parametric_cmds.is_empty(),
+            "raster-only dirty should not re-materialize parametric background"
+        );
+        assert_eq!(render_cmds.len(), 1, "should only composite the root branch");
+        assert_eq!(render_cmds[0].to.len(), 2, "should composite only dirty raster tiles");
+        assert_eq!(render_cmds[0].from.len(), 2, "root should still see both child layers");
+        assert_eq!(
+            render_cmds[0].from[0].tile_keys,
+            vec![TileKey::from_parts(1, 0, 10), TileKey::from_parts(1, 0, 11)],
+            "background should be read from its stable render cache"
+        );
+        assert_eq!(
+            render_cmds[0].from[1].tile_keys,
+            vec![TileKey::from_parts(2, 0, 20), TileKey::from_parts(2, 0, 21)],
+            "foreground raster tiles should be read directly from the raster image"
         );
     }
 }
