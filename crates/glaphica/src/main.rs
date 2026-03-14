@@ -1,22 +1,23 @@
+mod components;
+mod egui_renderer;
+mod theme;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-mod egui_renderer;
-
 use app::{AppThreadIntegration, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
-use brushes::{
-    BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint,
-    eval_unit_interval_curve_polynomial,
-};
-use document::{NewLayerKind, UiLayerTreeItem, UiNodeKind};
-use egui::{Color32, Pos2, Rect, Sense, Shape, SidePanel, Stroke, TopBottomPanel, vec2};
+use brushes::{BrushConfigItem, BrushConfigValue};
+use components::{ConfigPanel, Sidebar, StatusBar};
+use document::{NewLayerKind, UiLayerTreeItem};
+use egui::Rect;
 use egui_renderer::EguiRenderer;
 use glaphica_core::{BrushId, CanvasVec2, InputDeviceKind, MappedCursor, NodeId, RadianVec2};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
+use theme::Theme;
 use thread_protocol::InputRingSample;
 use winit::{
     application::ApplicationHandler,
@@ -646,6 +647,7 @@ struct EguiOverlay {
     ctx: egui::Context,
     state: egui_winit::State,
     renderer: EguiRenderer,
+    theme: Theme,
     left_panel_collapsed: bool,
     right_panel_collapsed: bool,
     brush_states: Vec<BrushUiState>,
@@ -687,6 +689,7 @@ impl EguiOverlay {
             ctx,
             state,
             renderer,
+            theme: Theme::dark(),
             left_panel_collapsed: false,
             right_panel_collapsed: false,
             brush_states,
@@ -790,6 +793,7 @@ impl EguiOverlay {
         target_height: u32,
     ) {
         let raw_input = self.state.take_egui_input(window);
+        let theme = &self.theme;
         let left_panel_collapsed = &mut self.left_panel_collapsed;
         let right_panel_collapsed = &mut self.right_panel_collapsed;
         let brush_states = &mut self.brush_states;
@@ -802,284 +806,66 @@ impl EguiOverlay {
         let pending_group_create = &mut self.pending_group_create;
         let pending_layer_move = &mut self.pending_layer_move;
         let config_panel_rect = &mut self.config_panel_rect;
+
         let full_output = self.ctx.run(raw_input, |ctx| {
-            if *left_panel_collapsed {
-                SidePanel::left("overlay-left-panel-collapsed")
-                    .resizable(false)
-                    .exact_width(28.0)
-                    .frame(egui::Frame::default().fill(Color32::from_rgb(26, 26, 26)))
-                    .show(ctx, |ui| {
-                        if ui.button(">").clicked() {
-                            *left_panel_collapsed = false;
-                        }
-                    });
-            } else {
-                SidePanel::left("overlay-left-panel")
-                    .resizable(true)
-                    .default_width(220.0)
-                    .min_width(180.0)
-                    .max_width(360.0)
-                    .frame(egui::Frame::default().fill(Color32::from_rgb(26, 26, 26)))
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.heading("Tools");
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("<").clicked() {
-                                        *left_panel_collapsed = true;
-                                    }
-                                },
-                            );
-                        });
-                        ui.separator();
-                        ui.label("Brushes");
-                        ui.label("Edit in right panel");
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Layers");
-                            if ui.small_button("+ Raster").clicked() {
-                                *pending_layer_create = Some(NewLayerKind::Raster);
-                            }
-                            if ui.small_button("+ Solid").clicked() {
-                                *pending_layer_create = Some(NewLayerKind::SolidColor {
-                                    color: [1.0, 1.0, 1.0, 1.0],
-                                });
-                            }
-                            if ui.small_button("+ Group").clicked() {
-                                *pending_group_create = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Up").clicked() {
-                                *pending_layer_move = Some(LayerMoveDirection::Up);
-                            }
-                            if ui.small_button("Down").clicked() {
-                                *pending_layer_move = Some(LayerMoveDirection::Down);
-                            }
-                        });
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .max_height(280.0)
-                            .show(ui, |ui| {
-                                for item in layer_tree_items {
-                                    render_layer_tree_item(
-                                        ui,
-                                        item,
-                                        *selected_node,
-                                        pending_layer_select,
-                                    );
-                                }
-                            });
-                    });
-            }
-            if *right_panel_collapsed {
-                *config_panel_rect = None;
-                SidePanel::right("overlay-right-panel-collapsed")
-                    .resizable(false)
-                    .exact_width(28.0)
-                    .frame(egui::Frame::default().fill(Color32::from_rgb(26, 26, 26)))
-                    .show(ctx, |ui| {
-                        if ui.button("<").clicked() {
-                            *right_panel_collapsed = false;
-                        }
-                    });
-            } else {
-                let panel = SidePanel::right("overlay-right-panel")
-                    .resizable(true)
-                    .default_width(240.0)
-                    .min_width(180.0)
-                    .max_width(420.0)
-                    .frame(egui::Frame::default().fill(Color32::from_rgb(26, 26, 26)))
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui.button(">").clicked() {
-                                *right_panel_collapsed = true;
-                            }
-                            ui.heading("Brush Config");
-                        });
-                        ui.separator();
-                        let previous_index = *selected_brush_index;
-                        let selected_label = brush_states
-                            .get(*selected_brush_index)
-                            .map(|state| state.kind.label())
-                            .unwrap_or("Unknown");
-                        egui::ComboBox::from_label("Engine")
-                            .selected_text(selected_label)
-                            .show_ui(ui, |ui| {
-                                for kind in BrushKind::ALL {
-                                    if let Some(index) =
-                                        brush_states.iter().position(|state| state.kind == kind)
-                                        && ui
-                                            .selectable_label(
-                                                *selected_brush_index == index,
-                                                kind.label(),
-                                            )
-                                            .clicked()
-                                    {
-                                        *selected_brush_index = index;
-                                    }
-                                }
-                            });
-                        if previous_index != *selected_brush_index
-                            && pending_brush_update.is_none()
-                            && brush_states
-                                .get(previous_index)
-                                .map(|state| state.dirty)
-                                .unwrap_or(false)
-                        {
-                            let previous = &mut brush_states[previous_index];
-                            previous.dirty = false;
-                            *pending_brush_update = Some((previous.kind, previous.values.clone()));
-                        }
-                        if let Some(brush_state) = brush_states.get_mut(*selected_brush_index) {
-                            ui.separator();
-                            egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    ui.group(|ui| {
-                                        ui.label("Color");
-                                        ui.checkbox(&mut brush_state.eraser, "Eraser");
-                                        let mut srgb = [
-                                            (brush_state.color_rgb[0].clamp(0.0, 1.0) * 255.0)
-                                                .round()
-                                                as u8,
-                                            (brush_state.color_rgb[1].clamp(0.0, 1.0) * 255.0)
-                                                .round()
-                                                as u8,
-                                            (brush_state.color_rgb[2].clamp(0.0, 1.0) * 255.0)
-                                                .round()
-                                                as u8,
-                                        ];
-                                        if ui.color_edit_button_srgb(&mut srgb).changed() {
-                                            brush_state.color_rgb = [
-                                                f32::from(srgb[0]) / 255.0,
-                                                f32::from(srgb[1]) / 255.0,
-                                                f32::from(srgb[2]) / 255.0,
-                                            ];
-                                        }
-                                    });
-                                    ui.add_space(8.0);
+            let sidebar = Sidebar::new(*left_panel_collapsed, layer_tree_items, *selected_node);
+            let sidebar_output = sidebar.render(ctx, theme);
 
-                                    ui.horizontal(|ui| {
-                                        let hidden_items = brush_state
-                                            .items
-                                            .iter()
-                                            .zip(brush_state.visible.iter())
-                                            .enumerate()
-                                            .filter(|(_, (item, visible))| {
-                                                item.default_hidden && !**visible
-                                            })
-                                            .map(|(index, (item, _))| (index, item.label))
-                                            .collect::<Vec<_>>();
-                                        ui.add_enabled_ui(!hidden_items.is_empty(), |ui| {
-                                            ui.menu_button("+", |ui| {
-                                                for (index, label) in &hidden_items {
-                                                    if ui.button(*label).clicked() {
-                                                        if let Some(visible) =
-                                                            brush_state.visible.get_mut(*index)
-                                                        {
-                                                            *visible = true;
-                                                            brush_state.dirty = true;
-                                                        }
-                                                        ui.close();
-                                                    }
-                                                }
-                                            });
-                                        });
-                                        if ui.button("Reset").clicked() {
-                                            brush_state.reset();
-                                        }
-                                        if ui.button("Apply").clicked() {
-                                            brush_state.dirty = false;
-                                            *pending_brush_update = Some((
-                                                brush_state.kind,
-                                                brush_state.values.clone(),
-                                            ));
-                                        }
-                                    });
-                                    ui.separator();
-
-                                    for index in 0..brush_state.items.len() {
-                                        if !brush_state.visible.get(index).copied().unwrap_or(false)
-                                        {
-                                            continue;
-                                        }
-                                        let item_key = brush_state.items[index].key;
-                                        let item_label = brush_state.items[index].label;
-                                        let default_hidden =
-                                            brush_state.items[index].default_hidden;
-                                        let item_kind = brush_state.items[index].kind.clone();
-                                        ui.group(|ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.label(item_label);
-                                                if default_hidden
-                                                    && ui.small_button("Hide").clicked()
-                                                    && let Some(visible) =
-                                                        brush_state.visible.get_mut(index)
-                                                {
-                                                    *visible = false;
-                                                    brush_state.dirty = true;
-                                                }
-                                            });
-                                            match (&item_kind, &mut brush_state.values[index]) {
-                                                (
-                                                    BrushConfigKind::ScalarF32 { min, max },
-                                                    BrushConfigValue::ScalarF32(current),
-                                                ) => {
-                                                    render_scalar_config(
-                                                        ui,
-                                                        item_key,
-                                                        current,
-                                                        *min,
-                                                        *max,
-                                                        &mut brush_state.dirty,
-                                                    );
-                                                }
-                                                (
-                                                    BrushConfigKind::UnitIntervalCurve,
-                                                    BrushConfigValue::UnitIntervalCurve(points),
-                                                ) => {
-                                                    render_curve_config(
-                                                        ui,
-                                                        item_key,
-                                                        points,
-                                                        &mut brush_state.dirty,
-                                                    );
-                                                }
-                                                _ => {
-                                                    ui.colored_label(
-                                                        Color32::from_rgb(220, 90, 90),
-                                                        "Config type mismatch",
-                                                    );
-                                                }
-                                            }
-                                        });
-                                        ui.add_space(8.0);
-                                    }
-                                });
-                        }
-                    });
-                *config_panel_rect = Some(panel.response.rect);
+            if sidebar_output.toggle_collapse {
+                *left_panel_collapsed = !*left_panel_collapsed;
             }
-            TopBottomPanel::bottom("overlay-bottom-bar")
-                .exact_height(48.0)
-                .frame(egui::Frame::default().fill(Color32::from_rgb(20, 20, 20)))
-                .show(ctx, |_ui| {});
+            if let Some(kind) = sidebar_output.create_layer {
+                *pending_layer_create = Some(kind);
+            }
+            if sidebar_output.create_group {
+                *pending_group_create = true;
+            }
+            if let Some(node_id) = sidebar_output.select_layer {
+                *pending_layer_select = Some(node_id);
+            }
+            if sidebar_output.move_layer_up {
+                *pending_layer_move = Some(LayerMoveDirection::Up);
+            }
+            if sidebar_output.move_layer_down {
+                *pending_layer_move = Some(LayerMoveDirection::Down);
+            }
+
+            let mut config_panel = ConfigPanel::new(
+                *right_panel_collapsed,
+                brush_states,
+                *selected_brush_index,
+            );
+            let config_output = config_panel.render(ctx, theme);
+
+            if config_output.toggle_collapse {
+                *right_panel_collapsed = !*right_panel_collapsed;
+            }
+            if let Some((kind, values)) = config_output.pending_brush_update {
+                *pending_brush_update = Some((kind, values));
+            }
+            if config_output.brush_selection_changed {
+                if let Some(new_index) = config_output.new_selected_index {
+                    *selected_brush_index = new_index;
+                }
+            }
+            *config_panel_rect = config_output.panel_rect;
+
+            StatusBar::render(ctx, theme);
         });
+
         self.state
             .handle_platform_output(window, full_output.platform_output);
 
         let pointer_pos = self.ctx.input(|input| input.pointer.latest_pos());
-        if pending_brush_update.is_none()
+        if self.pending_brush_update.is_none()
             && let (Some(rect), Some(pointer_pos)) = (*config_panel_rect, pointer_pos)
             && !rect.contains(pointer_pos)
-            && let Some(brush_state) = brush_states.get(*selected_brush_index)
+            && let Some(brush_state) = self.brush_states.get(self.selected_brush_index)
             && brush_state.dirty
         {
-            let brush_state = &mut brush_states[*selected_brush_index];
+            let brush_state = &mut self.brush_states[self.selected_brush_index];
             brush_state.dirty = false;
-            *pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
+            self.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
         }
 
         if target_width == 0 || target_height == 0 {
@@ -1100,212 +886,6 @@ impl EguiOverlay {
             full_output.pixels_per_point,
         );
     }
-}
-
-fn render_layer_tree_item(
-    ui: &mut egui::Ui,
-    item: &UiLayerTreeItem,
-    selected_node: Option<NodeId>,
-    pending_layer_select: &mut Option<NodeId>,
-) {
-    let prefix = match item.kind {
-        UiNodeKind::Branch => "[G] ",
-        UiNodeKind::RasterLayer => "",
-        UiNodeKind::SpecialLayer => "[S] ",
-    };
-    let label = format!("{prefix}{}", item.label);
-    if item.children.is_empty() {
-        if ui
-            .selectable_label(selected_node == Some(item.id), label)
-            .clicked()
-        {
-            *pending_layer_select = Some(item.id);
-        }
-        return;
-    }
-
-    egui::CollapsingHeader::new(label)
-        .default_open(true)
-        .show(ui, |ui| {
-            if ui
-                .selectable_label(selected_node == Some(item.id), "Select Group")
-                .clicked()
-            {
-                *pending_layer_select = Some(item.id);
-            }
-            for child in &item.children {
-                render_layer_tree_item(ui, child, selected_node, pending_layer_select);
-            }
-        });
-}
-
-fn render_scalar_config(
-    ui: &mut egui::Ui,
-    key: &'static str,
-    value: &mut f32,
-    min: f32,
-    max: f32,
-    dirty: &mut bool,
-) {
-    ui.push_id(key, |ui| {
-        if ui
-            .add(egui::Slider::new(value, min..=max).show_value(true))
-            .changed()
-        {
-            *dirty = true;
-        }
-    });
-}
-
-fn render_curve_config(
-    ui: &mut egui::Ui,
-    key: &'static str,
-    points: &mut Vec<UnitIntervalPoint>,
-    dirty: &mut bool,
-) {
-    ui.push_id(key, |ui| {
-        ui.horizontal(|ui| {
-            if ui.small_button("+ point").clicked() {
-                insert_curve_point(points);
-                *dirty = true;
-            }
-            if points.len() > 2 && ui.small_button("- point").clicked() {
-                points.remove(points.len().saturating_sub(2));
-                *dirty = true;
-            }
-        });
-
-        let desired_size = vec2(ui.available_width().max(120.0), 160.0);
-        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        paint_curve_editor(&painter, rect, points);
-        interact_with_curve(ui, key, rect, &response, points, dirty);
-    });
-}
-
-fn insert_curve_point(points: &mut Vec<UnitIntervalPoint>) {
-    if points.len() < 2 {
-        points.push(UnitIntervalPoint::new(1.0, 1.0));
-        return;
-    }
-
-    let mut insert_index = 1usize;
-    let mut max_gap = 0.0f32;
-    for index in 0..points.len() - 1 {
-        let gap = points[index + 1].x - points[index].x;
-        if gap > max_gap {
-            max_gap = gap;
-            insert_index = index + 1;
-        }
-    }
-    let prev = points[insert_index - 1];
-    let next = points[insert_index];
-    points.insert(
-        insert_index,
-        UnitIntervalPoint::new((prev.x + next.x) * 0.5, (prev.y + next.y) * 0.5),
-    );
-}
-
-fn paint_curve_editor(painter: &egui::Painter, rect: Rect, points: &[UnitIntervalPoint]) {
-    let bg = Color32::from_rgb(18, 18, 18);
-    let grid = Color32::from_rgb(48, 48, 48);
-    let line = Color32::from_rgb(128, 214, 255);
-    let point_fill = Color32::from_rgb(244, 174, 68);
-    let point_stroke = Stroke::new(1.0, Color32::BLACK);
-
-    painter.rect_filled(rect, 6.0, bg);
-    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, grid), egui::StrokeKind::Inside);
-
-    for step in 1..4 {
-        let t = step as f32 / 4.0;
-        let x = egui::lerp(rect.left()..=rect.right(), t);
-        let y = egui::lerp(rect.bottom()..=rect.top(), t);
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(1.0, grid),
-        );
-        painter.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(1.0, grid),
-        );
-    }
-
-    let mut curve = Vec::with_capacity(65);
-    for step in 0..=64 {
-        let x = step as f32 / 64.0;
-        let y = eval_unit_interval_curve_polynomial(points, x).unwrap_or(0.0);
-        curve.push(curve_pos(rect, x, y));
-    }
-    painter.add(Shape::line(curve, Stroke::new(2.0, line)));
-
-    for point in points {
-        painter.circle(
-            curve_pos(rect, point.x, point.y),
-            5.0,
-            point_fill,
-            point_stroke,
-        );
-    }
-}
-
-fn interact_with_curve(
-    ui: &mut egui::Ui,
-    key: &'static str,
-    rect: Rect,
-    response: &egui::Response,
-    points: &mut [UnitIntervalPoint],
-    dirty: &mut bool,
-) {
-    let drag_id = ui.id().with(key).with("curve_drag_index");
-    if response.drag_started()
-        && let Some(pointer_pos) = response.interact_pointer_pos()
-    {
-        let closest = points
-            .iter()
-            .enumerate()
-            .map(|(index, point)| {
-                (
-                    index,
-                    curve_pos(rect, point.x, point.y).distance(pointer_pos),
-                )
-            })
-            .min_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs));
-        if let Some((index, distance)) = closest
-            && distance <= 14.0
-        {
-            ui.memory_mut(|memory| memory.data.insert_temp(drag_id, index));
-        }
-    }
-
-    if response.dragged()
-        && let Some(pointer_pos) = response.interact_pointer_pos()
-        && let Some(index) = ui.memory(|memory| memory.data.get_temp::<usize>(drag_id))
-    {
-        let mut x = ((pointer_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-        let y = ((rect.bottom() - pointer_pos.y) / rect.height()).clamp(0.0, 1.0);
-        if index == 0 {
-            x = 0.0;
-        } else if index + 1 == points.len() {
-            x = 1.0;
-        } else {
-            let min_x = points[index - 1].x + 0.01;
-            let max_x = points[index + 1].x - 0.01;
-            x = x.clamp(min_x, max_x);
-        }
-        points[index] = UnitIntervalPoint::new(x, y);
-        *dirty = true;
-    }
-
-    if response.drag_stopped() {
-        ui.memory_mut(|memory| memory.data.remove::<usize>(drag_id));
-    }
-}
-
-fn curve_pos(rect: Rect, x: f32, y: f32) -> Pos2 {
-    Pos2::new(
-        egui::lerp(rect.left()..=rect.right(), x),
-        egui::lerp(rect.bottom()..=rect.top(), y),
-    )
 }
 
 fn main() {
