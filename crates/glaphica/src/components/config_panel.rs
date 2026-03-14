@@ -228,7 +228,7 @@ fn render_scalar_config(
     max: f32,
     dirty: &mut bool,
 ) {
-    const COMPACT_THRESHOLD: f32 = 180.0;
+    const COMPACT_THRESHOLD: f32 = 100.0;
     let available_width = ui.available_width();
     let is_compact = available_width < COMPACT_THRESHOLD;
 
@@ -242,7 +242,8 @@ fn render_scalar_config(
                 }
             });
         } else {
-            if ui.add(egui::Slider::new(value, min..=max).show_value(true)).changed() {
+            let slider = egui::Slider::new(value, min..=max).show_value(true);
+            if ui.add_sized([available_width, 20.0], slider).changed() {
                 *dirty = true;
             }
         }
@@ -256,7 +257,7 @@ fn render_curve_config(
     dirty: &mut bool,
     theme: &Theme,
 ) {
-    const COMPACT_THRESHOLD: f32 = 180.0;
+    const COMPACT_THRESHOLD: f32 = 100.0;
     let available_width = ui.available_width();
     let is_compact = available_width < COMPACT_THRESHOLD;
 
@@ -272,11 +273,8 @@ fn render_curve_config(
             }
         });
 
-        let desired_size = if is_compact {
-            vec2(available_width, 100.0)
-        } else {
-            vec2(ui.available_width(), 160.0)
-        };
+        let height = if is_compact { 80.0 } else { 160.0 };
+        let desired_size = vec2(available_width, height);
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         paint_curve_editor(&painter, rect, points, theme);
