@@ -96,9 +96,9 @@ impl<'a> ConfigPanel<'a> {
                         .show(ui, |ui| {
                             render_color_section(ui, brush_state);
                             ui.add_space(8.0);
+                            render_brush_params(ui, brush_state, theme, &mut output);
+                            ui.add_space(8.0);
                             render_config_actions(ui, brush_state, &mut output);
-                            ui.separator();
-                            render_config_items(ui, brush_state, theme, &mut output);
                         });
                 }
             });
@@ -119,9 +119,7 @@ pub struct ConfigPanelOutput {
 }
 
 fn render_color_section(ui: &mut egui::Ui, brush_state: &mut BrushUiState) {
-    ui.group(|ui| {
-        ui.label("Color");
-        ui.checkbox(&mut brush_state.eraser, "Eraser");
+    ui.horizontal(|ui| {
         let mut srgb = [
             (brush_state.color_rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
             (brush_state.color_rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -133,6 +131,51 @@ fn render_color_section(ui: &mut egui::Ui, brush_state: &mut BrushUiState) {
                 f32::from(srgb[1]) / 255.0,
                 f32::from(srgb[2]) / 255.0,
             ];
+        }
+    });
+}
+
+fn render_brush_params(
+    ui: &mut egui::Ui,
+    brush_state: &mut BrushUiState,
+    theme: &Theme,
+    _output: &mut ConfigPanelOutput,
+) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            ui.checkbox(&mut brush_state.eraser, "Eraser");
+        });
+
+        ui.add_space(4.0);
+
+        for index in 0..brush_state.items.len() {
+            if !brush_state.visible.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+
+            let item = &brush_state.items[index];
+            let item_key = item.key;
+            let item_kind = item.kind.clone();
+
+            match (&item_kind, &mut brush_state.values[index]) {
+                (
+                    BrushConfigKind::ScalarF32 { min, max },
+                    BrushConfigValue::ScalarF32(current),
+                ) => {
+                    render_scalar_config(ui, item_key, current, *min, *max, &mut brush_state.dirty);
+                }
+                (
+                    BrushConfigKind::UnitIntervalCurve,
+                    BrushConfigValue::UnitIntervalCurve(points),
+                ) => {
+                    ui.add_space(4.0);
+                    render_curve_config(ui, item_key, points, &mut brush_state.dirty, theme);
+                }
+                _ => {
+                    ui.colored_label(theme.error_color, "Config type mismatch");
+                }
+            }
         }
     });
 }
@@ -177,56 +220,6 @@ fn render_config_actions(
     });
 }
 
-fn render_config_items(
-    ui: &mut egui::Ui,
-    brush_state: &mut BrushUiState,
-    theme: &Theme,
-    _output: &mut ConfigPanelOutput,
-) {
-    for index in 0..brush_state.items.len() {
-        if !brush_state.visible.get(index).copied().unwrap_or(false) {
-            continue;
-        }
-
-        let item = &brush_state.items[index];
-        let item_key = item.key;
-        let item_label = item.label;
-        let default_hidden = item.default_hidden;
-        let item_kind = item.kind.clone();
-
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(item_label);
-                if default_hidden && ui.small_button("Hide").clicked() {
-                    if let Some(visible) = brush_state.visible.get_mut(index) {
-                        *visible = false;
-                        brush_state.dirty = true;
-                    }
-                }
-            });
-
-            match (&item_kind, &mut brush_state.values[index]) {
-                (
-                    BrushConfigKind::ScalarF32 { min, max },
-                    BrushConfigValue::ScalarF32(current),
-                ) => {
-                    render_scalar_config(ui, item_key, current, *min, *max, &mut brush_state.dirty);
-                }
-                (
-                    BrushConfigKind::UnitIntervalCurve,
-                    BrushConfigValue::UnitIntervalCurve(points),
-                ) => {
-                    render_curve_config(ui, item_key, points, &mut brush_state.dirty, theme);
-                }
-                _ => {
-                    ui.colored_label(theme.error_color, "Config type mismatch");
-                }
-            }
-        });
-        ui.add_space(8.0);
-    }
-}
-
 fn render_scalar_config(
     ui: &mut egui::Ui,
     key: &'static str,
@@ -235,9 +228,23 @@ fn render_scalar_config(
     max: f32,
     dirty: &mut bool,
 ) {
+    const COMPACT_THRESHOLD: f32 = 180.0;
+    let available_width = ui.available_width();
+    let is_compact = available_width < COMPACT_THRESHOLD;
+
     ui.push_id(key, |ui| {
-        if ui.add(egui::Slider::new(value, min..=max).show_value(true)).changed() {
-            *dirty = true;
+        ui.add_space(2.0);
+        
+        if is_compact {
+            ui.horizontal(|ui| {
+                if ui.add(egui::DragValue::new(value).speed((max - min) * 0.01).range(min..=max)).changed() {
+                    *dirty = true;
+                }
+            });
+        } else {
+            if ui.add(egui::Slider::new(value, min..=max).show_value(true)).changed() {
+                *dirty = true;
+            }
         }
     });
 }
@@ -249,6 +256,10 @@ fn render_curve_config(
     dirty: &mut bool,
     theme: &Theme,
 ) {
+    const COMPACT_THRESHOLD: f32 = 180.0;
+    let available_width = ui.available_width();
+    let is_compact = available_width < COMPACT_THRESHOLD;
+
     ui.push_id(key, |ui| {
         ui.horizontal(|ui| {
             if ui.small_button("+ point").clicked() {
@@ -261,7 +272,11 @@ fn render_curve_config(
             }
         });
 
-        let desired_size = vec2(ui.available_width().max(120.0), 160.0);
+        let desired_size = if is_compact {
+            vec2(available_width, 100.0)
+        } else {
+            vec2(ui.available_width(), 160.0)
+        };
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         paint_curve_editor(&painter, rect, points, theme);

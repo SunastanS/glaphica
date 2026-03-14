@@ -15,7 +15,7 @@ impl<'a> LayerTree<'a> {
     }
 
     pub fn render(&self, ui: &mut egui::Ui, on_select: &mut impl FnMut(NodeId)) {
-        for item in self.items {
+        for item in self.items.iter().rev() {
             self.render_item(ui, item, on_select);
         }
     }

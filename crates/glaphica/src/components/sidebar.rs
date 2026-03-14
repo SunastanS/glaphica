@@ -53,9 +53,6 @@ impl<'a> Sidebar<'a> {
                         });
                     });
                     ui.separator();
-                    ui.label("Brushes");
-                    ui.label("Edit in right panel");
-                    ui.separator();
 
                     ui.horizontal(|ui| {
                         ui.label("Layers");
