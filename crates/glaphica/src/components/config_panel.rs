@@ -45,7 +45,7 @@ impl<'a> ConfigPanel<'a> {
         let panel = SidePanel::right("overlay-right-panel")
             .resizable(true)
             .default_width(240.0)
-            .min_width(180.0)
+            .min_width(132.0)
             .max_width(420.0)
             .frame(Frame::default().fill(theme.panel_color))
             .show(ctx, |ui| {
@@ -92,7 +92,7 @@ impl<'a> ConfigPanel<'a> {
                 if let Some(brush_state) = self.brush_states.get_mut(self.selected_brush_index) {
                     ui.separator();
                     egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             render_color_section(ui, brush_state);
                             ui.add_space(8.0);
@@ -228,24 +228,45 @@ fn render_scalar_config(
     max: f32,
     dirty: &mut bool,
 ) {
-    const COMPACT_THRESHOLD: f32 = 100.0;
+    const VALUE_FIELD_WIDTH: f32 = 72.0;
     let available_width = ui.available_width();
-    let is_compact = available_width < COMPACT_THRESHOLD;
+    let drag_speed = (max - min) * 0.01;
+    let minimum_slider_width = ui.spacing().interact_size.x;
+    let slider_width = (available_width - VALUE_FIELD_WIDTH - ui.spacing().item_spacing.x).max(0.0);
+    let is_compact = slider_width < minimum_slider_width;
 
     ui.push_id(key, |ui| {
         ui.add_space(2.0);
         
         if is_compact {
             ui.horizontal(|ui| {
-                if ui.add(egui::DragValue::new(value).speed((max - min) * 0.01).range(min..=max)).changed() {
+                if ui
+                    .add(egui::DragValue::new(value).speed(drag_speed).range(min..=max))
+                    .changed()
+                {
                     *dirty = true;
                 }
             });
         } else {
-            let slider = egui::Slider::new(value, min..=max).show_value(true);
-            if ui.add_sized([available_width, 20.0], slider).changed() {
-                *dirty = true;
-            }
+            ui.horizontal(|ui| {
+                let slider_changed = ui
+                    .scope(|ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(egui::Slider::new(value, min..=max).show_value(false))
+                            .changed()
+                    })
+                    .inner;
+                let value_changed = ui
+                    .add_sized(
+                        [VALUE_FIELD_WIDTH, 0.0],
+                        egui::DragValue::new(value).speed(drag_speed).range(min..=max),
+                    )
+                    .changed();
+
+                if slider_changed || value_changed {
+                    *dirty = true;
+                }
+            });
         }
     });
 }
@@ -257,7 +278,7 @@ fn render_curve_config(
     dirty: &mut bool,
     theme: &Theme,
 ) {
-    const COMPACT_THRESHOLD: f32 = 100.0;
+    const COMPACT_THRESHOLD: f32 = 180.0;
     let available_width = ui.available_width();
     let is_compact = available_width < COMPACT_THRESHOLD;
 
@@ -273,8 +294,11 @@ fn render_curve_config(
             }
         });
 
-        let height = if is_compact { 80.0 } else { 160.0 };
-        let desired_size = vec2(available_width, height);
+        let desired_size = if is_compact {
+            vec2(available_width, 100.0)
+        } else {
+            vec2(ui.available_width(), 160.0)
+        };
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         paint_curve_editor(&painter, rect, points, theme);
