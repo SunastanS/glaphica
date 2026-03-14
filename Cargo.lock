@@ -848,6 +848,7 @@ dependencies = [
  "brushes",
  "bytemuck",
  "ctrlc",
+ "document",
  "egui",
  "egui-winit",
  "glaphica_core",

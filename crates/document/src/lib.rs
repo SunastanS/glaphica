@@ -22,11 +22,49 @@ pub struct Document {
     leaf_backend: BackendId,
     render_cache_backend: BackendId,
     next_node_id: NodeId,
+    next_layer_label_index: u64,
+    next_group_label_index: u64,
     active_node: Option<NodeId>,
 }
 
 pub struct Metadata {
     name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NewLayerKind {
+    Raster,
+    SolidColor { color: [f32; 4] },
+}
+
+#[derive(Debug)]
+pub enum LayerEditError {
+    NoActiveNode,
+    InvalidNode,
+    RootSelectionNotAllowed,
+    MoveOutOfBounds,
+    ImageCreate(ImageCreateError),
+}
+
+impl From<ImageCreateError> for LayerEditError {
+    fn from(err: ImageCreateError) -> Self {
+        Self::ImageCreate(err)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiNodeKind {
+    Branch,
+    RasterLayer,
+    SpecialLayer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiLayerTreeItem {
+    pub id: NodeId,
+    pub label: String,
+    pub kind: UiNodeKind,
+    pub children: Vec<UiLayerTreeItem>,
 }
 
 impl Document {
@@ -42,14 +80,20 @@ impl Document {
         let image = Image::new(layout, leaf_backend)?;
         let layer_tree = UiLayerTree {
             root: UiLayerNode::Branch(UiBranchNode {
-                id: root_id,
+                meta: UiNodeMeta {
+                    id: root_id,
+                    label: "Root".to_string(),
+                },
                 config: BranchConfig {
                     opacity: 1.0,
                     blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
                 },
                 children: vec![
                     UiLayerNode::Leaf(UiLeafNode {
-                        id: background_id,
+                        meta: UiNodeMeta {
+                            id: background_id,
+                            label: "Layer 1".to_string(),
+                        },
                         config: LeafConfig {
                             opacity: 1.0,
                             blend_mode: LeafBlendMode::Normal,
@@ -61,7 +105,10 @@ impl Document {
                         )),
                     }),
                     UiLayerNode::Leaf(UiLeafNode {
-                        id: paint_layer_id,
+                        meta: UiNodeMeta {
+                            id: paint_layer_id,
+                            label: "Layer 2".to_string(),
+                        },
                         config: LeafConfig {
                             opacity: 1.0,
                             blend_mode: LeafBlendMode::Normal,
@@ -79,6 +126,8 @@ impl Document {
             leaf_backend,
             render_cache_backend,
             next_node_id: NodeId(root_id.0 + 1),
+            next_layer_label_index: 3,
+            next_group_label_index: 1,
             active_node: Some(paint_layer_id),
         })
     }
@@ -93,7 +142,10 @@ impl Document {
         let initial_id = NodeId(0);
         let layer_tree = UiLayerTree {
             root: UiLayerNode::Leaf(UiLeafNode {
-                id: initial_id,
+                meta: UiNodeMeta {
+                    id: initial_id,
+                    label: "Layer 1".to_string(),
+                },
                 config: LeafConfig {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
@@ -111,6 +163,8 @@ impl Document {
             leaf_backend,
             render_cache_backend,
             next_node_id: NodeId(initial_id.0 + 1),
+            next_layer_label_index: 2,
+            next_group_label_index: 1,
             active_node: Some(initial_id),
         })
     }
@@ -135,6 +189,10 @@ impl Document {
         &self.layer_tree
     }
 
+    pub fn layer_tree_items(&self) -> Vec<UiLayerTreeItem> {
+        self.layer_tree.items()
+    }
+
     pub fn build_flat_render_tree(
         &self,
         generation: RenderTreeGeneration,
@@ -149,12 +207,78 @@ impl Document {
         self.active_node
     }
 
-    pub fn set_active_node(&mut self, id: NodeId) {
+    pub fn selected_node(&self) -> Option<NodeId> {
+        self.active_node
+    }
+
+    pub fn can_select_node(&self, id: NodeId) -> bool {
+        self.layer_tree.can_select_node(id)
+    }
+
+    pub fn can_paint_to_node(&self, id: NodeId) -> bool {
+        self.layer_tree.can_paint_to_node(id)
+    }
+
+    pub fn active_paint_node(&self) -> Option<NodeId> {
+        self.active_node.filter(|id| self.can_paint_to_node(*id))
+    }
+
+    pub fn set_active_node(&mut self, id: NodeId) -> bool {
+        if !self.can_select_node(id) {
+            return false;
+        }
         self.active_node = Some(id);
+        true
     }
 
     pub fn clear_active_node(&mut self) {
         self.active_node = None;
+    }
+
+    pub fn create_layer_above_active(
+        &mut self,
+        kind: NewLayerKind,
+    ) -> Result<NodeId, LayerEditError> {
+        let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
+        if !self.layer_tree.can_select_node(active_id) {
+            return Err(LayerEditError::InvalidNode);
+        }
+        let node_id = self.allocate_node_id();
+        let label = self.allocate_layer_label();
+        let new_node = self.build_new_layer_node(node_id, label, kind)?;
+        self.layer_tree.insert_node_above(active_id, new_node)?;
+        self.active_node = Some(node_id);
+        Ok(node_id)
+    }
+
+    pub fn create_group_above_active(&mut self) -> Result<NodeId, LayerEditError> {
+        let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
+        if !self.layer_tree.can_select_node(active_id) {
+            return Err(LayerEditError::InvalidNode);
+        }
+        let node_id = self.allocate_node_id();
+        let label = self.allocate_group_label();
+        let new_node = UiLayerNode::Branch(UiBranchNode {
+            meta: UiNodeMeta { id: node_id, label },
+            config: BranchConfig {
+                opacity: 1.0,
+                blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
+            },
+            children: Vec::new(),
+        });
+        self.layer_tree.insert_node_above(active_id, new_node)?;
+        self.active_node = Some(node_id);
+        Ok(node_id)
+    }
+
+    pub fn move_active_node_up(&mut self) -> Result<(), LayerEditError> {
+        let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
+        self.layer_tree.move_node(active_id, 1)
+    }
+
+    pub fn move_active_node_down(&mut self) -> Result<(), LayerEditError> {
+        let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
+        self.layer_tree.move_node(active_id, -1)
     }
 
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
@@ -257,6 +381,42 @@ impl Document {
         self.next_node_id = NodeId(id.0 + 1);
         id
     }
+
+    fn allocate_layer_label(&mut self) -> String {
+        let index = self.next_layer_label_index;
+        self.next_layer_label_index += 1;
+        format!("Layer {index}")
+    }
+
+    fn allocate_group_label(&mut self) -> String {
+        let index = self.next_group_label_index;
+        self.next_group_label_index += 1;
+        format!("Group {index}")
+    }
+
+    fn build_new_layer_node(
+        &self,
+        id: NodeId,
+        label: String,
+        kind: NewLayerKind,
+    ) -> Result<UiLayerNode, ImageCreateError> {
+        let content = match kind {
+            NewLayerKind::Raster => UiLeafContent::Raster {
+                image: Image::new(self.layout, self.leaf_backend)?,
+            },
+            NewLayerKind::SolidColor { color } => {
+                UiLeafContent::Special(SpecialLayer::SolidColor(SolidColorLayer { color }))
+            }
+        };
+        Ok(UiLayerNode::Leaf(UiLeafNode {
+            meta: UiNodeMeta { id, label },
+            config: LeafConfig {
+                opacity: 1.0,
+                blend_mode: LeafBlendMode::Normal,
+            },
+            content,
+        }))
+    }
 }
 
 pub struct UiLayerTree {
@@ -265,6 +425,65 @@ pub struct UiLayerTree {
 }
 
 impl UiLayerTree {
+    pub fn items(&self) -> Vec<UiLayerTreeItem> {
+        vec![build_layer_tree_item(&self.root)]
+    }
+
+    pub fn root_id(&self) -> NodeId {
+        self.root.id()
+    }
+
+    pub fn get_node(&self, node_id: NodeId) -> Option<&UiLayerNode> {
+        get_node_from_node(&self.root, node_id)
+    }
+
+    pub fn contains_node(&self, node_id: NodeId) -> bool {
+        self.get_node(node_id).is_some()
+    }
+
+    pub fn can_select_node(&self, node_id: NodeId) -> bool {
+        match self.get_node(node_id) {
+            Some(UiLayerNode::Branch(_)) => node_id != self.root_id(),
+            Some(UiLayerNode::Leaf(_)) => true,
+            None => false,
+        }
+    }
+
+    pub fn can_paint_to_node(&self, node_id: NodeId) -> bool {
+        matches!(
+            self.get_node(node_id),
+            Some(UiLayerNode::Leaf(UiLeafNode {
+                content: UiLeafContent::Raster { .. },
+                ..
+            }))
+        )
+    }
+
+    pub fn insert_node_above(
+        &mut self,
+        anchor_id: NodeId,
+        new_node: UiLayerNode,
+    ) -> Result<(), LayerEditError> {
+        if anchor_id == self.root_id() {
+            return Err(LayerEditError::RootSelectionNotAllowed);
+        }
+        if insert_node_above_in_branch(&mut self.root, anchor_id, new_node) {
+            return Ok(());
+        }
+        Err(LayerEditError::InvalidNode)
+    }
+
+    pub fn move_node(&mut self, node_id: NodeId, offset: isize) -> Result<(), LayerEditError> {
+        if node_id == self.root_id() {
+            return Err(LayerEditError::RootSelectionNotAllowed);
+        }
+        match move_node_in_branch(&mut self.root, node_id, offset) {
+            Some(true) => Ok(()),
+            Some(false) => Err(LayerEditError::MoveOutOfBounds),
+            None => Err(LayerEditError::InvalidNode),
+        }
+    }
+
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
         get_leaf_image_from_node(&self.root, node_id)
     }
@@ -315,6 +534,93 @@ impl UiLayerTree {
     }
 }
 
+fn get_node_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&UiLayerNode> {
+    if node.id() == node_id {
+        return Some(node);
+    }
+    match node {
+        UiLayerNode::Branch(branch) => branch
+            .children
+            .iter()
+            .find_map(|child| get_node_from_node(child, node_id)),
+        UiLayerNode::Leaf(_) => None,
+    }
+}
+
+fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
+    match node {
+        UiLayerNode::Branch(branch) => UiLayerTreeItem {
+            id: branch.meta.id,
+            label: branch.meta.label.clone(),
+            kind: UiNodeKind::Branch,
+            children: branch.children.iter().map(build_layer_tree_item).collect(),
+        },
+        UiLayerNode::Leaf(leaf) => UiLayerTreeItem {
+            id: leaf.meta.id,
+            label: leaf.meta.label.clone(),
+            kind: match &leaf.content {
+                UiLeafContent::Raster { .. } => UiNodeKind::RasterLayer,
+                UiLeafContent::Special(_) => UiNodeKind::SpecialLayer,
+            },
+            children: Vec::new(),
+        },
+    }
+}
+
+fn insert_node_above_in_branch(
+    node: &mut UiLayerNode,
+    anchor_id: NodeId,
+    new_node: UiLayerNode,
+) -> bool {
+    let UiLayerNode::Branch(branch) = node else {
+        return false;
+    };
+
+    if let Some(index) = branch
+        .children
+        .iter()
+        .position(|child| child.id() == anchor_id)
+    {
+        branch.children.insert(index + 1, new_node);
+        return true;
+    }
+
+    for child in &mut branch.children {
+        if insert_node_above_in_branch(child, anchor_id, new_node.clone()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn move_node_in_branch(node: &mut UiLayerNode, target_id: NodeId, offset: isize) -> Option<bool> {
+    let UiLayerNode::Branch(branch) = node else {
+        return None;
+    };
+
+    if let Some(index) = branch
+        .children
+        .iter()
+        .position(|child| child.id() == target_id)
+    {
+        let next_index = index as isize + offset;
+        if !(0..branch.children.len() as isize).contains(&next_index) {
+            return Some(false);
+        }
+        branch.children.swap(index, next_index as usize);
+        return Some(true);
+    }
+
+    for child in &mut branch.children {
+        if let Some(moved) = move_node_in_branch(child, target_id, offset) {
+            return Some(moved);
+        }
+    }
+
+    None
+}
+
 fn get_leaf_image_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&Image> {
     match node {
         UiLayerNode::Branch(branch) => {
@@ -326,7 +632,7 @@ fn get_leaf_image_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&Imag
             None
         }
         UiLayerNode::Leaf(leaf) => {
-            if leaf.id == node_id {
+            if leaf.meta.id == node_id {
                 match &leaf.content {
                     UiLeafContent::Raster { image } => Some(image),
                     UiLeafContent::Special(_) => None,
@@ -349,7 +655,7 @@ fn get_leaf_image_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Opti
             None
         }
         UiLayerNode::Leaf(leaf) => {
-            if leaf.id == node_id {
+            if leaf.meta.id == node_id {
                 match &mut leaf.content {
                     UiLeafContent::Raster { image } => Some(image),
                     UiLeafContent::Special(_) => None,
@@ -372,7 +678,7 @@ fn get_solid_color_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<[f32
             None
         }
         UiLayerNode::Leaf(leaf) => {
-            if leaf.id != node_id {
+            if leaf.meta.id != node_id {
                 return None;
             }
             match leaf.content {
@@ -390,7 +696,7 @@ fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f3
             .iter_mut()
             .any(|child| set_solid_color_from_node(child, node_id, color)),
         UiLayerNode::Leaf(leaf) => {
-            if leaf.id != node_id {
+            if leaf.meta.id != node_id {
                 return false;
             }
             match &mut leaf.content {
@@ -571,7 +877,7 @@ fn infer_render_branch(
     let render_cache = Image::new(layout, render_cache_backend)?;
 
     Ok(vec![RenderLayerNode::Branch(RenderBranchNode {
-        id: branch.id,
+        id: branch.meta.id,
         config: BranchConfig {
             opacity: combined_opacity,
             blend_mode: BranchBlendMode::Base(blend_mode),
@@ -605,7 +911,7 @@ fn infer_render_leaf(
     };
 
     Ok(vec![RenderLayerNode::Leaf(RenderLeafNode {
-        id: leaf.id,
+        id: leaf.meta.id,
         config: LeafConfig {
             opacity: parent_opacity * leaf.config.opacity,
             blend_mode,
@@ -620,16 +926,38 @@ pub enum UiLayerNode {
     Leaf(UiLeafNode),
 }
 
+impl UiLayerNode {
+    pub fn id(&self) -> NodeId {
+        match self {
+            Self::Branch(branch) => branch.meta.id,
+            Self::Leaf(leaf) => leaf.meta.id,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Branch(branch) => &branch.meta.label,
+            Self::Leaf(leaf) => &leaf.meta.label,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct UiNodeMeta {
+    id: NodeId,
+    label: String,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct UiBranchNode {
-    id: NodeId,
+    meta: UiNodeMeta,
     config: BranchConfig,
     children: Vec<UiLayerNode>,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct UiLeafNode {
-    id: NodeId,
+    meta: UiNodeMeta,
     config: LeafConfig,
     content: UiLeafContent,
 }
@@ -759,6 +1087,13 @@ mod tests {
     use images::layout::ImageLayout;
     use std::sync::Arc;
 
+    fn test_meta(id: NodeId, label: &str) -> UiNodeMeta {
+        UiNodeMeta {
+            id,
+            label: label.to_string(),
+        }
+    }
+
     #[test]
     fn test_sync_tile_keys_partial_update_preserves_untouched_tiles() {
         // Create a document with a leaf node that has 2 tiles
@@ -773,7 +1108,7 @@ mod tests {
             .unwrap();
 
         let leaf_node = UiLeafNode {
-            id: NodeId(0),
+            meta: test_meta(NodeId(0), "Layer 1"),
             config: LeafConfig {
                 opacity: 1.0,
                 blend_mode: LeafBlendMode::Normal,
@@ -792,6 +1127,8 @@ mod tests {
             leaf_backend: BackendId::new(1),
             render_cache_backend: BackendId::new(2),
             next_node_id: NodeId(1),
+            next_layer_label_index: 2,
+            next_group_label_index: 1,
             active_node: None,
             metadata: Metadata {
                 name: "test".to_string(),
@@ -925,7 +1262,7 @@ mod tests {
         let layout = ImageLayout::new(128, 64);
         let tree = UiLayerTree {
             root: UiLayerNode::Leaf(UiLeafNode {
-                id: NodeId(9),
+                meta: test_meta(NodeId(9), "Layer 1"),
                 config: LeafConfig {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
@@ -1036,5 +1373,162 @@ mod tests {
         assert_eq!(doc.active_node(), Some(NodeId(1)));
         assert_eq!(doc.get_solid_color(NodeId(0)), Some([1.0, 1.0, 1.0, 1.0]));
         assert!(doc.get_leaf_image(NodeId(1)).is_some());
+        assert_eq!(
+            doc.layer_tree().get_node(NodeId(1)).map(UiLayerNode::label),
+            Some("Layer 2")
+        );
+    }
+
+    #[test]
+    fn test_branch_can_be_selected_but_not_painted() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+        let group_id = doc.allocate_node_id();
+        let root_id = doc.layer_tree().root_id();
+        doc.layer_tree
+            .insert_node_above(
+                NodeId(1),
+                UiLayerNode::Branch(UiBranchNode {
+                    meta: test_meta(group_id, "Group 1"),
+                    config: BranchConfig {
+                        opacity: 1.0,
+                        blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
+                    },
+                    children: Vec::new(),
+                }),
+            )
+            .unwrap();
+
+        assert!(!doc.set_active_node(root_id));
+        assert!(doc.set_active_node(group_id));
+        assert_eq!(doc.active_node(), Some(group_id));
+        assert_eq!(doc.active_paint_node(), None);
+        assert!(!doc.can_paint_to_node(group_id));
+    }
+
+    #[test]
+    fn test_create_layer_above_selected_branch_inserts_as_sibling() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+        let group_id = doc.allocate_node_id();
+        doc.layer_tree
+            .insert_node_above(
+                NodeId(1),
+                UiLayerNode::Branch(UiBranchNode {
+                    meta: test_meta(group_id, "Group 1"),
+                    config: BranchConfig {
+                        opacity: 1.0,
+                        blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
+                    },
+                    children: Vec::new(),
+                }),
+            )
+            .unwrap();
+        assert!(doc.set_active_node(group_id));
+
+        let new_layer_id = doc.create_layer_above_active(NewLayerKind::Raster).unwrap();
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+
+        assert_eq!(root.children.len(), 4);
+        assert_eq!(root.children[2].id(), group_id);
+        assert_eq!(root.children[3].id(), new_layer_id);
+        assert_eq!(root.children[3].label(), "Layer 3");
+        assert_eq!(doc.active_node(), Some(new_layer_id));
+        assert_eq!(doc.active_paint_node(), Some(new_layer_id));
+    }
+
+    #[test]
+    fn test_create_group_above_active_selects_new_group() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let group_id = doc.create_group_above_active().unwrap();
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+
+        assert_eq!(root.children.len(), 3);
+        assert_eq!(root.children[2].id(), group_id);
+        assert_eq!(root.children[2].label(), "Group 1");
+        assert_eq!(doc.active_node(), Some(group_id));
+        assert_eq!(doc.active_paint_node(), None);
+    }
+
+    #[test]
+    fn test_move_active_node_up_and_down_reorders_siblings() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let group_id = doc.create_group_above_active().unwrap();
+        assert!(doc.set_active_node(NodeId(1)));
+        doc.move_active_node_up().unwrap();
+
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+        assert_eq!(root.children[0].id(), NodeId(0));
+        assert_eq!(root.children[1].id(), group_id);
+        assert_eq!(root.children[2].id(), NodeId(1));
+
+        doc.move_active_node_down().unwrap();
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+        assert_eq!(root.children[0].id(), NodeId(0));
+        assert_eq!(root.children[1].id(), NodeId(1));
+        assert_eq!(root.children[2].id(), group_id);
+    }
+
+    #[test]
+    fn test_layer_tree_items_preserve_labels_and_hierarchy() {
+        let layout = ImageLayout::new(64, 64);
+        let doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let items = doc.layer_tree_items();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, UiNodeKind::Branch);
+        assert_eq!(items[0].label, "Root");
+        assert_eq!(items[0].children.len(), 2);
+        assert_eq!(items[0].children[0].label, "Layer 1");
+        assert_eq!(items[0].children[0].kind, UiNodeKind::SpecialLayer);
+        assert_eq!(items[0].children[1].label, "Layer 2");
+        assert_eq!(items[0].children[1].kind, UiNodeKind::RasterLayer);
     }
 }

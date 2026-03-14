@@ -9,7 +9,7 @@ pub mod trace;
 mod screen_blitter_test;
 
 pub use engine_thread::EngineThreadState;
-pub use integration::{AppThreadIntegration, GpuError, StrokeControl, TileAllocReceipt};
+pub use integration::{AppControl, AppThreadIntegration, GpuError, TileAllocReceipt};
 pub use main_thread::{
     BrushRegisterError, InitError, MainThreadState, PresentError, ScreenshotError,
 };

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
-use document::{Document, FlatRenderTree, SharedRenderTree};
+use document::{Document, FlatRenderTree, NewLayerKind, SharedRenderTree, UiLayerTreeItem};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
@@ -16,28 +16,36 @@ use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 use crate::trace::{TraceInputFrame, TraceIoError, TraceRecorder};
 use crate::{BrushRegisterError, EngineThreadState, MainThreadState, config};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StrokeControl {
-    pub node_id: NodeId,
-    pub begin: bool,
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppControl {
+    StrokeBoundary { node_id: NodeId, begin: bool },
+    SelectNode { node_id: NodeId },
+    CreateLayerAboveActive { kind: NewLayerKind },
+    CreateGroupAboveActive,
+    MoveActiveNodeUp,
+    MoveActiveNodeDown,
 }
 
-impl InputControlOp for StrokeControl {
+impl InputControlOp for AppControl {
     type Target = Option<NodeId>;
 
     fn apply(&self, target: &mut Self::Target) {
-        if self.begin {
-            *target = Some(self.node_id);
-        } else {
-            *target = None;
+        if let Self::StrokeBoundary { node_id, begin } = self {
+            if *begin {
+                *target = Some(*node_id);
+            } else {
+                *target = None;
+            }
         }
     }
 
     fn undo(&self, target: &mut Self::Target) {
-        if self.begin {
-            *target = None;
-        } else {
-            *target = Some(self.node_id);
+        if let Self::StrokeBoundary { node_id, begin } = self {
+            if *begin {
+                *target = None;
+            } else {
+                *target = Some(*node_id);
+            }
         }
     }
 }
@@ -76,8 +84,8 @@ impl MergeItem for GpuError {
     fn merge_duplicate(_existing: &mut Self, _incoming: Self) {}
 }
 
-type AppMainThreadChannels = MainThreadChannels<StrokeControl, TileAllocReceipt, GpuError>;
-type AppEngineThreadChannels = EngineThreadChannels<StrokeControl, TileAllocReceipt, GpuError>;
+type AppMainThreadChannels = MainThreadChannels<AppControl, TileAllocReceipt, GpuError>;
+type AppEngineThreadChannels = EngineThreadChannels<AppControl, TileAllocReceipt, GpuError>;
 type AppGpuFeedbackFrame = GpuFeedbackFrame<TileAllocReceipt, GpuError>;
 
 struct AppGpuFeedbackMergeState {
@@ -152,7 +160,7 @@ pub struct AppThreadIntegration {
     engine_state: EngineThreadState,
     main_channels: AppMainThreadChannels,
     engine_channels: AppEngineThreadChannels,
-    input_controls: Vec<InputControlEvent<StrokeControl>>,
+    input_controls: Vec<InputControlEvent<AppControl>>,
     input_samples: Vec<InputRingSample>,
     brush_inputs: Vec<glaphica_core::BrushInput>,
     gpu_commands: Vec<thread_protocol::GpuCmdMsg>,
@@ -474,10 +482,7 @@ impl AppThreadIntegration {
     }
 
     pub fn begin_stroke(&mut self, node_id: NodeId) {
-        let stroke_id = StrokeId(self.next_stroke_id);
-        self.next_stroke_id += 1;
-
-        let control = StrokeControl {
+        let control = AppControl::StrokeBoundary {
             node_id,
             begin: true,
         };
@@ -487,11 +492,77 @@ impl AppThreadIntegration {
         self.active_stroke_node = Some(node_id);
         self.active_stroke_color_rgb = self.current_brush_color_rgb;
         self.active_stroke_erase = self.current_brush_erase;
-        self.engine_state.begin_stroke(stroke_id);
     }
 
     pub fn active_document_node(&self) -> Option<NodeId> {
-        self.engine_state.document().active_node()
+        self.engine_state.document().selected_node()
+    }
+
+    pub fn active_paint_node(&self) -> Option<NodeId> {
+        self.engine_state.document().active_paint_node()
+    }
+
+    pub fn layer_tree_items(&self) -> Vec<UiLayerTreeItem> {
+        self.engine_state.document().layer_tree_items()
+    }
+
+    pub fn select_document_node(&mut self, node_id: NodeId) -> bool {
+        if !self.engine_state.document().can_select_node(node_id) {
+            return false;
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::SelectNode {
+                node_id,
+            }));
+        true
+    }
+
+    pub fn create_layer_above_active(
+        &mut self,
+        kind: NewLayerKind,
+    ) -> Result<(), document::LayerEditError> {
+        if self.engine_state.document().selected_node().is_none() {
+            return Err(document::LayerEditError::NoActiveNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(
+                AppControl::CreateLayerAboveActive { kind },
+            ));
+        Ok(())
+    }
+
+    pub fn create_group_above_active(&mut self) -> Result<(), document::LayerEditError> {
+        if self.engine_state.document().selected_node().is_none() {
+            return Err(document::LayerEditError::NoActiveNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(
+                AppControl::CreateGroupAboveActive,
+            ));
+        Ok(())
+    }
+
+    pub fn move_active_node_up(&mut self) -> Result<(), document::LayerEditError> {
+        if self.engine_state.document().selected_node().is_none() {
+            return Err(document::LayerEditError::NoActiveNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::MoveActiveNodeUp));
+        Ok(())
+    }
+
+    pub fn move_active_node_down(&mut self) -> Result<(), document::LayerEditError> {
+        if self.engine_state.document().selected_node().is_none() {
+            return Err(document::LayerEditError::NoActiveNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::MoveActiveNodeDown));
+        Ok(())
     }
 
     pub fn set_active_brush(&mut self, brush_id: BrushId) {
@@ -519,7 +590,7 @@ impl AppThreadIntegration {
 
     pub fn end_stroke(&mut self) {
         if let Some(node_id) = self.active_stroke_node {
-            let control = StrokeControl {
+            let control = AppControl::StrokeBoundary {
                 node_id,
                 begin: false,
             };
@@ -528,7 +599,6 @@ impl AppThreadIntegration {
                 .blocking_push(InputControlEvent::Control(control));
         }
         self.active_stroke_node = None;
-        self.engine_state.end_stroke();
     }
 
     pub fn process_engine_frame(&mut self, wait_timeout: std::time::Duration) -> bool {
@@ -537,8 +607,9 @@ impl AppThreadIntegration {
         while let Ok(event) = self.engine_channels.input_control_queue.pop() {
             self.input_controls.push(event);
         }
-        for event in &self.input_controls {
-            event.apply(&mut self.active_stroke_node);
+        let drained_controls = self.input_controls.clone();
+        for event in &drained_controls {
+            self.apply_input_control_event(event);
         }
         self.input_samples.clear();
         let input_sample_started = Instant::now();
@@ -565,20 +636,68 @@ impl AppThreadIntegration {
         self.input_samples = samples;
         perf.sample_count = self.input_samples.len();
 
-        for event in &self.input_controls {
-            let InputControlEvent::Control(control) = event;
-            if control.begin {
-                let stroke_id = StrokeId(self.next_stroke_id);
-                self.next_stroke_id += 1;
-                self.engine_state.begin_stroke(stroke_id);
-            } else {
-                self.engine_state.end_stroke();
-            }
-        }
-        for event in &self.input_controls {
-            event.apply(&mut self.active_stroke_node);
+        let replay_controls = self.input_controls.clone();
+        for event in &replay_controls {
+            self.apply_input_control_event(event);
         }
         self.process_engine_frame_from_samples(Some(&mut perf))
+    }
+
+    fn apply_input_control_event(&mut self, event: &InputControlEvent<AppControl>) {
+        let InputControlEvent::Control(control) = event;
+        match control {
+            AppControl::StrokeBoundary { node_id, begin } => {
+                if *begin {
+                    let stroke_id = StrokeId(self.next_stroke_id);
+                    self.next_stroke_id += 1;
+                    self.active_stroke_node = Some(*node_id);
+                    self.engine_state.begin_stroke(stroke_id);
+                } else {
+                    self.active_stroke_node = None;
+                    self.engine_state.end_stroke();
+                }
+            }
+            AppControl::SelectNode { node_id } => {
+                let _ = self.engine_state.document_mut().set_active_node(*node_id);
+            }
+            AppControl::CreateLayerAboveActive { kind } => {
+                match self
+                    .engine_state
+                    .document_mut()
+                    .create_layer_above_active(*kind)
+                {
+                    Ok(_) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("create layer control failed: {error:?}"),
+                }
+            }
+            AppControl::CreateGroupAboveActive => {
+                match self.engine_state.document_mut().create_group_above_active() {
+                    Ok(_) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("create group control failed: {error:?}"),
+                }
+            }
+            AppControl::MoveActiveNodeUp => {
+                match self.engine_state.document_mut().move_active_node_up() {
+                    Ok(()) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("move layer up control failed: {error:?}"),
+                }
+            }
+            AppControl::MoveActiveNodeDown => {
+                match self.engine_state.document_mut().move_active_node_down() {
+                    Ok(()) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("move layer down control failed: {error:?}"),
+                }
+            }
+        }
+    }
+
+    fn enqueue_render_tree_update(&mut self) {
+        match self.engine_state.rebuild_render_tree() {
+            Ok(msg) => self
+                .pending_send_gpu_commands
+                .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)),
+            Err(error) => eprintln!("render tree rebuild failed after control event: {error}"),
+        }
     }
 
     fn process_engine_frame_from_samples(
@@ -685,8 +804,7 @@ impl AppThreadIntegration {
                 perf.submit_collect_render_tree = submit_stats.frame_batch.render_tree_collect;
                 perf.submit_materialize_parametric =
                     submit_stats.frame_batch.parametric_materialize;
-                perf.submit_composite_render_tree =
-                    submit_stats.frame_batch.render_tree_composite;
+                perf.submit_composite_render_tree = submit_stats.frame_batch.render_tree_composite;
                 perf.submit_queue = submit_stats.frame_batch.queue_submit;
                 perf.submit_parametric_cmd_count = submit_stats.frame_batch.parametric_cmd_count;
                 perf.submit_parametric_tile_count =

@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
+use document::NewLayerKind;
 use glaphica_core::{
     BrushId, CanvasVec2, EpochId, InputDeviceKind, MappedCursor, NodeId, RadianVec2,
     RenderTreeGeneration, StrokeId, TileKey,
@@ -14,9 +15,9 @@ use thread_protocol::{
     TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
 };
 
-use crate::StrokeControl;
+use crate::AppControl;
 
-const TRACE_VERSION: u32 = 1;
+const TRACE_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum TraceIoError {
@@ -65,7 +66,7 @@ pub struct TraceOutputFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceInputFrame {
-    pub controls: Vec<TraceStrokeControl>,
+    pub controls: Vec<TraceAppControl>,
     pub samples: Vec<TraceInputSample>,
 }
 
@@ -75,9 +76,19 @@ pub struct TraceOutputFrame {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct TraceStrokeControl {
-    pub node_id: u64,
-    pub begin: bool,
+pub enum TraceAppControl {
+    StrokeBoundary { node_id: u64, begin: bool },
+    SelectNode { node_id: u64 },
+    CreateLayerAboveActive { kind: TraceNewLayerKind },
+    CreateGroupAboveActive,
+    MoveActiveNodeUp,
+    MoveActiveNodeDown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TraceNewLayerKind {
+    Raster,
+    SolidColor,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -226,7 +237,7 @@ pub struct TraceRecorder {
 impl TraceRecorder {
     pub fn record_input_frame(
         &mut self,
-        controls: &[InputControlEvent<StrokeControl>],
+        controls: &[InputControlEvent<AppControl>],
         samples: &[InputRingSample],
     ) {
         if controls.is_empty() && samples.is_empty() {
@@ -235,10 +246,7 @@ impl TraceRecorder {
         let mut trace_controls = Vec::with_capacity(controls.len());
         for control in controls {
             let InputControlEvent::Control(control) = control;
-            trace_controls.push(TraceStrokeControl {
-                node_id: control.node_id.0,
-                begin: control.begin,
-            });
+            trace_controls.push(TraceAppControl::from(control.clone()));
         }
 
         let mut trace_samples = Vec::with_capacity(samples.len());
@@ -297,13 +305,12 @@ impl TraceRecorder {
 }
 
 impl TraceInputFrame {
-    pub fn to_runtime(&self) -> (Vec<InputControlEvent<StrokeControl>>, Vec<InputRingSample>) {
+    pub fn to_runtime(&self) -> (Vec<InputControlEvent<AppControl>>, Vec<InputRingSample>) {
         let mut controls = Vec::with_capacity(self.controls.len());
         for control in &self.controls {
-            controls.push(InputControlEvent::Control(StrokeControl {
-                node_id: NodeId(control.node_id),
-                begin: control.begin,
-            }));
+            controls.push(InputControlEvent::Control(AppControl::from(
+                control.clone(),
+            )));
         }
 
         let mut samples = Vec::with_capacity(self.samples.len());
@@ -357,6 +364,52 @@ fn trace_rgb_red() -> [f32; 3] {
 
 fn trace_write_rgb_red() -> Option<[f32; 3]> {
     Some(trace_rgb_red())
+}
+
+impl From<AppControl> for TraceAppControl {
+    fn from(value: AppControl) -> Self {
+        match value {
+            AppControl::StrokeBoundary { node_id, begin } => Self::StrokeBoundary {
+                node_id: node_id.0,
+                begin,
+            },
+            AppControl::SelectNode { node_id } => Self::SelectNode { node_id: node_id.0 },
+            AppControl::CreateLayerAboveActive { kind } => Self::CreateLayerAboveActive {
+                kind: match kind {
+                    NewLayerKind::Raster => TraceNewLayerKind::Raster,
+                    NewLayerKind::SolidColor { .. } => TraceNewLayerKind::SolidColor,
+                },
+            },
+            AppControl::CreateGroupAboveActive => Self::CreateGroupAboveActive,
+            AppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
+            AppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
+        }
+    }
+}
+
+impl From<TraceAppControl> for AppControl {
+    fn from(value: TraceAppControl) -> Self {
+        match value {
+            TraceAppControl::StrokeBoundary { node_id, begin } => Self::StrokeBoundary {
+                node_id: NodeId(node_id),
+                begin,
+            },
+            TraceAppControl::SelectNode { node_id } => Self::SelectNode {
+                node_id: NodeId(node_id),
+            },
+            TraceAppControl::CreateLayerAboveActive { kind } => Self::CreateLayerAboveActive {
+                kind: match kind {
+                    TraceNewLayerKind::Raster => NewLayerKind::Raster,
+                    TraceNewLayerKind::SolidColor => NewLayerKind::SolidColor {
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    },
+                },
+            },
+            TraceAppControl::CreateGroupAboveActive => Self::CreateGroupAboveActive,
+            TraceAppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
+            TraceAppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
+        }
+    }
 }
 
 impl From<TileKey> for TraceTileKey {

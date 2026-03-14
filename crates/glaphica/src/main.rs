@@ -11,9 +11,10 @@ use brushes::{
     BrushConfigItem, BrushConfigKind, BrushConfigValue, UnitIntervalPoint,
     eval_unit_interval_curve_polynomial,
 };
+use document::{NewLayerKind, UiLayerTreeItem, UiNodeKind};
 use egui::{Color32, Pos2, Rect, Sense, Shape, SidePanel, Stroke, TopBottomPanel, vec2};
 use egui_renderer::EguiRenderer;
-use glaphica_core::{BrushId, CanvasVec2, InputDeviceKind, MappedCursor, RadianVec2};
+use glaphica_core::{BrushId, CanvasVec2, InputDeviceKind, MappedCursor, NodeId, RadianVec2};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
 use thread_protocol::InputRingSample;
@@ -32,6 +33,12 @@ const PIXEL_RECT_BRUSH_ID: BrushId = BrushId(1);
 enum BrushKind {
     Round,
     PixelRect,
+}
+
+#[derive(Clone, Copy)]
+enum LayerMoveDirection {
+    Up,
+    Down,
 }
 
 impl BrushKind {
@@ -143,58 +150,100 @@ impl App {
         self.run_config.replay_input_path.is_some()
     }
 
+    fn advance_epoch(&mut self) {
+        self.epoch = glaphica_core::EpochId(self.epoch.0.saturating_add(1));
+    }
+
     fn render_frame(&mut self) {
-        let Some(integration) = &mut self.integration else {
-            return;
-        };
-        integration.process_main_render();
-        if let Some(overlay) = &mut self.overlay {
-            let Some(window) = self.window.as_deref() else {
-                integration.present_to_screen();
+        let mut should_advance_epoch = false;
+        {
+            let Some(integration) = &mut self.integration else {
                 return;
             };
-            integration.present_to_screen_with_overlay(
-                |device, queue, encoder, view, format, width, height| {
-                    overlay.paint(window, device, queue, encoder, view, format, width, height);
-                },
-            );
-            let selected_brush_kind = overlay.selected_brush_kind();
-            if self.active_brush_kind != selected_brush_kind {
-                self.active_brush_kind = selected_brush_kind;
-                integration.set_active_brush(self.active_brush_kind.brush_id());
-            }
-            integration.set_active_brush_color_rgb(overlay.selected_brush_color_rgb());
-            integration.set_active_brush_erase(overlay.selected_brush_erase());
-            if let Some((brush_kind, values)) = overlay.take_pending_brush_update() {
-                match brush_kind {
-                    BrushKind::Round => match RoundBrush::from_config_values(&values) {
-                        Ok(updated_brush) => {
-                            if let Err(error) =
-                                integration.update_brush(brush_kind.brush_id(), updated_brush)
-                            {
-                                eprintln!("failed to update brush: {error:?}");
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("failed to build round brush from config: {error}");
-                        }
+            integration.process_main_render();
+            if let Some(overlay) = &mut self.overlay {
+                overlay.sync_layer_tree(
+                    integration.layer_tree_items(),
+                    integration.active_document_node(),
+                );
+                let Some(window) = self.window.as_deref() else {
+                    integration.present_to_screen();
+                    return;
+                };
+                integration.present_to_screen_with_overlay(
+                    |device, queue, encoder, view, format, width, height| {
+                        overlay.paint(window, device, queue, encoder, view, format, width, height);
                     },
-                    BrushKind::PixelRect => match PixelRectBrush::from_config_values(&values) {
-                        Ok(updated_brush) => {
-                            if let Err(error) =
-                                integration.update_brush(brush_kind.brush_id(), updated_brush)
-                            {
-                                eprintln!("failed to update brush: {error:?}");
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("failed to build pixel rect brush from config: {error}");
-                        }
-                    },
+                );
+                let selected_brush_kind = overlay.selected_brush_kind();
+                if self.active_brush_kind != selected_brush_kind {
+                    self.active_brush_kind = selected_brush_kind;
+                    integration.set_active_brush(self.active_brush_kind.brush_id());
                 }
+                integration.set_active_brush_color_rgb(overlay.selected_brush_color_rgb());
+                integration.set_active_brush_erase(overlay.selected_brush_erase());
+                if let Some((brush_kind, values)) = overlay.take_pending_brush_update() {
+                    match brush_kind {
+                        BrushKind::Round => match RoundBrush::from_config_values(&values) {
+                            Ok(updated_brush) => {
+                                if let Err(error) =
+                                    integration.update_brush(brush_kind.brush_id(), updated_brush)
+                                {
+                                    eprintln!("failed to update brush: {error:?}");
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("failed to build round brush from config: {error}");
+                            }
+                        },
+                        BrushKind::PixelRect => match PixelRectBrush::from_config_values(&values) {
+                            Ok(updated_brush) => {
+                                if let Err(error) =
+                                    integration.update_brush(brush_kind.brush_id(), updated_brush)
+                                {
+                                    eprintln!("failed to update brush: {error:?}");
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("failed to build pixel rect brush from config: {error}");
+                            }
+                        },
+                    }
+                }
+                if let Some(node_id) = overlay.take_pending_layer_select() {
+                    if integration.select_document_node(node_id) {
+                        should_advance_epoch = true;
+                    }
+                }
+                if let Some(kind) = overlay.take_pending_layer_create() {
+                    match integration.create_layer_above_active(kind) {
+                        Ok(()) => should_advance_epoch = true,
+                        Err(error) => eprintln!("failed to create layer: {error:?}"),
+                    }
+                }
+                if overlay.take_pending_group_create() {
+                    match integration.create_group_above_active() {
+                        Ok(()) => should_advance_epoch = true,
+                        Err(error) => eprintln!("failed to create group: {error:?}"),
+                    }
+                }
+                if let Some(direction) = overlay.take_pending_layer_move() {
+                    let result = match direction {
+                        LayerMoveDirection::Up => integration.move_active_node_up(),
+                        LayerMoveDirection::Down => integration.move_active_node_down(),
+                    };
+                    if let Err(error) = result {
+                        eprintln!("failed to move layer: {error:?}");
+                    } else {
+                        should_advance_epoch = true;
+                    }
+                }
+            } else {
+                integration.present_to_screen();
             }
-        } else {
-            integration.present_to_screen();
+        }
+        if should_advance_epoch {
+            self.advance_epoch();
         }
     }
 
@@ -426,10 +475,11 @@ impl ApplicationHandler for App {
                                 overlay.flush_selected_brush_if_dirty();
                             }
                             self.render_frame();
-                            self.stroke_active = true;
+                            self.stroke_active = false;
                             if let Some(integration) = &mut self.integration {
-                                if let Some(node_id) = integration.active_document_node() {
+                                if let Some(node_id) = integration.active_paint_node() {
                                     integration.begin_stroke(node_id);
+                                    self.stroke_active = true;
                                 }
                             }
                         }
@@ -601,6 +651,12 @@ struct EguiOverlay {
     brush_states: Vec<BrushUiState>,
     selected_brush_index: usize,
     pending_brush_update: Option<(BrushKind, Vec<BrushConfigValue>)>,
+    layer_tree_items: Vec<UiLayerTreeItem>,
+    selected_node: Option<NodeId>,
+    pending_layer_select: Option<NodeId>,
+    pending_layer_create: Option<NewLayerKind>,
+    pending_group_create: bool,
+    pending_layer_move: Option<LayerMoveDirection>,
     config_panel_rect: Option<Rect>,
 }
 
@@ -636,6 +692,12 @@ impl EguiOverlay {
             brush_states,
             selected_brush_index,
             pending_brush_update: None,
+            layer_tree_items: Vec::new(),
+            selected_node: None,
+            pending_layer_select: None,
+            pending_layer_create: None,
+            pending_group_create: false,
+            pending_layer_move: None,
             config_panel_rect: None,
         }
     }
@@ -673,6 +735,31 @@ impl EguiOverlay {
         self.pending_brush_update.take()
     }
 
+    fn sync_layer_tree(
+        &mut self,
+        layer_tree_items: Vec<UiLayerTreeItem>,
+        selected_node: Option<NodeId>,
+    ) {
+        self.layer_tree_items = layer_tree_items;
+        self.selected_node = selected_node;
+    }
+
+    fn take_pending_layer_select(&mut self) -> Option<NodeId> {
+        self.pending_layer_select.take()
+    }
+
+    fn take_pending_layer_create(&mut self) -> Option<NewLayerKind> {
+        self.pending_layer_create.take()
+    }
+
+    fn take_pending_group_create(&mut self) -> bool {
+        std::mem::take(&mut self.pending_group_create)
+    }
+
+    fn take_pending_layer_move(&mut self) -> Option<LayerMoveDirection> {
+        self.pending_layer_move.take()
+    }
+
     fn flush_selected_brush_if_dirty(&mut self) {
         self.queue_brush_update_if_dirty(self.selected_brush_index);
     }
@@ -708,6 +795,12 @@ impl EguiOverlay {
         let brush_states = &mut self.brush_states;
         let selected_brush_index = &mut self.selected_brush_index;
         let pending_brush_update = &mut self.pending_brush_update;
+        let layer_tree_items = &self.layer_tree_items;
+        let selected_node = &mut self.selected_node;
+        let pending_layer_select = &mut self.pending_layer_select;
+        let pending_layer_create = &mut self.pending_layer_create;
+        let pending_group_create = &mut self.pending_group_create;
+        let pending_layer_move = &mut self.pending_layer_move;
         let config_panel_rect = &mut self.config_panel_rect;
         let full_output = self.ctx.run(raw_input, |ctx| {
             if *left_panel_collapsed {
@@ -742,6 +835,42 @@ impl EguiOverlay {
                         ui.separator();
                         ui.label("Brushes");
                         ui.label("Edit in right panel");
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Layers");
+                            if ui.small_button("+ Raster").clicked() {
+                                *pending_layer_create = Some(NewLayerKind::Raster);
+                            }
+                            if ui.small_button("+ Solid").clicked() {
+                                *pending_layer_create = Some(NewLayerKind::SolidColor {
+                                    color: [1.0, 1.0, 1.0, 1.0],
+                                });
+                            }
+                            if ui.small_button("+ Group").clicked() {
+                                *pending_group_create = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Up").clicked() {
+                                *pending_layer_move = Some(LayerMoveDirection::Up);
+                            }
+                            if ui.small_button("Down").clicked() {
+                                *pending_layer_move = Some(LayerMoveDirection::Down);
+                            }
+                        });
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height(280.0)
+                            .show(ui, |ui| {
+                                for item in layer_tree_items {
+                                    render_layer_tree_item(
+                                        ui,
+                                        item,
+                                        *selected_node,
+                                        pending_layer_select,
+                                    );
+                                }
+                            });
                     });
             }
             if *right_panel_collapsed {
@@ -971,6 +1100,43 @@ impl EguiOverlay {
             full_output.pixels_per_point,
         );
     }
+}
+
+fn render_layer_tree_item(
+    ui: &mut egui::Ui,
+    item: &UiLayerTreeItem,
+    selected_node: Option<NodeId>,
+    pending_layer_select: &mut Option<NodeId>,
+) {
+    let prefix = match item.kind {
+        UiNodeKind::Branch => "[G] ",
+        UiNodeKind::RasterLayer => "",
+        UiNodeKind::SpecialLayer => "[S] ",
+    };
+    let label = format!("{prefix}{}", item.label);
+    if item.children.is_empty() {
+        if ui
+            .selectable_label(selected_node == Some(item.id), label)
+            .clicked()
+        {
+            *pending_layer_select = Some(item.id);
+        }
+        return;
+    }
+
+    egui::CollapsingHeader::new(label)
+        .default_open(true)
+        .show(ui, |ui| {
+            if ui
+                .selectable_label(selected_node == Some(item.id), "Select Group")
+                .clicked()
+            {
+                *pending_layer_select = Some(item.id);
+            }
+            for child in &item.children {
+                render_layer_tree_item(ui, child, selected_node, pending_layer_select);
+            }
+        });
 }
 
 fn render_scalar_config(

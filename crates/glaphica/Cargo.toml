@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 app = { path = "../app" }
 brushes = { path = "../brushes" }
+document = { path = "../document" }
 glaphica_core = { path = "../glaphica_core" }
 images = { path = "../images" }
 thread_protocol = { path = "../thread_protocol" }

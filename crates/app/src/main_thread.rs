@@ -14,8 +14,8 @@ use glaphica_core::{
     TextureFormat, TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
-    FrameBatch, FrameBatchContext, FrameBatchPerfStats, GpuContext, GpuContextInitDescriptor, RenderContext,
-    RenderExecutor,
+    FrameBatch, FrameBatchContext, FrameBatchPerfStats, GpuContext, GpuContextInitDescriptor,
+    RenderContext, RenderExecutor,
     atlas_runtime::AtlasStorageRuntime,
     brush_runtime::{BrushGpuRuntime, validate_draw_op_layout},
     surface_runtime::{SurfaceError, SurfaceRuntime},
@@ -636,7 +636,8 @@ impl MainThreadState {
             }
         }
 
-        let dirty_summary = summarize_dirty_tracker(&self.shared_tree.read(), &self.image_dirty_tracker);
+        let dirty_summary =
+            summarize_dirty_tracker(&self.shared_tree.read(), &self.image_dirty_tracker);
         submit_perf.dirty_tile_count = dirty_summary.0;
         submit_perf.dirty_rect_count = dirty_summary.1;
         submit_perf.dirty_bbox_tile_area = dirty_summary.2;
@@ -942,7 +943,12 @@ fn summarize_dirty_tracker(
             (width as usize) * (height as usize)
         })
         .sum();
-    (dirty_tile_count, dirty_rect_count, dirty_bbox_tile_area, by_node.len())
+    (
+        dirty_tile_count,
+        dirty_rect_count,
+        dirty_bbox_tile_area,
+        by_node.len(),
+    )
 }
 
 fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
@@ -1071,7 +1077,7 @@ mod tests {
                 node_id: NodeId(1),
                 tile_index: 3,
                 tile_key,
-                blend_mode: DrawBlendMode::Alpha,
+                blend_mode: DrawBlendMode::Additive,
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
