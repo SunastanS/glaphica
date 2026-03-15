@@ -40,7 +40,15 @@ pub struct StrokeDrawOutput {
     pub copy_op: Option<CopyOp>,
     pub write_op: Option<WriteOp>,
     pub composite_op: Option<CompositeOp>,
-    pub tile_key_update: Option<(NodeId, usize, TileKey)>,
+    pub tile_key_update: Option<StrokeTileKeyUpdate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrokeTileKeyUpdate {
+    pub node_id: NodeId,
+    pub tile_index: usize,
+    pub old_tile_key: TileKey,
+    pub new_tile_key: TileKey,
 }
 
 pub trait EngineBrushPipeline: Send {
@@ -547,7 +555,7 @@ impl BrushEngineRuntime {
             Option<ClearOp>,
             Option<TileKey>,
             TileKey,
-            Option<(NodeId, usize, TileKey)>,
+            Option<StrokeTileKeyUpdate>,
         )> = Vec::new();
         let stroke_buffer_backend = self.pipelines.get(brush_id)?.stroke_buffer_backend;
         let uses_stroke_buffer = stroke_buffer_backend.is_some();
@@ -804,7 +812,7 @@ impl BrushEngineRuntime {
         Option<CopyOp>,
         Option<ClearOp>,
         TileKey,
-        Option<(NodeId, usize, TileKey)>,
+        Option<StrokeTileKeyUpdate>,
     )
     where
         A: TileSlotAllocator,
@@ -905,7 +913,12 @@ impl BrushEngineRuntime {
             copy_op,
             origin_init_clear_op,
             restore_tile,
-            Some((node_id, tile_index, new_tile_key)),
+            Some(StrokeTileKeyUpdate {
+                node_id,
+                tile_index,
+                old_tile_key: current_tile_key,
+                new_tile_key,
+            }),
         )
     }
 }
@@ -1247,7 +1260,10 @@ mod tests {
             .expect("draw op must exist");
         assert_eq!(draw_op.tile_key, stroke_tile);
         assert_eq!(draw_op.origin_tile, existing_key);
-        assert_eq!(first_allocator.replacements, vec![(existing_key, stroke_tile)]);
+        assert_eq!(
+            first_allocator.replacements,
+            vec![(existing_key, stroke_tile)]
+        );
         assert!(second_allocator.replacements.is_empty());
     }
 

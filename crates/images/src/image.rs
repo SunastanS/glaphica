@@ -25,6 +25,14 @@ pub enum ImageTileAccessError {
     OutOfBounds,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonEmptyTileBounds {
+    pub min_tile_x: u32,
+    pub min_tile_y: u32,
+    pub max_tile_x: u32,
+    pub max_tile_y: u32,
+}
+
 impl Display for ImageTileAccessError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -90,6 +98,38 @@ impl Image {
         Ok(())
     }
 
+    pub fn non_empty_tile_bounds(&self) -> Option<NonEmptyTileBounds> {
+        let tile_x = self.layout.tile_x() as usize;
+        let mut bounds: Option<NonEmptyTileBounds> = None;
+
+        for (tile_index, tile_key) in self.tile_keys.iter().copied().enumerate() {
+            if tile_key == TileKey::EMPTY {
+                continue;
+            }
+
+            let tile_coord_x = (tile_index % tile_x) as u32;
+            let tile_coord_y = (tile_index / tile_x) as u32;
+            match &mut bounds {
+                Some(bounds) => {
+                    bounds.min_tile_x = bounds.min_tile_x.min(tile_coord_x);
+                    bounds.min_tile_y = bounds.min_tile_y.min(tile_coord_y);
+                    bounds.max_tile_x = bounds.max_tile_x.max(tile_coord_x);
+                    bounds.max_tile_y = bounds.max_tile_y.max(tile_coord_y);
+                }
+                None => {
+                    bounds = Some(NonEmptyTileBounds {
+                        min_tile_x: tile_coord_x,
+                        min_tile_y: tile_coord_y,
+                        max_tile_x: tile_coord_x,
+                        max_tile_y: tile_coord_y,
+                    });
+                }
+            }
+        }
+
+        bounds
+    }
+
     pub fn for_each_affected_tile_key<F>(
         &self,
         center: CanvasVec2,
@@ -125,7 +165,7 @@ mod tests {
 
     use crate::layout::ImageLayout;
 
-    use super::{Image, ImageTileAccessError};
+    use super::{Image, ImageTileAccessError, NonEmptyTileBounds};
 
     #[test]
     fn set_and_get_tile_key_use_index_mapping() {
@@ -189,6 +229,32 @@ mod tests {
                 TileKey::from_parts(1, 2, 100),
                 TileKey::from_parts(1, 2, 101)
             ]
+        );
+    }
+
+    #[test]
+    fn non_empty_tile_bounds_cover_non_empty_keys() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
+        let mut image = Image::new(layout, BackendId::new(1)).unwrap();
+        assert!(
+            image
+                .set_tile_key(1, TileKey::from_parts(1, 2, 100))
+                .is_ok()
+        );
+        assert!(
+            image
+                .set_tile_key(5, TileKey::from_parts(1, 2, 101))
+                .is_ok()
+        );
+
+        assert_eq!(
+            image.non_empty_tile_bounds(),
+            Some(NonEmptyTileBounds {
+                min_tile_x: 1,
+                min_tile_y: 0,
+                max_tile_x: 2,
+                max_tile_y: 1,
+            })
         );
     }
 }

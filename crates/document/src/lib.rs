@@ -1,4 +1,5 @@
 mod shared_tree;
+mod storage;
 mod view;
 
 use std::collections::HashMap;
@@ -12,6 +13,10 @@ pub use images::ImageCreateError;
 pub use shared_tree::{
     FlatLeafContent, FlatNodeKind, FlatRenderNode, FlatRenderTree, MaterializeParametricCmd,
     NodeConfig, ParametricMesh, ParametricVertex, RenderCmd, RenderSource, SharedRenderTree,
+};
+pub use storage::{
+    DocumentStorageError, DocumentStorageManifest, RasterLayerAssetMetadata,
+    RasterLayerExportRequest, StoredBranchBlendMode, StoredLayerNode, StoredLeafBlendMode,
 };
 pub use view::View;
 
@@ -31,6 +36,12 @@ pub struct Metadata {
     name: String,
 }
 
+impl Metadata {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NewLayerKind {
     Raster,
@@ -46,6 +57,12 @@ pub enum LayerEditError {
     ImageCreate(ImageCreateError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerMoveTarget {
+    pub parent_id: NodeId,
+    pub index: usize,
+}
+
 impl From<ImageCreateError> for LayerEditError {
     fn from(err: ImageCreateError) -> Self {
         Self::ImageCreate(err)
@@ -59,11 +76,12 @@ pub enum UiNodeKind {
     SpecialLayer,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UiLayerTreeItem {
     pub id: NodeId,
     pub label: String,
     pub kind: UiNodeKind,
+    pub solid_color: Option<[f32; 4]>,
     pub children: Vec<UiLayerTreeItem>,
 }
 
@@ -189,6 +207,12 @@ impl Document {
         &self.layer_tree
     }
 
+    pub fn collect_raster_tile_keys(&self) -> Vec<glaphica_core::TileKey> {
+        let mut keys = Vec::new();
+        collect_raster_tile_keys_from_node(&self.layer_tree.root, &mut keys);
+        keys
+    }
+
     pub fn layer_tree_items(&self) -> Vec<UiLayerTreeItem> {
         self.layer_tree.items()
     }
@@ -279,6 +303,16 @@ impl Document {
     pub fn move_active_node_down(&mut self) -> Result<(), LayerEditError> {
         let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
         self.layer_tree.move_node(active_id, -1)
+    }
+
+    pub fn move_node_to(
+        &mut self,
+        node_id: NodeId,
+        target: LayerMoveTarget,
+    ) -> Result<(), LayerEditError> {
+        self.layer_tree.move_node_to(node_id, target)?;
+        self.active_node = Some(node_id);
+        Ok(())
     }
 
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
@@ -484,6 +518,36 @@ impl UiLayerTree {
         }
     }
 
+    pub fn move_node_to(
+        &mut self,
+        node_id: NodeId,
+        target: LayerMoveTarget,
+    ) -> Result<(), LayerEditError> {
+        if node_id == self.root_id() {
+            return Err(LayerEditError::RootSelectionNotAllowed);
+        }
+        let moving_node = self.get_node(node_id).ok_or(LayerEditError::InvalidNode)?;
+        let target_parent = self
+            .get_node(target.parent_id)
+            .ok_or(LayerEditError::InvalidNode)?;
+        if !matches!(target_parent, UiLayerNode::Branch(_)) {
+            return Err(LayerEditError::InvalidNode);
+        }
+        if subtree_contains_node(moving_node, target.parent_id) {
+            return Err(LayerEditError::InvalidNode);
+        }
+
+        let (moved_node, source_parent_id, source_index) =
+            remove_node_from_branch(&mut self.root, node_id).ok_or(LayerEditError::InvalidNode)?;
+        let adjusted_index = adjust_move_index(
+            source_parent_id,
+            source_index,
+            target.parent_id,
+            target.index,
+        );
+        insert_node_at_parent(&mut self.root, target.parent_id, adjusted_index, moved_node)
+    }
+
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
         get_leaf_image_from_node(&self.root, node_id)
     }
@@ -553,6 +617,7 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
             id: branch.meta.id,
             label: branch.meta.label.clone(),
             kind: UiNodeKind::Branch,
+            solid_color: None,
             children: branch.children.iter().map(build_layer_tree_item).collect(),
         },
         UiLayerNode::Leaf(leaf) => UiLayerTreeItem {
@@ -561,6 +626,10 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
             kind: match &leaf.content {
                 UiLeafContent::Raster { .. } => UiNodeKind::RasterLayer,
                 UiLeafContent::Special(_) => UiNodeKind::SpecialLayer,
+            },
+            solid_color: match &leaf.content {
+                UiLeafContent::Raster { .. } => None,
+                UiLeafContent::Special(SpecialLayer::SolidColor(layer)) => Some(layer.color),
             },
             children: Vec::new(),
         },
@@ -621,6 +690,77 @@ fn move_node_in_branch(node: &mut UiLayerNode, target_id: NodeId, offset: isize)
     None
 }
 
+fn subtree_contains_node(node: &UiLayerNode, target_id: NodeId) -> bool {
+    if node.id() == target_id {
+        return true;
+    }
+    match node {
+        UiLayerNode::Branch(branch) => branch
+            .children
+            .iter()
+            .any(|child| subtree_contains_node(child, target_id)),
+        UiLayerNode::Leaf(_) => false,
+    }
+}
+
+fn remove_node_from_branch(
+    node: &mut UiLayerNode,
+    target_id: NodeId,
+) -> Option<(UiLayerNode, NodeId, usize)> {
+    let UiLayerNode::Branch(branch) = node else {
+        return None;
+    };
+
+    if let Some(index) = branch
+        .children
+        .iter()
+        .position(|child| child.id() == target_id)
+    {
+        let removed = branch.children.remove(index);
+        return Some((removed, branch.meta.id, index));
+    }
+
+    for child in &mut branch.children {
+        if let Some(removed) = remove_node_from_branch(child, target_id) {
+            return Some(removed);
+        }
+    }
+
+    None
+}
+
+fn adjust_move_index(
+    source_parent_id: NodeId,
+    source_index: usize,
+    target_parent_id: NodeId,
+    target_index: usize,
+) -> usize {
+    if source_parent_id == target_parent_id && source_index < target_index {
+        target_index.saturating_sub(1)
+    } else {
+        target_index
+    }
+}
+
+fn insert_node_at_parent(
+    node: &mut UiLayerNode,
+    parent_id: NodeId,
+    index: usize,
+    new_node: UiLayerNode,
+) -> Result<(), LayerEditError> {
+    let Some(parent) = get_node_from_node_mut(node, parent_id) else {
+        return Err(LayerEditError::InvalidNode);
+    };
+    let UiLayerNode::Branch(branch) = parent else {
+        return Err(LayerEditError::InvalidNode);
+    };
+    if index > branch.children.len() {
+        return Err(LayerEditError::MoveOutOfBounds);
+    }
+    branch.children.insert(index, new_node);
+    Ok(())
+}
+
 fn get_leaf_image_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&Image> {
     match node {
         UiLayerNode::Branch(branch) => {
@@ -667,6 +807,19 @@ fn get_leaf_image_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Opti
     }
 }
 
+fn get_node_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Option<&mut UiLayerNode> {
+    if node.id() == node_id {
+        return Some(node);
+    }
+    match node {
+        UiLayerNode::Branch(branch) => branch
+            .children
+            .iter_mut()
+            .find_map(|child| get_node_from_node_mut(child, node_id)),
+        UiLayerNode::Leaf(_) => None,
+    }
+}
+
 fn get_solid_color_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<[f32; 4]> {
     match node {
         UiLayerNode::Branch(branch) => {
@@ -702,6 +855,29 @@ fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f3
             match &mut leaf.content {
                 UiLeafContent::Raster { .. } => false,
                 UiLeafContent::Special(layer) => layer.set_solid_color(color),
+            }
+        }
+    }
+}
+
+fn collect_raster_tile_keys_from_node(
+    node: &UiLayerNode,
+    output: &mut Vec<glaphica_core::TileKey>,
+) {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            for child in &branch.children {
+                collect_raster_tile_keys_from_node(child, output);
+            }
+        }
+        UiLayerNode::Leaf(leaf) => {
+            let UiLeafContent::Raster { image } = &leaf.content else {
+                return;
+            };
+            for tile_key in image.tile_keys().iter().copied() {
+                if tile_key != glaphica_core::TileKey::EMPTY {
+                    output.push(tile_key);
+                }
             }
         }
     }
@@ -1507,6 +1683,99 @@ mod tests {
         assert_eq!(root.children[0].id(), NodeId(0));
         assert_eq!(root.children[1].id(), NodeId(1));
         assert_eq!(root.children[2].id(), group_id);
+    }
+
+    #[test]
+    fn test_move_node_to_reparents_leaf_into_group() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let group_id = doc.create_group_above_active().unwrap();
+        doc.move_node_to(
+            NodeId(1),
+            LayerMoveTarget {
+                parent_id: group_id,
+                index: 0,
+            },
+        )
+        .unwrap();
+
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+        assert_eq!(root.children[0].id(), NodeId(0));
+        assert_eq!(root.children[1].id(), group_id);
+
+        let group = match doc.layer_tree().get_node(group_id) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch group"),
+        };
+        assert_eq!(group.children.len(), 1);
+        assert_eq!(group.children[0].id(), NodeId(1));
+        assert_eq!(doc.active_node(), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn test_move_node_to_cannot_move_group_into_descendant() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let parent_group_id = doc.create_group_above_active().unwrap();
+        let child_group_id = doc.allocate_node_id();
+        doc.layer_tree
+            .move_node_to(
+                NodeId(1),
+                LayerMoveTarget {
+                    parent_id: parent_group_id,
+                    index: 0,
+                },
+            )
+            .unwrap();
+        doc.layer_tree
+            .move_node_to(
+                parent_group_id,
+                LayerMoveTarget {
+                    parent_id: doc.layer_tree().root_id(),
+                    index: 1,
+                },
+            )
+            .unwrap();
+        if let Some(UiLayerNode::Branch(branch)) =
+            get_node_from_node_mut(&mut doc.layer_tree.root, parent_group_id)
+        {
+            branch.children.push(UiLayerNode::Branch(UiBranchNode {
+                meta: test_meta(child_group_id, "Child"),
+                config: BranchConfig {
+                    opacity: 1.0,
+                    blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
+                },
+                children: Vec::new(),
+            }));
+        } else {
+            panic!("expected mutable branch group");
+        }
+
+        let result = doc.move_node_to(
+            parent_group_id,
+            LayerMoveTarget {
+                parent_id: child_group_id,
+                index: 0,
+            },
+        );
+        assert!(matches!(result, Err(LayerEditError::InvalidNode)));
     }
 
     #[test]

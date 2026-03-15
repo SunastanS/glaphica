@@ -7,3 +7,4 @@ edition = "2024"
 glaphica_core = { path = "../glaphica_core" }
 images = { path = "../images" }
 arc-swap = "1.7"
+serde = { version = "1", features = ["derive"] }

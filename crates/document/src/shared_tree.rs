@@ -980,6 +980,9 @@ mod tests {
             render_cache.tile_key(0),
             Some(TileKey::from_parts(1, 0, 10))
         );
-        assert_eq!(new_tree.diff_render_cache_dirty(&old_tree), vec![NodeId(100)]);
+        assert_eq!(
+            new_tree.diff_render_cache_dirty(&old_tree),
+            vec![NodeId(100)]
+        );
     }
 }

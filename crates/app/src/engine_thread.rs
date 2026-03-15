@@ -1,4 +1,4 @@
-use atlas::{BackendManager, EditSession};
+use atlas::{BackendManager, EditSession, TileKeySwap};
 use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
 use document::{Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{
@@ -11,6 +11,19 @@ use stroke_input::{InputProcessingConfig, StrokeInputProcessor};
 pub struct EngineBackendManager {
     manager: BackendManager,
     stroke_edits: HashMap<u8, EditSession>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StrokeTileUndoRecord {
+    node_id: NodeId,
+    tile_index: usize,
+    old_tile_key: TileKey,
+    new_tile_key: TileKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrokeUndoRecord {
+    tiles: Vec<StrokeTileUndoRecord>,
 }
 
 impl EngineBackendManager {
@@ -33,8 +46,25 @@ impl EngineBackendManager {
     where
         I: IntoIterator<Item = TileKey>,
     {
+        self.cache_tiles(keys, false);
+    }
+
+    fn drop_tiles<I>(&mut self, keys: I)
+    where
+        I: IntoIterator<Item = TileKey>,
+    {
+        self.cache_tiles(keys, true);
+    }
+
+    fn cache_tiles<I>(&mut self, keys: I, drop_first: bool)
+    where
+        I: IntoIterator<Item = TileKey>,
+    {
         let mut sessions: HashMap<u8, EditSession> = HashMap::new();
         for key in keys {
+            if key == TileKey::EMPTY {
+                continue;
+            }
             let backend = key.backend();
             let Some(backend_ref) = self.manager.backend_mut(backend) else {
                 continue;
@@ -42,15 +72,25 @@ impl EngineBackendManager {
             let session = sessions
                 .entry(backend.raw())
                 .or_insert_with(|| backend_ref.begin_edit());
-            if let Err(error) = backend_ref.release_key(session, key) {
-                eprintln!("failed to retire tile key: {error:?}");
+            let result = if drop_first {
+                backend_ref.drop_key(session, key)
+            } else {
+                backend_ref.release_key(session, key)
+            };
+            if let Err(error) = result {
+                eprintln!("failed to cache tile key: {error:?}");
             }
         }
 
         for (backend, session) in sessions {
             if let Some(backend_ref) = self.manager.backend_mut(BackendId::new(backend)) {
-                if let Err(error) = backend_ref.finish_edit(session) {
-                    eprintln!("failed to finish tile retirement session: {error:?}");
+                let result = if drop_first {
+                    backend_ref.finish_drop(session)
+                } else {
+                    backend_ref.finish_edit(session)
+                };
+                if let Err(error) = result {
+                    eprintln!("failed to finish tile cache session: {error:?}");
                 }
             }
         }
@@ -73,9 +113,11 @@ impl TileSlotAllocator for EngineBackendManager {
     }
 
     fn alloc_active_with_parity(&mut self, backend: BackendId, parity: bool) -> Option<TileKey> {
-        self.manager
-            .backend_mut(backend)
-            .and_then(|b| b.alloc_active_with_parity(parity).ok().map(|tile| tile.key()))
+        self.manager.backend_mut(backend).and_then(|b| {
+            b.alloc_active_with_parity(parity)
+                .ok()
+                .map(|tile| tile.key())
+        })
     }
 
     fn begin_stroke(&mut self) {
@@ -140,6 +182,15 @@ pub struct EngineThreadState {
     stroke_outputs: Vec<StrokeDrawOutput>,
     input_processor: StrokeInputProcessor,
     active_stroke_id: Option<StrokeId>,
+    pending_stroke_undo_tiles: Vec<StrokeTileUndoRecord>,
+    undo_strokes: Vec<StrokeUndoRecord>,
+    redo_strokes: Vec<StrokeUndoRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineStats {
+    pub backend_tiles: Vec<atlas::BackendTileStats>,
+    pub undo_stroke_count: usize,
 }
 
 const RESAMPLER_MIN_TIME_S: f32 = 0.008;
@@ -172,6 +223,9 @@ impl EngineThreadState {
             stroke_outputs: Vec::new(),
             input_processor,
             active_stroke_id: None,
+            pending_stroke_undo_tiles: Vec::new(),
+            undo_strokes: Vec::new(),
+            redo_strokes: Vec::new(),
         }
     }
 
@@ -199,12 +253,35 @@ impl EngineThreadState {
         &mut self.document
     }
 
+    pub fn allocate_leaf_tile(&mut self, backend: BackendId) -> Option<TileKey> {
+        self.backend_manager.alloc_active(backend)
+    }
+
+    pub fn replace_document(&mut self, document: Document) {
+        let old_keys = self.document.collect_raster_tile_keys();
+        self.backend_manager.drop_tiles(old_keys);
+        self.document = document;
+        self.pending_stroke_undo_tiles.clear();
+        self.undo_strokes.clear();
+        self.redo_strokes.clear();
+        self.active_stroke_id = None;
+        self.input_processor.end_stroke();
+    }
+
+    pub fn stats(&self) -> EngineStats {
+        EngineStats {
+            backend_tiles: self.backend_manager.inner().backend_tile_stats(),
+            undo_stroke_count: self.undo_strokes.len(),
+        }
+    }
+
     pub fn shared_tree(&self) -> &SharedRenderTree {
         &self.shared_tree
     }
 
     pub fn begin_stroke(&mut self, stroke_id: StrokeId) {
         self.active_stroke_id = Some(stroke_id);
+        self.pending_stroke_undo_tiles.clear();
         self.input_processor.begin_stroke(stroke_id);
         self.brush_runtime.begin_stroke(&mut self.backend_manager);
     }
@@ -212,7 +289,45 @@ impl EngineThreadState {
     pub fn end_stroke(&mut self) {
         self.input_processor.end_stroke();
         self.brush_runtime.end_stroke(&mut self.backend_manager);
+        if !self.pending_stroke_undo_tiles.is_empty() {
+            self.undo_strokes.push(StrokeUndoRecord {
+                tiles: std::mem::take(&mut self.pending_stroke_undo_tiles),
+            });
+        }
         self.active_stroke_id = None;
+    }
+
+    pub fn undo_stroke(&mut self) -> Option<thread_protocol::TileSlotKeyUpdateMsg> {
+        let record = self.undo_strokes.pop()?;
+        self.apply_stroke_undo_record(&record)?;
+        self.redo_strokes.push(record.clone());
+        Some(Self::tile_update_msg_from_record(&record, true))
+    }
+
+    pub fn redo_stroke(&mut self) -> Option<thread_protocol::TileSlotKeyUpdateMsg> {
+        let record = self.redo_strokes.pop()?;
+        self.apply_stroke_redo_record(&record)?;
+        self.undo_strokes.push(record.clone());
+        Some(Self::tile_update_msg_from_record(&record, false))
+    }
+
+    pub fn invalidate_redo_strokes(&mut self) {
+        let mut keys = self
+            .redo_strokes
+            .iter()
+            .flat_map(|record| record.tiles.iter().map(|tile| tile.new_tile_key))
+            .filter(|key| *key != TileKey::EMPTY)
+            .collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|key| {
+            (
+                key.backend_index(),
+                key.generation_index(),
+                key.slot_index(),
+            )
+        });
+        keys.dedup();
+        self.backend_manager.drop_tiles(keys);
+        self.redo_strokes.clear();
     }
 
     pub fn process_raw_input(
@@ -305,8 +420,14 @@ impl EngineThreadState {
                 draw_ops.push(draw_op.clone());
             }
 
-            if let Some((node_id, tile_index, _tile_key)) = output.tile_key_update {
-                tile_updates.push((node_id, tile_index));
+            if let Some(tile_update) = output.tile_key_update {
+                tile_updates.push((tile_update.node_id, tile_update.tile_index));
+                self.pending_stroke_undo_tiles.push(StrokeTileUndoRecord {
+                    node_id: tile_update.node_id,
+                    tile_index: tile_update.tile_index,
+                    old_tile_key: tile_update.old_tile_key,
+                    new_tile_key: tile_update.new_tile_key,
+                });
             }
         }
 
@@ -349,6 +470,91 @@ impl EngineThreadState {
             ));
         }
         Ok(gpu_cmds)
+    }
+
+    fn apply_stroke_undo_record(&mut self, record: &StrokeUndoRecord) -> Option<()> {
+        let mut swaps_by_backend: HashMap<u8, Vec<TileKeySwap>> = HashMap::new();
+        for tile in &record.tiles {
+            let backend = if tile.old_tile_key != TileKey::EMPTY {
+                tile.old_tile_key.backend()
+            } else if tile.new_tile_key != TileKey::EMPTY {
+                tile.new_tile_key.backend()
+            } else {
+                continue;
+            };
+            swaps_by_backend
+                .entry(backend.raw())
+                .or_default()
+                .push(TileKeySwap {
+                    restore_key: tile.old_tile_key,
+                    retire_key: tile.new_tile_key,
+                });
+        }
+
+        for (backend, swaps) in &swaps_by_backend {
+            let backend = self
+                .backend_manager
+                .inner_mut()
+                .backend_mut(BackendId::new(*backend))?;
+            if backend.restore_cached_keys(swaps).is_err() {
+                return None;
+            }
+        }
+
+        for tile in &record.tiles {
+            let image = self.document.get_leaf_image_mut(tile.node_id)?;
+            if image
+                .set_tile_key(tile.tile_index, tile.old_tile_key)
+                .is_err()
+            {
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    fn apply_stroke_redo_record(&mut self, record: &StrokeUndoRecord) -> Option<()> {
+        let keys = record
+            .tiles
+            .iter()
+            .map(|tile| tile.old_tile_key)
+            .filter(|key| *key != TileKey::EMPTY)
+            .collect::<Vec<_>>();
+        self.backend_manager.retire_tiles(keys);
+
+        for tile in &record.tiles {
+            let image = self.document.get_leaf_image_mut(tile.node_id)?;
+            if image
+                .set_tile_key(tile.tile_index, tile.new_tile_key)
+                .is_err()
+            {
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    fn tile_update_msg_from_record(
+        record: &StrokeUndoRecord,
+        use_old_tile_key: bool,
+    ) -> thread_protocol::TileSlotKeyUpdateMsg {
+        thread_protocol::TileSlotKeyUpdateMsg {
+            updates: record
+                .tiles
+                .iter()
+                .map(|tile| {
+                    (
+                        tile.node_id,
+                        tile.tile_index,
+                        if use_old_tile_key {
+                            tile.old_tile_key
+                        } else {
+                            tile.new_tile_key
+                        },
+                    )
+                })
+                .collect(),
+        }
     }
 
     pub fn rebuild_render_tree(
@@ -460,7 +666,9 @@ fn cache_node_parity(
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineBackendManager, collect_render_cache_tile_keys, retire_stale_render_cache_tiles};
+    use super::{
+        EngineBackendManager, collect_render_cache_tile_keys, retire_stale_render_cache_tiles,
+    };
     use document::{FlatNodeKind, FlatRenderNode, FlatRenderTree, LeafBlendMode, NodeConfig};
     use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
     use images::{Image, layout::ImageLayout};
@@ -508,7 +716,10 @@ mod tests {
             .add_backend(glaphica_core::AtlasLayout::Small11)
             .unwrap();
 
-        let backend = backend_manager.inner_mut().backend_mut(BackendId::new(1)).unwrap();
+        let backend = backend_manager
+            .inner_mut()
+            .backend_mut(BackendId::new(1))
+            .unwrap();
         let kept = backend.alloc_active().unwrap().key();
         let removed = backend.alloc_active().unwrap().key();
 
@@ -522,6 +733,9 @@ mod tests {
 
         let backend = backend_manager.inner().backend(BackendId::new(1)).unwrap();
         assert_eq!(backend.tile_state(kept).unwrap(), atlas::TileState::Active);
-        assert_eq!(backend.tile_state(removed).unwrap(), atlas::TileState::Cached);
+        assert_eq!(
+            backend.tile_state(removed).unwrap(),
+            atlas::TileState::Cached
+        );
     }
 }

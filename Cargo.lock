@@ -88,6 +88,7 @@ dependencies = [
  "bytemuck",
  "document",
  "egui",
+ "flate2",
  "glaphica_core",
  "gpu_runtime",
  "images",
@@ -564,6 +565,7 @@ dependencies = [
  "arc-swap",
  "glaphica_core",
  "images",
+ "serde",
 ]
 
 [[package]]
@@ -1103,6 +1105,7 @@ version = "0.1.0"
 dependencies = [
  "atlas",
  "glaphica_core",
+ "serde",
 ]
 
 [[package]]

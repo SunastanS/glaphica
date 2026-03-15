@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -23,7 +23,12 @@ use gpu_runtime::{
 };
 use thread_protocol::{GpuCmdMsg, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg};
 
-use crate::{config, screen_blitter::ScreenBlitter};
+use crate::{
+    config,
+    layer_image_export::{LayerImageExportError, LayerImageExporter},
+    layer_preview::{LayerPreviewBitmap, LayerPreviewRenderer, PreviewSource},
+    screen_blitter::ScreenBlitter,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GpuSubmitPerfStats {
@@ -287,7 +292,12 @@ pub struct MainThreadState {
     image_dirty_tracker: ImageDirtyTracker,
     tile_dirty_tracker: TileDirtyTracker,
     pending_visible_tile_updates: VecDeque<PendingVisibleTileUpdateBatch>,
+    layer_preview_renderer: LayerPreviewRenderer,
+    layer_preview_updates: Vec<LayerPreviewBitmap>,
+    pending_preview_nodes: Vec<NodeId>,
+    blocked_preview_nodes: HashSet<NodeId>,
     next_brush_cache_backend_id: u8,
+    layer_image_exporter: LayerImageExporter,
 }
 
 impl MainThreadState {
@@ -346,7 +356,12 @@ impl MainThreadState {
             image_dirty_tracker: ImageDirtyTracker::default(),
             tile_dirty_tracker: TileDirtyTracker::default(),
             pending_visible_tile_updates: VecDeque::new(),
+            layer_preview_renderer: LayerPreviewRenderer::new(),
+            layer_preview_updates: Vec::new(),
+            pending_preview_nodes: Vec::new(),
+            blocked_preview_nodes: HashSet::new(),
             next_brush_cache_backend_id: 2,
+            layer_image_exporter: LayerImageExporter::new(),
         })
     }
 
@@ -397,10 +412,59 @@ impl MainThreadState {
 
     pub fn set_shared_tree(&mut self, shared_tree: Arc<SharedRenderTree>) {
         self.shared_tree = shared_tree;
+        let tree = self.shared_tree.read();
+        self.enqueue_all_preview_nodes(&tree);
     }
 
     pub fn gpu_context(&self) -> &Arc<GpuContext> {
         &self.gpu_context
+    }
+
+    pub fn export_layer_image(
+        &mut self,
+        image: &images::Image,
+    ) -> Result<images::StoredImage, LayerImageExportError> {
+        self.layer_image_exporter.export(
+            &self.gpu_context.device,
+            &self.gpu_context.queue,
+            &self.atlas_storage,
+            image,
+        )
+    }
+
+    pub fn upload_tile_rgba8(&self, tile_key: TileKey, rgba8: &[u8]) -> bool {
+        let Some(resolved) = self.atlas_storage.resolve(tile_key) else {
+            return false;
+        };
+        let expected_len =
+            (glaphica_core::IMAGE_TILE_SIZE * glaphica_core::IMAGE_TILE_SIZE * 4) as usize;
+        if rgba8.len() != expected_len {
+            return false;
+        }
+        self.gpu_context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: resolved.address.texel_offset.0 + glaphica_core::GUTTER_SIZE,
+                    y: resolved.address.texel_offset.1 + glaphica_core::GUTTER_SIZE,
+                    z: resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba8,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(glaphica_core::IMAGE_TILE_SIZE * 4),
+                rows_per_image: Some(glaphica_core::IMAGE_TILE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: glaphica_core::IMAGE_TILE_SIZE,
+                height: glaphica_core::IMAGE_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        true
     }
 
     pub fn set_surface(&mut self, surface_runtime: SurfaceRuntime) {
@@ -485,28 +549,68 @@ impl MainThreadState {
         self.promote_completed_tile_updates();
         let tree = self.shared_tree.read();
         let cmds = tree.build_render_cmds(&self.image_dirty_tracker);
+        let mut has_work = false;
 
-        if cmds.is_empty() {
-            return false;
+        if !cmds.is_empty() {
+            let mut context = RenderContext {
+                gpu_context: &self.gpu_context,
+                atlas_storage: &self.atlas_storage,
+            };
+
+            if let Err(e) = self.render_executor.execute(&mut context, &cmds) {
+                eprintln!("Render execution failed: {e}");
+                return false;
+            }
+
+            self.image_dirty_tracker.clear();
+            has_work = true;
         }
 
-        let mut context = RenderContext {
-            gpu_context: &self.gpu_context,
-            atlas_storage: &self.atlas_storage,
-        };
-
-        if let Err(e) = self.render_executor.execute(&mut context, &cmds) {
-            eprintln!("Render execution failed: {e}");
-            return false;
+        if self.process_layer_previews(&tree) {
+            has_work = true;
         }
 
-        self.image_dirty_tracker.clear();
-        true
+        has_work
     }
 
     pub fn clear_dirty_markers(&mut self) {
         self.image_dirty_tracker.clear();
         self.tile_dirty_tracker.clear();
+    }
+
+    pub fn reset_document_runtime_state(&mut self) {
+        self.pending_visible_tile_updates.clear();
+        self.clear_dirty_markers();
+        self.pending_preview_nodes.clear();
+        self.blocked_preview_nodes.clear();
+        self.layer_preview_updates.clear();
+    }
+
+    pub fn take_layer_preview_updates(&mut self) -> Vec<LayerPreviewBitmap> {
+        std::mem::take(&mut self.layer_preview_updates)
+    }
+
+    pub fn begin_preview_stroke(&mut self, node_id: NodeId) {
+        let tree = self.shared_tree.read();
+        let mut current = Some(node_id);
+        while let Some(blocked_id) = current {
+            if preview_source_image(&tree, blocked_id).is_some() {
+                self.blocked_preview_nodes.insert(blocked_id);
+            }
+            current = tree.nodes.get(&blocked_id).and_then(|node| node.parent_id);
+        }
+    }
+
+    pub fn end_preview_stroke(&mut self, node_id: NodeId) {
+        let tree = self.shared_tree.read();
+        let mut current = Some(node_id);
+        while let Some(unblocked_id) = current {
+            self.blocked_preview_nodes.remove(&unblocked_id);
+            current = tree
+                .nodes
+                .get(&unblocked_id)
+                .and_then(|node| node.parent_id);
+        }
     }
 
     pub fn process_gpu_commands(&mut self, commands: &[GpuCmdMsg]) -> GpuSubmitPerfStats {
@@ -677,6 +781,13 @@ impl MainThreadState {
         self.brush_runtime
             .executor_mut()
             .clear_transient_draw_resources();
+        let dirty_node_ids = self
+            .image_dirty_tracker
+            .iter()
+            .map(|key| key.node_id)
+            .collect::<Vec<_>>();
+        let tree = self.shared_tree.read();
+        self.enqueue_dirty_preview_nodes(&tree, &dirty_node_ids);
         submit_perf
     }
 
@@ -691,6 +802,9 @@ impl MainThreadState {
                     self.image_dirty_tracker.mark(*node_id, tile_index);
                 }
             }
+        }
+        for node_id in &msg.dirty_render_caches {
+            self.enqueue_preview_node(*node_id);
         }
     }
 
@@ -748,6 +862,87 @@ impl MainThreadState {
             nodes: Arc::new(new_nodes),
             root_id: tree.root_id,
         });
+
+        let updated_tree = self.shared_tree.read();
+        for (node_id, _, _) in updates {
+            let mut current = Some(*node_id);
+            while let Some(ancestor_id) = current {
+                if preview_source_image(&updated_tree, ancestor_id).is_some() {
+                    self.enqueue_preview_node(ancestor_id);
+                }
+                current = updated_tree
+                    .nodes
+                    .get(&ancestor_id)
+                    .and_then(|node| node.parent_id);
+            }
+        }
+    }
+
+    fn enqueue_all_preview_nodes(&mut self, tree: &FlatRenderTree) {
+        for node_id in tree.nodes.keys().copied() {
+            if preview_source_image(tree, node_id).is_some() {
+                self.enqueue_preview_node(node_id);
+            }
+        }
+    }
+
+    fn enqueue_dirty_preview_nodes(&mut self, tree: &FlatRenderTree, dirty_node_ids: &[NodeId]) {
+        for &dirty_node_id in dirty_node_ids {
+            let mut current = Some(dirty_node_id);
+            while let Some(node_id) = current {
+                if preview_source_image(tree, node_id).is_some() {
+                    self.enqueue_preview_node(node_id);
+                }
+                current = tree.nodes.get(&node_id).and_then(|node| node.parent_id);
+            }
+        }
+    }
+
+    fn enqueue_preview_node(&mut self, node_id: NodeId) {
+        if self.pending_preview_nodes.contains(&node_id) {
+            return;
+        }
+        self.pending_preview_nodes.push(node_id);
+    }
+
+    fn process_layer_previews(&mut self, tree: &FlatRenderTree) -> bool {
+        if self.pending_preview_nodes.is_empty() {
+            return false;
+        }
+
+        let pending = std::mem::take(&mut self.pending_preview_nodes);
+        let mut blocked = Vec::new();
+        let mut produced = false;
+        for node_id in pending {
+            if self.blocked_preview_nodes.contains(&node_id) {
+                blocked.push(node_id);
+                continue;
+            }
+            let Some(image) = preview_source_image(tree, node_id) else {
+                continue;
+            };
+            match self.layer_preview_renderer.render(
+                &self.gpu_context.device,
+                &self.gpu_context.queue,
+                &self.atlas_storage,
+                node_id,
+                PreviewSource { image },
+            ) {
+                Ok(Some(bitmap)) => {
+                    self.layer_preview_updates.push(bitmap);
+                    produced = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "Layer preview render failed for node {}: {error:?}",
+                        node_id.0
+                    );
+                }
+            }
+        }
+        self.pending_preview_nodes = blocked;
+        produced
     }
 
     pub fn save_screenshot(
@@ -949,6 +1144,17 @@ fn summarize_dirty_tracker(
         dirty_bbox_tile_area,
         by_node.len(),
     )
+}
+
+fn preview_source_image(tree: &FlatRenderTree, node_id: NodeId) -> Option<&images::Image> {
+    let node = tree.nodes.get(&node_id)?;
+    match &node.kind {
+        document::FlatNodeKind::Branch { render_cache, .. } => Some(render_cache),
+        document::FlatNodeKind::Leaf { content } => match content {
+            document::FlatLeafContent::Raster { image } => Some(image),
+            document::FlatLeafContent::Parametric { .. } => None,
+        },
+    }
 }
 
 fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
