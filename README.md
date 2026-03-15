@@ -10,10 +10,6 @@ The long-term direction is cross-platform support through Rust and wgpu, with po
 
 ![Glaphica screenshot](assets/screenshot.png)
 
-## Overview
-
-Glaphica is a painting software project organized as a modular Rust workspace, with separate crates for document state, brush logic, runtime systems, and UI-related integration.
-
 The current codebase is sufficient to show the main technical direction, while many workflows and user-facing details are still evolving.
 
 ## Current status
@@ -57,17 +53,17 @@ For development builds, you will need a working Rust toolchain and a graphics en
 
 ```text
 .
-├── crates/
-│   ├── glaphica        # desktop app entry
-│   ├── app             # app-thread integration and high-level runtime glue
-│   ├── document        # document and layer model
-│   ├── brushes         # built-in brush implementations and config
-│   ├── gpu_runtime     # GPU runtime / surface handling
-│   ├── thread_protocol # cross-thread protocol and transport types
-│   ├── threads         # thread model
-│   ├── glaphica_core   # shared core types
-│   ├── atlas           # atlas-related infrastructure
-│   └── images          # image layout and related utilities
+└── crates/
+    ├── glaphica        # desktop app entry
+    ├── app             # app-thread integration and high-level runtime glue
+    ├── document        # document and layer model
+    ├── brushes         # built-in brush implementations and config
+    ├── gpu_runtime     # GPU runtime / surface handling
+    ├── thread_protocol # cross-thread protocol and transport types
+    ├── threads         # thread model
+    ├── glaphica_core   # shared core types
+    ├── atlas           # atlas-related infrastructure
+    └── images          # image layout and related utilities
 ```
 
 ## Project goals
