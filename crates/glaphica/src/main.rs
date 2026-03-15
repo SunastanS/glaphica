@@ -474,6 +474,24 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let WindowEvent::KeyboardInput { event, .. } = &event
+            && event.state == ElementState::Pressed
+            && !event.repeat
+            && matches!(event.logical_key, Key::Named(NamedKey::Tab))
+        {
+            if let Some(overlay) = self.overlay.as_mut() {
+                let collapsed = !overlay.left_panel_collapsed || !overlay.right_panel_collapsed;
+                overlay.left_panel_collapsed = collapsed;
+                overlay.right_panel_collapsed = collapsed;
+            }
+            if let Some(window) = &self.window
+                && window.id() == window_id
+            {
+                window.request_redraw();
+            }
+            return;
+        }
+
         let mut ui_event_consumed = false;
         if let (Some(window), Some(overlay)) = (self.window.as_deref(), self.overlay.as_mut())
             && window.id() == window_id
@@ -691,17 +709,6 @@ impl ApplicationHandler for App {
                         {
                             if let Some(overlay) = self.overlay.as_mut() {
                                 overlay.pending_document_save = true;
-                            }
-                            if let Some(window) = &self.window {
-                                window.request_redraw();
-                            }
-                        }
-                        Key::Named(NamedKey::Tab) => {
-                            if let Some(overlay) = self.overlay.as_mut() {
-                                let collapsed =
-                                    !overlay.left_panel_collapsed || !overlay.right_panel_collapsed;
-                                overlay.left_panel_collapsed = collapsed;
-                                overlay.right_panel_collapsed = collapsed;
                             }
                             if let Some(window) = &self.window {
                                 window.request_redraw();
