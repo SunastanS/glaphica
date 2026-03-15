@@ -1,5 +1,7 @@
 # Glaphica
 
+![Glaphica screenshot](assets/screenshot.png)
+
 Glaphica is an experimental digital painting tool built with Rust and wgpu.
 
 The project currently focuses on a GPU-centered painting architecture. It explores workflows in which image data and stroke processing remain on the GPU as much as possible, rather than using a CPU-first raster pipeline.
@@ -7,8 +9,6 @@ The project currently focuses on a GPU-centered painting architecture. It explor
 Brushes are treated as configurable rendering pipelines, so the project can be used to test brush behavior and related shader-based rendering experiments.
 
 The long-term direction is cross-platform support through Rust and wgpu, with possible web or PWA deployment if the surrounding platform capabilities become practical.
-
-![Glaphica screenshot](assets/screenshot.png)
 
 The current codebase is sufficient to show the main technical direction, while many workflows and user-facing details are still evolving.
 
