@@ -253,6 +253,21 @@ impl EngineThreadState {
         &mut self.document
     }
 
+    pub fn allocate_leaf_tile(&mut self, backend: BackendId) -> Option<TileKey> {
+        self.backend_manager.alloc_active(backend)
+    }
+
+    pub fn replace_document(&mut self, document: Document) {
+        let old_keys = self.document.collect_raster_tile_keys();
+        self.backend_manager.drop_tiles(old_keys);
+        self.document = document;
+        self.pending_stroke_undo_tiles.clear();
+        self.undo_strokes.clear();
+        self.redo_strokes.clear();
+        self.active_stroke_id = None;
+        self.input_processor.end_stroke();
+    }
+
     pub fn stats(&self) -> EngineStats {
         EngineStats {
             backend_tiles: self.backend_manager.inner().backend_tile_stats(),

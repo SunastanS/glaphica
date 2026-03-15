@@ -1,4 +1,5 @@
 mod shared_tree;
+mod storage;
 mod view;
 
 use std::collections::HashMap;
@@ -12,6 +13,10 @@ pub use images::ImageCreateError;
 pub use shared_tree::{
     FlatLeafContent, FlatNodeKind, FlatRenderNode, FlatRenderTree, MaterializeParametricCmd,
     NodeConfig, ParametricMesh, ParametricVertex, RenderCmd, RenderSource, SharedRenderTree,
+};
+pub use storage::{
+    DocumentStorageError, DocumentStorageManifest, RasterLayerAssetMetadata,
+    RasterLayerExportRequest, StoredBranchBlendMode, StoredLayerNode, StoredLeafBlendMode,
 };
 pub use view::View;
 
@@ -29,6 +34,12 @@ pub struct Document {
 
 pub struct Metadata {
     name: String,
+}
+
+impl Metadata {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,6 +205,12 @@ impl Document {
 
     pub fn layer_tree(&self) -> &UiLayerTree {
         &self.layer_tree
+    }
+
+    pub fn collect_raster_tile_keys(&self) -> Vec<glaphica_core::TileKey> {
+        let mut keys = Vec::new();
+        collect_raster_tile_keys_from_node(&self.layer_tree.root, &mut keys);
+        keys
     }
 
     pub fn layer_tree_items(&self) -> Vec<UiLayerTreeItem> {
@@ -838,6 +855,26 @@ fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f3
             match &mut leaf.content {
                 UiLeafContent::Raster { .. } => false,
                 UiLeafContent::Special(layer) => layer.set_solid_color(color),
+            }
+        }
+    }
+}
+
+fn collect_raster_tile_keys_from_node(node: &UiLayerNode, output: &mut Vec<glaphica_core::TileKey>) {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            for child in &branch.children {
+                collect_raster_tile_keys_from_node(child, output);
+            }
+        }
+        UiLayerNode::Leaf(leaf) => {
+            let UiLeafContent::Raster { image } = &leaf.content else {
+                return;
+            };
+            for tile_key in image.tile_keys().iter().copied() {
+                if tile_key != glaphica_core::TileKey::EMPTY {
+                    output.push(tile_key);
+                }
             }
         }
     }

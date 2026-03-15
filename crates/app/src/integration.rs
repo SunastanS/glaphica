@@ -1,14 +1,23 @@
 use std::collections::{HashMap, VecDeque};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
 use document::{
-    Document, FlatRenderTree, LayerMoveTarget, NewLayerKind, SharedRenderTree, UiLayerTreeItem,
+    Document, DocumentStorageError, DocumentStorageManifest, FlatRenderTree, LayerMoveTarget,
+    NewLayerKind, SharedRenderTree, UiLayerTreeItem,
 };
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
+use images::StoredImage;
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
+use serde::{Deserialize, Serialize};
 use thread_protocol::{
     DrawFrameMergePolicy, GpuCmdFrameMergeTag, GpuCmdMsg, GpuFeedbackFrame, InputControlEvent,
     InputControlOp, InputRingSample, MergeItem, MergeVecIndex, TileKey,
@@ -16,7 +25,100 @@ use thread_protocol::{
 use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 
 use crate::trace::{TraceInputFrame, TraceIoError, TraceRecorder};
-use crate::{BrushRegisterError, EngineThreadState, LayerPreviewBitmap, MainThreadState, config};
+use crate::{
+    BrushRegisterError, EngineThreadState, LayerImageExportError, LayerPreviewBitmap,
+    MainThreadState, config,
+};
+
+#[derive(Debug)]
+pub enum DocumentPackageError {
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    PngDecode(png::DecodingError),
+    PngEncode(png::EncodingError),
+    Storage(DocumentStorageError),
+    LayerExport(LayerImageExportError),
+    MissingRasterNode { node_id: NodeId },
+    TileAlloc { node_id: NodeId, tile_index: usize },
+    TileUpload { node_id: NodeId, tile_index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PackedDocumentFile {
+    manifest: DocumentStorageManifest,
+    layers: Vec<PackedLayerAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PackedLayerAsset {
+    node_id: u64,
+    file_name: String,
+    png_bytes: Vec<u8>,
+}
+
+impl From<std::io::Error> for DocumentPackageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for DocumentPackageError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
+
+impl From<png::DecodingError> for DocumentPackageError {
+    fn from(error: png::DecodingError) -> Self {
+        Self::PngDecode(error)
+    }
+}
+
+impl From<png::EncodingError> for DocumentPackageError {
+    fn from(error: png::EncodingError) -> Self {
+        Self::PngEncode(error)
+    }
+}
+
+impl From<DocumentStorageError> for DocumentPackageError {
+    fn from(error: DocumentStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<LayerImageExportError> for DocumentPackageError {
+    fn from(error: LayerImageExportError) -> Self {
+        Self::LayerExport(error)
+    }
+}
+
+impl Display for DocumentPackageError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "document package io error: {error}"),
+            Self::Json(error) => write!(f, "document package json error: {error}"),
+            Self::PngDecode(error) => write!(f, "document package png decode error: {error}"),
+            Self::PngEncode(error) => write!(f, "document package png encode error: {error}"),
+            Self::Storage(error) => write!(f, "document package storage error: {error:?}"),
+            Self::LayerExport(error) => write!(f, "document package layer export error: {error:?}"),
+            Self::MissingRasterNode { node_id } => {
+                write!(f, "document package missing raster node {}", node_id.0)
+            }
+            Self::TileAlloc { node_id, tile_index } => write!(
+                f,
+                "document package tile allocation failed for node {} tile {}",
+                node_id.0, tile_index
+            ),
+            Self::TileUpload { node_id, tile_index } => write!(
+                f,
+                "document package tile upload failed for node {} tile {}",
+                node_id.0, tile_index
+            ),
+        }
+    }
+}
+
+impl Error for DocumentPackageError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppControl {
@@ -1092,6 +1194,157 @@ impl AppThreadIntegration {
         Ok(())
     }
 
+    pub fn save_document_package(
+        &mut self,
+        package_dir: &Path,
+    ) -> Result<(), DocumentPackageError> {
+        let package = self.build_packed_document_file()?;
+        std::fs::create_dir_all(package_dir)?;
+        std::fs::create_dir_all(package_dir.join("layers"))?;
+
+        for layer in &package.layers {
+            save_png_bytes(&package_dir.join(&layer.file_name), &layer.png_bytes)?;
+        }
+
+        let manifest_file = File::create(package_dir.join("manifest.json"))?;
+        serde_json::to_writer_pretty(BufWriter::new(manifest_file), &package.manifest)?;
+        Ok(())
+    }
+
+    pub fn save_document_bundle(
+        &mut self,
+        bundle_path: &Path,
+    ) -> Result<(), DocumentPackageError> {
+        if let Some(parent) = bundle_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let package = self.build_packed_document_file()?;
+        let file = File::create(bundle_path)?;
+        let writer = BufWriter::new(file);
+        let mut encoder = GzEncoder::new(writer, Compression::default());
+        serde_json::to_writer(&mut encoder, &package)?;
+        encoder.finish()?;
+        Ok(())
+    }
+
+    pub fn load_document_package(
+        &mut self,
+        package_dir: &Path,
+    ) -> Result<(), DocumentPackageError> {
+        let manifest_file = File::open(package_dir.join("manifest.json"))?;
+        let manifest: DocumentStorageManifest =
+            serde_json::from_reader(BufReader::new(manifest_file))?;
+        let raster_requests = collect_manifest_raster_assets(&manifest.root);
+        let mut layers = Vec::with_capacity(raster_requests.len());
+        for (node_id, file_name) in raster_requests {
+            layers.push(PackedLayerAsset {
+                node_id,
+                file_name: file_name.to_string(),
+                png_bytes: std::fs::read(package_dir.join(file_name))?,
+            });
+        }
+        self.load_packed_document_file(PackedDocumentFile { manifest, layers })
+    }
+
+    pub fn load_document_bundle(
+        &mut self,
+        bundle_path: &Path,
+    ) -> Result<(), DocumentPackageError> {
+        let file = File::open(bundle_path)?;
+        let reader = BufReader::new(file);
+        let decoder = GzDecoder::new(reader);
+        let package: PackedDocumentFile = serde_json::from_reader(decoder)?;
+        self.load_packed_document_file(package)
+    }
+
+    fn build_packed_document_file(&mut self) -> Result<PackedDocumentFile, DocumentPackageError> {
+        let manifest = self.engine_state.document().storage_manifest();
+        let requests = self.engine_state.document().raster_layer_export_requests();
+        let mut layers = Vec::with_capacity(requests.len());
+        for request in requests {
+            let image = self
+                .engine_state
+                .document()
+                .get_leaf_image(request.node_id)
+                .ok_or(DocumentPackageError::MissingRasterNode {
+                    node_id: request.node_id,
+                })?;
+            let stored = self.main_state.export_layer_image(image)?;
+            layers.push(PackedLayerAsset {
+                node_id: request.node_id.0,
+                file_name: request.file_name,
+                png_bytes: encode_png_rgba8(&stored)?,
+            });
+        }
+        Ok(PackedDocumentFile { manifest, layers })
+    }
+
+    fn load_packed_document_file(
+        &mut self,
+        package: PackedDocumentFile,
+    ) -> Result<(), DocumentPackageError> {
+        let manifest = package.manifest;
+        let mut raster_images = Vec::with_capacity(package.layers.len());
+        for layer in package.layers {
+            let image = decode_png_rgba8(&layer.png_bytes)?;
+            raster_images.push((NodeId(layer.node_id), image));
+        }
+
+        let mut document = Document::from_storage_manifest(
+            manifest,
+            glaphica_core::BackendId::new(0),
+            glaphica_core::BackendId::new(1),
+        )?;
+
+        for (node_id, image) in raster_images {
+            let mut tile_indices = Vec::new();
+            image.collect_non_empty_tile_indices(&mut tile_indices);
+            let Some(layer) = document.get_leaf_image_mut(node_id) else {
+                return Err(DocumentPackageError::MissingRasterNode { node_id });
+            };
+            let mut tile_pixels = Vec::new();
+            for tile_index in tile_indices {
+                let tile_key = self.engine_state.allocate_leaf_tile(layer.backend()).ok_or(
+                    DocumentPackageError::TileAlloc {
+                        node_id,
+                        tile_index,
+                    },
+                )?;
+                layer
+                    .set_tile_key(tile_index, tile_key)
+                    .map_err(|_| DocumentPackageError::TileAlloc {
+                        node_id,
+                        tile_index,
+                    })?;
+                image.copy_tile_rgba8(tile_index, &mut tile_pixels).map_err(|_| {
+                    DocumentPackageError::TileUpload {
+                        node_id,
+                        tile_index,
+                    }
+                })?;
+                if !self.main_state.upload_tile_rgba8(tile_key, &tile_pixels) {
+                    return Err(DocumentPackageError::TileUpload {
+                        node_id,
+                        tile_index,
+                    });
+                }
+            }
+        }
+
+        self.engine_state.replace_document(document);
+        let mut msg = self
+            .engine_state
+            .rebuild_render_tree()
+            .map_err(|error| DocumentPackageError::Storage(DocumentStorageError::ImageCreate(error)))?;
+        msg.dirty_render_caches = collect_all_render_cache_node_ids(&self.engine_state.shared_tree().read());
+        let _ = self
+            .main_state
+            .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
+        Ok(())
+    }
+
     pub fn register_brush<S: BrushSpec + BrushResamplerDistancePolicy>(
         &mut self,
         brush_id: BrushId,
@@ -1165,6 +1418,111 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+fn collect_manifest_raster_assets(root: &document::StoredLayerNode) -> Vec<(u64, &str)> {
+    let mut output = Vec::new();
+    collect_manifest_raster_assets_from_node(root, &mut output);
+    output
+}
+
+fn collect_all_render_cache_node_ids(tree: &FlatRenderTree) -> Vec<NodeId> {
+    tree.nodes
+        .iter()
+        .filter_map(|(node_id, node)| node.kind.render_cache().map(|_| *node_id))
+        .collect()
+}
+
+fn collect_manifest_raster_assets_from_node<'a>(
+    node: &'a document::StoredLayerNode,
+    output: &mut Vec<(u64, &'a str)>,
+) {
+    match node {
+        document::StoredLayerNode::Branch { children, .. } => {
+            for child in children {
+                collect_manifest_raster_assets_from_node(child, output);
+            }
+        }
+        document::StoredLayerNode::RasterLayer { image, .. } => {
+            output.push((image.node_id, &image.file_name));
+        }
+        document::StoredLayerNode::SolidColorLayer { .. } => {}
+    }
+}
+
+fn save_png_rgba8(path: &Path, image: &StoredImage) -> Result<(), DocumentPackageError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    save_png_bytes(path, &encode_png_rgba8(image)?)?;
+    Ok(())
+}
+
+fn load_png_rgba8(path: &Path) -> Result<StoredImage, DocumentPackageError> {
+    decode_png_rgba8(&std::fs::read(path)?)
+}
+
+fn save_png_bytes(path: &Path, png_bytes: &[u8]) -> Result<(), DocumentPackageError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, png_bytes)?;
+    Ok(())
+}
+
+fn encode_png_rgba8(image: &StoredImage) -> Result<Vec<u8>, DocumentPackageError> {
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(image.pixels_rgba8())?;
+    drop(writer);
+    Ok(bytes)
+}
+
+fn decode_png_rgba8(png_bytes: &[u8]) -> Result<StoredImage, DocumentPackageError> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let mut reader = decoder.read_info()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+    let bytes = &buf[..info.buffer_size()];
+    let pixels = match info.color_type {
+        png::ColorType::Rgba => bytes.to_vec(),
+        png::ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for chunk in bytes.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            rgba
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for chunk in bytes.chunks_exact(2) {
+                rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+            }
+            rgba
+        }
+        png::ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+            for value in bytes {
+                rgba.extend_from_slice(&[*value, *value, *value, 255]);
+            }
+            rgba
+        }
+        png::ColorType::Indexed => {
+            return Err(DocumentPackageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "indexed color png is not supported for document package",
+            )));
+        }
+    };
+    StoredImage::new_rgba8(info.width, info.height, pixels)
+        .map_err(|error| DocumentPackageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))
+}
+
 fn current_time_ns() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_nanos() as u64,
@@ -1174,11 +1532,20 @@ fn current_time_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::AppThreadIntegration;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use document::StoredLayerNode;
+    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use images::StoredImage;
     use thread_protocol::{
         CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
         WriteBlendMode, WriteOp,
+    };
+
+    use super::{
+        AppThreadIntegration, PackedDocumentFile, PackedLayerAsset, collect_manifest_raster_assets,
+        decode_png_rgba8, encode_png_rgba8, load_png_rgba8, save_png_rgba8,
     };
 
     #[test]
@@ -1343,5 +1710,132 @@ mod tests {
         assert!(matches!(commands[2], GpuCmdMsg::DrawOp(_)));
         assert!(matches!(commands[3], GpuCmdMsg::WriteOp(_)));
         assert!(matches!(commands[4], GpuCmdMsg::TileSlotKeyUpdate(_)));
+    }
+
+    #[test]
+    fn collect_manifest_raster_assets_walks_nested_tree() {
+        let root = StoredLayerNode::Branch {
+            id: 2,
+            label: "Root".to_string(),
+            opacity: 1.0,
+            blend_mode: document::StoredBranchBlendMode::Base(
+                document::StoredLeafBlendMode::Normal,
+            ),
+            children: vec![
+                StoredLayerNode::SolidColorLayer {
+                    id: 3,
+                    label: "bg".to_string(),
+                    opacity: 1.0,
+                    blend_mode: document::StoredLeafBlendMode::Normal,
+                    color: [1.0; 4],
+                },
+                StoredLayerNode::Branch {
+                    id: 4,
+                    label: "group".to_string(),
+                    opacity: 1.0,
+                    blend_mode: document::StoredBranchBlendMode::Penetrate,
+                    children: vec![StoredLayerNode::RasterLayer {
+                        id: 9,
+                        label: "paint".to_string(),
+                        opacity: 1.0,
+                        blend_mode: document::StoredLeafBlendMode::Multiply,
+                        image: document::RasterLayerAssetMetadata {
+                            node_id: 9,
+                            file_name: "layers/9.png".to_string(),
+                            width: 8,
+                            height: 4,
+                        },
+                    }],
+                },
+            ],
+        };
+
+        assert_eq!(collect_manifest_raster_assets(&root), vec![(9, "layers/9.png")]);
+    }
+
+    #[test]
+    fn save_and_load_png_rgba8_round_trip() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("glaphica-pkg-test-{unique}"));
+        let path = dir.join("layers/test.png");
+        let image = StoredImage::new_rgba8(
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 255, 255, 255, 0,
+            ],
+        )
+        .unwrap();
+
+        save_png_rgba8(&path, &image).unwrap();
+        let loaded = load_png_rgba8(&path).unwrap();
+
+        assert_eq!(loaded, image);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn packed_document_file_round_trip_through_gzip_json() {
+        let package = PackedDocumentFile {
+            manifest: document::DocumentStorageManifest {
+                version: 1,
+                name: "demo".to_string(),
+                canvas_width: 2,
+                canvas_height: 2,
+                root: StoredLayerNode::RasterLayer {
+                    id: 9,
+                    label: "paint".to_string(),
+                    opacity: 1.0,
+                    blend_mode: document::StoredLeafBlendMode::Normal,
+                    image: document::RasterLayerAssetMetadata {
+                        node_id: 9,
+                        file_name: "layers/9.png".to_string(),
+                        width: 2,
+                        height: 2,
+                    },
+                },
+                active_node_id: Some(9),
+                next_node_id: 10,
+                next_layer_label_index: 2,
+                next_group_label_index: 1,
+            },
+            layers: vec![PackedLayerAsset {
+                node_id: 9,
+                file_name: "layers/9.png".to_string(),
+                png_bytes: encode_png_rgba8(
+                    &StoredImage::new_rgba8(
+                        2,
+                        2,
+                        vec![
+                            1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120,
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            }],
+        };
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        serde_json::to_writer(&mut encoder, &package).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let decoded: PackedDocumentFile =
+            serde_json::from_reader(GzDecoder::new(std::io::Cursor::new(compressed))).unwrap();
+
+        assert_eq!(decoded.manifest.name, "demo");
+        assert_eq!(
+            decode_png_rgba8(&decoded.layers[0].png_bytes).unwrap(),
+            StoredImage::new_rgba8(
+                2,
+                2,
+                vec![
+                    1, 2, 3, 4, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120,
+                ],
+            )
+            .unwrap()
+        );
     }
 }

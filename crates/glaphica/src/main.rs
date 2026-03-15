@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use app::{AppStats, AppThreadIntegration, LayerPreviewBitmap, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
 use brushes::{BrushConfigItem, BrushConfigValue};
-use components::{ConfigPanel, Sidebar, StatusBar};
+use components::{ConfigPanel, Sidebar, StatusBar, TopBar};
 use document::{LayerMoveTarget, NewLayerKind, UiLayerTreeItem};
 use egui::Rect;
 use egui_renderer::EguiRenderer;
@@ -234,6 +234,41 @@ impl App {
                         should_advance_epoch = true;
                     }
                 }
+                if let Some(path) = overlay.take_pending_document_save() {
+                    match integration.save_document_bundle(&path) {
+                        Ok(()) => {
+                            overlay.set_document_status(
+                                format!("Saved {}", path.display()),
+                                false,
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("failed to save document bundle: {error}");
+                            overlay.set_document_status(
+                                format!("Save failed: {error}"),
+                                true,
+                            );
+                        }
+                    }
+                }
+                if let Some(path) = overlay.take_pending_document_load() {
+                    match integration.load_document_bundle(&path) {
+                        Ok(()) => {
+                            overlay.set_document_status(
+                                format!("Loaded {}", path.display()),
+                                false,
+                            );
+                            should_advance_epoch = true;
+                        }
+                        Err(error) => {
+                            eprintln!("failed to load document bundle: {error}");
+                            overlay.set_document_status(
+                                format!("Load failed: {error}"),
+                                true,
+                            );
+                        }
+                    }
+                }
             } else {
                 integration.present_to_screen();
             }
@@ -393,6 +428,12 @@ impl ApplicationHandler for App {
                 surface_format,
                 self.brush_states.clone(),
                 self.active_brush_kind,
+                self.run_config
+                    .document_bundle_path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("document.glaphica"))
+                    .display()
+                    .to_string(),
             ));
         }
 
@@ -683,6 +724,11 @@ struct EguiOverlay {
     pending_layer_create: Option<NewLayerKind>,
     pending_group_create: bool,
     pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
+    pending_document_save: bool,
+    pending_document_load: bool,
+    document_path: String,
+    document_status_text: Option<String>,
+    document_status_is_error: bool,
     config_panel_rect: Option<Rect>,
     app_stats: Option<AppStats>,
 }
@@ -695,6 +741,7 @@ impl EguiOverlay {
         surface_format: wgpu::TextureFormat,
         brush_states: Vec<BrushUiState>,
         active_brush_kind: BrushKind,
+        document_path: String,
     ) -> Self {
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(
@@ -730,6 +777,11 @@ impl EguiOverlay {
             pending_layer_create: None,
             pending_group_create: false,
             pending_layer_move: None,
+            pending_document_save: false,
+            pending_document_load: false,
+            document_path,
+            document_status_text: None,
+            document_status_is_error: false,
             config_panel_rect: None,
             app_stats: None,
         }
@@ -813,6 +865,31 @@ impl EguiOverlay {
         self.pending_layer_move.take()
     }
 
+    fn take_pending_document_save(&mut self) -> Option<PathBuf> {
+        if std::mem::take(&mut self.pending_document_save) {
+            let path = self.document_path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+        None
+    }
+
+    fn take_pending_document_load(&mut self) -> Option<PathBuf> {
+        if std::mem::take(&mut self.pending_document_load) {
+            let path = self.document_path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+        None
+    }
+
+    fn set_document_status(&mut self, text: String, is_error: bool) {
+        self.document_status_text = Some(text);
+        self.document_status_is_error = is_error;
+    }
+
     fn flush_selected_brush_if_dirty(&mut self) {
         self.queue_brush_update_if_dirty(self.selected_brush_index);
     }
@@ -869,6 +946,19 @@ impl EguiOverlay {
             .min(target_width as f32);
 
         let full_output = self.ctx.run(raw_input, |ctx| {
+            let mut top_bar = TopBar::new(
+                &mut self.document_path,
+                self.document_status_text.as_deref(),
+                self.document_status_is_error,
+            );
+            let top_bar_output = top_bar.render(ctx, theme);
+            if top_bar_output.save_clicked {
+                self.pending_document_save = true;
+            }
+            if top_bar_output.load_clicked {
+                self.pending_document_load = true;
+            }
+
             let sidebar = Sidebar::new(
                 *left_panel_collapsed,
                 *left_panel_width,
@@ -1014,6 +1104,7 @@ struct RunConfig {
     record_input_path: Option<PathBuf>,
     record_output_path: Option<PathBuf>,
     screenshot_path: Option<PathBuf>,
+    document_bundle_path: Option<PathBuf>,
     exit_after_ms: Option<u64>,
 }
 
@@ -1044,6 +1135,12 @@ impl RunConfig {
                 "--screenshot" => {
                     if let Some(path) = args.get(index + 1) {
                         config.screenshot_path = Some(Path::new(path).to_path_buf());
+                    }
+                    index += 2;
+                }
+                "--document-bundle" => {
+                    if let Some(path) = args.get(index + 1) {
+                        config.document_bundle_path = Some(Path::new(path).to_path_buf());
                     }
                     index += 2;
                 }

@@ -25,6 +25,7 @@ use thread_protocol::{GpuCmdMsg, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg};
 
 use crate::{
     config,
+    layer_image_export::{LayerImageExportError, LayerImageExporter},
     layer_preview::{LayerPreviewBitmap, LayerPreviewRenderer, PreviewSource},
     screen_blitter::ScreenBlitter,
 };
@@ -296,6 +297,7 @@ pub struct MainThreadState {
     pending_preview_nodes: Vec<NodeId>,
     blocked_preview_nodes: HashSet<NodeId>,
     next_brush_cache_backend_id: u8,
+    layer_image_exporter: LayerImageExporter,
 }
 
 impl MainThreadState {
@@ -359,6 +361,7 @@ impl MainThreadState {
             pending_preview_nodes: Vec::new(),
             blocked_preview_nodes: HashSet::new(),
             next_brush_cache_backend_id: 2,
+            layer_image_exporter: LayerImageExporter::new(),
         })
     }
 
@@ -415,6 +418,53 @@ impl MainThreadState {
 
     pub fn gpu_context(&self) -> &Arc<GpuContext> {
         &self.gpu_context
+    }
+
+    pub fn export_layer_image(
+        &mut self,
+        image: &images::Image,
+    ) -> Result<images::StoredImage, LayerImageExportError> {
+        self.layer_image_exporter.export(
+            &self.gpu_context.device,
+            &self.gpu_context.queue,
+            &self.atlas_storage,
+            image,
+        )
+    }
+
+    pub fn upload_tile_rgba8(&self, tile_key: TileKey, rgba8: &[u8]) -> bool {
+        let Some(resolved) = self.atlas_storage.resolve(tile_key) else {
+            return false;
+        };
+        let expected_len =
+            (glaphica_core::IMAGE_TILE_SIZE * glaphica_core::IMAGE_TILE_SIZE * 4) as usize;
+        if rgba8.len() != expected_len {
+            return false;
+        }
+        self.gpu_context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: resolved.address.texel_offset.0 + glaphica_core::GUTTER_SIZE,
+                    y: resolved.address.texel_offset.1 + glaphica_core::GUTTER_SIZE,
+                    z: resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba8,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(glaphica_core::IMAGE_TILE_SIZE * 4),
+                rows_per_image: Some(glaphica_core::IMAGE_TILE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: glaphica_core::IMAGE_TILE_SIZE,
+                height: glaphica_core::IMAGE_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        true
     }
 
     pub fn set_surface(&mut self, surface_runtime: SurfaceRuntime) {
@@ -526,6 +576,14 @@ impl MainThreadState {
     pub fn clear_dirty_markers(&mut self) {
         self.image_dirty_tracker.clear();
         self.tile_dirty_tracker.clear();
+    }
+
+    pub fn reset_document_runtime_state(&mut self) {
+        self.pending_visible_tile_updates.clear();
+        self.clear_dirty_markers();
+        self.pending_preview_nodes.clear();
+        self.blocked_preview_nodes.clear();
+        self.layer_preview_updates.clear();
     }
 
     pub fn take_layer_preview_updates(&mut self) -> Vec<LayerPreviewBitmap> {
