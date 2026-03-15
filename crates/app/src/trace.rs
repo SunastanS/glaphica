@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
-use document::NewLayerKind;
+use document::{LayerMoveTarget, NewLayerKind};
 use glaphica_core::{
     BrushId, CanvasVec2, EpochId, InputDeviceKind, MappedCursor, NodeId, RadianVec2,
     RenderTreeGeneration, StrokeId, TileKey,
@@ -81,6 +81,11 @@ pub enum TraceAppControl {
     SelectNode { node_id: u64 },
     CreateLayerAboveActive { kind: TraceNewLayerKind },
     CreateGroupAboveActive,
+    MoveNode {
+        node_id: u64,
+        target_parent_id: u64,
+        target_index: usize,
+    },
     MoveActiveNodeUp,
     MoveActiveNodeDown,
 }
@@ -381,6 +386,11 @@ impl From<AppControl> for TraceAppControl {
                 },
             },
             AppControl::CreateGroupAboveActive => Self::CreateGroupAboveActive,
+            AppControl::MoveNode { node_id, target } => Self::MoveNode {
+                node_id: node_id.0,
+                target_parent_id: target.parent_id.0,
+                target_index: target.index,
+            },
             AppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
             AppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
         }
@@ -406,6 +416,17 @@ impl From<TraceAppControl> for AppControl {
                 },
             },
             TraceAppControl::CreateGroupAboveActive => Self::CreateGroupAboveActive,
+            TraceAppControl::MoveNode {
+                node_id,
+                target_parent_id,
+                target_index,
+            } => Self::MoveNode {
+                node_id: NodeId(node_id),
+                target: LayerMoveTarget {
+                    parent_id: NodeId(target_parent_id),
+                    index: target_index,
+                },
+            },
             TraceAppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
             TraceAppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
         }

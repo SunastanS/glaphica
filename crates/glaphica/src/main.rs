@@ -11,7 +11,7 @@ use app::{AppThreadIntegration, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
 use brushes::{BrushConfigItem, BrushConfigValue};
 use components::{ConfigPanel, Sidebar, StatusBar};
-use document::{NewLayerKind, UiLayerTreeItem};
+use document::{LayerMoveTarget, NewLayerKind, UiLayerTreeItem};
 use egui::Rect;
 use egui_renderer::EguiRenderer;
 use glaphica_core::{BrushId, CanvasVec2, InputDeviceKind, MappedCursor, NodeId, RadianVec2};
@@ -34,12 +34,6 @@ const PIXEL_RECT_BRUSH_ID: BrushId = BrushId(1);
 enum BrushKind {
     Round,
     PixelRect,
-}
-
-#[derive(Clone, Copy)]
-enum LayerMoveDirection {
-    Up,
-    Down,
 }
 
 impl BrushKind {
@@ -228,12 +222,8 @@ impl App {
                         Err(error) => eprintln!("failed to create group: {error:?}"),
                     }
                 }
-                if let Some(direction) = overlay.take_pending_layer_move() {
-                    let result = match direction {
-                        LayerMoveDirection::Up => integration.move_active_node_up(),
-                        LayerMoveDirection::Down => integration.move_active_node_down(),
-                    };
-                    if let Err(error) = result {
+                if let Some((node_id, target)) = overlay.take_pending_layer_move() {
+                    if let Err(error) = integration.move_document_node(node_id, target) {
                         eprintln!("failed to move layer: {error:?}");
                     } else {
                         should_advance_epoch = true;
@@ -658,7 +648,7 @@ struct EguiOverlay {
     pending_layer_select: Option<NodeId>,
     pending_layer_create: Option<NewLayerKind>,
     pending_group_create: bool,
-    pending_layer_move: Option<LayerMoveDirection>,
+    pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
     config_panel_rect: Option<Rect>,
 }
 
@@ -759,7 +749,7 @@ impl EguiOverlay {
         std::mem::take(&mut self.pending_group_create)
     }
 
-    fn take_pending_layer_move(&mut self) -> Option<LayerMoveDirection> {
+    fn take_pending_layer_move(&mut self) -> Option<(NodeId, LayerMoveTarget)> {
         self.pending_layer_move.take()
     }
 
@@ -823,11 +813,8 @@ impl EguiOverlay {
             if let Some(node_id) = sidebar_output.select_layer {
                 *pending_layer_select = Some(node_id);
             }
-            if sidebar_output.move_layer_up {
-                *pending_layer_move = Some(LayerMoveDirection::Up);
-            }
-            if sidebar_output.move_layer_down {
-                *pending_layer_move = Some(LayerMoveDirection::Down);
+            if let Some(layer_move) = sidebar_output.move_layer {
+                *pending_layer_move = Some((layer_move.node_id, layer_move.target));
             }
 
             let mut config_panel = ConfigPanel::new(

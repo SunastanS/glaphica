@@ -1,4 +1,4 @@
-use crate::components::LayerTree;
+use crate::components::{LayerTree, LayerTreeMove};
 use crate::theme::Theme;
 use document::{NewLayerKind, UiLayerTreeItem};
 use egui::{Button, CornerRadius, Frame, RichText, SidePanel, Stroke};
@@ -106,33 +106,12 @@ impl<'a> Sidebar<'a> {
                             });
 
                             ui.add_space(10.0);
+                            ui.add_space(4.0);
                             ui.label(
-                                RichText::new("Reorder")
-                                    .size(12.0)
-                                    .color(theme.accent_color)
-                                    .strong(),
+                                RichText::new("Drag the handle on the right to reorder or regroup.")
+                                    .size(11.0)
+                                    .color(theme.text_color),
                             );
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_sized(
-                                        [72.0, 26.0],
-                                        Button::new("Move Up").fill(theme.input_bg_color),
-                                    )
-                                    .clicked()
-                                {
-                                    output.move_layer_up = true;
-                                }
-                                if ui
-                                    .add_sized(
-                                        [88.0, 26.0],
-                                        Button::new("Move Down").fill(theme.input_bg_color),
-                                    )
-                                    .clicked()
-                                {
-                                    output.move_layer_down = true;
-                                }
-                            });
                         });
 
                     ui.add_space(10.0);
@@ -171,9 +150,11 @@ impl<'a> Sidebar<'a> {
                                         self.selected_node,
                                         theme,
                                     );
-                                    layer_tree.render(ui, &mut |node_id| {
+                                    let tree_output = layer_tree.render(ui);
+                                    if let Some(node_id) = tree_output.select_node {
                                         output.select_layer = Some(node_id);
-                                    });
+                                    }
+                                    output.move_layer = tree_output.move_node;
                                 });
                         });
                 });
@@ -189,6 +170,5 @@ pub struct SidebarOutput {
     pub create_layer: Option<NewLayerKind>,
     pub create_group: bool,
     pub select_layer: Option<NodeId>,
-    pub move_layer_up: bool,
-    pub move_layer_down: bool,
+    pub move_layer: Option<LayerTreeMove>,
 }

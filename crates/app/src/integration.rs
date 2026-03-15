@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
-use document::{Document, FlatRenderTree, NewLayerKind, SharedRenderTree, UiLayerTreeItem};
+use document::{
+    Document, FlatRenderTree, LayerMoveTarget, NewLayerKind, SharedRenderTree, UiLayerTreeItem,
+};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
@@ -22,6 +24,10 @@ pub enum AppControl {
     SelectNode { node_id: NodeId },
     CreateLayerAboveActive { kind: NewLayerKind },
     CreateGroupAboveActive,
+    MoveNode {
+        node_id: NodeId,
+        target: LayerMoveTarget,
+    },
     MoveActiveNodeUp,
     MoveActiveNodeDown,
 }
@@ -545,6 +551,23 @@ impl AppThreadIntegration {
         Ok(())
     }
 
+    pub fn move_document_node(
+        &mut self,
+        node_id: NodeId,
+        target: LayerMoveTarget,
+    ) -> Result<(), document::LayerEditError> {
+        if !self.engine_state.document().layer_tree().contains_node(node_id) {
+            return Err(document::LayerEditError::InvalidNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::MoveNode {
+                node_id,
+                target,
+            }));
+        Ok(())
+    }
+
     pub fn move_active_node_up(&mut self) -> Result<(), document::LayerEditError> {
         if self.engine_state.document().selected_node().is_none() {
             return Err(document::LayerEditError::NoActiveNode);
@@ -674,6 +697,12 @@ impl AppThreadIntegration {
                 match self.engine_state.document_mut().create_group_above_active() {
                     Ok(_) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("create group control failed: {error:?}"),
+                }
+            }
+            AppControl::MoveNode { node_id, target } => {
+                match self.engine_state.document_mut().move_node_to(*node_id, *target) {
+                    Ok(()) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("move node control failed: {error:?}"),
                 }
             }
             AppControl::MoveActiveNodeUp => {

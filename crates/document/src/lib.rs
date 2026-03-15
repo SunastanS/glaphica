@@ -46,6 +46,12 @@ pub enum LayerEditError {
     ImageCreate(ImageCreateError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerMoveTarget {
+    pub parent_id: NodeId,
+    pub index: usize,
+}
+
 impl From<ImageCreateError> for LayerEditError {
     fn from(err: ImageCreateError) -> Self {
         Self::ImageCreate(err)
@@ -281,6 +287,16 @@ impl Document {
         self.layer_tree.move_node(active_id, -1)
     }
 
+    pub fn move_node_to(
+        &mut self,
+        node_id: NodeId,
+        target: LayerMoveTarget,
+    ) -> Result<(), LayerEditError> {
+        self.layer_tree.move_node_to(node_id, target)?;
+        self.active_node = Some(node_id);
+        Ok(())
+    }
+
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
         self.layer_tree.get_leaf_image(node_id)
     }
@@ -484,6 +500,32 @@ impl UiLayerTree {
         }
     }
 
+    pub fn move_node_to(
+        &mut self,
+        node_id: NodeId,
+        target: LayerMoveTarget,
+    ) -> Result<(), LayerEditError> {
+        if node_id == self.root_id() {
+            return Err(LayerEditError::RootSelectionNotAllowed);
+        }
+        let moving_node = self.get_node(node_id).ok_or(LayerEditError::InvalidNode)?;
+        let target_parent = self
+            .get_node(target.parent_id)
+            .ok_or(LayerEditError::InvalidNode)?;
+        if !matches!(target_parent, UiLayerNode::Branch(_)) {
+            return Err(LayerEditError::InvalidNode);
+        }
+        if subtree_contains_node(moving_node, target.parent_id) {
+            return Err(LayerEditError::InvalidNode);
+        }
+
+        let (moved_node, source_parent_id, source_index) =
+            remove_node_from_branch(&mut self.root, node_id).ok_or(LayerEditError::InvalidNode)?;
+        let adjusted_index =
+            adjust_move_index(source_parent_id, source_index, target.parent_id, target.index);
+        insert_node_at_parent(&mut self.root, target.parent_id, adjusted_index, moved_node)
+    }
+
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
         get_leaf_image_from_node(&self.root, node_id)
     }
@@ -621,6 +663,77 @@ fn move_node_in_branch(node: &mut UiLayerNode, target_id: NodeId, offset: isize)
     None
 }
 
+fn subtree_contains_node(node: &UiLayerNode, target_id: NodeId) -> bool {
+    if node.id() == target_id {
+        return true;
+    }
+    match node {
+        UiLayerNode::Branch(branch) => branch
+            .children
+            .iter()
+            .any(|child| subtree_contains_node(child, target_id)),
+        UiLayerNode::Leaf(_) => false,
+    }
+}
+
+fn remove_node_from_branch(
+    node: &mut UiLayerNode,
+    target_id: NodeId,
+) -> Option<(UiLayerNode, NodeId, usize)> {
+    let UiLayerNode::Branch(branch) = node else {
+        return None;
+    };
+
+    if let Some(index) = branch
+        .children
+        .iter()
+        .position(|child| child.id() == target_id)
+    {
+        let removed = branch.children.remove(index);
+        return Some((removed, branch.meta.id, index));
+    }
+
+    for child in &mut branch.children {
+        if let Some(removed) = remove_node_from_branch(child, target_id) {
+            return Some(removed);
+        }
+    }
+
+    None
+}
+
+fn adjust_move_index(
+    source_parent_id: NodeId,
+    source_index: usize,
+    target_parent_id: NodeId,
+    target_index: usize,
+) -> usize {
+    if source_parent_id == target_parent_id && source_index < target_index {
+        target_index.saturating_sub(1)
+    } else {
+        target_index
+    }
+}
+
+fn insert_node_at_parent(
+    node: &mut UiLayerNode,
+    parent_id: NodeId,
+    index: usize,
+    new_node: UiLayerNode,
+) -> Result<(), LayerEditError> {
+    let Some(parent) = get_node_from_node_mut(node, parent_id) else {
+        return Err(LayerEditError::InvalidNode);
+    };
+    let UiLayerNode::Branch(branch) = parent else {
+        return Err(LayerEditError::InvalidNode);
+    };
+    if index > branch.children.len() {
+        return Err(LayerEditError::MoveOutOfBounds);
+    }
+    branch.children.insert(index, new_node);
+    Ok(())
+}
+
 fn get_leaf_image_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<&Image> {
     match node {
         UiLayerNode::Branch(branch) => {
@@ -664,6 +777,19 @@ fn get_leaf_image_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Opti
                 None
             }
         }
+    }
+}
+
+fn get_node_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Option<&mut UiLayerNode> {
+    if node.id() == node_id {
+        return Some(node);
+    }
+    match node {
+        UiLayerNode::Branch(branch) => branch
+            .children
+            .iter_mut()
+            .find_map(|child| get_node_from_node_mut(child, node_id)),
+        UiLayerNode::Leaf(_) => None,
     }
 }
 
@@ -1507,6 +1633,100 @@ mod tests {
         assert_eq!(root.children[0].id(), NodeId(0));
         assert_eq!(root.children[1].id(), NodeId(1));
         assert_eq!(root.children[2].id(), group_id);
+    }
+
+    #[test]
+    fn test_move_node_to_reparents_leaf_into_group() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let group_id = doc.create_group_above_active().unwrap();
+        doc.move_node_to(
+            NodeId(1),
+            LayerMoveTarget {
+                parent_id: group_id,
+                index: 0,
+            },
+        )
+        .unwrap();
+
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+        assert_eq!(root.children[0].id(), NodeId(0));
+        assert_eq!(root.children[1].id(), group_id);
+
+        let group = match doc.layer_tree().get_node(group_id) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch group"),
+        };
+        assert_eq!(group.children.len(), 1);
+        assert_eq!(group.children[0].id(), NodeId(1));
+        assert_eq!(doc.active_node(), Some(NodeId(1)));
+    }
+
+    #[test]
+    fn test_move_node_to_cannot_move_group_into_descendant() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let parent_group_id = doc.create_group_above_active().unwrap();
+        let child_group_id = doc.allocate_node_id();
+        doc.layer_tree
+            .move_node_to(
+                NodeId(1),
+                LayerMoveTarget {
+                    parent_id: parent_group_id,
+                    index: 0,
+                },
+            )
+            .unwrap();
+        doc.layer_tree
+            .move_node_to(
+                parent_group_id,
+                LayerMoveTarget {
+                    parent_id: doc.layer_tree().root_id(),
+                    index: 1,
+                },
+            )
+            .unwrap();
+        if let Some(UiLayerNode::Branch(branch)) = get_node_from_node_mut(
+            &mut doc.layer_tree.root,
+            parent_group_id,
+        ) {
+            branch.children.push(UiLayerNode::Branch(UiBranchNode {
+                meta: test_meta(child_group_id, "Child"),
+                config: BranchConfig {
+                    opacity: 1.0,
+                    blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
+                },
+                children: Vec::new(),
+            }));
+        } else {
+            panic!("expected mutable branch group");
+        }
+
+        let result = doc.move_node_to(
+            parent_group_id,
+            LayerMoveTarget {
+                parent_id: child_group_id,
+                index: 0,
+            },
+        );
+        assert!(matches!(result, Err(LayerEditError::InvalidNode)));
     }
 
     #[test]
