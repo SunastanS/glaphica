@@ -14,8 +14,8 @@ use document::{
 };
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
-use images::StoredImage;
 use gpu_runtime::surface_runtime::SurfaceRuntime;
+use images::StoredImage;
 use images::layout::ImageLayout;
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
@@ -104,12 +104,18 @@ impl Display for DocumentPackageError {
             Self::MissingRasterNode { node_id } => {
                 write!(f, "document package missing raster node {}", node_id.0)
             }
-            Self::TileAlloc { node_id, tile_index } => write!(
+            Self::TileAlloc {
+                node_id,
+                tile_index,
+            } => write!(
                 f,
                 "document package tile allocation failed for node {} tile {}",
                 node_id.0, tile_index
             ),
-            Self::TileUpload { node_id, tile_index } => write!(
+            Self::TileUpload {
+                node_id,
+                tile_index,
+            } => write!(
                 f,
                 "document package tile upload failed for node {} tile {}",
                 node_id.0, tile_index
@@ -1211,10 +1217,7 @@ impl AppThreadIntegration {
         Ok(())
     }
 
-    pub fn save_document_bundle(
-        &mut self,
-        bundle_path: &Path,
-    ) -> Result<(), DocumentPackageError> {
+    pub fn save_document_bundle(&mut self, bundle_path: &Path) -> Result<(), DocumentPackageError> {
         if let Some(parent) = bundle_path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -1248,10 +1251,7 @@ impl AppThreadIntegration {
         self.load_packed_document_file(PackedDocumentFile { manifest, layers })
     }
 
-    pub fn load_document_bundle(
-        &mut self,
-        bundle_path: &Path,
-    ) -> Result<(), DocumentPackageError> {
+    pub fn load_document_bundle(&mut self, bundle_path: &Path) -> Result<(), DocumentPackageError> {
         let file = File::open(bundle_path)?;
         let reader = BufReader::new(file);
         let decoder = GzDecoder::new(reader);
@@ -1306,24 +1306,25 @@ impl AppThreadIntegration {
             };
             let mut tile_pixels = Vec::new();
             for tile_index in tile_indices {
-                let tile_key = self.engine_state.allocate_leaf_tile(layer.backend()).ok_or(
-                    DocumentPackageError::TileAlloc {
-                        node_id,
-                        tile_index,
-                    },
-                )?;
-                layer
-                    .set_tile_key(tile_index, tile_key)
-                    .map_err(|_| DocumentPackageError::TileAlloc {
+                let tile_key = self
+                    .engine_state
+                    .allocate_leaf_tile(layer.backend())
+                    .ok_or(DocumentPackageError::TileAlloc {
                         node_id,
                         tile_index,
                     })?;
-                image.copy_tile_rgba8(tile_index, &mut tile_pixels).map_err(|_| {
-                    DocumentPackageError::TileUpload {
+                layer.set_tile_key(tile_index, tile_key).map_err(|_| {
+                    DocumentPackageError::TileAlloc {
                         node_id,
                         tile_index,
                     }
                 })?;
+                image
+                    .copy_tile_rgba8(tile_index, &mut tile_pixels)
+                    .map_err(|_| DocumentPackageError::TileUpload {
+                        node_id,
+                        tile_index,
+                    })?;
                 if !self.main_state.upload_tile_rgba8(tile_key, &tile_pixels) {
                     return Err(DocumentPackageError::TileUpload {
                         node_id,
@@ -1334,11 +1335,11 @@ impl AppThreadIntegration {
         }
 
         self.engine_state.replace_document(document);
-        let mut msg = self
-            .engine_state
-            .rebuild_render_tree()
-            .map_err(|error| DocumentPackageError::Storage(DocumentStorageError::ImageCreate(error)))?;
-        msg.dirty_render_caches = collect_all_render_cache_node_ids(&self.engine_state.shared_tree().read());
+        let mut msg = self.engine_state.rebuild_render_tree().map_err(|error| {
+            DocumentPackageError::Storage(DocumentStorageError::ImageCreate(error))
+        })?;
+        msg.dirty_render_caches =
+            collect_all_render_cache_node_ids(&self.engine_state.shared_tree().read());
         let _ = self
             .main_state
             .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
@@ -1519,8 +1520,9 @@ fn decode_png_rgba8(png_bytes: &[u8]) -> Result<StoredImage, DocumentPackageErro
             )));
         }
     };
-    StoredImage::new_rgba8(info.width, info.height, pixels)
-        .map_err(|error| DocumentPackageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))
+    StoredImage::new_rgba8(info.width, info.height, pixels).map_err(|error| {
+        DocumentPackageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })
 }
 
 fn current_time_ns() -> u64 {
@@ -1750,7 +1752,10 @@ mod tests {
             ],
         };
 
-        assert_eq!(collect_manifest_raster_assets(&root), vec![(9, "layers/9.png")]);
+        assert_eq!(
+            collect_manifest_raster_assets(&root),
+            vec![(9, "layers/9.png")]
+        );
     }
 
     #[test]

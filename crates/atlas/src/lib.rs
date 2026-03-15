@@ -907,7 +907,10 @@ mod tests {
 
         let reused = backend.alloc_active().unwrap().key();
         assert_eq!(reused.slot().raw(), dropped_key.slot().raw());
-        assert_eq!(backend.tile_state(first.keys[0]).unwrap(), TileState::Cached);
+        assert_eq!(
+            backend.tile_state(first.keys[0]).unwrap(),
+            TileState::Cached
+        );
     }
 
     #[test]

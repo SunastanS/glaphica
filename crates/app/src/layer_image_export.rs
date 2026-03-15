@@ -165,12 +165,12 @@ fn scatter_tile_readback(
     mapped: &[u8],
     readback: &TileReadback,
 ) -> Result<(), LayerImageExportError> {
-    let tile_origin_x =
-        usize::try_from(readback.tile_origin_x).map_err(|_| LayerImageExportError::InvalidOutputSize)?;
-    let tile_origin_y =
-        usize::try_from(readback.tile_origin_y).map_err(|_| LayerImageExportError::InvalidOutputSize)?;
-    let sample_width =
-        usize::try_from(readback.sample_width).map_err(|_| LayerImageExportError::InvalidOutputSize)?;
+    let tile_origin_x = usize::try_from(readback.tile_origin_x)
+        .map_err(|_| LayerImageExportError::InvalidOutputSize)?;
+    let tile_origin_y = usize::try_from(readback.tile_origin_y)
+        .map_err(|_| LayerImageExportError::InvalidOutputSize)?;
+    let sample_width = usize::try_from(readback.sample_width)
+        .map_err(|_| LayerImageExportError::InvalidOutputSize)?;
     let sample_height = usize::try_from(readback.sample_height)
         .map_err(|_| LayerImageExportError::InvalidOutputSize)?;
     let bytes_per_row = sample_width * 4;

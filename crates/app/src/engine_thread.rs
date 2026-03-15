@@ -319,7 +319,11 @@ impl EngineThreadState {
             .filter(|key| *key != TileKey::EMPTY)
             .collect::<Vec<_>>();
         keys.sort_unstable_by_key(|key| {
-            (key.backend_index(), key.generation_index(), key.slot_index())
+            (
+                key.backend_index(),
+                key.generation_index(),
+                key.slot_index(),
+            )
         });
         keys.dedup();
         self.backend_manager.drop_tiles(keys);
@@ -488,7 +492,10 @@ impl EngineThreadState {
         }
 
         for (backend, swaps) in &swaps_by_backend {
-            let backend = self.backend_manager.inner_mut().backend_mut(BackendId::new(*backend))?;
+            let backend = self
+                .backend_manager
+                .inner_mut()
+                .backend_mut(BackendId::new(*backend))?;
             if backend.restore_cached_keys(swaps).is_err() {
                 return None;
             }
@@ -496,7 +503,10 @@ impl EngineThreadState {
 
         for tile in &record.tiles {
             let image = self.document.get_leaf_image_mut(tile.node_id)?;
-            if image.set_tile_key(tile.tile_index, tile.old_tile_key).is_err() {
+            if image
+                .set_tile_key(tile.tile_index, tile.old_tile_key)
+                .is_err()
+            {
                 return None;
             }
         }
@@ -514,7 +524,10 @@ impl EngineThreadState {
 
         for tile in &record.tiles {
             let image = self.document.get_leaf_image_mut(tile.node_id)?;
-            if image.set_tile_key(tile.tile_index, tile.new_tile_key).is_err() {
+            if image
+                .set_tile_key(tile.tile_index, tile.new_tile_key)
+                .is_err()
+            {
                 return None;
             }
         }

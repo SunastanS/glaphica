@@ -860,7 +860,10 @@ fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f3
     }
 }
 
-fn collect_raster_tile_keys_from_node(node: &UiLayerNode, output: &mut Vec<glaphica_core::TileKey>) {
+fn collect_raster_tile_keys_from_node(
+    node: &UiLayerNode,
+    output: &mut Vec<glaphica_core::TileKey>,
+) {
     match node {
         UiLayerNode::Branch(branch) => {
             for child in &branch.children {

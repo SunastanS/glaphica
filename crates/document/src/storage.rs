@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use glaphica_core::{BackendId, NodeId};
-use images::{Image, ImageCreateError};
 use images::layout::ImageLayout;
+use images::{Image, ImageCreateError};
 
 use crate::{
     BranchBlendMode, BranchConfig, Document, LeafBlendMode, LeafConfig, Metadata, SolidColorLayer,
@@ -13,7 +13,10 @@ const STORAGE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentStorageError {
-    UnsupportedVersion { expected: u32, actual: u32 },
+    UnsupportedVersion {
+        expected: u32,
+        actual: u32,
+    },
     RasterSizeMismatch {
         node_id: NodeId,
         expected_width: u32,
@@ -393,7 +396,10 @@ mod tests {
 
         assert_eq!(requests.len(), raster_assets.len());
         assert_eq!(
-            requests.iter().map(|request| request.file_name.clone()).collect::<Vec<_>>(),
+            requests
+                .iter()
+                .map(|request| request.file_name.clone())
+                .collect::<Vec<_>>(),
             raster_assets
         );
     }
