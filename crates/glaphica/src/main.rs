@@ -217,13 +217,19 @@ impl App {
                 }
                 if let Some(kind) = overlay.take_pending_layer_create() {
                     match integration.create_layer_above_active(kind) {
-                        Ok(()) => should_advance_epoch = true,
+                        Ok(()) => {
+                            overlay.mark_document_dirty();
+                            should_advance_epoch = true;
+                        }
                         Err(error) => eprintln!("failed to create layer: {error:?}"),
                     }
                 }
                 if overlay.take_pending_group_create() {
                     match integration.create_group_above_active() {
-                        Ok(()) => should_advance_epoch = true,
+                        Ok(()) => {
+                            overlay.mark_document_dirty();
+                            should_advance_epoch = true;
+                        }
                         Err(error) => eprintln!("failed to create group: {error:?}"),
                     }
                 }
@@ -231,41 +237,33 @@ impl App {
                     if let Err(error) = integration.move_document_node(node_id, target) {
                         eprintln!("failed to move layer: {error:?}");
                     } else {
+                        overlay.mark_document_dirty();
                         should_advance_epoch = true;
                     }
                 }
                 if let Some(path) = overlay.take_pending_document_save() {
                     match integration.save_document_bundle(&path) {
                         Ok(()) => {
-                            overlay.set_document_status(
-                                format!("Saved {}", path.display()),
-                                false,
-                            );
+                            overlay.set_document_status(format!("Saved {}", path.display()), false);
+                            overlay.mark_document_clean();
                         }
                         Err(error) => {
                             eprintln!("failed to save document bundle: {error}");
-                            overlay.set_document_status(
-                                format!("Save failed: {error}"),
-                                true,
-                            );
+                            overlay.set_document_status(format!("Save failed: {error}"), true);
                         }
                     }
                 }
                 if let Some(path) = overlay.take_pending_document_load() {
                     match integration.load_document_bundle(&path) {
                         Ok(()) => {
-                            overlay.set_document_status(
-                                format!("Loaded {}", path.display()),
-                                false,
-                            );
+                            overlay
+                                .set_document_status(format!("Loaded {}", path.display()), false);
+                            overlay.mark_document_clean();
                             should_advance_epoch = true;
                         }
                         Err(error) => {
                             eprintln!("failed to load document bundle: {error}");
-                            overlay.set_document_status(
-                                format!("Load failed: {error}"),
-                                true,
-                            );
+                            overlay.set_document_status(format!("Load failed: {error}"), true);
                         }
                     }
                 }
@@ -312,6 +310,19 @@ impl App {
     }
 
     fn request_shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(overlay) = self.overlay.as_mut()
+            && overlay.document_dirty
+        {
+            overlay.exit_confirm_open = true;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        self.perform_shutdown(event_loop);
+    }
+
+    fn perform_shutdown(&mut self, event_loop: &ActiveEventLoop) {
         self.shutdown_requested = true;
         self.finalize_outputs();
         event_loop.exit();
@@ -484,6 +495,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
+                if let Some(overlay) = self.overlay.as_mut() {
+                    match overlay.take_exit_confirm_action() {
+                        Some(ExitConfirmAction::SaveAndExit) => {
+                            overlay.pending_document_save = true;
+                            self.render_frame();
+                            self.perform_shutdown(event_loop);
+                        }
+                        Some(ExitConfirmAction::DiscardAndExit) => {
+                            self.perform_shutdown(event_loop)
+                        }
+                        Some(ExitConfirmAction::Cancel) | None => {}
+                    }
+                }
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 if self.is_replay_mode() {
@@ -494,6 +518,9 @@ impl ApplicationHandler for App {
                         && state == ElementState::Released
                         && self.stroke_active
                     {
+                        if let Some(overlay) = self.overlay.as_mut() {
+                            overlay.mark_document_dirty();
+                        }
                         self.stroke_active = false;
                         if let Some(integration) = &mut self.integration {
                             integration.end_stroke();
@@ -521,9 +548,13 @@ impl ApplicationHandler for App {
                             }
                         }
                         ElementState::Released => {
+                            let stroke_was_active = self.stroke_active;
                             self.stroke_active = false;
                             if let Some(integration) = &mut self.integration {
                                 integration.end_stroke();
+                            }
+                            if stroke_was_active && let Some(overlay) = self.overlay.as_mut() {
+                                overlay.mark_document_dirty();
                             }
                         }
                     },
@@ -634,6 +665,9 @@ impl ApplicationHandler for App {
                                 if integration.redo_stroke()
                                     && let Some(window) = &self.window
                                 {
+                                    if let Some(overlay) = self.overlay.as_mut() {
+                                        overlay.mark_document_dirty();
+                                    }
                                     window.request_redraw();
                                 }
                             }
@@ -645,14 +679,24 @@ impl ApplicationHandler for App {
                                 if integration.undo_stroke()
                                     && let Some(window) = &self.window
                                 {
+                                    if let Some(overlay) = self.overlay.as_mut() {
+                                        overlay.mark_document_dirty();
+                                    }
                                     window.request_redraw();
                                 }
                             }
                         }
-                        Key::Named(NamedKey::Escape) => self.request_shutdown(event_loop),
-                        Key::Character(value) if value.eq_ignore_ascii_case("q") => {
-                            self.request_shutdown(event_loop)
+                        Key::Character(value)
+                            if self.ctrl_pressed && value.eq_ignore_ascii_case("s") =>
+                        {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                overlay.pending_document_save = true;
+                            }
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
                         }
+                        Key::Named(NamedKey::Escape) => self.request_shutdown(event_loop),
                         _ => {}
                     }
                 }
@@ -729,8 +773,18 @@ struct EguiOverlay {
     document_path: String,
     document_status_text: Option<String>,
     document_status_is_error: bool,
+    document_dirty: bool,
+    exit_confirm_open: bool,
+    exit_confirm_action: Option<ExitConfirmAction>,
     config_panel_rect: Option<Rect>,
     app_stats: Option<AppStats>,
+}
+
+#[derive(Clone, Copy)]
+enum ExitConfirmAction {
+    SaveAndExit,
+    DiscardAndExit,
+    Cancel,
 }
 
 impl EguiOverlay {
@@ -782,6 +836,9 @@ impl EguiOverlay {
             document_path,
             document_status_text: None,
             document_status_is_error: false,
+            document_dirty: false,
+            exit_confirm_open: false,
+            exit_confirm_action: None,
             config_panel_rect: None,
             app_stats: None,
         }
@@ -890,6 +947,18 @@ impl EguiOverlay {
         self.document_status_is_error = is_error;
     }
 
+    fn mark_document_dirty(&mut self) {
+        self.document_dirty = true;
+    }
+
+    fn mark_document_clean(&mut self) {
+        self.document_dirty = false;
+    }
+
+    fn take_exit_confirm_action(&mut self) -> Option<ExitConfirmAction> {
+        self.exit_confirm_action.take()
+    }
+
     fn flush_selected_brush_if_dirty(&mut self) {
         self.queue_brush_update_if_dirty(self.selected_brush_index);
     }
@@ -946,11 +1015,7 @@ impl EguiOverlay {
             .min(target_width as f32);
 
         let full_output = self.ctx.run(raw_input, |ctx| {
-            let mut top_bar = TopBar::new(
-                &mut self.document_path,
-                self.document_status_text.as_deref(),
-                self.document_status_is_error,
-            );
+            let mut top_bar = TopBar::new(&mut self.document_path);
             let top_bar_output = top_bar.render(ctx, theme);
             if top_bar_output.save_clicked {
                 self.pending_document_save = true;
@@ -958,6 +1023,8 @@ impl EguiOverlay {
             if top_bar_output.load_clicked {
                 self.pending_document_load = true;
             }
+
+            StatusBar::render(ctx, theme, self.app_stats.as_ref());
 
             let sidebar = Sidebar::new(
                 *left_panel_collapsed,
@@ -1014,7 +1081,30 @@ impl EguiOverlay {
                 *right_panel_width = rect.width();
             }
 
-            StatusBar::render(ctx, theme, self.app_stats.as_ref());
+            if self.exit_confirm_open {
+                egui::Window::new("Unsaved Changes")
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label("Save changes before exit?");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                self.exit_confirm_open = false;
+                                self.exit_confirm_action = Some(ExitConfirmAction::SaveAndExit);
+                            }
+                            if ui.button("Discard").clicked() {
+                                self.exit_confirm_open = false;
+                                self.exit_confirm_action = Some(ExitConfirmAction::DiscardAndExit);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.exit_confirm_open = false;
+                                self.exit_confirm_action = Some(ExitConfirmAction::Cancel);
+                            }
+                        });
+                    });
+            }
         });
 
         self.state

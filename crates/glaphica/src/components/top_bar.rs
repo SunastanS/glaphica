@@ -3,30 +3,19 @@ use egui::{Button, Frame, RichText, TextEdit, TopBottomPanel};
 
 pub struct TopBar<'a> {
     document_path: &'a mut String,
-    status_text: Option<&'a str>,
-    status_is_error: bool,
 }
 
 impl<'a> TopBar<'a> {
-    pub fn new(
-        document_path: &'a mut String,
-        status_text: Option<&'a str>,
-        status_is_error: bool,
-    ) -> Self {
-        Self {
-            document_path,
-            status_text,
-            status_is_error,
-        }
+    pub fn new(document_path: &'a mut String) -> Self {
+        Self { document_path }
     }
 
     pub fn render(&mut self, ctx: &egui::Context, theme: &Theme) -> TopBarOutput {
         let mut output = TopBarOutput::default();
         TopBottomPanel::top("overlay-top-bar")
-            .exact_height(52.0)
+            .exact_height(38.0)
             .frame(Frame::default().fill(theme.bg_color))
             .show(ctx, |ui| {
-                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Document").color(theme.text_color).strong());
                     let text_edit = TextEdit::singleline(self.document_path)
@@ -45,15 +34,6 @@ impl<'a> TopBar<'a> {
                         output.load_clicked = true;
                     }
                 });
-                if let Some(status_text) = self.status_text {
-                    let color = if self.status_is_error {
-                        theme.error_color
-                    } else {
-                        theme.text_color
-                    };
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(status_text).color(color).size(12.0));
-                }
             });
         output
     }
