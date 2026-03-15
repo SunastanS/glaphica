@@ -696,6 +696,17 @@ impl ApplicationHandler for App {
                                 window.request_redraw();
                             }
                         }
+                        Key::Named(NamedKey::Tab) => {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                let collapsed =
+                                    !overlay.left_panel_collapsed || !overlay.right_panel_collapsed;
+                                overlay.left_panel_collapsed = collapsed;
+                                overlay.right_panel_collapsed = collapsed;
+                            }
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
                         Key::Named(NamedKey::Escape) => self.request_shutdown(event_loop),
                         _ => {}
                     }
