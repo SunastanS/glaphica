@@ -105,6 +105,8 @@ struct App {
     replay_index: usize,
     replay_finished: bool,
     shutdown_requested: bool,
+    shutdown_after_save: bool,
+    deferred_shutdown_requested: bool,
     output_finalized: bool,
     started_at: Option<Instant>,
     sigint_flag: Arc<AtomicBool>,
@@ -130,6 +132,8 @@ impl App {
             replay_index: 0,
             replay_finished: false,
             shutdown_requested: false,
+            shutdown_after_save: false,
+            deferred_shutdown_requested: false,
             output_finalized: false,
             started_at: None,
             sigint_flag,
@@ -215,6 +219,9 @@ impl App {
                         should_advance_epoch = true;
                     }
                 }
+                if overlay.take_path_dialog_cancelled() {
+                    self.shutdown_after_save = false;
+                }
                 if let Some(kind) = overlay.take_pending_layer_create() {
                     match integration.create_layer_above_active(kind) {
                         Ok(()) => {
@@ -246,10 +253,15 @@ impl App {
                         Ok(()) => {
                             overlay.set_document_status(format!("Saved {}", path.display()), false);
                             overlay.mark_document_clean();
+                            if self.shutdown_after_save {
+                                self.shutdown_after_save = false;
+                                self.deferred_shutdown_requested = true;
+                            }
                         }
                         Err(error) => {
                             eprintln!("failed to save document bundle: {error}");
                             overlay.set_document_status(format!("Save failed: {error}"), true);
+                            self.shutdown_after_save = false;
                         }
                     }
                 }
@@ -264,6 +276,18 @@ impl App {
                         Err(error) => {
                             eprintln!("failed to load document bundle: {error}");
                             overlay.set_document_status(format!("Load failed: {error}"), true);
+                        }
+                    }
+                }
+                if let Some(path) = overlay.take_pending_document_export() {
+                    match integration.export_document_jpeg(&path) {
+                        Ok(()) => {
+                            overlay
+                                .set_document_status(format!("Exported {}", path.display()), false);
+                        }
+                        Err(error) => {
+                            eprintln!("failed to export document jpeg: {error}");
+                            overlay.set_document_status(format!("Export failed: {error}"), true);
                         }
                     }
                 }
@@ -516,14 +540,17 @@ impl ApplicationHandler for App {
                 if let Some(overlay) = self.overlay.as_mut() {
                     match overlay.take_exit_confirm_action() {
                         Some(ExitConfirmAction::SaveAndExit) => {
-                            overlay.pending_document_save = true;
+                            self.shutdown_after_save = true;
+                            overlay.open_path_dialog(PathDialogAction::Save);
                             self.render_frame();
-                            self.perform_shutdown(event_loop);
                         }
                         Some(ExitConfirmAction::DiscardAndExit) => {
                             self.perform_shutdown(event_loop)
                         }
-                        Some(ExitConfirmAction::Cancel) | None => {}
+                        Some(ExitConfirmAction::Cancel) => {
+                            self.shutdown_after_save = false;
+                        }
+                        None => {}
                     }
                 }
             }
@@ -708,7 +735,7 @@ impl ApplicationHandler for App {
                             if self.ctrl_pressed && value.eq_ignore_ascii_case("s") =>
                         {
                             if let Some(overlay) = self.overlay.as_mut() {
-                                overlay.pending_document_save = true;
+                                overlay.open_path_dialog(PathDialogAction::Save);
                             }
                             if let Some(window) = &self.window {
                                 window.request_redraw();
@@ -724,6 +751,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.deferred_shutdown_requested {
+            self.deferred_shutdown_requested = false;
+            self.perform_shutdown(event_loop);
+            return;
+        }
         if self.shutdown_requested {
             return;
         }
@@ -788,7 +820,10 @@ struct EguiOverlay {
     pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
     pending_document_save: bool,
     pending_document_load: bool,
+    pending_document_export: bool,
     document_path: String,
+    path_dialog_action: Option<PathDialogAction>,
+    path_dialog_cancelled: bool,
     document_status_text: Option<String>,
     document_status_is_error: bool,
     document_dirty: bool,
@@ -803,6 +838,13 @@ enum ExitConfirmAction {
     SaveAndExit,
     DiscardAndExit,
     Cancel,
+}
+
+#[derive(Clone, Copy)]
+enum PathDialogAction {
+    Save,
+    Load,
+    Export,
 }
 
 impl EguiOverlay {
@@ -851,7 +893,10 @@ impl EguiOverlay {
             pending_layer_move: None,
             pending_document_save: false,
             pending_document_load: false,
+            pending_document_export: false,
             document_path,
+            path_dialog_action: None,
+            path_dialog_cancelled: false,
             document_status_text: None,
             document_status_is_error: false,
             document_dirty: false,
@@ -960,6 +1005,54 @@ impl EguiOverlay {
         None
     }
 
+    fn take_pending_document_export(&mut self) -> Option<PathBuf> {
+        if std::mem::take(&mut self.pending_document_export) {
+            let path = self.document_path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+        None
+    }
+
+    fn open_path_dialog(&mut self, action: PathDialogAction) {
+        self.document_path = self.suggested_path_for_action(action);
+        self.path_dialog_action = Some(action);
+    }
+
+    fn confirm_path_dialog(&mut self) {
+        match self.path_dialog_action.take() {
+            Some(PathDialogAction::Save) => self.pending_document_save = true,
+            Some(PathDialogAction::Load) => self.pending_document_load = true,
+            Some(PathDialogAction::Export) => self.pending_document_export = true,
+            None => {}
+        }
+    }
+
+    fn suggested_path_for_action(&self, action: PathDialogAction) -> String {
+        let current = Path::new(self.document_path.trim());
+        let file_stem = current
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("document");
+        let extension = match action {
+            PathDialogAction::Save | PathDialogAction::Load => "glaphica",
+            PathDialogAction::Export => "jpeg",
+        };
+        let file_name = format!("{file_stem}.{extension}");
+        match current.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join(file_name),
+            _ => PathBuf::from(file_name),
+        }
+        .display()
+        .to_string()
+    }
+
+    fn take_path_dialog_cancelled(&mut self) -> bool {
+        std::mem::take(&mut self.path_dialog_cancelled)
+    }
+
     fn set_document_status(&mut self, text: String, is_error: bool) {
         self.document_status_text = Some(text);
         self.document_status_is_error = is_error;
@@ -1007,7 +1100,7 @@ impl EguiOverlay {
         target_height: u32,
     ) {
         let raw_input = self.state.take_egui_input(window);
-        let theme = &self.theme;
+        let theme = self.theme;
         let left_panel_collapsed = &mut self.left_panel_collapsed;
         let right_panel_collapsed = &mut self.right_panel_collapsed;
         let left_panel_width = &mut self.left_panel_width;
@@ -1027,22 +1120,28 @@ impl EguiOverlay {
         let pending_layer_create = &mut self.pending_layer_create;
         let pending_group_create = &mut self.pending_group_create;
         let pending_layer_move = &mut self.pending_layer_move;
-        let config_panel_rect = &mut self.config_panel_rect;
+        let mut config_panel_rect = self.config_panel_rect;
         let panel_max_width = (target_width as f32 - 96.0)
             .max(0.0)
             .min(target_width as f32);
+        let mut requested_path_dialog = None;
+        let mut confirm_path_dialog = false;
+        let mut cancel_path_dialog = false;
 
         let full_output = self.ctx.run(raw_input, |ctx| {
-            let mut top_bar = TopBar::new(&mut self.document_path);
-            let top_bar_output = top_bar.render(ctx, theme);
+            let mut top_bar = TopBar::new();
+            let top_bar_output = top_bar.render(ctx, &theme);
             if top_bar_output.save_clicked {
-                self.pending_document_save = true;
+                requested_path_dialog = Some(PathDialogAction::Save);
             }
             if top_bar_output.load_clicked {
-                self.pending_document_load = true;
+                requested_path_dialog = Some(PathDialogAction::Load);
+            }
+            if top_bar_output.export_clicked {
+                requested_path_dialog = Some(PathDialogAction::Export);
             }
 
-            StatusBar::render(ctx, theme, self.app_stats.as_ref());
+            StatusBar::render(ctx, &theme, self.app_stats.as_ref());
 
             let sidebar = Sidebar::new(
                 *left_panel_collapsed,
@@ -1052,7 +1151,7 @@ impl EguiOverlay {
                 *selected_node,
                 &preview_texture_ids,
             );
-            let sidebar_output = sidebar.render(ctx, theme);
+            let sidebar_output = sidebar.render(ctx, &theme);
 
             if sidebar_output.toggle_collapse {
                 *left_panel_collapsed = !*left_panel_collapsed;
@@ -1081,7 +1180,7 @@ impl EguiOverlay {
                 brush_states,
                 *selected_brush_index,
             );
-            let config_output = config_panel.render(ctx, theme);
+            let config_output = config_panel.render(ctx, &theme);
 
             if config_output.toggle_collapse {
                 *right_panel_collapsed = !*right_panel_collapsed;
@@ -1094,7 +1193,7 @@ impl EguiOverlay {
                     *selected_brush_index = new_index;
                 }
             }
-            *config_panel_rect = config_output.panel_rect;
+            config_panel_rect = config_output.panel_rect;
             if let Some(rect) = config_output.panel_rect {
                 *right_panel_width = rect.width();
             }
@@ -1123,14 +1222,57 @@ impl EguiOverlay {
                         });
                     });
             }
+
+            if let Some(action) = self.path_dialog_action {
+                let (title, confirm_label, hint) = match action {
+                    PathDialogAction::Save => ("Save Document", "Save", "Enter bundle output path"),
+                    PathDialogAction::Load => ("Load Document", "Load", "Enter bundle input path"),
+                    PathDialogAction::Export => {
+                        ("Export JPEG", "Export", "Enter .jpg or .jpeg output path")
+                    }
+                };
+                egui::Window::new(title)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label(hint);
+                        ui.add_space(8.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.document_path)
+                                .desired_width(360.0),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(confirm_label).clicked() {
+                                confirm_path_dialog = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_path_dialog = true;
+                            }
+                        });
+                    });
+            }
         });
+
+        if let Some(action) = requested_path_dialog {
+            self.open_path_dialog(action);
+        }
+        if confirm_path_dialog {
+            self.confirm_path_dialog();
+        }
+        if cancel_path_dialog {
+            self.path_dialog_action = None;
+            self.path_dialog_cancelled = true;
+        }
+        self.config_panel_rect = config_panel_rect;
 
         self.state
             .handle_platform_output(window, full_output.platform_output);
 
         let pointer_pos = self.ctx.input(|input| input.pointer.latest_pos());
         if self.pending_brush_update.is_none()
-            && let (Some(rect), Some(pointer_pos)) = (*config_panel_rect, pointer_pos)
+            && let (Some(rect), Some(pointer_pos)) = (config_panel_rect, pointer_pos)
             && !rect.contains(pointer_pos)
             && let Some(brush_state) = self.brush_states.get(self.selected_brush_index)
             && brush_state.dirty

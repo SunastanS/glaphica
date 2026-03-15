@@ -17,5 +17,5 @@ pub use integration::{
 pub use layer_image_export::{LayerImageExportError, LayerImageExporter};
 pub use layer_preview::LayerPreviewBitmap;
 pub use main_thread::{
-    BrushRegisterError, InitError, MainThreadState, PresentError, ScreenshotError,
+    BrushRegisterError, ExportImageError, InitError, MainThreadState, PresentError, ScreenshotError,
 };

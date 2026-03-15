@@ -951,14 +951,57 @@ impl MainThreadState {
         width: u32,
         height: u32,
     ) -> Result<(), ScreenshotError> {
+        let pixels = self
+            .read_final_image_rgba8(width, height)
+            .map_err(map_export_image_error_to_screenshot)?;
+        let file = std::fs::File::create(output_path).map_err(ScreenshotError::Io)?;
+        let mut encoder = png::Encoder::new(file, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(ScreenshotError::Png)?;
+        writer
+            .write_image_data(&pixels)
+            .map_err(ScreenshotError::Png)?;
+        Ok(())
+    }
+
+    pub fn export_jpeg_image(&mut self, output_path: &Path) -> Result<(), ExportImageError> {
+        if !matches_jpeg_extension(output_path) {
+            return Err(ExportImageError::InvalidExtension);
+        }
+        if let Some(parent_dir) = output_path.parent()
+            && !parent_dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent_dir).map_err(ExportImageError::Io)?;
+        }
+
+        let tree = self.shared_tree.read();
+        let Some(root_id) = tree.root_id else {
+            return Err(ExportImageError::MissingDocumentImage);
+        };
+        let Some(root_node) = tree.nodes.get(&root_id) else {
+            return Err(ExportImageError::MissingDocumentImage);
+        };
+        let Some(image) = root_node.kind.render_image() else {
+            return Err(ExportImageError::MissingDocumentImage);
+        };
+        let stored = self.layer_image_exporter.export(
+            &self.gpu_context.device,
+            &self.gpu_context.queue,
+            &self.atlas_storage,
+            image,
+        )?;
+        save_jpeg_rgba8(output_path, &stored)
+    }
+
+    fn read_final_image_rgba8(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, ExportImageError> {
         self.promote_completed_tile_updates();
         if width == 0 || height == 0 {
-            return Err(ScreenshotError::InvalidSize);
-        }
-        if let Some(parent_dir) = output_path.parent() {
-            if !parent_dir.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent_dir).map_err(ScreenshotError::Io)?;
-            }
+            return Err(ExportImageError::InvalidSize);
         }
 
         let screenshot_texture = self
@@ -1051,15 +1094,15 @@ impl MainThreadState {
             .poll(wgpu::PollType::wait_indefinitely());
         let map_result = result_receiver
             .recv()
-            .map_err(ScreenshotError::MapChannel)?;
-        map_result.map_err(ScreenshotError::Map)?;
+            .map_err(ExportImageError::MapChannel)?;
+        map_result.map_err(ExportImageError::Map)?;
 
         let mapped_range = buffer_slice.get_mapped_range();
         let unpadded_row_len =
-            usize::try_from(unpadded_bytes_per_row).map_err(|_| ScreenshotError::InvalidSize)?;
+            usize::try_from(unpadded_bytes_per_row).map_err(|_| ExportImageError::InvalidSize)?;
         let padded_row_len =
-            usize::try_from(padded_bytes_per_row).map_err(|_| ScreenshotError::InvalidSize)?;
-        let height_usize = usize::try_from(height).map_err(|_| ScreenshotError::InvalidSize)?;
+            usize::try_from(padded_bytes_per_row).map_err(|_| ExportImageError::InvalidSize)?;
+        let height_usize = usize::try_from(height).map_err(|_| ExportImageError::InvalidSize)?;
         let mut pixels = vec![0u8; unpadded_row_len.saturating_mul(height_usize)];
         for row_index in 0..height_usize {
             let source_start = row_index * padded_row_len;
@@ -1071,16 +1114,26 @@ impl MainThreadState {
         }
         drop(mapped_range);
         output_buffer.unmap();
+        Ok(pixels)
+    }
+}
 
-        let file = std::fs::File::create(output_path).map_err(ScreenshotError::Io)?;
-        let mut encoder = png::Encoder::new(file, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().map_err(ScreenshotError::Png)?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(ScreenshotError::Png)?;
-        Ok(())
+fn matches_jpeg_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg"))
+}
+
+fn map_export_image_error_to_screenshot(error: ExportImageError) -> ScreenshotError {
+    match error {
+        ExportImageError::InvalidExtension
+        | ExportImageError::MissingDocumentImage
+        | ExportImageError::InvalidSize
+        | ExportImageError::LayerExport(_) => ScreenshotError::InvalidSize,
+        ExportImageError::Io(error) => ScreenshotError::Io(error),
+        ExportImageError::Map(error) => ScreenshotError::Map(error),
+        ExportImageError::MapChannel(error) => ScreenshotError::MapChannel(error),
+        ExportImageError::Jpeg(_) => ScreenshotError::InvalidSize,
     }
 }
 
@@ -1267,6 +1320,62 @@ impl Display for ScreenshotError {
 }
 
 impl std::error::Error for ScreenshotError {}
+
+#[derive(Debug)]
+pub enum ExportImageError {
+    InvalidExtension,
+    MissingDocumentImage,
+    InvalidSize,
+    Io(std::io::Error),
+    Map(wgpu::BufferAsyncError),
+    MapChannel(std::sync::mpsc::RecvError),
+    Jpeg(jpeg_encoder::EncodingError),
+    LayerExport(LayerImageExportError),
+}
+
+impl Display for ExportImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidExtension => write!(f, "export path must end with .jpg or .jpeg"),
+            Self::MissingDocumentImage => write!(f, "document render image is unavailable"),
+            Self::InvalidSize => write!(f, "invalid export image size"),
+            Self::Io(error) => write!(f, "export image io error: {error}"),
+            Self::Map(error) => write!(f, "export image map error: {error}"),
+            Self::MapChannel(error) => write!(f, "export image map channel error: {error}"),
+            Self::Jpeg(error) => write!(f, "export image jpeg error: {error}"),
+            Self::LayerExport(error) => write!(f, "export image layer export error: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ExportImageError {}
+
+impl From<LayerImageExportError> for ExportImageError {
+    fn from(error: LayerImageExportError) -> Self {
+        Self::LayerExport(error)
+    }
+}
+
+fn save_jpeg_rgba8(path: &Path, image: &images::StoredImage) -> Result<(), ExportImageError> {
+    let mut rgb_pixels = Vec::with_capacity(image.pixels_rgba8().len() / 4 * 3);
+    for rgba in image.pixels_rgba8().chunks_exact(4) {
+        rgb_pixels.extend_from_slice(&rgba[..3]);
+    }
+
+    let file = std::fs::File::create(path).map_err(ExportImageError::Io)?;
+    let encoder = jpeg_encoder::Encoder::new(file, 90);
+    let jpeg_width = u16::try_from(image.width()).map_err(|_| ExportImageError::InvalidSize)?;
+    let jpeg_height = u16::try_from(image.height()).map_err(|_| ExportImageError::InvalidSize)?;
+    encoder
+        .encode(
+            &rgb_pixels,
+            jpeg_width,
+            jpeg_height,
+            jpeg_encoder::ColorType::Rgb,
+        )
+        .map_err(ExportImageError::Jpeg)?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,13 +1,11 @@
 use crate::theme::Theme;
-use egui::{Button, Frame, RichText, TextEdit, TopBottomPanel};
+use egui::{Button, Frame, RichText, TopBottomPanel};
 
-pub struct TopBar<'a> {
-    document_path: &'a mut String,
-}
+pub struct TopBar;
 
-impl<'a> TopBar<'a> {
-    pub fn new(document_path: &'a mut String) -> Self {
-        Self { document_path }
+impl TopBar {
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn render(&mut self, ctx: &egui::Context, theme: &Theme) -> TopBarOutput {
@@ -18,9 +16,7 @@ impl<'a> TopBar<'a> {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Document").color(theme.text_color).strong());
-                    let text_edit = TextEdit::singleline(self.document_path)
-                        .desired_width((ui.available_width() - 160.0).max(120.0));
-                    ui.add(text_edit);
+                    ui.add_space((ui.available_width() - 200.0).max(0.0));
                     if ui
                         .add(Button::new("Save").fill(theme.input_bg_color))
                         .clicked()
@@ -33,6 +29,12 @@ impl<'a> TopBar<'a> {
                     {
                         output.load_clicked = true;
                     }
+                    if ui
+                        .add(Button::new("Export").fill(theme.input_bg_color))
+                        .clicked()
+                    {
+                        output.export_clicked = true;
+                    }
                 });
             });
         output
@@ -43,4 +45,5 @@ impl<'a> TopBar<'a> {
 pub struct TopBarOutput {
     pub save_clicked: bool,
     pub load_clicked: bool,
+    pub export_clicked: bool,
 }

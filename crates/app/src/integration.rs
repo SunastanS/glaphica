@@ -26,8 +26,8 @@ use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 
 use crate::trace::{TraceInputFrame, TraceIoError, TraceRecorder};
 use crate::{
-    BrushRegisterError, EngineThreadState, LayerImageExportError, LayerPreviewBitmap,
-    MainThreadState, config,
+    BrushRegisterError, EngineThreadState, ExportImageError, LayerImageExportError,
+    LayerPreviewBitmap, MainThreadState, config,
 };
 
 #[derive(Debug)]
@@ -1190,6 +1190,10 @@ impl AppThreadIntegration {
         height: u32,
     ) -> Result<(), crate::ScreenshotError> {
         self.main_state.save_screenshot(output_path, width, height)
+    }
+
+    pub fn export_document_jpeg(&mut self, output_path: &Path) -> Result<(), ExportImageError> {
+        self.main_state.export_jpeg_image(output_path)
     }
 
     pub fn rebuild_render_tree(&mut self) -> Result<(), document::ImageCreateError> {
