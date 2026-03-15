@@ -77,9 +77,16 @@ pub struct TraceOutputFrame {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TraceAppControl {
-    StrokeBoundary { node_id: u64, begin: bool },
-    SelectNode { node_id: u64 },
-    CreateLayerAboveActive { kind: TraceNewLayerKind },
+    StrokeBoundary {
+        node_id: u64,
+        begin: bool,
+    },
+    SelectNode {
+        node_id: u64,
+    },
+    CreateLayerAboveActive {
+        kind: TraceNewLayerKind,
+    },
     CreateGroupAboveActive,
     MoveNode {
         node_id: u64,

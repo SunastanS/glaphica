@@ -2,12 +2,13 @@ mod components;
 mod egui_renderer;
 mod theme;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use app::{AppThreadIntegration, trace::TraceRecorder};
+use app::{AppStats, AppThreadIntegration, LayerPreviewBitmap, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
 use brushes::{BrushConfigItem, BrushConfigValue};
 use components::{ConfigPanel, Sidebar, StatusBar};
@@ -112,6 +113,7 @@ struct App {
     middle_pan_active: bool,
     middle_pan_last_position: Option<(f32, f32)>,
     ctrl_pressed: bool,
+    shift_pressed: bool,
     active_brush_kind: BrushKind,
     brush_states: Vec<BrushUiState>,
 }
@@ -136,6 +138,7 @@ impl App {
             middle_pan_active: false,
             middle_pan_last_position: None,
             ctrl_pressed: false,
+            shift_pressed: false,
             active_brush_kind: BrushKind::Round,
             brush_states: Vec::new(),
         }
@@ -157,9 +160,11 @@ impl App {
             };
             integration.process_main_render();
             if let Some(overlay) = &mut self.overlay {
+                overlay.set_app_stats(integration.stats());
                 overlay.sync_layer_tree(
                     integration.layer_tree_items(),
                     integration.active_document_node(),
+                    integration.take_layer_preview_updates(),
                 );
                 let Some(window) = self.window.as_deref() else {
                     integration.present_to_screen();
@@ -571,6 +576,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.ctrl_pressed = modifiers.state().control_key();
+                self.shift_pressed = modifiers.state().shift_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if ui_event_consumed {
@@ -578,6 +584,30 @@ impl ApplicationHandler for App {
                 }
                 if event.state == ElementState::Pressed && !event.repeat {
                     match &event.logical_key {
+                        Key::Character(value)
+                            if self.ctrl_pressed
+                                && self.shift_pressed
+                                && value.eq_ignore_ascii_case("z") =>
+                        {
+                            if let Some(integration) = &mut self.integration {
+                                if integration.redo_stroke()
+                                    && let Some(window) = &self.window
+                                {
+                                    window.request_redraw();
+                                }
+                            }
+                        }
+                        Key::Character(value)
+                            if self.ctrl_pressed && value.eq_ignore_ascii_case("z") =>
+                        {
+                            if let Some(integration) = &mut self.integration {
+                                if integration.undo_stroke()
+                                    && let Some(window) = &self.window
+                                {
+                                    window.request_redraw();
+                                }
+                            }
+                        }
                         Key::Named(NamedKey::Escape) => self.request_shutdown(event_loop),
                         Key::Character(value) if value.eq_ignore_ascii_case("q") => {
                             self.request_shutdown(event_loop)
@@ -640,16 +670,21 @@ struct EguiOverlay {
     theme: Theme,
     left_panel_collapsed: bool,
     right_panel_collapsed: bool,
+    active_color_rgb: [f32; 3],
+    left_panel_width: f32,
+    right_panel_width: f32,
     brush_states: Vec<BrushUiState>,
     selected_brush_index: usize,
     pending_brush_update: Option<(BrushKind, Vec<BrushConfigValue>)>,
     layer_tree_items: Vec<UiLayerTreeItem>,
+    layer_preview_textures: HashMap<NodeId, egui::TextureHandle>,
     selected_node: Option<NodeId>,
     pending_layer_select: Option<NodeId>,
     pending_layer_create: Option<NewLayerKind>,
     pending_group_create: bool,
     pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
     config_panel_rect: Option<Rect>,
+    app_stats: Option<AppStats>,
 }
 
 impl EguiOverlay {
@@ -682,17 +717,26 @@ impl EguiOverlay {
             theme: Theme::dark(),
             left_panel_collapsed: false,
             right_panel_collapsed: false,
+            active_color_rgb: [1.0, 0.0, 0.0],
+            left_panel_width: 280.0,
+            right_panel_width: 240.0,
             brush_states,
             selected_brush_index,
             pending_brush_update: None,
             layer_tree_items: Vec::new(),
+            layer_preview_textures: HashMap::new(),
             selected_node: None,
             pending_layer_select: None,
             pending_layer_create: None,
             pending_group_create: false,
             pending_layer_move: None,
             config_panel_rect: None,
+            app_stats: None,
         }
+    }
+
+    fn set_app_stats(&mut self, stats: AppStats) {
+        self.app_stats = Some(stats);
     }
 
     fn on_window_event(
@@ -711,10 +755,7 @@ impl EguiOverlay {
     }
 
     fn selected_brush_color_rgb(&self) -> [f32; 3] {
-        self.brush_states
-            .get(self.selected_brush_index)
-            .map(|state| state.color_rgb)
-            .unwrap_or([1.0, 0.0, 0.0])
+        self.active_color_rgb
     }
 
     fn selected_brush_erase(&self) -> bool {
@@ -732,9 +773,28 @@ impl EguiOverlay {
         &mut self,
         layer_tree_items: Vec<UiLayerTreeItem>,
         selected_node: Option<NodeId>,
+        preview_updates: Vec<LayerPreviewBitmap>,
     ) {
         self.layer_tree_items = layer_tree_items;
         self.selected_node = selected_node;
+        self.sync_layer_preview_textures(preview_updates);
+        let valid_ids = collect_layer_tree_ids(&self.layer_tree_items);
+        self.layer_preview_textures
+            .retain(|node_id, _| valid_ids.contains(node_id));
+    }
+
+    fn sync_layer_preview_textures(&mut self, preview_updates: Vec<LayerPreviewBitmap>) {
+        for preview in preview_updates {
+            let texture = self.ctx.load_texture(
+                format!("layer-preview-{}", preview.node_id.0),
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [preview.width as usize, preview.height as usize],
+                    &preview.pixels,
+                ),
+                egui::TextureOptions::NEAREST,
+            );
+            self.layer_preview_textures.insert(preview.node_id, texture);
+        }
     }
 
     fn take_pending_layer_select(&mut self) -> Option<NodeId> {
@@ -786,19 +846,37 @@ impl EguiOverlay {
         let theme = &self.theme;
         let left_panel_collapsed = &mut self.left_panel_collapsed;
         let right_panel_collapsed = &mut self.right_panel_collapsed;
+        let left_panel_width = &mut self.left_panel_width;
+        let right_panel_width = &mut self.right_panel_width;
+        let active_color_rgb = &mut self.active_color_rgb;
         let brush_states = &mut self.brush_states;
         let selected_brush_index = &mut self.selected_brush_index;
         let pending_brush_update = &mut self.pending_brush_update;
         let layer_tree_items = &self.layer_tree_items;
+        let preview_texture_ids: HashMap<_, _> = self
+            .layer_preview_textures
+            .iter()
+            .map(|(node_id, texture)| (*node_id, texture.id()))
+            .collect();
         let selected_node = &mut self.selected_node;
         let pending_layer_select = &mut self.pending_layer_select;
         let pending_layer_create = &mut self.pending_layer_create;
         let pending_group_create = &mut self.pending_group_create;
         let pending_layer_move = &mut self.pending_layer_move;
         let config_panel_rect = &mut self.config_panel_rect;
+        let panel_max_width = (target_width as f32 - 96.0)
+            .max(0.0)
+            .min(target_width as f32);
 
         let full_output = self.ctx.run(raw_input, |ctx| {
-            let sidebar = Sidebar::new(*left_panel_collapsed, layer_tree_items, *selected_node);
+            let sidebar = Sidebar::new(
+                *left_panel_collapsed,
+                *left_panel_width,
+                panel_max_width,
+                layer_tree_items,
+                *selected_node,
+                &preview_texture_ids,
+            );
             let sidebar_output = sidebar.render(ctx, theme);
 
             if sidebar_output.toggle_collapse {
@@ -816,9 +894,15 @@ impl EguiOverlay {
             if let Some(layer_move) = sidebar_output.move_layer {
                 *pending_layer_move = Some((layer_move.node_id, layer_move.target));
             }
+            if let Some(rect) = sidebar_output.panel_rect {
+                *left_panel_width = rect.width();
+            }
 
             let mut config_panel = ConfigPanel::new(
                 *right_panel_collapsed,
+                *right_panel_width,
+                panel_max_width,
+                active_color_rgb,
                 brush_states,
                 *selected_brush_index,
             );
@@ -836,8 +920,11 @@ impl EguiOverlay {
                 }
             }
             *config_panel_rect = config_output.panel_rect;
+            if let Some(rect) = config_output.panel_rect {
+                *right_panel_width = rect.width();
+            }
 
-            StatusBar::render(ctx, theme);
+            StatusBar::render(ctx, theme, self.app_stats.as_ref());
         });
 
         self.state
@@ -899,6 +986,19 @@ fn current_time_ns() -> u64 {
         Ok(duration) => duration.as_nanos() as u64,
         Err(_) => 0,
     }
+}
+
+fn collect_layer_tree_ids(items: &[UiLayerTreeItem]) -> std::collections::HashSet<NodeId> {
+    fn collect_into(items: &[UiLayerTreeItem], output: &mut std::collections::HashSet<NodeId>) {
+        for item in items {
+            output.insert(item.id);
+            collect_into(&item.children, output);
+        }
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    collect_into(items, &mut ids);
+    ids
 }
 
 fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {

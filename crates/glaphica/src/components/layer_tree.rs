@@ -2,15 +2,17 @@ use crate::theme::Theme;
 use document::{LayerMoveTarget, UiLayerTreeItem, UiNodeKind};
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Vec2};
 use glaphica_core::NodeId;
+use std::collections::HashMap;
 
-const ROW_HEIGHT: f32 = 38.0;
-const THUMB_SIZE: Vec2 = Vec2::new(34.0, 24.0);
-const HANDLE_SIZE: Vec2 = Vec2::new(18.0, 24.0);
+const ROW_HEIGHT: f32 = 32.0;
+const THUMB_SIZE: Vec2 = Vec2::new(28.0, 20.0);
 
 pub struct LayerTree<'a> {
     items: &'a [UiLayerTreeItem],
     selected_node: Option<NodeId>,
+    preview_texture_ids: &'a HashMap<NodeId, egui::TextureId>,
     theme: &'a Theme,
+    compact: bool,
 }
 
 #[derive(Default)]
@@ -47,19 +49,23 @@ struct DropCandidate {
 struct RowRender {
     rect: Rect,
     row_response: egui::Response,
-    handle_response: egui::Response,
+    preview_response: egui::Response,
 }
 
 impl<'a> LayerTree<'a> {
     pub fn new(
         items: &'a [UiLayerTreeItem],
         selected_node: Option<NodeId>,
+        preview_texture_ids: &'a HashMap<NodeId, egui::TextureId>,
         theme: &'a Theme,
+        compact: bool,
     ) -> Self {
         Self {
             items,
             selected_node,
+            preview_texture_ids,
             theme,
+            compact,
         }
     }
 
@@ -92,14 +98,16 @@ impl<'a> LayerTree<'a> {
             if render.row_response.clicked() {
                 output.select_node = Some(row.item.id);
             }
-            if render.handle_response.drag_started() {
-                ui.ctx().data_mut(|data| data.insert_temp(drag_id, row.item.id));
+            if render.preview_response.drag_started() {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(drag_id, row.item.id));
                 dragging_node = Some(row.item.id);
                 output.select_node = Some(row.item.id);
             }
             if let (Some(node_id), Some(pointer_pos)) = (dragging_node, pointer_pos)
                 && render.rect.contains(pointer_pos)
-                && let Some(candidate) = self.drop_candidate(&row, render.rect, pointer_pos, node_id)
+                && let Some(candidate) =
+                    self.drop_candidate(&row, render.rect, pointer_pos, node_id)
             {
                 self.paint_drop_indicator(ui, &candidate.indicator);
                 active_drop = Some(candidate);
@@ -173,50 +181,42 @@ impl<'a> LayerTree<'a> {
         let row_width = ui.available_width();
         let (rect, row_response) =
             ui.allocate_exact_size(Vec2::new(row_width, ROW_HEIGHT), Sense::click());
-        let painter = ui.painter();
-        painter.rect(
+        ui.painter().rect(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(4),
             fill,
             stroke,
             StrokeKind::Middle,
         );
 
         let indent = row.depth as f32 * 14.0;
-        let thumb_rect = Rect::from_min_size(rect.min + Vec2::new(8.0 + indent, 7.0), THUMB_SIZE);
-        self.paint_thumbnail(ui, thumb_rect, row.item.kind);
-
-        let handle_rect = Rect::from_min_size(
-            rect.right_top() - Vec2::new(HANDLE_SIZE.x + 8.0, -7.0),
-            HANDLE_SIZE,
-        );
-        let handle_response = ui.interact(
-            handle_rect,
-            ui.id().with(("layer-tree-handle", row.item.id.0)),
+        let thumb_rect = if self.compact {
+            let thumb_x = (rect.center().x - THUMB_SIZE.x * 0.5).max(rect.left() + 2.0);
+            Rect::from_min_size(egui::pos2(thumb_x, rect.min.y + 6.0), THUMB_SIZE)
+        } else {
+            Rect::from_min_size(rect.min + Vec2::new(8.0 + indent, 6.0), THUMB_SIZE)
+        };
+        let preview_response = ui.interact(
+            thumb_rect,
+            ui.id().with(("layer-tree-preview", row.item.id.0)),
             Sense::click_and_drag(),
         );
-        self.paint_handle(ui, handle_rect, handle_response.hovered() || is_dragging);
-
-        let label_pos = thumb_rect.right_top() + Vec2::new(8.0, 1.0);
-        painter.text(
-            label_pos,
-            Align2::LEFT_TOP,
-            &row.item.label,
-            FontId::proportional(13.0),
-            self.theme.text_color,
-        );
-        painter.text(
-            label_pos + Vec2::new(0.0, 16.0),
-            Align2::LEFT_TOP,
-            self.kind_label(row.item.kind),
-            FontId::proportional(11.0),
-            self.theme.accent_color,
-        );
+        self.paint_thumbnail(ui, thumb_rect, row.item);
+        if !self.compact {
+            let label_pos = egui::pos2(thumb_rect.right() + 8.0, rect.center().y);
+            ui.painter().text(
+                label_pos,
+                Align2::LEFT_CENTER,
+                &row.item.label,
+                FontId::proportional(13.0),
+                self.theme.text_color,
+            );
+        }
 
         RowRender {
             rect,
             row_response,
-            handle_response,
+            preview_response,
         }
     }
 
@@ -288,14 +288,17 @@ impl<'a> LayerTree<'a> {
         match indicator {
             DropIndicator::InsertLine { x_start, y } => {
                 painter.line_segment(
-                    [egui::pos2(*x_start, *y), egui::pos2(ui.max_rect().right() - 10.0, *y)],
+                    [
+                        egui::pos2(*x_start, *y),
+                        egui::pos2(ui.max_rect().right() - 10.0, *y),
+                    ],
                     Stroke::new(2.0, self.theme.accent_color),
                 );
             }
             DropIndicator::HighlightGroup { rect } => {
                 painter.rect_stroke(
                     rect.shrink(1.0),
-                    CornerRadius::same(6),
+                    CornerRadius::same(4),
                     Stroke::new(2.0, self.theme.accent_color),
                     StrokeKind::Middle,
                 );
@@ -303,59 +306,35 @@ impl<'a> LayerTree<'a> {
         }
     }
 
-    fn paint_handle(&self, ui: &egui::Ui, rect: Rect, active: bool) {
+    fn paint_thumbnail(&self, ui: &mut egui::Ui, rect: Rect, item: &UiLayerTreeItem) {
         let painter = ui.painter();
-        let fill = if active {
-            self.theme.hover_color
-        } else {
-            self.theme.panel_color
-        };
-        painter.rect(
-            rect,
-            CornerRadius::same(4),
-            fill,
-            Stroke::new(1.0, self.theme.border_color),
-            StrokeKind::Middle,
-        );
-
-        let center_x = rect.center().x;
-        for offset in [-4.0_f32, 0.0, 4.0] {
-            let x = center_x + offset;
-            painter.line_segment(
-                [
-                    egui::pos2(x, rect.top() + 5.0),
-                    egui::pos2(x, rect.bottom() - 5.0),
-                ],
-                Stroke::new(1.0, self.theme.text_color),
+        if let Some(texture_id) = self.preview_texture_ids.get(&item.id).copied() {
+            let size = fit_size_preserving_aspect(Vec2::splat(128.0), rect.size());
+            let image_rect = Rect::from_center_size(rect.center(), size);
+            painter.image(
+                texture_id,
+                image_rect,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
             );
+            return;
         }
-    }
 
-    fn paint_thumbnail(&self, ui: &egui::Ui, rect: Rect, kind: UiNodeKind) {
-        let painter = ui.painter();
-        painter.rect(
-            rect,
-            CornerRadius::same(4),
-            self.theme.panel_color,
-            Stroke::new(1.0, self.theme.border_color),
-            StrokeKind::Middle,
-        );
-
-        match kind {
+        match item.kind {
             UiNodeKind::Branch => {
                 let top = Rect::from_min_size(
-                    rect.min + Vec2::new(4.0, 5.0),
-                    Vec2::new(rect.width() - 8.0, 6.0),
+                    rect.min + Vec2::new(4.0, 4.0),
+                    Vec2::new(rect.width() - 8.0, 5.0),
                 );
                 let bottom = Rect::from_min_size(
-                    rect.min + Vec2::new(7.0, 13.0),
-                    Vec2::new(rect.width() - 14.0, 5.0),
+                    rect.min + Vec2::new(6.0, 11.0),
+                    Vec2::new(rect.width() - 12.0, 4.0),
                 );
                 painter.rect_filled(top, 2.0, self.theme.accent_color);
                 painter.rect_filled(bottom, 2.0, self.theme.hover_color);
             }
             UiNodeKind::RasterLayer => {
-                let inner = rect.shrink2(Vec2::new(4.0, 4.0));
+                let inner = Rect::from_center_size(rect.center(), Vec2::new(14.0, 14.0));
                 painter.rect_filled(inner, 2.0, Color32::from_rgb(104, 138, 176));
                 painter.line_segment(
                     [inner.left_top(), inner.right_bottom()],
@@ -363,18 +342,28 @@ impl<'a> LayerTree<'a> {
                 );
             }
             UiNodeKind::SpecialLayer => {
-                let inner = rect.shrink2(Vec2::new(4.0, 4.0));
-                painter.rect_filled(inner, 2.0, Color32::from_rgb(214, 157, 86));
-                painter.circle_filled(inner.center(), 4.0, Color32::from_white_alpha(120));
+                let inner = Rect::from_center_size(rect.center(), Vec2::new(14.0, 14.0));
+                let rgba = item.solid_color.unwrap_or([0.84, 0.62, 0.34, 1.0]);
+                let to_u8 = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+                painter.circle_filled(
+                    inner.center(),
+                    inner.width().min(inner.height()) * 0.35,
+                    Color32::from_rgba_unmultiplied(
+                        to_u8(rgba[0]),
+                        to_u8(rgba[1]),
+                        to_u8(rgba[2]),
+                        to_u8(rgba[3]),
+                    ),
+                );
             }
         }
     }
+}
 
-    fn kind_label(&self, kind: UiNodeKind) -> &'static str {
-        match kind {
-            UiNodeKind::Branch => "Branch",
-            UiNodeKind::RasterLayer => "Leaf",
-            UiNodeKind::SpecialLayer => "Leaf / Special",
-        }
+fn fit_size_preserving_aspect(source: Vec2, target: Vec2) -> Vec2 {
+    if source.x <= 0.0 || source.y <= 0.0 || target.x <= 0.0 || target.y <= 0.0 {
+        return Vec2::ZERO;
     }
+    let scale = (target.x / source.x).min(target.y / source.y);
+    Vec2::new(source.x * scale, source.y * scale)
 }

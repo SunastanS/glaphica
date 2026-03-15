@@ -23,6 +23,14 @@ pub enum TileState {
     Vacant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendTileStats {
+    pub backend_id: BackendId,
+    pub active: u32,
+    pub cached: u32,
+    pub free: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TileGroupId(u32);
 
@@ -46,6 +54,12 @@ impl ActiveTile {
 #[derive(Debug, Default)]
 pub struct EditSession {
     retired: Vec<TileKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileKeySwap {
+    pub restore_key: TileKey,
+    pub retire_key: TileKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +165,24 @@ impl Backend {
         Ok(())
     }
 
+    pub fn drop(
+        &mut self,
+        session: &mut EditSession,
+        tile: ActiveTile,
+    ) -> Result<(), AtlasBackendError> {
+        self.drop_key(session, tile.key())
+    }
+
+    pub fn drop_key(
+        &mut self,
+        session: &mut EditSession,
+        key: TileKey,
+    ) -> Result<(), AtlasBackendError> {
+        self.ensure_tile_is_active(key)?;
+        session.retired.push(key);
+        Ok(())
+    }
+
     pub fn finish_edit(&mut self, session: EditSession) -> Result<(), AtlasBackendError> {
         if session.retired.is_empty() {
             return Ok(());
@@ -159,6 +191,34 @@ impl Backend {
         let group = self.acquire_vacant_group();
         self.assign_tiles_to_group(group, &session.retired)?;
         self.mark_group_cached(group)
+    }
+
+    pub fn finish_drop(&mut self, session: EditSession) -> Result<(), AtlasBackendError> {
+        if session.retired.is_empty() {
+            return Ok(());
+        }
+
+        let group = self.acquire_vacant_group();
+        self.assign_tiles_to_group(group, &session.retired)?;
+        self.mark_group_drop_first(group)
+    }
+
+    pub fn restore_cached_keys(&mut self, swaps: &[TileKeySwap]) -> Result<(), AtlasBackendError> {
+        for swap in swaps {
+            if swap.restore_key == TileKey::EMPTY {
+                continue;
+            }
+            if self.tile_state(swap.restore_key)? != TileState::Cached {
+                return Err(AtlasBackendError::InvalidState);
+            }
+        }
+
+        for swap in swaps {
+            if swap.restore_key != TileKey::EMPTY {
+                self.reactivate_cached_key(swap.restore_key)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn create_group(&mut self) -> TileGroupId {
@@ -215,6 +275,15 @@ impl Backend {
         if tile_group.state != TileState::Cached {
             tile_group.state = TileState::Cached;
             self.cached_groups.push_back(group);
+        }
+        Ok(())
+    }
+
+    fn mark_group_drop_first(&mut self, group: TileGroupId) -> Result<(), AtlasBackendError> {
+        let tile_group = self.group_mut(group)?;
+        if tile_group.state != TileState::Cached {
+            tile_group.state = TileState::Cached;
+            self.cached_groups.push_front(group);
         }
         Ok(())
     }
@@ -284,6 +353,31 @@ impl Backend {
         self.backend_id
     }
 
+    pub fn tile_stats(&self) -> BackendTileStats {
+        let mut active = 0u32;
+        let mut cached = 0u32;
+        let mut free = 0u32;
+
+        for owner in self.slot_owners.iter().copied() {
+            match owner {
+                SlotOwner::Vacant => free += 1,
+                SlotOwner::UngroupedActive => active += 1,
+                SlotOwner::Grouped(group) => match self.group(group) {
+                    Ok(tile_group) if tile_group.state == TileState::Cached => cached += 1,
+                    Ok(_) => active += 1,
+                    Err(_) => free += 1,
+                },
+            }
+        }
+
+        BackendTileStats {
+            backend_id: self.backend_id,
+            active,
+            cached,
+            free,
+        }
+    }
+
     fn alloc_in_group_internal(
         &mut self,
         group: TileGroupId,
@@ -319,7 +413,10 @@ impl Backend {
         Ok(TileGroupAllocation { group, keys })
     }
 
-    fn alloc_active_internal(&mut self, parity: Option<bool>) -> Result<ActiveTile, AtlasBackendError> {
+    fn alloc_active_internal(
+        &mut self,
+        parity: Option<bool>,
+    ) -> Result<ActiveTile, AtlasBackendError> {
         self.ensure_capacity(1, parity)?;
         let (encoded_slot, raw_slot) = match parity {
             Some(parity) => self.alloc_from_parity(parity),
@@ -339,8 +436,15 @@ impl Backend {
     }
 
     fn alloc_from_parity(&mut self, parity: bool) -> Option<(u32, u32)> {
-        let index = if parity { self.odd_pool.alloc()? } else { self.even_pool.alloc()? };
-        Some((encode_slot(parity, index), self.decode_raw_slot(parity, index)))
+        let index = if parity {
+            self.odd_pool.alloc()?
+        } else {
+            self.even_pool.alloc()?
+        };
+        Some((
+            encode_slot(parity, index),
+            self.decode_raw_slot(parity, index),
+        ))
     }
 
     fn ensure_capacity(
@@ -409,12 +513,30 @@ impl Backend {
         self.generations[raw_slot as usize] = GenerationId::new(generation);
         self.slot_owners[raw_slot as usize] = SlotOwner::Vacant;
 
-        let parity = ((raw_slot / (self.layout.tiles_per_edge() * self.layout.tiles_per_edge())) & 1) == 1;
+        let parity =
+            ((raw_slot / (self.layout.tiles_per_edge() * self.layout.tiles_per_edge())) & 1) == 1;
         let index_within_parity = raw_slot_to_parity_index(self.layout, raw_slot);
         if parity {
             self.odd_pool.free(index_within_parity);
         } else {
             self.even_pool.free(index_within_parity);
+        }
+        Ok(())
+    }
+
+    fn reactivate_cached_key(&mut self, key: TileKey) -> Result<(), AtlasBackendError> {
+        let raw_slot = self.validate_key(key)?;
+        let SlotOwner::Grouped(group) = self.slot_owners[raw_slot as usize] else {
+            return Err(AtlasBackendError::InvalidState);
+        };
+        if self.group(group)?.state != TileState::Cached {
+            return Err(AtlasBackendError::InvalidState);
+        }
+
+        self.detach_slot_from_group(group, raw_slot)?;
+        self.slot_owners[raw_slot as usize] = SlotOwner::UngroupedActive;
+        if self.group(group)?.slots.is_empty() {
+            self.group_mut(group)?.state = TileState::Vacant;
         }
         Ok(())
     }
@@ -599,13 +721,17 @@ impl BackendManager {
     pub fn backend_for_key_mut(&mut self, key: TileKey) -> Option<&mut Backend> {
         self.backend_mut(key.backend())
     }
+
+    pub fn backend_tile_stats(&self) -> Vec<BackendTileStats> {
+        self.backends.iter().map(Backend::tile_stats).collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         AtlasBackendError, AtlasBackendManagerError, AtlasLayout, Backend, BackendManager,
-        ParityPool, TileGroupId, TileState,
+        ParityPool, TileGroupId, TileKeySwap, TileState,
     };
     use glaphica_core::BackendId;
 
@@ -706,12 +832,82 @@ mod tests {
         let mut session = backend.begin_edit();
 
         let new_tile = backend.replace(&mut session, old_tile, new_tile).unwrap();
-        assert_eq!(backend.tile_state(new_tile.key()).unwrap(), TileState::Active);
+        assert_eq!(
+            backend.tile_state(new_tile.key()).unwrap(),
+            TileState::Active
+        );
 
         backend.finish_edit(session).unwrap();
 
-        assert_eq!(backend.tile_state(new_tile.key()).unwrap(), TileState::Active);
+        assert_eq!(
+            backend.tile_state(new_tile.key()).unwrap(),
+            TileState::Active
+        );
         assert_eq!(backend.tile_state(old_key).unwrap(), TileState::Cached);
+    }
+
+    #[test]
+    fn restore_cached_keys_restores_previous_tile_without_retiring_current_tile() {
+        let mut backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let old_key = backend.alloc_active().unwrap().key();
+        let new_key = backend.alloc_active().unwrap().key();
+        let mut session = backend.begin_edit();
+        backend.replace_key(&mut session, old_key, new_key).unwrap();
+        backend.finish_edit(session).unwrap();
+
+        backend
+            .restore_cached_keys(&[TileKeySwap {
+                restore_key: old_key,
+                retire_key: new_key,
+            }])
+            .unwrap();
+
+        assert_eq!(backend.tile_state(old_key).unwrap(), TileState::Active);
+        assert_eq!(backend.tile_state(new_key).unwrap(), TileState::Active);
+    }
+
+    #[test]
+    fn restore_cached_keys_rejects_reclaimed_restore_key() {
+        let mut backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let old_key = backend.alloc_active().unwrap().key();
+        let new_key = backend.alloc_active().unwrap().key();
+        let mut session = backend.begin_edit();
+        backend.replace_key(&mut session, old_key, new_key).unwrap();
+        backend.finish_edit(session).unwrap();
+        backend.free(old_key).unwrap();
+
+        let err = backend
+            .restore_cached_keys(&[TileKeySwap {
+                restore_key: old_key,
+                retire_key: new_key,
+            }])
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AtlasBackendError::GenerationMismatch | AtlasBackendError::InvalidSlot
+        ));
+        assert_eq!(backend.tile_state(new_key).unwrap(), TileState::Active);
+    }
+
+    #[test]
+    fn finish_drop_prioritizes_group_for_next_reclaim() {
+        let mut backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let first = backend.alloc_group(1).unwrap();
+        let dropped_key = backend.alloc_active().unwrap().key();
+        backend.mark_group_cached(first.group).unwrap();
+
+        let mut drop_session = backend.begin_edit();
+        backend.drop_key(&mut drop_session, dropped_key).unwrap();
+        backend.finish_drop(drop_session).unwrap();
+
+        for _ in 0..254 {
+            backend.alloc_active().unwrap();
+        }
+
+        let reused = backend.alloc_active().unwrap().key();
+        assert_eq!(reused.slot().raw(), dropped_key.slot().raw());
+        assert_eq!(backend.tile_state(first.keys[0]).unwrap(), TileState::Cached);
     }
 
     #[test]
@@ -720,7 +916,9 @@ mod tests {
         let old_tile = backend.alloc_active().unwrap();
         let new_tile = backend.alloc_active().unwrap();
         let mut first_session = backend.begin_edit();
-        backend.replace(&mut first_session, old_tile, new_tile).unwrap();
+        backend
+            .replace(&mut first_session, old_tile, new_tile)
+            .unwrap();
         backend.finish_edit(first_session).unwrap();
 
         let first_group = backend
@@ -733,7 +931,9 @@ mod tests {
         let old_tile = backend.alloc_active().unwrap();
         let new_tile = backend.alloc_active().unwrap();
         let mut second_session = backend.begin_edit();
-        backend.replace(&mut second_session, old_tile, new_tile).unwrap();
+        backend
+            .replace(&mut second_session, old_tile, new_tile)
+            .unwrap();
         backend.finish_edit(second_session).unwrap();
 
         let reused_group = backend
@@ -888,8 +1088,14 @@ mod tests {
             .unwrap();
         backend.mark_group_cached(retained_group).unwrap();
 
-        assert_eq!(backend.tile_state(replacement.keys[0]).unwrap(), TileState::Active);
-        assert_eq!(backend.tile_state(untouched_key).unwrap(), TileState::Active);
+        assert_eq!(
+            backend.tile_state(replacement.keys[0]).unwrap(),
+            TileState::Active
+        );
+        assert_eq!(
+            backend.tile_state(untouched_key).unwrap(),
+            TileState::Active
+        );
         assert_eq!(backend.tile_state(replaced_key).unwrap(), TileState::Cached);
         assert_eq!(backend.group_state(image_group).unwrap(), TileState::Active);
     }

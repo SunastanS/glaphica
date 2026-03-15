@@ -65,11 +65,12 @@ pub enum UiNodeKind {
     SpecialLayer,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UiLayerTreeItem {
     pub id: NodeId,
     pub label: String,
     pub kind: UiNodeKind,
+    pub solid_color: Option<[f32; 4]>,
     pub children: Vec<UiLayerTreeItem>,
 }
 
@@ -521,8 +522,12 @@ impl UiLayerTree {
 
         let (moved_node, source_parent_id, source_index) =
             remove_node_from_branch(&mut self.root, node_id).ok_or(LayerEditError::InvalidNode)?;
-        let adjusted_index =
-            adjust_move_index(source_parent_id, source_index, target.parent_id, target.index);
+        let adjusted_index = adjust_move_index(
+            source_parent_id,
+            source_index,
+            target.parent_id,
+            target.index,
+        );
         insert_node_at_parent(&mut self.root, target.parent_id, adjusted_index, moved_node)
     }
 
@@ -595,6 +600,7 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
             id: branch.meta.id,
             label: branch.meta.label.clone(),
             kind: UiNodeKind::Branch,
+            solid_color: None,
             children: branch.children.iter().map(build_layer_tree_item).collect(),
         },
         UiLayerNode::Leaf(leaf) => UiLayerTreeItem {
@@ -603,6 +609,10 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
             kind: match &leaf.content {
                 UiLeafContent::Raster { .. } => UiNodeKind::RasterLayer,
                 UiLeafContent::Special(_) => UiNodeKind::SpecialLayer,
+            },
+            solid_color: match &leaf.content {
+                UiLeafContent::Raster { .. } => None,
+                UiLeafContent::Special(SpecialLayer::SolidColor(layer)) => Some(layer.color),
             },
             children: Vec::new(),
         },
@@ -1703,10 +1713,9 @@ mod tests {
                 },
             )
             .unwrap();
-        if let Some(UiLayerNode::Branch(branch)) = get_node_from_node_mut(
-            &mut doc.layer_tree.root,
-            parent_group_id,
-        ) {
+        if let Some(UiLayerNode::Branch(branch)) =
+            get_node_from_node_mut(&mut doc.layer_tree.root, parent_group_id)
+        {
             branch.children.push(UiLayerNode::Branch(UiBranchNode {
                 meta: test_meta(child_group_id, "Child"),
                 config: BranchConfig {

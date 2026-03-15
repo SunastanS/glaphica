@@ -262,7 +262,12 @@ impl FrameBatch {
         stats.render_dst_tile_count = render_cmds.iter().map(|cmd| cmd.to.len()).sum();
         stats.render_source_count = render_cmds
             .iter()
-            .map(|cmd| cmd.from.iter().map(|source| source.tile_keys.len()).sum::<usize>())
+            .map(|cmd| {
+                cmd.from
+                    .iter()
+                    .map(|source| source.tile_keys.len())
+                    .sum::<usize>()
+            })
             .sum();
 
         if !parametric_cmds.is_empty() {

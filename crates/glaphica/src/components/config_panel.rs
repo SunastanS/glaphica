@@ -1,10 +1,19 @@
 use crate::theme::Theme;
-use brushes::{BrushConfigKind, BrushConfigValue, UnitIntervalPoint, eval_unit_interval_curve_polynomial};
-use egui::{Frame, Rect, Sense, Shape, SidePanel, Stroke, vec2};
 use crate::{BrushKind, BrushUiState};
+use brushes::{
+    BrushConfigKind, BrushConfigValue, UnitIntervalPoint, eval_unit_interval_curve_polynomial,
+};
+use egui::{Color32, Frame, Rect, Sense, Shape, SidePanel, Stroke, vec2};
+
+pub const RIGHT_PANEL_COMPACT_WIDTH: f32 = 160.0;
+const RIGHT_PANEL_DRAG_MIN_WIDTH: f32 = 28.0;
+const COLLAPSED_PANEL_WIDTH: f32 = 28.0;
 
 pub struct ConfigPanel<'a> {
     collapsed: bool,
+    width: f32,
+    max_width: f32,
+    active_color_rgb: &'a mut [f32; 3],
     brush_states: &'a mut [BrushUiState],
     selected_brush_index: usize,
 }
@@ -12,28 +21,31 @@ pub struct ConfigPanel<'a> {
 impl<'a> ConfigPanel<'a> {
     pub fn new(
         collapsed: bool,
+        width: f32,
+        max_width: f32,
+        active_color_rgb: &'a mut [f32; 3],
         brush_states: &'a mut [BrushUiState],
         selected_brush_index: usize,
     ) -> Self {
         Self {
             collapsed,
+            width,
+            max_width,
+            active_color_rgb,
             brush_states,
             selected_brush_index,
         }
     }
 
-    pub fn render(
-        &mut self,
-        ctx: &egui::Context,
-        theme: &Theme,
-    ) -> ConfigPanelOutput {
+    pub fn render(&mut self, ctx: &egui::Context, theme: &Theme) -> ConfigPanelOutput {
         let mut output = ConfigPanelOutput::default();
+        let panel_fill = translucent_panel_fill(theme);
 
         if self.collapsed {
             SidePanel::right("overlay-right-panel-collapsed")
                 .resizable(false)
-                .exact_width(28.0)
-                .frame(Frame::default().fill(theme.panel_color))
+                .exact_width(COLLAPSED_PANEL_WIDTH)
+                .frame(Frame::default().fill(panel_fill))
                 .show(ctx, |ui| {
                     if ui.button("<").clicked() {
                         output.toggle_collapse = true;
@@ -44,42 +56,81 @@ impl<'a> ConfigPanel<'a> {
 
         let panel = SidePanel::right("overlay-right-panel")
             .resizable(true)
-            .default_width(240.0)
-            .min_width(132.0)
-            .max_width(420.0)
-            .frame(Frame::default().fill(theme.panel_color))
+            .default_width(self.width)
+            .min_width(RIGHT_PANEL_DRAG_MIN_WIDTH)
+            .max_width(self.max_width)
+            .frame(Frame::default().fill(panel_fill))
             .show(ctx, |ui| {
+                let compact = ui.available_width() <= RIGHT_PANEL_COMPACT_WIDTH;
                 ui.horizontal(|ui| {
                     if ui.button(">").clicked() {
                         output.toggle_collapse = true;
                     }
-                    ui.heading("Brush Config");
+                    if compact {
+                        ui.menu_button(
+                            self.brush_states
+                                .get(self.selected_brush_index)
+                                .map(|state| state.kind.label())
+                                .unwrap_or("Brush"),
+                            |ui| {
+                                for kind in BrushKind::ALL {
+                                    if let Some(index) = self
+                                        .brush_states
+                                        .iter()
+                                        .position(|state| state.kind == kind)
+                                        && ui
+                                            .selectable_label(
+                                                self.selected_brush_index == index,
+                                                kind.label(),
+                                            )
+                                            .clicked()
+                                    {
+                                        self.selected_brush_index = index;
+                                        output.brush_selection_changed = true;
+                                        ui.close();
+                                    }
+                                }
+                            },
+                        );
+                    } else {
+                        ui.heading("Brush Config");
+                    }
                 });
                 ui.separator();
 
                 let previous_index = self.selected_brush_index;
-                let selected_label = self.brush_states
+                let selected_label = self
+                    .brush_states
                     .get(self.selected_brush_index)
                     .map(|state| state.kind.label())
                     .unwrap_or("Unknown");
 
-                egui::ComboBox::from_label("Engine")
-                    .selected_text(selected_label)
-                    .show_ui(ui, |ui| {
-                        for kind in BrushKind::ALL {
-                            if let Some(index) = self.brush_states.iter().position(|state| state.kind == kind)
-                                && ui
-                                    .selectable_label(self.selected_brush_index == index, kind.label())
-                                    .clicked()
-                            {
-                                self.selected_brush_index = index;
-                                output.brush_selection_changed = true;
+                if !compact {
+                    egui::ComboBox::from_label("Engine")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for kind in BrushKind::ALL {
+                                if let Some(index) = self
+                                    .brush_states
+                                    .iter()
+                                    .position(|state| state.kind == kind)
+                                    && ui
+                                        .selectable_label(
+                                            self.selected_brush_index == index,
+                                            kind.label(),
+                                        )
+                                        .clicked()
+                                {
+                                    self.selected_brush_index = index;
+                                    output.brush_selection_changed = true;
+                                }
                             }
-                        }
-                    });
+                        });
+                }
 
                 if previous_index != self.selected_brush_index
-                    && self.brush_states
+                    && self
+                        .brush_states
                         .get(previous_index)
                         .map(|state| state.dirty)
                         .unwrap_or(false)
@@ -89,13 +140,13 @@ impl<'a> ConfigPanel<'a> {
                     output.pending_brush_update = Some((previous.kind, previous.values.clone()));
                 }
 
+                render_color_section(ui, self.active_color_rgb, compact, theme);
+
                 if let Some(brush_state) = self.brush_states.get_mut(self.selected_brush_index) {
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            render_color_section(ui, brush_state);
-                            ui.add_space(8.0);
                             render_brush_params(ui, brush_state, theme, &mut output);
                             ui.add_space(8.0);
                             render_config_actions(ui, brush_state, &mut output);
@@ -109,6 +160,70 @@ impl<'a> ConfigPanel<'a> {
     }
 }
 
+fn render_color_section(
+    ui: &mut egui::Ui,
+    active_color_rgb: &mut [f32; 3],
+    compact: bool,
+    theme: &Theme,
+) {
+    ui.group(|ui| {
+        if compact {
+            ui.horizontal(|ui| {
+                ui.menu_button(color_swatch_text(*active_color_rgb), |ui| {
+                    render_color_picker(ui, active_color_rgb);
+                });
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Color")
+                        .size(12.0)
+                        .color(theme.text_color)
+                        .strong(),
+                );
+            });
+            ui.add_space(4.0);
+            ui.scope(|ui| {
+                ui.spacing_mut().slider_width = ui.available_width().max(48.0);
+                render_color_picker(ui, active_color_rgb);
+            });
+        }
+    });
+}
+
+fn render_color_picker(ui: &mut egui::Ui, color_rgb: &mut [f32; 3]) {
+    let mut color = to_color32(*color_rgb);
+    if egui::widgets::color_picker::color_picker_color32(
+        ui,
+        &mut color,
+        egui::widgets::color_picker::Alpha::Opaque,
+    ) {
+        *color_rgb = [
+            f32::from(color.r()) / 255.0,
+            f32::from(color.g()) / 255.0,
+            f32::from(color.b()) / 255.0,
+        ];
+    }
+}
+
+fn color_swatch_text(rgb: [f32; 3]) -> egui::RichText {
+    egui::RichText::new("    ").background_color(to_color32(rgb))
+}
+
+fn to_color32(rgb: [f32; 3]) -> Color32 {
+    let to_u8 = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Color32::from_rgb(to_u8(rgb[0]), to_u8(rgb[1]), to_u8(rgb[2]))
+}
+
+fn translucent_panel_fill(theme: &Theme) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        theme.panel_color.r(),
+        theme.panel_color.g(),
+        theme.panel_color.b(),
+        208,
+    )
+}
+
 #[derive(Default)]
 pub struct ConfigPanelOutput {
     pub toggle_collapse: bool,
@@ -116,23 +231,6 @@ pub struct ConfigPanelOutput {
     pub brush_selection_changed: bool,
     pub new_selected_index: Option<usize>,
     pub panel_rect: Option<Rect>,
-}
-
-fn render_color_section(ui: &mut egui::Ui, brush_state: &mut BrushUiState) {
-    ui.horizontal(|ui| {
-        let mut srgb = [
-            (brush_state.color_rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (brush_state.color_rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (brush_state.color_rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-        ];
-        if ui.color_edit_button_srgb(&mut srgb).changed() {
-            brush_state.color_rgb = [
-                f32::from(srgb[0]) / 255.0,
-                f32::from(srgb[1]) / 255.0,
-                f32::from(srgb[2]) / 255.0,
-            ];
-        }
-    });
 }
 
 fn render_brush_params(
@@ -143,8 +241,11 @@ fn render_brush_params(
 ) {
     ui.group(|ui| {
         ui.horizontal(|ui| {
-            ui.add_space(24.0);
-            ui.checkbox(&mut brush_state.eraser, "Eraser");
+            let eraser_button = egui::Button::new("␡").selected(brush_state.eraser);
+            if ui.add(eraser_button).clicked() {
+                brush_state.eraser = !brush_state.eraser;
+                brush_state.dirty = true;
+            }
         });
 
         ui.add_space(4.0);
@@ -159,10 +260,7 @@ fn render_brush_params(
             let item_kind = item.kind.clone();
 
             match (&item_kind, &mut brush_state.values[index]) {
-                (
-                    BrushConfigKind::ScalarF32 { min, max },
-                    BrushConfigValue::ScalarF32(current),
-                ) => {
+                (BrushConfigKind::ScalarF32 { min, max }, BrushConfigValue::ScalarF32(current)) => {
                     render_scalar_config(ui, item_key, current, *min, *max, &mut brush_state.dirty);
                 }
                 (
@@ -183,7 +281,7 @@ fn render_brush_params(
 fn render_config_actions(
     ui: &mut egui::Ui,
     brush_state: &mut BrushUiState,
-    output: &mut ConfigPanelOutput,
+    _output: &mut ConfigPanelOutput,
 ) {
     ui.horizontal(|ui| {
         let hidden_items = brush_state
@@ -212,11 +310,6 @@ fn render_config_actions(
         if ui.button("Reset").clicked() {
             brush_state.reset();
         }
-
-        if ui.button("Apply").clicked() {
-            brush_state.dirty = false;
-            output.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
-        }
     });
 }
 
@@ -233,15 +326,20 @@ fn render_scalar_config(
     let drag_speed = (max - min) * 0.01;
     let minimum_slider_width = ui.spacing().interact_size.x;
     let slider_width = (available_width - VALUE_FIELD_WIDTH - ui.spacing().item_spacing.x).max(0.0);
-    let is_compact = slider_width < minimum_slider_width;
+    let is_compact =
+        available_width < RIGHT_PANEL_COMPACT_WIDTH || slider_width < minimum_slider_width;
 
     ui.push_id(key, |ui| {
         ui.add_space(2.0);
-        
+
         if is_compact {
             ui.horizontal(|ui| {
                 if ui
-                    .add(egui::DragValue::new(value).speed(drag_speed).range(min..=max))
+                    .add(
+                        egui::DragValue::new(value)
+                            .speed(drag_speed)
+                            .range(min..=max),
+                    )
                     .changed()
                 {
                     *dirty = true;
@@ -259,7 +357,9 @@ fn render_scalar_config(
                 let value_changed = ui
                     .add_sized(
                         [VALUE_FIELD_WIDTH, 0.0],
-                        egui::DragValue::new(value).speed(drag_speed).range(min..=max),
+                        egui::DragValue::new(value)
+                            .speed(drag_speed)
+                            .range(min..=max),
                     )
                     .changed();
 
@@ -278,9 +378,8 @@ fn render_curve_config(
     dirty: &mut bool,
     theme: &Theme,
 ) {
-    const COMPACT_THRESHOLD: f32 = 180.0;
     let available_width = ui.available_width();
-    let is_compact = available_width < COMPACT_THRESHOLD;
+    let is_compact = available_width < RIGHT_PANEL_COMPACT_WIDTH;
 
     ui.push_id(key, |ui| {
         ui.horizontal(|ui| {
@@ -337,18 +436,29 @@ fn paint_curve_editor(
     theme: &Theme,
 ) {
     painter.rect_filled(rect, 6.0, theme.curve_bg);
-    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, theme.curve_grid), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        6.0,
+        Stroke::new(1.0, theme.curve_grid),
+        egui::StrokeKind::Inside,
+    );
 
     for step in 1..4 {
         let t = step as f32 / 4.0;
         let x = egui::lerp(rect.left()..=rect.right(), t);
         let y = egui::lerp(rect.bottom()..=rect.top(), t);
         painter.line_segment(
-            [egui::Pos2::new(x, rect.top()), egui::Pos2::new(x, rect.bottom())],
+            [
+                egui::Pos2::new(x, rect.top()),
+                egui::Pos2::new(x, rect.bottom()),
+            ],
             Stroke::new(1.0, theme.curve_grid),
         );
         painter.line_segment(
-            [egui::Pos2::new(rect.left(), y), egui::Pos2::new(rect.right(), y)],
+            [
+                egui::Pos2::new(rect.left(), y),
+                egui::Pos2::new(rect.right(), y),
+            ],
             Stroke::new(1.0, theme.curve_grid),
         );
     }
@@ -388,7 +498,10 @@ fn interact_with_curve(
             .iter()
             .enumerate()
             .map(|(index, point)| {
-                (index, curve_pos(rect, point.x, point.y).distance(pointer_pos))
+                (
+                    index,
+                    curve_pos(rect, point.x, point.y).distance(pointer_pos),
+                )
             })
             .min_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs));
 
