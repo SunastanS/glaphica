@@ -19,6 +19,14 @@ pub enum WriteBlendMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositeBlendMode {
+    /// Standard source-over compositing.
+    Normal,
+    /// Multiply blend in source-over composition.
+    Multiply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawFrameMergePolicy {
     None,
     KeepLastInFrameByNodeTileBrush,
@@ -104,7 +112,7 @@ pub struct CompositeOp {
     pub overlay_tile_key: TileKey,
     /// Destination tile in atlas space.
     pub dst_tile_key: TileKey,
-    pub blend_mode: WriteBlendMode,
+    pub blend_mode: CompositeBlendMode,
     /// Global composite opacity multiplier in [0, 1].
     pub opacity: f32,
 }

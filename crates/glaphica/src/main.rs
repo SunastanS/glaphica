@@ -12,6 +12,7 @@ use app::{AppStats, AppThreadIntegration, LayerPreviewBitmap, trace::TraceRecord
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
 use brushes::{BrushConfigItem, BrushConfigValue};
 use components::{ConfigPanel, Sidebar, StatusBar, TopBar};
+use document::UiBlendMode;
 use document::{LayerMoveTarget, NewLayerKind, UiLayerTreeItem};
 use egui::Rect;
 use egui_renderer::EguiRenderer;
@@ -243,6 +244,32 @@ impl App {
                 if let Some((node_id, target)) = overlay.take_pending_layer_move() {
                     if let Err(error) = integration.move_document_node(node_id, target) {
                         eprintln!("failed to move layer: {error:?}");
+                    } else {
+                        overlay.mark_document_dirty();
+                        should_advance_epoch = true;
+                    }
+                }
+                if let Some((node_id, visible)) = overlay.take_pending_layer_visibility() {
+                    if let Err(error) = integration.set_document_node_visibility(node_id, visible) {
+                        eprintln!("failed to set layer visibility: {error:?}");
+                    } else {
+                        overlay.mark_document_dirty();
+                        should_advance_epoch = true;
+                    }
+                }
+                if let Some((node_id, opacity)) = overlay.take_pending_layer_opacity() {
+                    if let Err(error) = integration.set_document_node_opacity(node_id, opacity) {
+                        eprintln!("failed to set layer opacity: {error:?}");
+                    } else {
+                        overlay.mark_document_dirty();
+                        should_advance_epoch = true;
+                    }
+                }
+                if let Some((node_id, blend_mode)) = overlay.take_pending_layer_blend_mode() {
+                    if let Err(error) =
+                        integration.set_document_node_blend_mode(node_id, blend_mode)
+                    {
+                        eprintln!("failed to set layer blend mode: {error:?}");
                     } else {
                         overlay.mark_document_dirty();
                         should_advance_epoch = true;
@@ -818,6 +845,9 @@ struct EguiOverlay {
     pending_layer_create: Option<NewLayerKind>,
     pending_group_create: bool,
     pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
+    pending_layer_visibility: Option<(NodeId, bool)>,
+    pending_layer_opacity: Option<(NodeId, f32)>,
+    pending_layer_blend_mode: Option<(NodeId, UiBlendMode)>,
     pending_document_save: bool,
     pending_document_load: bool,
     pending_document_export: bool,
@@ -891,6 +921,9 @@ impl EguiOverlay {
             pending_layer_create: None,
             pending_group_create: false,
             pending_layer_move: None,
+            pending_layer_visibility: None,
+            pending_layer_opacity: None,
+            pending_layer_blend_mode: None,
             pending_document_save: false,
             pending_document_load: false,
             pending_document_export: false,
@@ -983,6 +1016,18 @@ impl EguiOverlay {
 
     fn take_pending_layer_move(&mut self) -> Option<(NodeId, LayerMoveTarget)> {
         self.pending_layer_move.take()
+    }
+
+    fn take_pending_layer_visibility(&mut self) -> Option<(NodeId, bool)> {
+        self.pending_layer_visibility.take()
+    }
+
+    fn take_pending_layer_opacity(&mut self) -> Option<(NodeId, f32)> {
+        self.pending_layer_opacity.take()
+    }
+
+    fn take_pending_layer_blend_mode(&mut self) -> Option<(NodeId, UiBlendMode)> {
+        self.pending_layer_blend_mode.take()
     }
 
     fn take_pending_document_save(&mut self) -> Option<PathBuf> {
@@ -1120,6 +1165,9 @@ impl EguiOverlay {
         let pending_layer_create = &mut self.pending_layer_create;
         let pending_group_create = &mut self.pending_group_create;
         let pending_layer_move = &mut self.pending_layer_move;
+        let pending_layer_visibility = &mut self.pending_layer_visibility;
+        let pending_layer_opacity = &mut self.pending_layer_opacity;
+        let pending_layer_blend_mode = &mut self.pending_layer_blend_mode;
         let mut config_panel_rect = self.config_panel_rect;
         let panel_max_width = (target_width as f32 - 96.0)
             .max(0.0)
@@ -1167,6 +1215,15 @@ impl EguiOverlay {
             }
             if let Some(layer_move) = sidebar_output.move_layer {
                 *pending_layer_move = Some((layer_move.node_id, layer_move.target));
+            }
+            if let Some((node_id, visible)) = sidebar_output.set_layer_visibility {
+                *pending_layer_visibility = Some((node_id, visible));
+            }
+            if let Some((node_id, opacity)) = sidebar_output.set_layer_opacity {
+                *pending_layer_opacity = Some((node_id, opacity));
+            }
+            if let Some((node_id, blend_mode)) = sidebar_output.set_layer_blend_mode {
+                *pending_layer_blend_mode = Some((node_id, blend_mode));
             }
             if let Some(rect) = sidebar_output.panel_rect {
                 *left_panel_width = rect.width();

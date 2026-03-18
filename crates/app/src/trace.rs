@@ -3,16 +3,16 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
-use document::{LayerMoveTarget, NewLayerKind};
+use document::{LayerMoveTarget, NewLayerKind, UiBlendMode};
 use glaphica_core::{
     BrushId, CanvasVec2, EpochId, InputDeviceKind, MappedCursor, NodeId, RadianVec2,
     RenderTreeGeneration, StrokeId, TileKey,
 };
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
-    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag,
-    GpuCmdMsg, InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg,
-    TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
+    ClearOp, CompositeBlendMode, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp,
+    GpuCmdFrameMergeTag, GpuCmdMsg, InputControlEvent, InputRingSample, RefImage,
+    RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
 };
 
 use crate::AppControl;
@@ -93,8 +93,27 @@ pub enum TraceAppControl {
         target_parent_id: u64,
         target_index: usize,
     },
+    SetNodeVisibility {
+        node_id: u64,
+        visible: bool,
+    },
+    SetNodeOpacity {
+        node_id: u64,
+        opacity: f32,
+    },
+    SetNodeBlendMode {
+        node_id: u64,
+        blend_mode: TraceUiBlendMode,
+    },
     MoveActiveNodeUp,
     MoveActiveNodeDown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceUiBlendMode {
+    Normal,
+    Multiply,
+    Penetrate,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,8 +231,8 @@ pub struct TraceCompositeOp {
     pub base_tile_key: TraceTileKey,
     pub overlay_tile_key: TraceTileKey,
     pub dst_tile_key: TraceTileKey,
-    #[serde(default = "trace_write_blend_mode_normal")]
-    pub blend_mode: TraceWriteBlendMode,
+    #[serde(default = "trace_composite_blend_mode_normal")]
+    pub blend_mode: TraceCompositeBlendMode,
     #[serde(default = "trace_write_opacity_one")]
     pub opacity: f32,
 }
@@ -222,6 +241,12 @@ pub struct TraceCompositeOp {
 pub enum TraceWriteBlendMode {
     Normal,
     Erase,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceCompositeBlendMode {
+    Normal,
+    Multiply,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -366,6 +391,10 @@ fn trace_write_blend_mode_normal() -> TraceWriteBlendMode {
     TraceWriteBlendMode::Normal
 }
 
+fn trace_composite_blend_mode_normal() -> TraceCompositeBlendMode {
+    TraceCompositeBlendMode::Normal
+}
+
 fn trace_write_opacity_one() -> f32 {
     1.0
 }
@@ -397,6 +426,25 @@ impl From<AppControl> for TraceAppControl {
                 node_id: node_id.0,
                 target_parent_id: target.parent_id.0,
                 target_index: target.index,
+            },
+            AppControl::SetNodeVisibility { node_id, visible } => Self::SetNodeVisibility {
+                node_id: node_id.0,
+                visible,
+            },
+            AppControl::SetNodeOpacity { node_id, opacity } => Self::SetNodeOpacity {
+                node_id: node_id.0,
+                opacity,
+            },
+            AppControl::SetNodeBlendMode {
+                node_id,
+                blend_mode,
+            } => Self::SetNodeBlendMode {
+                node_id: node_id.0,
+                blend_mode: match blend_mode {
+                    UiBlendMode::Normal => TraceUiBlendMode::Normal,
+                    UiBlendMode::Multiply => TraceUiBlendMode::Multiply,
+                    UiBlendMode::Penetrate => TraceUiBlendMode::Penetrate,
+                },
             },
             AppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
             AppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
@@ -432,6 +480,25 @@ impl From<TraceAppControl> for AppControl {
                 target: LayerMoveTarget {
                     parent_id: NodeId(target_parent_id),
                     index: target_index,
+                },
+            },
+            TraceAppControl::SetNodeVisibility { node_id, visible } => Self::SetNodeVisibility {
+                node_id: NodeId(node_id),
+                visible,
+            },
+            TraceAppControl::SetNodeOpacity { node_id, opacity } => Self::SetNodeOpacity {
+                node_id: NodeId(node_id),
+                opacity,
+            },
+            TraceAppControl::SetNodeBlendMode {
+                node_id,
+                blend_mode,
+            } => Self::SetNodeBlendMode {
+                node_id: NodeId(node_id),
+                blend_mode: match blend_mode {
+                    TraceUiBlendMode::Normal => UiBlendMode::Normal,
+                    TraceUiBlendMode::Multiply => UiBlendMode::Multiply,
+                    TraceUiBlendMode::Penetrate => UiBlendMode::Penetrate,
                 },
             },
             TraceAppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
@@ -562,8 +629,8 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                 overlay_tile_key: composite_op.overlay_tile_key.into(),
                 dst_tile_key: composite_op.dst_tile_key.into(),
                 blend_mode: match composite_op.blend_mode {
-                    WriteBlendMode::Normal => TraceWriteBlendMode::Normal,
-                    WriteBlendMode::Erase => TraceWriteBlendMode::Erase,
+                    CompositeBlendMode::Normal => TraceCompositeBlendMode::Normal,
+                    CompositeBlendMode::Multiply => TraceCompositeBlendMode::Multiply,
                 },
                 opacity: composite_op.opacity,
             }),
@@ -661,8 +728,8 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                 overlay_tile_key: composite_op.overlay_tile_key.into(),
                 dst_tile_key: composite_op.dst_tile_key.into(),
                 blend_mode: match composite_op.blend_mode {
-                    TraceWriteBlendMode::Normal => WriteBlendMode::Normal,
-                    TraceWriteBlendMode::Erase => WriteBlendMode::Erase,
+                    TraceCompositeBlendMode::Normal => CompositeBlendMode::Normal,
+                    TraceCompositeBlendMode::Multiply => CompositeBlendMode::Multiply,
                 },
                 opacity: composite_op.opacity,
             }),

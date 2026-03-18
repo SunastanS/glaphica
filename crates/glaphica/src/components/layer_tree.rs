@@ -19,6 +19,7 @@ pub struct LayerTree<'a> {
 pub struct LayerTreeOutput {
     pub select_node: Option<NodeId>,
     pub move_node: Option<LayerTreeMove>,
+    pub set_visibility: Option<(NodeId, bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +51,7 @@ struct RowRender {
     rect: Rect,
     row_response: egui::Response,
     preview_response: egui::Response,
+    visibility_response: egui::Response,
 }
 
 impl<'a> LayerTree<'a> {
@@ -95,7 +97,14 @@ impl<'a> LayerTree<'a> {
 
         for row in rows {
             let render = self.render_row(ui, &row, dragging_node);
-            if render.row_response.clicked() {
+            if render.visibility_response.clicked() {
+                output.set_visibility = Some((row.item.id, !row.item.visible));
+            }
+            let clicked_visibility_toggle = render
+                .row_response
+                .interact_pointer_pos()
+                .is_some_and(|pos| render.visibility_response.rect.contains(pos));
+            if render.row_response.clicked() && !clicked_visibility_toggle {
                 output.select_node = Some(row.item.id);
             }
             if render.preview_response.drag_started() {
@@ -201,7 +210,17 @@ impl<'a> LayerTree<'a> {
             ui.id().with(("layer-tree-preview", row.item.id.0)),
             Sense::click_and_drag(),
         );
+        let visibility_rect = Rect::from_center_size(
+            egui::pos2(rect.right() - 18.0, rect.center().y),
+            Vec2::new(22.0, 22.0),
+        );
+        let visibility_response = ui.interact(
+            visibility_rect,
+            ui.id().with(("layer-tree-visible", row.item.id.0)),
+            Sense::click(),
+        );
         self.paint_thumbnail(ui, thumb_rect, row.item);
+        self.paint_visibility_toggle(ui, visibility_rect, row.item.visible);
         if !self.compact {
             let label_pos = egui::pos2(thumb_rect.right() + 8.0, rect.center().y);
             ui.painter().text(
@@ -217,6 +236,7 @@ impl<'a> LayerTree<'a> {
             rect,
             row_response,
             preview_response,
+            visibility_response,
         }
     }
 
@@ -356,6 +376,27 @@ impl<'a> LayerTree<'a> {
                     ),
                 );
             }
+        }
+    }
+
+    fn paint_visibility_toggle(&self, ui: &egui::Ui, rect: Rect, visible: bool) {
+        let painter = ui.painter();
+        let stroke_color = if visible {
+            self.theme.text_color
+        } else {
+            self.theme.border_color
+        };
+        painter.circle_stroke(rect.center(), 6.0, Stroke::new(1.0, stroke_color));
+        if visible {
+            painter.circle_filled(rect.center(), 2.5, self.theme.accent_color);
+        } else {
+            painter.line_segment(
+                [
+                    rect.left_top() + Vec2::new(5.0, 5.0),
+                    rect.right_bottom() - Vec2::new(5.0, 5.0),
+                ],
+                Stroke::new(1.5, self.theme.border_color),
+            );
         }
     }
 }

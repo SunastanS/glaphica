@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 
 use document::{LeafBlendMode, MaterializeParametricCmd, ParametricVertex, RenderCmd};
 use glaphica_core::{ATLAS_TILE_SIZE, GUTTER_SIZE, TileKey};
-use thread_protocol::{ClearOp, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
+use thread_protocol::{ClearOp, CompositeBlendMode, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
 use crate::context::GpuContext;
@@ -48,6 +48,7 @@ struct PipelineCache {
     image_multiply: wgpu::RenderPipeline,
     write_erase: wgpu::RenderPipeline,
     composite_normal: wgpu::RenderPipeline,
+    composite_multiply: wgpu::RenderPipeline,
     parametric: wgpu::RenderPipeline,
     clear: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -990,8 +991,8 @@ impl RenderExecutor {
             create_composite_bind_group(context, &cache.composite_bind_group_layout, composite_op)?;
         let dst_view = create_render_attachment_view(&dst_resolved);
         let pipeline = match composite_op.blend_mode {
-            WriteBlendMode::Normal => &cache.composite_normal,
-            WriteBlendMode::Erase => &cache.composite_normal,
+            CompositeBlendMode::Normal => &cache.composite_normal,
+            CompositeBlendMode::Multiply => &cache.composite_multiply,
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1225,6 +1226,34 @@ impl RenderExecutor {
             multiview_mask: None,
             cache: None,
         });
+        let composite_multiply = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glaphica-render-pipeline-composite-multiply"),
+            layout: Some(&composite_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_composite_multiply"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let parametric = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glaphica-render-pipeline-parametric"),
             layout: Some(&parametric_pipeline_layout),
@@ -1327,6 +1356,7 @@ impl RenderExecutor {
             image_multiply,
             write_erase,
             composite_normal,
+            composite_multiply,
             parametric,
             clear,
             bind_group_layout,
@@ -1897,9 +1927,13 @@ mod tests {
     use crate::context::{GpuContext, GpuContextInitDescriptor};
 
     use super::{RenderContext, RenderExecutor};
-    use document::{LeafBlendMode, NodeConfig, RenderCmd, RenderSource};
+    use document::{
+        LeafBlendMode, MaterializeParametricCmd, NodeConfig, ParametricMesh, ParametricVertex,
+        RenderCmd, RenderSource,
+    };
+    use glaphica_core::CanvasVec2;
     use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, TileKey};
-    use thread_protocol::{ClearOp, WriteBlendMode, WriteOp};
+    use thread_protocol::{ClearOp, CompositeBlendMode, CompositeOp, WriteBlendMode, WriteOp};
 
     #[test]
     fn clear_tile_does_not_modify_neighbor_tile_in_same_layer() {
@@ -2098,6 +2132,97 @@ mod tests {
     }
 
     #[test]
+    fn execute_multiply_respects_opacity_without_brightening() {
+        let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
+        else {
+            eprintln!("skip test: gpu context init failed");
+            return;
+        };
+
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(2);
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                0,
+                BackendKind::Leaf,
+                AtlasLayout::Small11,
+                Default::default(),
+            )
+            .is_err()
+        {
+            eprintln!("skip test: source atlas backend init failed");
+            return;
+        }
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                1,
+                BackendKind::BranchCache,
+                AtlasLayout::Small11,
+                AtlasTextureConfig {
+                    usage: wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        {
+            eprintln!("skip test: destination atlas backend init failed");
+            return;
+        }
+
+        let base_tile = TileKey::from_parts(0, 0, 0);
+        let multiply_tile = TileKey::from_parts(0, 0, 1);
+        let dst_tile = TileKey::from_parts(1, 0, 0);
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            base_tile,
+            [128, 128, 128, 255],
+        );
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            multiply_tile,
+            [255, 255, 255, 255],
+        );
+
+        let mut executor = RenderExecutor::new();
+        let mut context = RenderContext {
+            gpu_context: &gpu_context,
+            atlas_storage: &atlas_storage,
+        };
+        let render_result = executor.execute(
+            &mut context,
+            &[RenderCmd {
+                from: vec![
+                    RenderSource {
+                        tile_keys: vec![base_tile],
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                    },
+                    RenderSource {
+                        tile_keys: vec![multiply_tile],
+                        config: NodeConfig {
+                            opacity: 0.5,
+                            blend_mode: LeafBlendMode::Multiply,
+                        },
+                    },
+                ],
+                to: vec![dst_tile],
+            }],
+        );
+        assert!(render_result.is_ok());
+
+        let pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, dst_tile);
+        assert_eq!(pixel, [128, 128, 128, 255]);
+    }
+
+    #[test]
     fn write_tile_erase_subtracts_alpha_from_origin_snapshot() {
         let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
         else {
@@ -2105,7 +2230,7 @@ mod tests {
             return;
         };
 
-        let mut atlas_storage = AtlasStorageRuntime::with_capacity(1);
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(2);
         if atlas_storage
             .create_backend(
                 &gpu_context.device,
@@ -2148,6 +2273,260 @@ mod tests {
 
         let pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, dst_tile);
         assert_eq!(pixel, [64, 0, 0, 64]);
+    }
+
+    #[test]
+    fn composite_tile_multiply_respects_opacity_without_brightening() {
+        let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
+        else {
+            eprintln!("skip test: gpu context init failed");
+            return;
+        };
+
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(1);
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                0,
+                BackendKind::Leaf,
+                AtlasLayout::Small11,
+                Default::default(),
+            )
+            .is_err()
+        {
+            eprintln!("skip test: atlas backend init failed");
+            return;
+        }
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                1,
+                BackendKind::BranchCache,
+                AtlasLayout::Small11,
+                AtlasTextureConfig {
+                    usage: wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        {
+            eprintln!("skip test: destination atlas backend init failed");
+            return;
+        }
+
+        let base_tile = TileKey::from_parts(0, 0, 0);
+        let overlay_tile = TileKey::from_parts(0, 0, 1);
+        let dst_tile = TileKey::from_parts(1, 0, 0);
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            base_tile,
+            [128, 128, 128, 255],
+        );
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            overlay_tile,
+            [255, 255, 255, 255],
+        );
+        fill_tile_rgba8(&gpu_context, &atlas_storage, dst_tile, [0, 0, 0, 0]);
+
+        let mut executor = RenderExecutor::new();
+        let mut context = RenderContext {
+            gpu_context: &gpu_context,
+            atlas_storage: &atlas_storage,
+        };
+        let mut encoder =
+            gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-test-composite-multiply-encoder"),
+                });
+        let result = executor.composite_tile_with_encoder(
+            &mut encoder,
+            &mut context,
+            &CompositeOp {
+                base_tile_key: base_tile,
+                overlay_tile_key: overlay_tile,
+                dst_tile_key: dst_tile,
+                blend_mode: CompositeBlendMode::Multiply,
+                opacity: 0.5,
+            },
+        );
+        assert!(result.is_ok());
+
+        gpu_context.queue.submit(Some(encoder.finish()));
+
+        let pixel = sample_tile_pixel_rgba8(&gpu_context, &atlas_storage, dst_tile);
+        assert_eq!(pixel, [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn parametric_sources_preserve_multiply_distinction_from_normal() {
+        let Ok(gpu_context) = GpuContext::init_blocking(&GpuContextInitDescriptor::default())
+        else {
+            eprintln!("skip test: gpu context init failed");
+            return;
+        };
+
+        let mut atlas_storage = AtlasStorageRuntime::with_capacity(2);
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                0,
+                BackendKind::Leaf,
+                AtlasLayout::Small11,
+                Default::default(),
+            )
+            .is_err()
+        {
+            eprintln!("skip test: leaf atlas backend init failed");
+            return;
+        }
+        if atlas_storage
+            .create_backend(
+                &gpu_context.device,
+                1,
+                BackendKind::BranchCache,
+                AtlasLayout::Small11,
+                AtlasTextureConfig {
+                    usage: wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        {
+            eprintln!("skip test: destination atlas backend init failed");
+            return;
+        }
+
+        let bottom_tile = TileKey::from_parts(0, 0, 0);
+        let top_tile = TileKey::from_parts(0, 0, 1);
+        let multiply_dst = TileKey::from_parts(1, 0, 0);
+        let normal_dst = TileKey::from_parts(1, 0, 1);
+
+        let mut executor = RenderExecutor::new();
+        let mut context = RenderContext {
+            gpu_context: &gpu_context,
+            atlas_storage: &atlas_storage,
+        };
+
+        let mesh = |color| ParametricMesh {
+            vertices: vec![
+                ParametricVertex {
+                    position: CanvasVec2::new(0.0, 0.0),
+                    color,
+                },
+                ParametricVertex {
+                    position: CanvasVec2::new(64.0, 0.0),
+                    color,
+                },
+                ParametricVertex {
+                    position: CanvasVec2::new(0.0, 64.0),
+                    color,
+                },
+                ParametricVertex {
+                    position: CanvasVec2::new(64.0, 64.0),
+                    color,
+                },
+            ],
+            indices: vec![0, 1, 2, 2, 1, 3],
+        };
+        let cmds = [
+            MaterializeParametricCmd {
+                node_id: glaphica_core::NodeId(0),
+                mesh: mesh([1.0, 0.0, 0.0, 1.0]),
+                tile_indices: vec![0],
+                tile_origins: vec![CanvasVec2::new(0.0, 0.0)],
+                dst_tile_keys: vec![bottom_tile],
+            },
+            MaterializeParametricCmd {
+                node_id: glaphica_core::NodeId(1),
+                mesh: mesh([0.0, 1.0, 0.0, 1.0]),
+                tile_indices: vec![0],
+                tile_origins: vec![CanvasVec2::new(0.0, 0.0)],
+                dst_tile_keys: vec![top_tile],
+            },
+        ];
+        let mut encoder =
+            gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-test-parametric-materialize-encoder"),
+                });
+        let materialize_result =
+            executor.materialize_parametric_with_encoder(&mut encoder, &mut context, &cmds);
+        assert!(materialize_result.is_ok());
+        gpu_context.queue.submit(Some(encoder.finish()));
+        assert_eq!(
+            sample_tile_content_pixel_rgba8(&gpu_context, &atlas_storage, bottom_tile),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            sample_tile_content_pixel_rgba8(&gpu_context, &atlas_storage, top_tile),
+            [0, 255, 0, 255]
+        );
+
+        let multiply_result = executor.execute(
+            &mut context,
+            &[RenderCmd {
+                from: vec![
+                    RenderSource {
+                        tile_keys: vec![bottom_tile],
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                    },
+                    RenderSource {
+                        tile_keys: vec![top_tile],
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Multiply,
+                        },
+                    },
+                ],
+                to: vec![multiply_dst],
+            }],
+        );
+        assert!(multiply_result.is_ok());
+
+        let normal_result = executor.execute(
+            &mut context,
+            &[RenderCmd {
+                from: vec![
+                    RenderSource {
+                        tile_keys: vec![bottom_tile],
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                    },
+                    RenderSource {
+                        tile_keys: vec![top_tile],
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                    },
+                ],
+                to: vec![normal_dst],
+            }],
+        );
+        assert!(normal_result.is_ok());
+
+        let multiply_pixel =
+            sample_tile_content_pixel_rgba8(&gpu_context, &atlas_storage, multiply_dst);
+        let normal_pixel =
+            sample_tile_content_pixel_rgba8(&gpu_context, &atlas_storage, normal_dst);
+        assert_eq!(multiply_pixel, [0, 0, 0, 255]);
+        assert_eq!(normal_pixel, [0, 255, 0, 255]);
     }
 
     fn fill_tile_rgba8(
@@ -2256,6 +2635,85 @@ mod tests {
 
         let mapped = slice.get_mapped_range();
         let pixel = [mapped[0], mapped[1], mapped[2], mapped[3]];
+        drop(mapped);
+        buffer.unmap();
+        pixel
+    }
+
+    fn sample_tile_content_pixel_rgba8(
+        gpu_context: &GpuContext,
+        atlas_storage: &AtlasStorageRuntime,
+        key: TileKey,
+    ) -> [u8; 4] {
+        let Some(resolved) = atlas_storage.resolve(key) else {
+            return [0, 0, 0, 0];
+        };
+        let width = ATLAS_TILE_SIZE;
+        let height = ATLAS_TILE_SIZE;
+        let bytes_per_row = width * 4;
+        let buffer_size = (bytes_per_row * height) as u64;
+
+        let buffer = gpu_context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render-executor-test-readback-content"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("render-executor-test-readback-content-encoder"),
+                });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: resolved.texture2d_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: resolved.address.texel_offset.0,
+                    y: resolved.address.texel_offset.1,
+                    z: resolved.address.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu_context.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if sender.send(result).is_err() {
+                eprintln!("readback content map callback send failed");
+            }
+        });
+        let _ = gpu_context.device.poll(wgpu::PollType::wait_indefinitely());
+        if receiver.recv().is_err() {
+            return [0, 0, 0, 0];
+        }
+
+        let mapped = slice.get_mapped_range();
+        let center = (ATLAS_TILE_SIZE as usize / 2) * bytes_per_row as usize
+            + (ATLAS_TILE_SIZE as usize / 2) * 4;
+        let pixel = [
+            mapped[center],
+            mapped[center + 1],
+            mapped[center + 2],
+            mapped[center + 3],
+        ];
         drop(mapped);
         buffer.unmap();
         pixel

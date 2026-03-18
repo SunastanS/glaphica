@@ -11,6 +11,10 @@ use crate::{
 
 const STORAGE_VERSION: u32 = 1;
 
+fn default_visible() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentStorageError {
     UnsupportedVersion {
@@ -81,6 +85,8 @@ pub enum StoredLayerNode {
     Branch {
         id: u64,
         label: String,
+        #[serde(default = "default_visible")]
+        visible: bool,
         opacity: f32,
         blend_mode: StoredBranchBlendMode,
         children: Vec<StoredLayerNode>,
@@ -88,6 +94,8 @@ pub enum StoredLayerNode {
     RasterLayer {
         id: u64,
         label: String,
+        #[serde(default = "default_visible")]
+        visible: bool,
         opacity: f32,
         blend_mode: StoredLeafBlendMode,
         image: RasterLayerAssetMetadata,
@@ -95,6 +103,8 @@ pub enum StoredLayerNode {
     SolidColorLayer {
         id: u64,
         label: String,
+        #[serde(default = "default_visible")]
+        visible: bool,
         opacity: f32,
         blend_mode: StoredLeafBlendMode,
         color: [f32; 4],
@@ -158,6 +168,7 @@ fn export_layer_node(node: &UiLayerNode) -> StoredLayerNode {
         UiLayerNode::Branch(branch) => StoredLayerNode::Branch {
             id: branch.meta.id.0,
             label: branch.meta.label.clone(),
+            visible: branch.meta.visible,
             opacity: branch.config.opacity,
             blend_mode: branch.config.blend_mode.into(),
             children: branch.children.iter().map(export_layer_node).collect(),
@@ -168,6 +179,7 @@ fn export_layer_node(node: &UiLayerNode) -> StoredLayerNode {
                 StoredLayerNode::RasterLayer {
                     id: node_id.0,
                     label: leaf.meta.label.clone(),
+                    visible: leaf.meta.visible,
                     opacity: leaf.config.opacity,
                     blend_mode: leaf.config.blend_mode.into(),
                     image: RasterLayerAssetMetadata {
@@ -182,6 +194,7 @@ fn export_layer_node(node: &UiLayerNode) -> StoredLayerNode {
                 StoredLayerNode::SolidColorLayer {
                     id: leaf.meta.id.0,
                     label: leaf.meta.label.clone(),
+                    visible: leaf.meta.visible,
                     opacity: leaf.config.opacity,
                     blend_mode: leaf.config.blend_mode.into(),
                     color: layer.color,
@@ -223,6 +236,7 @@ fn import_layer_node(
         StoredLayerNode::Branch {
             id,
             label,
+            visible,
             opacity,
             blend_mode,
             children,
@@ -230,6 +244,7 @@ fn import_layer_node(
             meta: UiNodeMeta {
                 id: NodeId(*id),
                 label: label.clone(),
+                visible: *visible,
             },
             config: BranchConfig {
                 opacity: *opacity,
@@ -243,6 +258,7 @@ fn import_layer_node(
         StoredLayerNode::RasterLayer {
             id,
             label,
+            visible,
             opacity,
             blend_mode,
             image,
@@ -260,6 +276,7 @@ fn import_layer_node(
                 meta: UiNodeMeta {
                     id: NodeId(*id),
                     label: label.clone(),
+                    visible: *visible,
                 },
                 config: LeafConfig {
                     opacity: *opacity,
@@ -273,6 +290,7 @@ fn import_layer_node(
         StoredLayerNode::SolidColorLayer {
             id,
             label,
+            visible,
             opacity,
             blend_mode,
             color,
@@ -280,6 +298,7 @@ fn import_layer_node(
             meta: UiNodeMeta {
                 id: NodeId(*id),
                 label: label.clone(),
+                visible: *visible,
             },
             config: LeafConfig {
                 opacity: *opacity,

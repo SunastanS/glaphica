@@ -55,8 +55,9 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag,
-    GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteBlendMode, WriteOp,
+    ClearOp, CompositeBlendMode, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp,
+    GpuCmdFrameMergeTag, GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
+    WriteBlendMode, WriteOp,
 };
 
 mod gpu_feedback;
@@ -68,10 +69,10 @@ pub use gpu_feedback::{
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushId, ClearOp, CompleteWaterline, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp,
-        ExecutedBatchWaterline, GpuCmdFrameMergeTag, GpuCmdMsg, GpuFeedbackFrame,
-        GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem, RefImage,
-        SubmitWaterline, TileKey, WriteBlendMode, WriteOp,
+        BrushId, ClearOp, CompleteWaterline, CompositeBlendMode, CompositeOp, CopyOp,
+        DrawBlendMode, DrawFrameMergePolicy, DrawOp, ExecutedBatchWaterline, GpuCmdFrameMergeTag,
+        GpuCmdMsg, GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp,
+        MergeItem, RefImage, SubmitWaterline, TileKey, WriteBlendMode, WriteOp,
     };
 
     use glaphica_core::PresentFrameId;
@@ -372,6 +373,33 @@ mod tests {
             | GpuCmdMsg::ClearOp(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected write op"),
+        }
+    }
+
+    #[test]
+    fn gpu_cmd_composite_op_carries_source_destination_and_blend_mode() {
+        let cmd = GpuCmdMsg::CompositeOp(CompositeOp {
+            base_tile_key: TileKey::from_parts(1, 2, 3),
+            overlay_tile_key: TileKey::from_parts(4, 5, 6),
+            dst_tile_key: TileKey::from_parts(7, 8, 9),
+            blend_mode: CompositeBlendMode::Multiply,
+            opacity: 0.6,
+        });
+
+        match cmd {
+            GpuCmdMsg::CompositeOp(composite_op) => {
+                assert_eq!(composite_op.base_tile_key, TileKey::from_parts(1, 2, 3));
+                assert_eq!(composite_op.overlay_tile_key, TileKey::from_parts(4, 5, 6));
+                assert_eq!(composite_op.dst_tile_key, TileKey::from_parts(7, 8, 9));
+                assert_eq!(composite_op.blend_mode, CompositeBlendMode::Multiply);
+                assert_eq!(composite_op.opacity, 0.6);
+            }
+            GpuCmdMsg::DrawOp(_)
+            | GpuCmdMsg::CopyOp(_)
+            | GpuCmdMsg::WriteOp(_)
+            | GpuCmdMsg::ClearOp(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => panic!("expected composite op"),
         }
     }
 

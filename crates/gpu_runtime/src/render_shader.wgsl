@@ -76,16 +76,16 @@ fn fs_multiply(input: VertexOutput) -> @location(0) vec4<f32> {
         i32(params.src_y) + local.y,
     );
     let color = textureLoad(src_texture, texel, i32(params.src_layer), 0);
-    let alpha = color.a * params.opacity;
-    if (color.a <= 0.0) {
+    let alpha = clamp(color.a * params.opacity, 0.0, 1.0);
+    if (color.a <= 0.0 || alpha <= 0.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     let unpremul_rgb = clamp(color.rgb / color.a, vec3<f32>(0.0), vec3<f32>(1.0));
     if (params.has_tint != 0u) {
         let tint = vec3<f32>(params.tint_r, params.tint_g, params.tint_b);
-        return vec4<f32>(tint, alpha);
+        return vec4<f32>(tint * alpha, alpha);
     }
-    return vec4<f32>(unpremul_rgb, alpha);
+    return vec4<f32>(unpremul_rgb * alpha, alpha);
 }
 
 @fragment
@@ -123,7 +123,7 @@ fn fs_image_multiply(input: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     let unpremul_rgb = clamp(color.rgb / color.a, vec3<f32>(0.0), vec3<f32>(1.0));
-    return vec4<f32>(unpremul_rgb, alpha);
+    return vec4<f32>(unpremul_rgb * alpha, alpha);
 }
 
 @fragment
