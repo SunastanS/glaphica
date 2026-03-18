@@ -17,7 +17,7 @@ use winit::{
 
 use crate::brush_ui::state::{BrushKind, BrushUiState, ROUND_BRUSH_ID, PIXEL_RECT_BRUSH_ID};
 use crate::egui_renderer::EguiRenderer;
-use crate::input::handle_window_event;
+use crate::input::{handle_window_event, MouseInputResult};
 use crate::overlay::{EguiOverlay, ExitConfirmAction, PathDialogAction};
 use crate::run_config::RunConfig;
 
@@ -563,9 +563,83 @@ impl ApplicationHandler for DesktopApp {
                 }
             }
             _ => {
-                if handle_window_event(self, &event, ui_event_consumed) {
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
+                match handle_window_event(self, &event, ui_event_consumed) {
+                    MouseInputResult::StrokeBegan => {
+                        if let Some(overlay) = &mut self.overlay {
+                            if let Some((brush_kind, values)) =
+                                overlay.flush_selected_brush_if_dirty()
+                            {
+                                match brush_kind {
+                                    crate::brush_ui::state::BrushKind::Round => {
+                                        match brushes::builtin_brushes::round::RoundBrush::from_config_values(
+                                            &values,
+                                        ) {
+                                            Ok(updated_brush) => {
+                                                if let Some(integration) = &mut self.integration {
+                                                    if let Err(error) = integration.update_brush(
+                                                        brush_kind.brush_id(),
+                                                        updated_brush,
+                                                    ) {
+                                                        eprintln!(
+                                                            "failed to update brush: {:?}",
+                                                            error
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "failed to build round brush from config: {}",
+                                                    error
+                                                );
+                                            }
+                                        }
+                                    }
+                                    crate::brush_ui::state::BrushKind::PixelRect => {
+                                        match brushes::builtin_brushes::pixel_rect::PixelRectBrush::from_config_values(
+                                            &values,
+                                        ) {
+                                            Ok(updated_brush) => {
+                                                if let Some(integration) = &mut self.integration {
+                                                    if let Err(error) = integration.update_brush(
+                                                        brush_kind.brush_id(),
+                                                        updated_brush,
+                                                    ) {
+                                                        eprintln!(
+                                                            "failed to update brush: {:?}",
+                                                            error
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "failed to build pixel rect brush from config: {}",
+                                                    error
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.render_frame();
+                        if let Some(integration) = &mut self.integration {
+                            if let Some(node_id) = integration.active_paint_node() {
+                                integration.begin_stroke(node_id);
+                            }
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    MouseInputResult::StrokeEnded
+                    | MouseInputResult::PanStarted
+                    | MouseInputResult::PanEnded
+                    | MouseInputResult::None => {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
                     }
                 }
             }

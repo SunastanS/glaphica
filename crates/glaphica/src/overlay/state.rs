@@ -249,8 +249,9 @@ impl EguiOverlay {
         self.exit_confirm_action.take()
     }
 
-    pub fn flush_selected_brush_if_dirty(&mut self) {
+    pub fn flush_selected_brush_if_dirty(&mut self) -> Option<(BrushKind, Vec<brushes::BrushConfigValue>)> {
         self.queue_brush_update_if_dirty(self.selected_brush_index);
+        self.pending_brush_update.take()
     }
 
     fn queue_brush_update_if_dirty(&mut self, index: usize) {
