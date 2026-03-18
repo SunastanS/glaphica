@@ -69,6 +69,9 @@ fn handle_mouse_input_ui_consumed(
             if let Some(integration) = &mut app.integration {
                 integration.end_stroke();
             }
+            if let Some(overlay) = &mut app.overlay {
+                overlay.mark_document_dirty();
+            }
             true
         }
         (MouseButton::Middle, ElementState::Released) => {
@@ -81,9 +84,15 @@ fn handle_mouse_input_ui_consumed(
 }
 
 fn handle_mouse_input(app: &mut DesktopApp, button: &MouseButton, state: &ElementState) -> bool {
+    if app.is_replay_mode() {
+        return false;
+    }
     match button {
         MouseButton::Left => match state {
             ElementState::Pressed => {
+                if let Some(overlay) = &mut app.overlay {
+                    overlay.flush_selected_brush_if_dirty();
+                }
                 app.stroke_active = false;
                 if let Some(integration) = &mut app.integration {
                     if let Some(node_id) = integration.active_paint_node() {
@@ -98,6 +107,11 @@ fn handle_mouse_input(app: &mut DesktopApp, button: &MouseButton, state: &Elemen
                 app.stroke_active = false;
                 if let Some(integration) = &mut app.integration {
                     integration.end_stroke();
+                }
+                if stroke_was_active {
+                    if let Some(overlay) = &mut app.overlay {
+                        overlay.mark_document_dirty();
+                    }
                 }
                 stroke_was_active
             }

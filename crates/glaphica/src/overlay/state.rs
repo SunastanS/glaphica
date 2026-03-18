@@ -254,13 +254,18 @@ impl EguiOverlay {
     }
 
     fn queue_brush_update_if_dirty(&mut self, index: usize) {
+        if self.pending_brush_update.is_some() {
+            return;
+        }
         if index >= self.brush_states.len() {
             return;
         }
         let brush_state = &mut self.brush_states[index];
-        if brush_state.dirty {
-            brush_state.dirty = false;
+        if !brush_state.dirty {
+            return;
         }
+        brush_state.dirty = false;
+        self.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
     }
 
     pub fn open_path_dialog(&mut self, action: PathDialogAction) {
