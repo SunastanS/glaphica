@@ -13,9 +13,9 @@ use winit::{
 };
 
 use crate::brush_ui::state::{BrushKind, BrushUiState};
+use crate::components::{ConfigPanel, Sidebar, StatusBar, TopBar};
 use crate::egui_renderer::EguiRenderer;
-use crate::overlay::actions::{ExitConfirmAction, PathDialogAction, PendingActions};
-use crate::overlay::panels::Panels;
+use crate::overlay::actions::{ExitConfirmAction, PathDialogAction};
 use crate::overlay::texture_cache::LayerTextureCache;
 use crate::theme::Theme;
 
@@ -43,6 +43,19 @@ pub struct EguiOverlay {
     pub exit_confirm_open: bool,
     pub config_panel_rect: Option<Rect>,
     pub app_stats: Option<AppStats>,
+    // Pending action fields
+    pending_brush_update: Option<(BrushKind, Vec<brushes::BrushConfigValue>)>,
+    pending_layer_select: Option<NodeId>,
+    pending_layer_create: Option<NewLayerKind>,
+    pending_group_create: bool,
+    pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
+    pending_layer_visibility: Option<(NodeId, bool)>,
+    pending_layer_opacity: Option<(NodeId, f32)>,
+    pending_layer_blend_mode: Option<(NodeId, UiBlendMode)>,
+    pending_document_save: bool,
+    pending_document_load: bool,
+    pending_document_export: bool,
+    exit_confirm_action: Option<ExitConfirmAction>,
 }
 
 impl EguiOverlay {
@@ -94,6 +107,19 @@ impl EguiOverlay {
             exit_confirm_open: false,
             config_panel_rect: None,
             app_stats: None,
+            // Initialize pending fields
+            pending_brush_update: None,
+            pending_layer_select: None,
+            pending_layer_create: None,
+            pending_group_create: false,
+            pending_layer_move: None,
+            pending_layer_visibility: None,
+            pending_layer_opacity: None,
+            pending_layer_blend_mode: None,
+            pending_document_save: false,
+            pending_document_load: false,
+            pending_document_export: false,
+            exit_confirm_action: None,
         }
     }
 
@@ -141,46 +167,64 @@ impl EguiOverlay {
     }
 
     pub fn take_pending_brush_update(&mut self) -> Option<(BrushKind, Vec<brushes::BrushConfigValue>)> {
-        None
+        self.pending_brush_update.take()
     }
 
     pub fn take_pending_layer_select(&mut self) -> Option<NodeId> {
-        None
+        self.pending_layer_select.take()
     }
 
     pub fn take_pending_layer_create(&mut self) -> Option<NewLayerKind> {
-        None
+        self.pending_layer_create.take()
     }
 
     pub fn take_pending_group_create(&mut self) -> bool {
-        false
+        std::mem::take(&mut self.pending_group_create)
     }
 
     pub fn take_pending_layer_move(&mut self) -> Option<(NodeId, LayerMoveTarget)> {
-        None
+        self.pending_layer_move.take()
     }
 
     pub fn take_pending_layer_visibility(&mut self) -> Option<(NodeId, bool)> {
-        None
+        self.pending_layer_visibility.take()
     }
 
     pub fn take_pending_layer_opacity(&mut self) -> Option<(NodeId, f32)> {
-        None
+        self.pending_layer_opacity.take()
     }
 
     pub fn take_pending_layer_blend_mode(&mut self) -> Option<(NodeId, UiBlendMode)> {
-        None
+        self.pending_layer_blend_mode.take()
     }
 
     pub fn take_pending_document_save(&mut self) -> Option<PathBuf> {
+        if std::mem::take(&mut self.pending_document_save) {
+            let path = self.document_path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
         None
     }
 
     pub fn take_pending_document_load(&mut self) -> Option<PathBuf> {
+        if std::mem::take(&mut self.pending_document_load) {
+            let path = self.document_path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
         None
     }
 
     pub fn take_pending_document_export(&mut self) -> Option<PathBuf> {
+        if std::mem::take(&mut self.pending_document_export) {
+            let path = self.document_path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
         None
     }
 
@@ -202,7 +246,7 @@ impl EguiOverlay {
     }
 
     pub fn take_exit_confirm_action(&mut self) -> Option<ExitConfirmAction> {
-        None
+        self.exit_confirm_action.take()
     }
 
     pub fn flush_selected_brush_if_dirty(&mut self) {
@@ -254,7 +298,7 @@ impl EguiOverlay {
         _target_format: wgpu::TextureFormat,
         target_width: u32,
         target_height: u32,
-    ) -> PendingActions {
+    ) {
         let raw_input = self.state.take_egui_input(window);
         let preview_texture_ids: HashMap<_, _> = self
             .texture_cache
@@ -263,78 +307,212 @@ impl EguiOverlay {
             .map(|(node_id, texture)| (*node_id, texture.id()))
             .collect();
 
-        let mut exit_confirm_open = self.exit_confirm_open;
-        let mut document_path = self.document_path.clone();
-        let mut path_dialog_action = self.path_dialog_action;
+        let theme = self.theme;
+        let left_panel_collapsed = &mut self.left_panel_collapsed;
+        let right_panel_collapsed = &mut self.right_panel_collapsed;
+        let left_panel_width = &mut self.left_panel_width;
+        let right_panel_width = &mut self.right_panel_width;
+        let active_color_rgb = &mut self.active_color_rgb;
+        let brush_states = &mut self.brush_states;
+        let selected_brush_index = &mut self.selected_brush_index;
+        let pending_brush_update = &mut self.pending_brush_update;
+        let layer_tree_items = &self.layer_tree_items;
+        let selected_node = &mut self.selected_node;
+        let pending_layer_select = &mut self.pending_layer_select;
+        let pending_layer_create = &mut self.pending_layer_create;
+        let pending_group_create = &mut self.pending_group_create;
+        let pending_layer_move = &mut self.pending_layer_move;
+        let pending_layer_visibility = &mut self.pending_layer_visibility;
+        let pending_layer_opacity = &mut self.pending_layer_opacity;
+        let pending_layer_blend_mode = &mut self.pending_layer_blend_mode;
+        let _pending_document_save = &mut self.pending_document_save;
+        let _pending_document_load = &mut self.pending_document_load;
+        let _pending_document_export = &mut self.pending_document_export;
+        let exit_confirm_open = &mut self.exit_confirm_open;
+        let exit_confirm_action = &mut self.exit_confirm_action;
+        let mut config_panel_rect = self.config_panel_rect;
+        let app_stats = self.app_stats.clone();
+        let _document_dirty = self.document_dirty;
+        let document_path = &mut self.document_path;
+        let path_dialog_action = &mut self.path_dialog_action;
+        let _path_dialog_cancelled = &mut self.path_dialog_cancelled;
 
-        let panels = Panels {
-            left_collapsed: self.left_panel_collapsed,
-            right_collapsed: self.right_panel_collapsed,
-            left_width: self.left_panel_width,
-            right_width: self.right_panel_width,
-            active_color_rgb: &mut self.active_color_rgb,
-            brush_states: &mut self.brush_states,
-            selected_brush_index: self.selected_brush_index,
-            layer_tree_items: &self.layer_tree_items,
-            selected_node: self.selected_node,
-            preview_texture_ids: &preview_texture_ids,
-            app_stats: self.app_stats.clone(),
-            document_dirty: self.document_dirty,
-        };
+        let panel_max_width = (target_width as f32 - 96.0)
+            .max(0.0)
+            .min(target_width as f32);
 
-        let output = panels.render(
-            &self.ctx,
-            &self.theme,
-            target_width,
-            &mut document_path,
-            &mut path_dialog_action,
-            &mut exit_confirm_open,
-        );
+        let mut requested_path_dialog: Option<PathDialogAction> = None;
+        let mut confirm_path_dialog_flag = false;
+        let mut cancel_path_dialog_flag = false;
 
-        self.left_panel_width = output.left_width;
-        self.right_panel_width = output.right_width;
-        self.config_panel_rect = output.config_panel_rect;
-        self.document_path = document_path;
-        self.path_dialog_action = path_dialog_action;
-        self.exit_confirm_open = output.exit_confirm_open;
+        let full_output = self.ctx.run(raw_input, |ctx| {
+            // Top bar
+            let mut top_bar = TopBar::new();
+            let top_bar_output = top_bar.render(ctx, &theme);
+            if top_bar_output.save_clicked {
+                requested_path_dialog = Some(PathDialogAction::Save);
+            }
+            if top_bar_output.load_clicked {
+                requested_path_dialog = Some(PathDialogAction::Load);
+            }
+            if top_bar_output.export_clicked {
+                requested_path_dialog = Some(PathDialogAction::Export);
+            }
 
-        if let Some(index) = output.new_selected_brush_index {
-            self.selected_brush_index = index;
-        }
+            // Status bar
+            StatusBar::render(ctx, &theme, app_stats.as_ref());
 
-        // Handle path dialog actions
-        if let Some(action) = output.requested_path_dialog {
+            // Sidebar (left panel)
+            let sidebar = Sidebar::new(
+                *left_panel_collapsed,
+                *left_panel_width,
+                panel_max_width,
+                layer_tree_items,
+                *selected_node,
+                &preview_texture_ids,
+            );
+            let sidebar_output = sidebar.render(ctx, &theme);
+
+            if sidebar_output.toggle_collapse {
+                *left_panel_collapsed = !*left_panel_collapsed;
+            }
+            if let Some(kind) = sidebar_output.create_layer {
+                *pending_layer_create = Some(kind);
+            }
+            if sidebar_output.create_group {
+                *pending_group_create = true;
+            }
+            if let Some(node_id) = sidebar_output.select_layer {
+                *pending_layer_select = Some(node_id);
+            }
+            if let Some(layer_move) = sidebar_output.move_layer {
+                *pending_layer_move = Some((layer_move.node_id, layer_move.target));
+            }
+            if let Some((node_id, visible)) = sidebar_output.set_layer_visibility {
+                *pending_layer_visibility = Some((node_id, visible));
+            }
+            if let Some((node_id, opacity)) = sidebar_output.set_layer_opacity {
+                *pending_layer_opacity = Some((node_id, opacity));
+            }
+            if let Some((node_id, blend_mode)) = sidebar_output.set_layer_blend_mode {
+                *pending_layer_blend_mode = Some((node_id, blend_mode));
+            }
+            if let Some(rect) = sidebar_output.panel_rect {
+                *left_panel_width = rect.width();
+            }
+
+            // Config panel (right panel)
+            let mut config_panel = ConfigPanel::new(
+                *right_panel_collapsed,
+                *right_panel_width,
+                panel_max_width,
+                active_color_rgb,
+                brush_states,
+                *selected_brush_index,
+            );
+            let config_output = config_panel.render(ctx, &theme);
+
+            if config_output.toggle_collapse {
+                *right_panel_collapsed = !*right_panel_collapsed;
+            }
+            if let Some((kind, values)) = config_output.pending_brush_update {
+                *pending_brush_update = Some((kind, values));
+            }
+            if config_output.brush_selection_changed {
+                if let Some(new_index) = config_output.new_selected_index {
+                    *selected_brush_index = new_index;
+                }
+            }
+            config_panel_rect = config_output.panel_rect;
+            if let Some(rect) = config_output.panel_rect {
+                *right_panel_width = rect.width();
+            }
+
+            // Exit confirmation dialog
+            if *exit_confirm_open {
+                egui::Window::new("Unsaved Changes")
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label("Save changes before exit?");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                *exit_confirm_open = false;
+                                *exit_confirm_action = Some(ExitConfirmAction::SaveAndExit);
+                            }
+                            if ui.button("Discard").clicked() {
+                                *exit_confirm_open = false;
+                                *exit_confirm_action = Some(ExitConfirmAction::DiscardAndExit);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                *exit_confirm_open = false;
+                                *exit_confirm_action = Some(ExitConfirmAction::Cancel);
+                            }
+                        });
+                    });
+            }
+
+            // Path dialog
+            if let Some(action) = *path_dialog_action {
+                let (title, confirm_label, hint) = match action {
+                    PathDialogAction::Save => ("Save Document", "Save", "Enter bundle output path"),
+                    PathDialogAction::Load => ("Load Document", "Load", "Enter bundle input path"),
+                    PathDialogAction::Export => ("Export JPEG", "Export", "Enter .jpg or .jpeg output path"),
+                };
+                egui::Window::new(title)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .collapsible(false)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.label(hint);
+                        ui.add_space(8.0);
+                        ui.add(egui::TextEdit::singleline(document_path).desired_width(360.0));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(confirm_label).clicked() {
+                                confirm_path_dialog_flag = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_path_dialog_flag = true;
+                            }
+                        });
+                    });
+            }
+        });
+
+        // Handle path dialog actions after ctx.run()
+        if let Some(action) = requested_path_dialog {
             self.open_path_dialog(action);
         }
-        if output.confirm_path_dialog {
+        if confirm_path_dialog_flag {
             self.confirm_path_dialog();
         }
-        if output.cancel_path_dialog {
+        if cancel_path_dialog_flag {
             self.path_dialog_action = None;
             self.path_dialog_cancelled = true;
         }
+        self.config_panel_rect = config_panel_rect;
+
+        self.state
+            .handle_platform_output(window, full_output.platform_output);
 
         // Auto-flush brush update when pointer leaves config panel
         let pointer_pos = self.ctx.input(|input| input.pointer.latest_pos());
-        if output.pending.brush_update.is_none()
-            && let (Some(rect), Some(pointer_pos)) = (output.config_panel_rect, pointer_pos)
+        if self.pending_brush_update.is_none()
+            && let (Some(rect), Some(pointer_pos)) = (config_panel_rect, pointer_pos)
             && !rect.contains(pointer_pos)
             && let Some(brush_state) = self.brush_states.get(self.selected_brush_index)
             && brush_state.dirty
         {
             let brush_state = &mut self.brush_states[self.selected_brush_index];
             brush_state.dirty = false;
+            self.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
         }
 
-        let full_output = self
-            .ctx
-            .run(raw_input, |_ctx| {});
-
-        self.state
-            .handle_platform_output(window, full_output.platform_output);
-
         if target_width == 0 || target_height == 0 {
-            return output.pending;
+            return;
         }
 
         let clipped_primitives = self
@@ -351,15 +529,13 @@ impl EguiOverlay {
             [target_width, target_height],
             full_output.pixels_per_point,
         );
-
-        output.pending
     }
 
     fn confirm_path_dialog(&mut self) {
         match self.path_dialog_action.take() {
-            Some(PathDialogAction::Save) => {}
-            Some(PathDialogAction::Load) => {}
-            Some(PathDialogAction::Export) => {}
+            Some(PathDialogAction::Save) => self.pending_document_save = true,
+            Some(PathDialogAction::Load) => self.pending_document_load = true,
+            Some(PathDialogAction::Export) => self.pending_document_export = true,
             None => {}
         }
     }

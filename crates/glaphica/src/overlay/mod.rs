@@ -1,5 +1,4 @@
 pub mod actions;
-pub mod panels;
 pub mod state;
 pub mod texture_cache;
 
