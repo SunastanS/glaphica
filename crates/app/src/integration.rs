@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
 use document::{
     Document, DocumentStorageError, DocumentStorageManifest, FlatRenderTree, LayerMoveTarget,
-    NewLayerKind, SharedRenderTree, UiLayerTreeItem,
+    NewLayerKind, SharedRenderTree, UiBlendMode, UiLayerTreeItem,
 };
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
@@ -142,6 +142,18 @@ pub enum AppControl {
     MoveNode {
         node_id: NodeId,
         target: LayerMoveTarget,
+    },
+    SetNodeVisibility {
+        node_id: NodeId,
+        visible: bool,
+    },
+    SetNodeOpacity {
+        node_id: NodeId,
+        opacity: f32,
+    },
+    SetNodeBlendMode {
+        node_id: NodeId,
+        blend_mode: UiBlendMode,
     },
     MoveActiveNodeUp,
     MoveActiveNodeDown,
@@ -698,6 +710,72 @@ impl AppThreadIntegration {
         Ok(())
     }
 
+    pub fn set_document_node_visibility(
+        &mut self,
+        node_id: NodeId,
+        visible: bool,
+    ) -> Result<(), document::LayerEditError> {
+        if !self
+            .engine_state
+            .document()
+            .layer_tree()
+            .contains_node(node_id)
+        {
+            return Err(document::LayerEditError::InvalidNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::SetNodeVisibility {
+                node_id,
+                visible,
+            }));
+        Ok(())
+    }
+
+    pub fn set_document_node_opacity(
+        &mut self,
+        node_id: NodeId,
+        opacity: f32,
+    ) -> Result<(), document::LayerEditError> {
+        if !self
+            .engine_state
+            .document()
+            .layer_tree()
+            .contains_node(node_id)
+        {
+            return Err(document::LayerEditError::InvalidNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::SetNodeOpacity {
+                node_id,
+                opacity,
+            }));
+        Ok(())
+    }
+
+    pub fn set_document_node_blend_mode(
+        &mut self,
+        node_id: NodeId,
+        blend_mode: UiBlendMode,
+    ) -> Result<(), document::LayerEditError> {
+        if !self
+            .engine_state
+            .document()
+            .layer_tree()
+            .contains_node(node_id)
+        {
+            return Err(document::LayerEditError::InvalidNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::SetNodeBlendMode {
+                node_id,
+                blend_mode,
+            }));
+        Ok(())
+    }
+
     pub fn move_active_node_up(&mut self) -> Result<(), document::LayerEditError> {
         if self.engine_state.document().selected_node().is_none() {
             return Err(document::LayerEditError::NoActiveNode);
@@ -875,6 +953,44 @@ impl AppThreadIntegration {
                 {
                     Ok(()) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("move node control failed: {error:?}"),
+                }
+            }
+            AppControl::SetNodeVisibility { node_id, visible } => {
+                self.engine_state.invalidate_redo_strokes();
+                match self
+                    .engine_state
+                    .document_mut()
+                    .set_node_visibility(*node_id, *visible)
+                {
+                    Some(_) => self.enqueue_render_tree_update(),
+                    None => eprintln!("set node visibility control failed: invalid node"),
+                }
+            }
+            AppControl::SetNodeOpacity { node_id, opacity } => {
+                self.engine_state.invalidate_redo_strokes();
+                if self
+                    .engine_state
+                    .document_mut()
+                    .set_node_opacity(*node_id, *opacity)
+                {
+                    self.enqueue_render_tree_update();
+                } else {
+                    eprintln!("set node opacity control failed: invalid node");
+                }
+            }
+            AppControl::SetNodeBlendMode {
+                node_id,
+                blend_mode,
+            } => {
+                self.engine_state.invalidate_redo_strokes();
+                if self
+                    .engine_state
+                    .document_mut()
+                    .set_node_blend_mode(*node_id, *blend_mode)
+                {
+                    self.enqueue_render_tree_update();
+                } else {
+                    eprintln!("set node blend mode control failed: invalid node");
                 }
             }
             AppControl::MoveActiveNodeUp => {
@@ -1723,6 +1839,7 @@ mod tests {
         let root = StoredLayerNode::Branch {
             id: 2,
             label: "Root".to_string(),
+            visible: true,
             opacity: 1.0,
             blend_mode: document::StoredBranchBlendMode::Base(
                 document::StoredLeafBlendMode::Normal,
@@ -1731,6 +1848,7 @@ mod tests {
                 StoredLayerNode::SolidColorLayer {
                     id: 3,
                     label: "bg".to_string(),
+                    visible: true,
                     opacity: 1.0,
                     blend_mode: document::StoredLeafBlendMode::Normal,
                     color: [1.0; 4],
@@ -1738,11 +1856,13 @@ mod tests {
                 StoredLayerNode::Branch {
                     id: 4,
                     label: "group".to_string(),
+                    visible: true,
                     opacity: 1.0,
                     blend_mode: document::StoredBranchBlendMode::Penetrate,
                     children: vec![StoredLayerNode::RasterLayer {
                         id: 9,
                         label: "paint".to_string(),
+                        visible: true,
                         opacity: 1.0,
                         blend_mode: document::StoredLeafBlendMode::Multiply,
                         image: document::RasterLayerAssetMetadata {
@@ -1797,6 +1917,7 @@ mod tests {
                 root: StoredLayerNode::RasterLayer {
                     id: 9,
                     label: "paint".to_string(),
+                    visible: true,
                     opacity: 1.0,
                     blend_mode: document::StoredLeafBlendMode::Normal,
                     image: document::RasterLayerAssetMetadata {

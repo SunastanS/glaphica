@@ -156,6 +156,36 @@ impl FlatRenderTree {
 
             if !Self::render_cache_content_unchanged(node, old_node) {
                 dirty.push(*node_id);
+                continue;
+            }
+
+            let (
+                FlatNodeKind::Branch { children, .. },
+                FlatNodeKind::Branch {
+                    children: old_children,
+                    ..
+                },
+            ) = (&node.kind, &old_node.kind)
+            else {
+                continue;
+            };
+            if children.len() != old_children.len() {
+                continue;
+            }
+            if children
+                .iter()
+                .zip(old_children)
+                .any(|(child_id, old_child_id)| {
+                    let Some(child) = self.nodes.get(child_id) else {
+                        return true;
+                    };
+                    let Some(old_child) = old.nodes.get(old_child_id) else {
+                        return true;
+                    };
+                    child.config != old_child.config
+                })
+            {
+                dirty.push(*node_id);
             }
         }
 
@@ -980,6 +1010,89 @@ mod tests {
             render_cache.tile_key(0),
             Some(TileKey::from_parts(1, 0, 10))
         );
+        assert_eq!(
+            new_tree.diff_render_cache_dirty(&old_tree),
+            vec![NodeId(100)]
+        );
+    }
+
+    #[test]
+    fn test_diff_render_cache_dirty_when_child_opacity_changes() {
+        let layout = ImageLayout::new(64, 64);
+        let old_cache = Image::new(layout, BackendId::new(1)).unwrap();
+        let new_cache = Image::new(layout, BackendId::new(1)).unwrap();
+        let child_image = Image::new(layout, BackendId::new(2)).unwrap();
+
+        let old_tree = FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::from([
+                (
+                    NodeId(1),
+                    FlatRenderNode {
+                        parent_id: Some(NodeId(100)),
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                        kind: FlatNodeKind::Leaf {
+                            content: FlatLeafContent::Raster {
+                                image: child_image.clone(),
+                            },
+                        },
+                    },
+                ),
+                (
+                    NodeId(100),
+                    FlatRenderNode {
+                        parent_id: None,
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                        kind: FlatNodeKind::Branch {
+                            children: vec![NodeId(1)],
+                            render_cache: old_cache,
+                        },
+                    },
+                ),
+            ])),
+            root_id: Some(NodeId(100)),
+        };
+
+        let new_tree = FlatRenderTree {
+            generation: RenderTreeGeneration(1),
+            nodes: Arc::new(HashMap::from([
+                (
+                    NodeId(1),
+                    FlatRenderNode {
+                        parent_id: Some(NodeId(100)),
+                        config: NodeConfig {
+                            opacity: 0.4,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                        kind: FlatNodeKind::Leaf {
+                            content: FlatLeafContent::Raster { image: child_image },
+                        },
+                    },
+                ),
+                (
+                    NodeId(100),
+                    FlatRenderNode {
+                        parent_id: None,
+                        config: NodeConfig {
+                            opacity: 1.0,
+                            blend_mode: LeafBlendMode::Normal,
+                        },
+                        kind: FlatNodeKind::Branch {
+                            children: vec![NodeId(1)],
+                            render_cache: new_cache,
+                        },
+                    },
+                ),
+            ])),
+            root_id: Some(NodeId(100)),
+        };
+
         assert_eq!(
             new_tree.diff_render_cache_dirty(&old_tree),
             vec![NodeId(100)]

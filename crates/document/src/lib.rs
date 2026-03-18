@@ -76,10 +76,20 @@ pub enum UiNodeKind {
     SpecialLayer,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiBlendMode {
+    Normal,
+    Multiply,
+    Penetrate,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiLayerTreeItem {
     pub id: NodeId,
     pub label: String,
+    pub visible: bool,
+    pub opacity: f32,
+    pub blend_mode: UiBlendMode,
     pub kind: UiNodeKind,
     pub solid_color: Option<[f32; 4]>,
     pub children: Vec<UiLayerTreeItem>,
@@ -101,6 +111,7 @@ impl Document {
                 meta: UiNodeMeta {
                     id: root_id,
                     label: "Root".to_string(),
+                    visible: true,
                 },
                 config: BranchConfig {
                     opacity: 1.0,
@@ -111,6 +122,7 @@ impl Document {
                         meta: UiNodeMeta {
                             id: background_id,
                             label: "Layer 1".to_string(),
+                            visible: true,
                         },
                         config: LeafConfig {
                             opacity: 1.0,
@@ -126,6 +138,7 @@ impl Document {
                         meta: UiNodeMeta {
                             id: paint_layer_id,
                             label: "Layer 2".to_string(),
+                            visible: true,
                         },
                         config: LeafConfig {
                             opacity: 1.0,
@@ -163,6 +176,7 @@ impl Document {
                 meta: UiNodeMeta {
                     id: initial_id,
                     label: "Layer 1".to_string(),
+                    visible: true,
                 },
                 config: LeafConfig {
                     opacity: 1.0,
@@ -283,7 +297,11 @@ impl Document {
         let node_id = self.allocate_node_id();
         let label = self.allocate_group_label();
         let new_node = UiLayerNode::Branch(UiBranchNode {
-            meta: UiNodeMeta { id: node_id, label },
+            meta: UiNodeMeta {
+                id: node_id,
+                label,
+                visible: true,
+            },
             config: BranchConfig {
                 opacity: 1.0,
                 blend_mode: BranchBlendMode::Base(LeafBlendMode::Normal),
@@ -327,6 +345,14 @@ impl Document {
         self.layer_tree.get_solid_color(node_id)
     }
 
+    pub fn node_opacity(&self, node_id: NodeId) -> Option<f32> {
+        self.layer_tree.node_opacity(node_id)
+    }
+
+    pub fn node_blend_mode(&self, node_id: NodeId) -> Option<UiBlendMode> {
+        self.layer_tree.node_blend_mode(node_id)
+    }
+
     pub fn set_solid_color(
         &mut self,
         node_id: NodeId,
@@ -341,6 +367,30 @@ impl Document {
             dirty.mark(node_id, tile_index);
         }
         Some(dirty)
+    }
+
+    pub fn set_node_visibility(
+        &mut self,
+        node_id: NodeId,
+        visible: bool,
+    ) -> Option<ImageDirtyTracker> {
+        if !self.layer_tree.set_node_visibility(node_id, visible) {
+            return None;
+        }
+
+        let mut dirty = ImageDirtyTracker::default();
+        for tile_index in 0..self.layout.total_tiles() as usize {
+            dirty.mark(node_id, tile_index);
+        }
+        Some(dirty)
+    }
+
+    pub fn set_node_opacity(&mut self, node_id: NodeId, opacity: f32) -> bool {
+        self.layer_tree.set_node_opacity(node_id, opacity)
+    }
+
+    pub fn set_node_blend_mode(&mut self, node_id: NodeId, blend_mode: UiBlendMode) -> bool {
+        self.layer_tree.set_node_blend_mode(node_id, blend_mode)
     }
 
     /// Incrementally syncs tile keys from UiLayerTree to FlatRenderTree.
@@ -443,7 +493,11 @@ impl Document {
             }
         };
         Ok(UiLayerNode::Leaf(UiLeafNode {
-            meta: UiNodeMeta { id, label },
+            meta: UiNodeMeta {
+                id,
+                label,
+                visible: true,
+            },
             config: LeafConfig {
                 opacity: 1.0,
                 blend_mode: LeafBlendMode::Normal,
@@ -560,8 +614,28 @@ impl UiLayerTree {
         get_solid_color_from_node(&self.root, node_id)
     }
 
+    pub fn node_opacity(&self, node_id: NodeId) -> Option<f32> {
+        get_node_opacity_from_node(&self.root, node_id)
+    }
+
+    pub fn node_blend_mode(&self, node_id: NodeId) -> Option<UiBlendMode> {
+        get_node_blend_mode_from_node(&self.root, node_id)
+    }
+
     pub fn set_solid_color(&mut self, node_id: NodeId, color: [f32; 4]) -> bool {
         set_solid_color_from_node(&mut self.root, node_id, color)
+    }
+
+    pub fn set_node_visibility(&mut self, node_id: NodeId, visible: bool) -> bool {
+        set_node_visibility_from_node(&mut self.root, node_id, visible)
+    }
+
+    pub fn set_node_opacity(&mut self, node_id: NodeId, opacity: f32) -> bool {
+        set_node_opacity_from_node(&mut self.root, node_id, opacity)
+    }
+
+    pub fn set_node_blend_mode(&mut self, node_id: NodeId, blend_mode: UiBlendMode) -> bool {
+        set_node_blend_mode_from_node(&mut self.root, node_id, blend_mode)
     }
 
     pub fn infer_render_tree(
@@ -616,6 +690,9 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
         UiLayerNode::Branch(branch) => UiLayerTreeItem {
             id: branch.meta.id,
             label: branch.meta.label.clone(),
+            visible: branch.meta.visible,
+            opacity: branch.config.opacity,
+            blend_mode: ui_blend_mode_from_branch(branch.config.blend_mode),
             kind: UiNodeKind::Branch,
             solid_color: None,
             children: branch.children.iter().map(build_layer_tree_item).collect(),
@@ -623,6 +700,9 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
         UiLayerNode::Leaf(leaf) => UiLayerTreeItem {
             id: leaf.meta.id,
             label: leaf.meta.label.clone(),
+            visible: leaf.meta.visible,
+            opacity: leaf.config.opacity,
+            blend_mode: ui_blend_mode_from_leaf(leaf.config.blend_mode),
             kind: match &leaf.content {
                 UiLeafContent::Raster { .. } => UiNodeKind::RasterLayer,
                 UiLeafContent::Special(_) => UiNodeKind::SpecialLayer,
@@ -842,6 +922,48 @@ fn get_solid_color_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<[f32
     }
 }
 
+fn get_node_opacity_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<f32> {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            if branch.meta.id == node_id {
+                return Some(branch.config.opacity);
+            }
+            branch
+                .children
+                .iter()
+                .find_map(|child| get_node_opacity_from_node(child, node_id))
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.meta.id == node_id {
+                Some(leaf.config.opacity)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn get_node_blend_mode_from_node(node: &UiLayerNode, node_id: NodeId) -> Option<UiBlendMode> {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            if branch.meta.id == node_id {
+                return Some(ui_blend_mode_from_branch(branch.config.blend_mode));
+            }
+            branch
+                .children
+                .iter()
+                .find_map(|child| get_node_blend_mode_from_node(child, node_id))
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.meta.id == node_id {
+                Some(ui_blend_mode_from_leaf(leaf.config.blend_mode))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f32; 4]) -> bool {
     match node {
         UiLayerNode::Branch(branch) => branch
@@ -857,6 +979,110 @@ fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f3
                 UiLeafContent::Special(layer) => layer.set_solid_color(color),
             }
         }
+    }
+}
+
+fn set_node_visibility_from_node(node: &mut UiLayerNode, node_id: NodeId, visible: bool) -> bool {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            if branch.meta.id == node_id {
+                branch.meta.visible = visible;
+                return true;
+            }
+            branch
+                .children
+                .iter_mut()
+                .any(|child| set_node_visibility_from_node(child, node_id, visible))
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.meta.id != node_id {
+                return false;
+            }
+            leaf.meta.visible = visible;
+            true
+        }
+    }
+}
+
+fn set_node_opacity_from_node(node: &mut UiLayerNode, node_id: NodeId, opacity: f32) -> bool {
+    let opacity = opacity.clamp(0.0, 1.0);
+    match node {
+        UiLayerNode::Branch(branch) => {
+            if branch.meta.id == node_id {
+                branch.config.opacity = opacity;
+                return true;
+            }
+            branch
+                .children
+                .iter_mut()
+                .any(|child| set_node_opacity_from_node(child, node_id, opacity))
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.meta.id != node_id {
+                return false;
+            }
+            leaf.config.opacity = opacity;
+            true
+        }
+    }
+}
+
+fn set_node_blend_mode_from_node(
+    node: &mut UiLayerNode,
+    node_id: NodeId,
+    blend_mode: UiBlendMode,
+) -> bool {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            if branch.meta.id == node_id {
+                branch.config.blend_mode = branch_blend_mode_from_ui(blend_mode);
+                return true;
+            }
+            branch
+                .children
+                .iter_mut()
+                .any(|child| set_node_blend_mode_from_node(child, node_id, blend_mode))
+        }
+        UiLayerNode::Leaf(leaf) => {
+            if leaf.meta.id != node_id {
+                return false;
+            }
+            let Some(leaf_blend_mode) = leaf_blend_mode_from_ui(blend_mode) else {
+                return false;
+            };
+            leaf.config.blend_mode = leaf_blend_mode;
+            true
+        }
+    }
+}
+
+fn ui_blend_mode_from_leaf(blend_mode: LeafBlendMode) -> UiBlendMode {
+    match blend_mode {
+        LeafBlendMode::Normal => UiBlendMode::Normal,
+        LeafBlendMode::Multiply => UiBlendMode::Multiply,
+    }
+}
+
+fn ui_blend_mode_from_branch(blend_mode: BranchBlendMode) -> UiBlendMode {
+    match blend_mode {
+        BranchBlendMode::Base(mode) => ui_blend_mode_from_leaf(mode),
+        BranchBlendMode::Penetrate => UiBlendMode::Penetrate,
+    }
+}
+
+fn leaf_blend_mode_from_ui(blend_mode: UiBlendMode) -> Option<LeafBlendMode> {
+    match blend_mode {
+        UiBlendMode::Normal => Some(LeafBlendMode::Normal),
+        UiBlendMode::Multiply => Some(LeafBlendMode::Multiply),
+        UiBlendMode::Penetrate => None,
+    }
+}
+
+fn branch_blend_mode_from_ui(blend_mode: UiBlendMode) -> BranchBlendMode {
+    match blend_mode {
+        UiBlendMode::Normal => BranchBlendMode::Base(LeafBlendMode::Normal),
+        UiBlendMode::Multiply => BranchBlendMode::Base(LeafBlendMode::Multiply),
+        UiBlendMode::Penetrate => BranchBlendMode::Penetrate,
     }
 }
 
@@ -972,6 +1198,9 @@ fn infer_render_nodes(
     render_cache_backend: BackendId,
     layout: ImageLayout,
 ) -> Result<Vec<RenderLayerNode>, ImageCreateError> {
+    if !node.meta().visible {
+        return Ok(vec![]);
+    }
     match node {
         UiLayerNode::Branch(branch) => infer_render_branch(
             branch,
@@ -1116,12 +1345,20 @@ impl UiLayerNode {
             Self::Leaf(leaf) => &leaf.meta.label,
         }
     }
+
+    fn meta(&self) -> &UiNodeMeta {
+        match self {
+            Self::Branch(branch) => &branch.meta,
+            Self::Leaf(leaf) => &leaf.meta,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
 pub struct UiNodeMeta {
     id: NodeId,
     label: String,
+    visible: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -1267,6 +1504,7 @@ mod tests {
         UiNodeMeta {
             id,
             label: label.to_string(),
+            visible: true,
         }
     }
 
@@ -1794,10 +2032,78 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, UiNodeKind::Branch);
         assert_eq!(items[0].label, "Root");
+        assert!(items[0].visible);
         assert_eq!(items[0].children.len(), 2);
         assert_eq!(items[0].children[0].label, "Layer 1");
+        assert!(items[0].children[0].visible);
         assert_eq!(items[0].children[0].kind, UiNodeKind::SpecialLayer);
         assert_eq!(items[0].children[1].label, "Layer 2");
+        assert!(items[0].children[1].visible);
         assert_eq!(items[0].children[1].kind, UiNodeKind::RasterLayer);
+    }
+
+    #[test]
+    fn test_hidden_node_is_omitted_from_render_tree() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let dirty = doc
+            .set_node_visibility(NodeId(1), false)
+            .expect("layer should exist");
+        let flat = doc.build_flat_render_tree(RenderTreeGeneration(4)).unwrap();
+
+        assert_eq!(dirty.iter().count(), layout.total_tiles() as usize);
+        assert!(!flat.nodes.contains_key(&NodeId(1)));
+        assert!(flat.nodes.contains_key(&NodeId(0)));
+    }
+
+    #[test]
+    fn test_set_node_opacity_updates_tree_items_and_flat_render_tree() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        assert!(doc.set_node_opacity(NodeId(1), 0.35));
+        assert_eq!(doc.node_opacity(NodeId(1)), Some(0.35));
+
+        let items = doc.layer_tree_items();
+        assert_eq!(items[0].children[1].opacity, 0.35);
+
+        let flat = doc.build_flat_render_tree(RenderTreeGeneration(5)).unwrap();
+        let node = flat.nodes.get(&NodeId(1)).unwrap();
+        assert_eq!(node.config.opacity, 0.35);
+    }
+
+    #[test]
+    fn test_set_node_blend_mode_updates_tree_items_and_flat_render_tree() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        assert!(doc.set_node_blend_mode(NodeId(1), UiBlendMode::Multiply));
+        assert_eq!(doc.node_blend_mode(NodeId(1)), Some(UiBlendMode::Multiply));
+
+        let items = doc.layer_tree_items();
+        assert_eq!(items[0].children[1].blend_mode, UiBlendMode::Multiply);
+
+        let flat = doc.build_flat_render_tree(RenderTreeGeneration(6)).unwrap();
+        let node = flat.nodes.get(&NodeId(1)).unwrap();
+        assert_eq!(node.config.blend_mode, LeafBlendMode::Multiply);
     }
 }
