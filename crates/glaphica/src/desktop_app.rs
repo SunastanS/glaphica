@@ -162,15 +162,19 @@ impl DesktopApp {
         &mut self,
         brush_kind: BrushKind,
         values: &[brushes::BrushConfigValue],
-    ) {
+    ) -> bool {
+        let mut updated = false;
         match brush_kind {
             BrushKind::Round => match RoundBrush::from_config_values(values) {
                 Ok(updated_brush) => {
-                    if let Some(integration) = self.integration.as_mut()
-                        && let Err(error) =
+                    if let Some(integration) = self.integration.as_mut() {
+                        if let Err(error) =
                             integration.update_brush(brush_kind.brush_id(), updated_brush)
-                    {
-                        eprintln!("failed to update brush: {:?}", error);
+                        {
+                            eprintln!("failed to update brush: {:?}", error);
+                        } else {
+                            updated = true;
+                        }
                     }
                 }
                 Err(error) => {
@@ -179,11 +183,14 @@ impl DesktopApp {
             },
             BrushKind::PixelRect => match PixelRectBrush::from_config_values(values) {
                 Ok(updated_brush) => {
-                    if let Some(integration) = self.integration.as_mut()
-                        && let Err(error) =
+                    if let Some(integration) = self.integration.as_mut() {
+                        if let Err(error) =
                             integration.update_brush(brush_kind.brush_id(), updated_brush)
-                    {
-                        eprintln!("failed to update brush: {:?}", error);
+                        {
+                            eprintln!("failed to update brush: {:?}", error);
+                        } else {
+                            updated = true;
+                        }
                     }
                 }
                 Err(error) => {
@@ -191,6 +198,7 @@ impl DesktopApp {
                 }
             },
         }
+        updated
     }
 
     fn apply_layer_select(&mut self, node_id: NodeId) -> bool {
