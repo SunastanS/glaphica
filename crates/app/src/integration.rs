@@ -962,20 +962,19 @@ impl AppThreadIntegration {
                     .document_mut()
                     .set_node_visibility(*node_id, *visible)
                 {
-                    Some(_) => self.enqueue_render_tree_update(),
-                    None => eprintln!("set node visibility control failed: invalid node"),
+                    Ok(_) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("set node visibility control failed: {error:?}"),
                 }
             }
             AppControl::SetNodeOpacity { node_id, opacity } => {
                 self.engine_state.invalidate_redo_strokes();
-                if self
+                match self
                     .engine_state
                     .document_mut()
                     .set_node_opacity(*node_id, *opacity)
                 {
-                    self.enqueue_render_tree_update();
-                } else {
-                    eprintln!("set node opacity control failed: invalid node");
+                    Ok(()) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("set node opacity control failed: {error:?}"),
                 }
             }
             AppControl::SetNodeBlendMode {
@@ -983,14 +982,13 @@ impl AppThreadIntegration {
                 blend_mode,
             } => {
                 self.engine_state.invalidate_redo_strokes();
-                if self
+                match self
                     .engine_state
                     .document_mut()
                     .set_node_blend_mode(*node_id, *blend_mode)
                 {
-                    self.enqueue_render_tree_update();
-                } else {
-                    eprintln!("set node blend mode control failed: invalid node");
+                    Ok(()) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("set node blend mode control failed: {error:?}"),
                 }
             }
             AppControl::MoveActiveNodeUp => {

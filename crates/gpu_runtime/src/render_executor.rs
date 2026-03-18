@@ -2176,8 +2176,18 @@ mod tests {
         let base_tile = TileKey::from_parts(0, 0, 0);
         let multiply_tile = TileKey::from_parts(0, 0, 1);
         let dst_tile = TileKey::from_parts(1, 0, 0);
-        fill_tile_rgba8(&gpu_context, &atlas_storage, base_tile, [128, 128, 128, 255]);
-        fill_tile_rgba8(&gpu_context, &atlas_storage, multiply_tile, [255, 255, 255, 255]);
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            base_tile,
+            [128, 128, 128, 255],
+        );
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            multiply_tile,
+            [255, 255, 255, 255],
+        );
 
         let mut executor = RenderExecutor::new();
         let mut context = RenderContext {
@@ -2310,8 +2320,18 @@ mod tests {
         let base_tile = TileKey::from_parts(0, 0, 0);
         let overlay_tile = TileKey::from_parts(0, 0, 1);
         let dst_tile = TileKey::from_parts(1, 0, 0);
-        fill_tile_rgba8(&gpu_context, &atlas_storage, base_tile, [128, 128, 128, 255]);
-        fill_tile_rgba8(&gpu_context, &atlas_storage, overlay_tile, [255, 255, 255, 255]);
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            base_tile,
+            [128, 128, 128, 255],
+        );
+        fill_tile_rgba8(
+            &gpu_context,
+            &atlas_storage,
+            overlay_tile,
+            [255, 255, 255, 255],
+        );
         fill_tile_rgba8(&gpu_context, &atlas_storage, dst_tile, [0, 0, 0, 0]);
 
         let mut executor = RenderExecutor::new();
@@ -2319,11 +2339,12 @@ mod tests {
             gpu_context: &gpu_context,
             atlas_storage: &atlas_storage,
         };
-        let mut encoder = gpu_context
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glaphica-test-composite-multiply-encoder"),
-            });
+        let mut encoder =
+            gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-test-composite-multiply-encoder"),
+                });
         let result = executor.composite_tile_with_encoder(
             &mut encoder,
             &mut context,
@@ -2433,11 +2454,12 @@ mod tests {
                 dst_tile_keys: vec![top_tile],
             },
         ];
-        let mut encoder = gpu_context
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glaphica-test-parametric-materialize-encoder"),
-            });
+        let mut encoder =
+            gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-test-parametric-materialize-encoder"),
+                });
         let materialize_result =
             executor.materialize_parametric_with_encoder(&mut encoder, &mut context, &cmds);
         assert!(materialize_result.is_ok());

@@ -52,6 +52,7 @@ pub enum NewLayerKind {
 pub enum LayerEditError {
     NoActiveNode,
     InvalidNode,
+    InvalidBlendModeForLeaf(UiBlendMode),
     RootSelectionNotAllowed,
     MoveOutOfBounds,
     ImageCreate(ImageCreateError),
@@ -373,23 +374,30 @@ impl Document {
         &mut self,
         node_id: NodeId,
         visible: bool,
-    ) -> Option<ImageDirtyTracker> {
-        if !self.layer_tree.set_node_visibility(node_id, visible) {
-            return None;
-        }
+    ) -> Result<ImageDirtyTracker, LayerEditError> {
+        self.layer_tree.set_node_visibility(node_id, visible)?;
 
         let mut dirty = ImageDirtyTracker::default();
+        // TODO: Narrow this to affected tiles if visibility toggles become frequent.
         for tile_index in 0..self.layout.total_tiles() as usize {
             dirty.mark(node_id, tile_index);
         }
-        Some(dirty)
+        Ok(dirty)
     }
 
-    pub fn set_node_opacity(&mut self, node_id: NodeId, opacity: f32) -> bool {
+    pub fn set_node_opacity(
+        &mut self,
+        node_id: NodeId,
+        opacity: f32,
+    ) -> Result<(), LayerEditError> {
         self.layer_tree.set_node_opacity(node_id, opacity)
     }
 
-    pub fn set_node_blend_mode(&mut self, node_id: NodeId, blend_mode: UiBlendMode) -> bool {
+    pub fn set_node_blend_mode(
+        &mut self,
+        node_id: NodeId,
+        blend_mode: UiBlendMode,
+    ) -> Result<(), LayerEditError> {
         self.layer_tree.set_node_blend_mode(node_id, blend_mode)
     }
 
@@ -626,15 +634,27 @@ impl UiLayerTree {
         set_solid_color_from_node(&mut self.root, node_id, color)
     }
 
-    pub fn set_node_visibility(&mut self, node_id: NodeId, visible: bool) -> bool {
+    pub fn set_node_visibility(
+        &mut self,
+        node_id: NodeId,
+        visible: bool,
+    ) -> Result<(), LayerEditError> {
         set_node_visibility_from_node(&mut self.root, node_id, visible)
     }
 
-    pub fn set_node_opacity(&mut self, node_id: NodeId, opacity: f32) -> bool {
+    pub fn set_node_opacity(
+        &mut self,
+        node_id: NodeId,
+        opacity: f32,
+    ) -> Result<(), LayerEditError> {
         set_node_opacity_from_node(&mut self.root, node_id, opacity)
     }
 
-    pub fn set_node_blend_mode(&mut self, node_id: NodeId, blend_mode: UiBlendMode) -> bool {
+    pub fn set_node_blend_mode(
+        &mut self,
+        node_id: NodeId,
+        blend_mode: UiBlendMode,
+    ) -> Result<(), LayerEditError> {
         set_node_blend_mode_from_node(&mut self.root, node_id, blend_mode)
     }
 
@@ -982,47 +1002,59 @@ fn set_solid_color_from_node(node: &mut UiLayerNode, node_id: NodeId, color: [f3
     }
 }
 
-fn set_node_visibility_from_node(node: &mut UiLayerNode, node_id: NodeId, visible: bool) -> bool {
+fn set_node_visibility_from_node(
+    node: &mut UiLayerNode,
+    node_id: NodeId,
+    visible: bool,
+) -> Result<(), LayerEditError> {
     match node {
         UiLayerNode::Branch(branch) => {
             if branch.meta.id == node_id {
                 branch.meta.visible = visible;
-                return true;
+                return Ok(());
             }
-            branch
-                .children
-                .iter_mut()
-                .any(|child| set_node_visibility_from_node(child, node_id, visible))
+            for child in &mut branch.children {
+                if set_node_visibility_from_node(child, node_id, visible).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(LayerEditError::InvalidNode)
         }
         UiLayerNode::Leaf(leaf) => {
             if leaf.meta.id != node_id {
-                return false;
+                return Err(LayerEditError::InvalidNode);
             }
             leaf.meta.visible = visible;
-            true
+            Ok(())
         }
     }
 }
 
-fn set_node_opacity_from_node(node: &mut UiLayerNode, node_id: NodeId, opacity: f32) -> bool {
+fn set_node_opacity_from_node(
+    node: &mut UiLayerNode,
+    node_id: NodeId,
+    opacity: f32,
+) -> Result<(), LayerEditError> {
     let opacity = opacity.clamp(0.0, 1.0);
     match node {
         UiLayerNode::Branch(branch) => {
             if branch.meta.id == node_id {
                 branch.config.opacity = opacity;
-                return true;
+                return Ok(());
             }
-            branch
-                .children
-                .iter_mut()
-                .any(|child| set_node_opacity_from_node(child, node_id, opacity))
+            for child in &mut branch.children {
+                if set_node_opacity_from_node(child, node_id, opacity).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(LayerEditError::InvalidNode)
         }
         UiLayerNode::Leaf(leaf) => {
             if leaf.meta.id != node_id {
-                return false;
+                return Err(LayerEditError::InvalidNode);
             }
             leaf.config.opacity = opacity;
-            true
+            Ok(())
         }
     }
 }
@@ -1031,27 +1063,31 @@ fn set_node_blend_mode_from_node(
     node: &mut UiLayerNode,
     node_id: NodeId,
     blend_mode: UiBlendMode,
-) -> bool {
+) -> Result<(), LayerEditError> {
     match node {
         UiLayerNode::Branch(branch) => {
             if branch.meta.id == node_id {
                 branch.config.blend_mode = branch_blend_mode_from_ui(blend_mode);
-                return true;
+                return Ok(());
             }
-            branch
-                .children
-                .iter_mut()
-                .any(|child| set_node_blend_mode_from_node(child, node_id, blend_mode))
+            for child in &mut branch.children {
+                match set_node_blend_mode_from_node(child, node_id, blend_mode) {
+                    Ok(()) => return Ok(()),
+                    Err(LayerEditError::InvalidNode) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(LayerEditError::InvalidNode)
         }
         UiLayerNode::Leaf(leaf) => {
             if leaf.meta.id != node_id {
-                return false;
+                return Err(LayerEditError::InvalidNode);
             }
             let Some(leaf_blend_mode) = leaf_blend_mode_from_ui(blend_mode) else {
-                return false;
+                return Err(LayerEditError::InvalidBlendModeForLeaf(blend_mode));
             };
             leaf.config.blend_mode = leaf_blend_mode;
-            true
+            Ok(())
         }
     }
 }
@@ -2074,7 +2110,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(doc.set_node_opacity(NodeId(1), 0.35));
+        doc.set_node_opacity(NodeId(1), 0.35).unwrap();
         assert_eq!(doc.node_opacity(NodeId(1)), Some(0.35));
 
         let items = doc.layer_tree_items();
@@ -2096,7 +2132,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(doc.set_node_blend_mode(NodeId(1), UiBlendMode::Multiply));
+        doc.set_node_blend_mode(NodeId(1), UiBlendMode::Multiply)
+            .unwrap();
         assert_eq!(doc.node_blend_mode(NodeId(1)), Some(UiBlendMode::Multiply));
 
         let items = doc.layer_tree_items();
@@ -2105,5 +2142,26 @@ mod tests {
         let flat = doc.build_flat_render_tree(RenderTreeGeneration(6)).unwrap();
         let node = flat.nodes.get(&NodeId(1)).unwrap();
         assert_eq!(node.config.blend_mode, LeafBlendMode::Multiply);
+    }
+
+    #[test]
+    fn test_set_node_blend_mode_reports_invalid_leaf_mode() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        let result = doc.set_node_blend_mode(NodeId(1), UiBlendMode::Penetrate);
+
+        assert!(matches!(
+            result,
+            Err(LayerEditError::InvalidBlendModeForLeaf(
+                UiBlendMode::Penetrate
+            ))
+        ));
     }
 }

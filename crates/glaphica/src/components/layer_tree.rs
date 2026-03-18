@@ -100,7 +100,11 @@ impl<'a> LayerTree<'a> {
             if render.visibility_response.clicked() {
                 output.set_visibility = Some((row.item.id, !row.item.visible));
             }
-            if render.row_response.clicked() && !render.visibility_response.clicked() {
+            let clicked_visibility_toggle = render
+                .row_response
+                .interact_pointer_pos()
+                .is_some_and(|pos| render.visibility_response.rect.contains(pos));
+            if render.row_response.clicked() && !clicked_visibility_toggle {
                 output.select_node = Some(row.item.id);
             }
             if render.preview_response.drag_started() {
