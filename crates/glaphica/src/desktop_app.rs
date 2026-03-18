@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use app::{AppThreadIntegration, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
-use glaphica_core::EpochId;
+use glaphica_core::{EpochId, NodeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
 use winit::{
@@ -16,35 +16,33 @@ use winit::{
 };
 
 use crate::brush_ui::state::{BrushKind, BrushUiState, PIXEL_RECT_BRUSH_ID, ROUND_BRUSH_ID};
-use crate::egui_renderer::EguiRenderer;
 use crate::input::{MouseInputResult, handle_window_event};
 use crate::overlay::{EguiOverlay, ExitConfirmAction, OverlayAction, PathDialogAction};
 use crate::run_config::RunConfig;
 
 pub struct DesktopApp {
-    pub window: Option<Arc<Window>>,
-    pub integration: Option<AppThreadIntegration>,
-    pub stroke_active: bool,
-    pub epoch: EpochId,
-    pub run_config: RunConfig,
-    pub replay_frames: Vec<app::trace::TraceInputFrame>,
-    pub replay_index: usize,
-    pub replay_finished: bool,
-    pub shutdown_requested: bool,
-    pub shutdown_after_save: bool,
-    pub deferred_shutdown_requested: bool,
-    pub output_finalized: bool,
-    pub started_at: Option<Instant>,
-    pub sigint_flag: Arc<AtomicBool>,
-    pub overlay: Option<EguiOverlay>,
-    pub cursor_position: Option<(f32, f32)>,
-    pub middle_pan_active: bool,
-    pub middle_pan_last_position: Option<(f32, f32)>,
-    pub ctrl_pressed: bool,
-    pub shift_pressed: bool,
-    pub active_brush_kind: BrushKind,
-    pub brush_states: Vec<BrushUiState>,
-    pub egui_renderer: Option<EguiRenderer>,
+    pub(crate) window: Option<Arc<Window>>,
+    pub(crate) integration: Option<AppThreadIntegration>,
+    pub(crate) stroke_active: bool,
+    pub(crate) epoch: EpochId,
+    pub(crate) run_config: RunConfig,
+    pub(crate) replay_frames: Vec<app::trace::TraceInputFrame>,
+    pub(crate) replay_index: usize,
+    pub(crate) replay_finished: bool,
+    pub(crate) shutdown_requested: bool,
+    pub(crate) shutdown_after_save: bool,
+    pub(crate) deferred_shutdown_requested: bool,
+    pub(crate) output_finalized: bool,
+    pub(crate) started_at: Option<Instant>,
+    pub(crate) sigint_flag: Arc<AtomicBool>,
+    pub(crate) overlay: Option<EguiOverlay>,
+    pub(crate) cursor_position: Option<(f32, f32)>,
+    pub(crate) middle_pan_active: bool,
+    pub(crate) middle_pan_last_position: Option<(f32, f32)>,
+    pub(crate) ctrl_pressed: bool,
+    pub(crate) shift_pressed: bool,
+    pub(crate) active_brush_kind: BrushKind,
+    pub(crate) brush_states: Vec<BrushUiState>,
 }
 
 impl DesktopApp {
@@ -72,7 +70,6 @@ impl DesktopApp {
             shift_pressed: false,
             active_brush_kind: BrushKind::Round,
             brush_states: Vec::new(),
-            egui_renderer: None,
         }
     }
 
@@ -129,195 +126,43 @@ impl DesktopApp {
     fn apply_overlay_actions(&mut self, actions: Vec<OverlayAction>) -> bool {
         let mut should_advance_epoch = false;
         for action in actions {
-            match action {
-                OverlayAction::BrushUpdated(brush_kind, values) => {
-                    self.apply_brush_update(brush_kind, &values);
-                }
-                OverlayAction::LayerSelected(node_id) => {
-                    if let Some(integration) = self.integration.as_mut()
-                        && integration.select_document_node(node_id)
-                    {
-                        should_advance_epoch = true;
-                    }
-                }
-                OverlayAction::LayerCreated(kind) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        match integration.create_layer_above_active(kind) {
-                            Ok(()) => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.mark_document_dirty();
-                                }
-                                should_advance_epoch = true;
-                            }
-                            Err(error) => eprintln!("failed to create layer: {:?}", error),
-                        }
-                    }
-                }
-                OverlayAction::GroupCreated => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        match integration.create_group_above_active() {
-                            Ok(()) => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.mark_document_dirty();
-                                }
-                                should_advance_epoch = true;
-                            }
-                            Err(error) => eprintln!("failed to create group: {:?}", error),
-                        }
-                    }
-                }
-                OverlayAction::LayerMoved(node_id, target) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        if let Err(error) = integration.move_document_node(node_id, target) {
-                            eprintln!("failed to move layer: {:?}", error);
-                        } else {
-                            if let Some(overlay) = self.overlay.as_mut() {
-                                overlay.mark_document_dirty();
-                            }
-                            should_advance_epoch = true;
-                        }
-                    }
-                }
-                OverlayAction::LayerVisibilityChanged(node_id, visible) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        if let Err(error) =
-                            integration.set_document_node_visibility(node_id, visible)
-                        {
-                            eprintln!("failed to set layer visibility: {:?}", error);
-                        } else {
-                            if let Some(overlay) = self.overlay.as_mut() {
-                                overlay.mark_document_dirty();
-                            }
-                            should_advance_epoch = true;
-                        }
-                    }
-                }
-                OverlayAction::LayerOpacityChanged(node_id, opacity) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        if let Err(error) = integration.set_document_node_opacity(node_id, opacity)
-                        {
-                            eprintln!("failed to set layer opacity: {:?}", error);
-                        } else {
-                            if let Some(overlay) = self.overlay.as_mut() {
-                                overlay.mark_document_dirty();
-                            }
-                            should_advance_epoch = true;
-                        }
-                    }
-                }
-                OverlayAction::LayerBlendModeChanged(node_id, blend_mode) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        if let Err(error) =
-                            integration.set_document_node_blend_mode(node_id, blend_mode)
-                        {
-                            eprintln!("failed to set layer blend mode: {:?}", error);
-                        } else {
-                            if let Some(overlay) = self.overlay.as_mut() {
-                                overlay.mark_document_dirty();
-                            }
-                            should_advance_epoch = true;
-                        }
-                    }
-                }
-                OverlayAction::DocumentSaveRequested(path) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        match integration.save_document_bundle(&path) {
-                            Ok(()) => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.set_document_status(
-                                        format!("Saved {}", path.display()),
-                                        false,
-                                    );
-                                    overlay.mark_document_clean();
-                                }
-                                if self.shutdown_after_save {
-                                    self.shutdown_after_save = false;
-                                    self.deferred_shutdown_requested = true;
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("failed to save document bundle: {}", error);
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.set_document_status(
-                                        format!("Save failed: {}", error),
-                                        true,
-                                    );
-                                }
-                                self.shutdown_after_save = false;
-                            }
-                        }
-                    }
-                }
-                OverlayAction::DocumentLoadRequested(path) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        match integration.load_document_bundle(&path) {
-                            Ok(()) => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.set_document_status(
-                                        format!("Loaded {}", path.display()),
-                                        false,
-                                    );
-                                    overlay.mark_document_clean();
-                                }
-                                should_advance_epoch = true;
-                            }
-                            Err(error) => {
-                                eprintln!("failed to load document bundle: {}", error);
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.set_document_status(
-                                        format!("Load failed: {}", error),
-                                        true,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                OverlayAction::DocumentExportRequested(path) => {
-                    if let Some(integration) = self.integration.as_mut() {
-                        match integration.export_document_jpeg(&path) {
-                            Ok(()) => {
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.set_document_status(
-                                        format!("Exported {}", path.display()),
-                                        false,
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("failed to export document jpeg: {}", error);
-                                if let Some(overlay) = self.overlay.as_mut() {
-                                    overlay.set_document_status(
-                                        format!("Export failed: {}", error),
-                                        true,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                OverlayAction::ExitConfirmed(ExitConfirmAction::SaveAndExit) => {
-                    self.shutdown_after_save = true;
-                    if let Some(overlay) = self.overlay.as_mut() {
-                        overlay.open_path_dialog(PathDialogAction::Save);
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                }
-                OverlayAction::ExitConfirmed(ExitConfirmAction::DiscardAndExit) => {
-                    self.deferred_shutdown_requested = true;
-                }
-                OverlayAction::ExitConfirmed(ExitConfirmAction::Cancel)
-                | OverlayAction::PathDialogCancelled => {
-                    self.shutdown_after_save = false;
-                }
-            }
+            should_advance_epoch |= self.apply_single_overlay_action(action);
         }
         should_advance_epoch
     }
 
-    fn apply_brush_update(&mut self, brush_kind: BrushKind, values: &[brushes::BrushConfigValue]) {
+    fn apply_single_overlay_action(&mut self, action: OverlayAction) -> bool {
+        match action {
+            OverlayAction::BrushUpdated(brush_kind, values) => {
+                self.apply_brush_action(brush_kind, &values);
+                false
+            }
+            OverlayAction::LayerSelected(node_id) => self.apply_layer_select(node_id),
+            OverlayAction::LayerCreated(kind) => self.apply_layer_create(kind),
+            OverlayAction::GroupCreated => self.apply_group_create(),
+            OverlayAction::LayerMoved(node_id, target) => self.apply_layer_move(node_id, target),
+            OverlayAction::LayerVisibilityChanged(node_id, visible) => {
+                self.apply_layer_visibility(node_id, visible)
+            }
+            OverlayAction::LayerOpacityChanged(node_id, opacity) => {
+                self.apply_layer_opacity(node_id, opacity)
+            }
+            OverlayAction::LayerBlendModeChanged(node_id, blend_mode) => {
+                self.apply_layer_blend_mode(node_id, blend_mode)
+            }
+            OverlayAction::DocumentSaveRequested(path) => self.apply_document_save(path),
+            OverlayAction::DocumentLoadRequested(path) => self.apply_document_load(path),
+            OverlayAction::DocumentExportRequested(path) => self.apply_document_export(path),
+            OverlayAction::ExitConfirmed(action) => self.apply_exit_confirm(action),
+            OverlayAction::PathDialogCancelled => self.apply_path_dialog_cancel(),
+        }
+    }
+
+    fn apply_brush_action(
+        &mut self,
+        brush_kind: BrushKind,
+        values: &[brushes::BrushConfigValue],
+    ) {
         match brush_kind {
             BrushKind::Round => match RoundBrush::from_config_values(values) {
                 Ok(updated_brush) => {
@@ -346,6 +191,192 @@ impl DesktopApp {
                 }
             },
         }
+    }
+
+    fn apply_layer_select(&mut self, node_id: NodeId) -> bool {
+        if let Some(integration) = self.integration.as_mut()
+            && integration.select_document_node(node_id)
+        {
+            return true;
+        }
+        false
+    }
+
+    fn apply_layer_create(&mut self, kind: document::NewLayerKind) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            match integration.create_layer_above_active(kind) {
+                Ok(()) => {
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.mark_document_dirty();
+                    }
+                    return true;
+                }
+                Err(error) => eprintln!("failed to create layer: {:?}", error),
+            }
+        }
+        false
+    }
+
+    fn apply_group_create(&mut self) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            match integration.create_group_above_active() {
+                Ok(()) => {
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.mark_document_dirty();
+                    }
+                    return true;
+                }
+                Err(error) => eprintln!("failed to create group: {:?}", error),
+            }
+        }
+        false
+    }
+
+    fn apply_layer_move(&mut self, node_id: NodeId, target: document::LayerMoveTarget) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            if let Err(error) = integration.move_document_node(node_id, target) {
+                eprintln!("failed to move layer: {:?}", error);
+            } else {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.mark_document_dirty();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn apply_layer_visibility(&mut self, node_id: NodeId, visible: bool) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            if let Err(error) = integration.set_document_node_visibility(node_id, visible) {
+                eprintln!("failed to set layer visibility: {:?}", error);
+            } else {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.mark_document_dirty();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn apply_layer_opacity(&mut self, node_id: NodeId, opacity: f32) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            if let Err(error) = integration.set_document_node_opacity(node_id, opacity) {
+                eprintln!("failed to set layer opacity: {:?}", error);
+            } else {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.mark_document_dirty();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn apply_layer_blend_mode(&mut self, node_id: NodeId, blend_mode: document::UiBlendMode) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            if let Err(error) = integration.set_document_node_blend_mode(node_id, blend_mode) {
+                eprintln!("failed to set layer blend mode: {:?}", error);
+            } else {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.mark_document_dirty();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn apply_document_save(&mut self, path: std::path::PathBuf) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            match integration.save_document_bundle(&path) {
+                Ok(()) => {
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.set_document_status(format!("Saved {}", path.display()), false);
+                        overlay.mark_document_clean();
+                    }
+                    if self.shutdown_after_save {
+                        self.shutdown_after_save = false;
+                        self.deferred_shutdown_requested = true;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("failed to save document bundle: {}", error);
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.set_document_status(format!("Save failed: {}", error), true);
+                    }
+                    self.shutdown_after_save = false;
+                }
+            }
+        }
+        false
+    }
+
+    fn apply_document_load(&mut self, path: std::path::PathBuf) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            match integration.load_document_bundle(&path) {
+                Ok(()) => {
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.set_document_status(format!("Loaded {}", path.display()), false);
+                        overlay.mark_document_clean();
+                    }
+                    return true;
+                }
+                Err(error) => {
+                    eprintln!("failed to load document bundle: {}", error);
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.set_document_status(format!("Load failed: {}", error), true);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn apply_document_export(&mut self, path: std::path::PathBuf) -> bool {
+        if let Some(integration) = self.integration.as_mut() {
+            match integration.export_document_jpeg(&path) {
+                Ok(()) => {
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.set_document_status(format!("Exported {}", path.display()), false);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("failed to export document jpeg: {}", error);
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.set_document_status(format!("Export failed: {}", error), true);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn apply_exit_confirm(&mut self, action: ExitConfirmAction) -> bool {
+        match action {
+            ExitConfirmAction::SaveAndExit => {
+                self.shutdown_after_save = true;
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.open_path_dialog(PathDialogAction::Save);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            ExitConfirmAction::DiscardAndExit => {
+                self.deferred_shutdown_requested = true;
+            }
+            ExitConfirmAction::Cancel => {
+                self.shutdown_after_save = false;
+            }
+        }
+        false
+    }
+
+    fn apply_path_dialog_cancel(&mut self) -> bool {
+        self.shutdown_after_save = false;
+        false
     }
 
     pub fn finalize_outputs(&mut self) {
