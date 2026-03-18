@@ -2,20 +2,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use app::{AppStats, LayerPreviewBitmap};
-use document::{LayerMoveTarget, NewLayerKind, UiBlendMode, UiLayerTreeItem};
+use document::UiLayerTreeItem;
 use egui::Rect;
 use egui_winit::EventResponse;
 use glaphica_core::NodeId;
-use winit::{
-    event::WindowEvent,
-    event_loop::ActiveEventLoop,
-    window::Window,
-};
+use winit::{event::WindowEvent, event_loop::ActiveEventLoop, window::Window};
 
 use crate::brush_ui::state::{BrushKind, BrushUiState};
 use crate::components::{ConfigPanel, Sidebar, StatusBar, TopBar};
 use crate::egui_renderer::EguiRenderer;
-use crate::overlay::actions::{ExitConfirmAction, PathDialogAction};
+use crate::overlay::actions::{ExitConfirmAction, OverlayAction, PathDialogAction};
 use crate::overlay::texture_cache::LayerTextureCache;
 use crate::theme::Theme;
 
@@ -36,26 +32,13 @@ pub struct EguiOverlay {
     pub texture_cache: LayerTextureCache,
     pub document_path: String,
     pub path_dialog_action: Option<PathDialogAction>,
-    pub path_dialog_cancelled: bool,
     pub document_status_text: Option<String>,
     pub document_status_is_error: bool,
     pub document_dirty: bool,
     pub exit_confirm_open: bool,
     pub config_panel_rect: Option<Rect>,
     pub app_stats: Option<AppStats>,
-    // Pending action fields
-    pending_brush_update: Option<(BrushKind, Vec<brushes::BrushConfigValue>)>,
-    pending_layer_select: Option<NodeId>,
-    pending_layer_create: Option<NewLayerKind>,
-    pending_group_create: bool,
-    pending_layer_move: Option<(NodeId, LayerMoveTarget)>,
-    pending_layer_visibility: Option<(NodeId, bool)>,
-    pending_layer_opacity: Option<(NodeId, f32)>,
-    pending_layer_blend_mode: Option<(NodeId, UiBlendMode)>,
-    pending_document_save: bool,
-    pending_document_load: bool,
-    pending_document_export: bool,
-    exit_confirm_action: Option<ExitConfirmAction>,
+    pending_actions: Vec<OverlayAction>,
 }
 
 impl EguiOverlay {
@@ -100,26 +83,13 @@ impl EguiOverlay {
             texture_cache: LayerTextureCache::new(),
             document_path,
             path_dialog_action: None,
-            path_dialog_cancelled: false,
             document_status_text: None,
             document_status_is_error: false,
             document_dirty: false,
             exit_confirm_open: false,
             config_panel_rect: None,
             app_stats: None,
-            // Initialize pending fields
-            pending_brush_update: None,
-            pending_layer_select: None,
-            pending_layer_create: None,
-            pending_group_create: false,
-            pending_layer_move: None,
-            pending_layer_visibility: None,
-            pending_layer_opacity: None,
-            pending_layer_blend_mode: None,
-            pending_document_save: false,
-            pending_document_load: false,
-            pending_document_export: false,
-            exit_confirm_action: None,
+            pending_actions: Vec::new(),
         }
     }
 
@@ -127,11 +97,7 @@ impl EguiOverlay {
         self.app_stats = Some(stats);
     }
 
-    pub fn on_window_event(
-        &mut self,
-        window: &Window,
-        event: &WindowEvent,
-    ) -> EventResponse {
+    pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> EventResponse {
         self.state.on_window_event(window, event)
     }
 
@@ -163,73 +129,12 @@ impl EguiOverlay {
         self.selected_node = selected_node;
         self.texture_cache.update(&self.ctx, preview_updates);
         let valid_ids = collect_layer_tree_ids(&self.layer_tree_items);
-        self.texture_cache.retain(|node_id| valid_ids.contains(node_id));
+        self.texture_cache
+            .retain(|node_id| valid_ids.contains(node_id));
     }
 
-    pub fn take_pending_brush_update(&mut self) -> Option<(BrushKind, Vec<brushes::BrushConfigValue>)> {
-        self.pending_brush_update.take()
-    }
-
-    pub fn take_pending_layer_select(&mut self) -> Option<NodeId> {
-        self.pending_layer_select.take()
-    }
-
-    pub fn take_pending_layer_create(&mut self) -> Option<NewLayerKind> {
-        self.pending_layer_create.take()
-    }
-
-    pub fn take_pending_group_create(&mut self) -> bool {
-        std::mem::take(&mut self.pending_group_create)
-    }
-
-    pub fn take_pending_layer_move(&mut self) -> Option<(NodeId, LayerMoveTarget)> {
-        self.pending_layer_move.take()
-    }
-
-    pub fn take_pending_layer_visibility(&mut self) -> Option<(NodeId, bool)> {
-        self.pending_layer_visibility.take()
-    }
-
-    pub fn take_pending_layer_opacity(&mut self) -> Option<(NodeId, f32)> {
-        self.pending_layer_opacity.take()
-    }
-
-    pub fn take_pending_layer_blend_mode(&mut self) -> Option<(NodeId, UiBlendMode)> {
-        self.pending_layer_blend_mode.take()
-    }
-
-    pub fn take_pending_document_save(&mut self) -> Option<PathBuf> {
-        if std::mem::take(&mut self.pending_document_save) {
-            let path = self.document_path.trim();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-        None
-    }
-
-    pub fn take_pending_document_load(&mut self) -> Option<PathBuf> {
-        if std::mem::take(&mut self.pending_document_load) {
-            let path = self.document_path.trim();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-        None
-    }
-
-    pub fn take_pending_document_export(&mut self) -> Option<PathBuf> {
-        if std::mem::take(&mut self.pending_document_export) {
-            let path = self.document_path.trim();
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-        None
-    }
-
-    pub fn take_path_dialog_cancelled(&mut self) -> bool {
-        std::mem::take(&mut self.path_dialog_cancelled)
+    pub fn take_pending_actions(&mut self) -> Vec<OverlayAction> {
+        std::mem::take(&mut self.pending_actions)
     }
 
     pub fn set_document_status(&mut self, text: String, is_error: bool) {
@@ -245,19 +150,11 @@ impl EguiOverlay {
         self.document_dirty = false;
     }
 
-    pub fn take_exit_confirm_action(&mut self) -> Option<ExitConfirmAction> {
-        self.exit_confirm_action.take()
-    }
-
-    pub fn flush_selected_brush_if_dirty(&mut self) -> Option<(BrushKind, Vec<brushes::BrushConfigValue>)> {
+    pub fn flush_selected_brush_if_dirty(&mut self) {
         self.queue_brush_update_if_dirty(self.selected_brush_index);
-        self.pending_brush_update.take()
     }
 
     fn queue_brush_update_if_dirty(&mut self, index: usize) {
-        if self.pending_brush_update.is_some() {
-            return;
-        }
         if index >= self.brush_states.len() {
             return;
         }
@@ -266,7 +163,10 @@ impl EguiOverlay {
             return;
         }
         brush_state.dirty = false;
-        self.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
+        self.pending_actions.push(OverlayAction::BrushUpdated(
+            brush_state.kind,
+            brush_state.values.clone(),
+        ));
     }
 
     pub fn open_path_dialog(&mut self, action: PathDialogAction) {
@@ -321,27 +221,15 @@ impl EguiOverlay {
         let active_color_rgb = &mut self.active_color_rgb;
         let brush_states = &mut self.brush_states;
         let selected_brush_index = &mut self.selected_brush_index;
-        let pending_brush_update = &mut self.pending_brush_update;
+        let pending_actions = &mut self.pending_actions;
         let layer_tree_items = &self.layer_tree_items;
         let selected_node = &mut self.selected_node;
-        let pending_layer_select = &mut self.pending_layer_select;
-        let pending_layer_create = &mut self.pending_layer_create;
-        let pending_group_create = &mut self.pending_group_create;
-        let pending_layer_move = &mut self.pending_layer_move;
-        let pending_layer_visibility = &mut self.pending_layer_visibility;
-        let pending_layer_opacity = &mut self.pending_layer_opacity;
-        let pending_layer_blend_mode = &mut self.pending_layer_blend_mode;
-        let _pending_document_save = &mut self.pending_document_save;
-        let _pending_document_load = &mut self.pending_document_load;
-        let _pending_document_export = &mut self.pending_document_export;
         let exit_confirm_open = &mut self.exit_confirm_open;
-        let exit_confirm_action = &mut self.exit_confirm_action;
         let mut config_panel_rect = self.config_panel_rect;
         let app_stats = self.app_stats.clone();
         let _document_dirty = self.document_dirty;
         let document_path = &mut self.document_path;
         let path_dialog_action = &mut self.path_dialog_action;
-        let _path_dialog_cancelled = &mut self.path_dialog_cancelled;
 
         let panel_max_width = (target_width as f32 - 96.0)
             .max(0.0)
@@ -383,25 +271,28 @@ impl EguiOverlay {
                 *left_panel_collapsed = !*left_panel_collapsed;
             }
             if let Some(kind) = sidebar_output.create_layer {
-                *pending_layer_create = Some(kind);
+                pending_actions.push(OverlayAction::LayerCreated(kind));
             }
             if sidebar_output.create_group {
-                *pending_group_create = true;
+                pending_actions.push(OverlayAction::GroupCreated);
             }
             if let Some(node_id) = sidebar_output.select_layer {
-                *pending_layer_select = Some(node_id);
+                pending_actions.push(OverlayAction::LayerSelected(node_id));
             }
             if let Some(layer_move) = sidebar_output.move_layer {
-                *pending_layer_move = Some((layer_move.node_id, layer_move.target));
+                pending_actions.push(OverlayAction::LayerMoved(
+                    layer_move.node_id,
+                    layer_move.target,
+                ));
             }
             if let Some((node_id, visible)) = sidebar_output.set_layer_visibility {
-                *pending_layer_visibility = Some((node_id, visible));
+                pending_actions.push(OverlayAction::LayerVisibilityChanged(node_id, visible));
             }
             if let Some((node_id, opacity)) = sidebar_output.set_layer_opacity {
-                *pending_layer_opacity = Some((node_id, opacity));
+                pending_actions.push(OverlayAction::LayerOpacityChanged(node_id, opacity));
             }
             if let Some((node_id, blend_mode)) = sidebar_output.set_layer_blend_mode {
-                *pending_layer_blend_mode = Some((node_id, blend_mode));
+                pending_actions.push(OverlayAction::LayerBlendModeChanged(node_id, blend_mode));
             }
             if let Some(rect) = sidebar_output.panel_rect {
                 *left_panel_width = rect.width();
@@ -422,7 +313,7 @@ impl EguiOverlay {
                 *right_panel_collapsed = !*right_panel_collapsed;
             }
             if let Some((kind, values)) = config_output.pending_brush_update {
-                *pending_brush_update = Some((kind, values));
+                pending_actions.push(OverlayAction::BrushUpdated(kind, values));
             }
             if config_output.brush_selection_changed {
                 if let Some(new_index) = config_output.new_selected_index {
@@ -446,15 +337,20 @@ impl EguiOverlay {
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
                                 *exit_confirm_open = false;
-                                *exit_confirm_action = Some(ExitConfirmAction::SaveAndExit);
+                                pending_actions.push(OverlayAction::ExitConfirmed(
+                                    ExitConfirmAction::SaveAndExit,
+                                ));
                             }
                             if ui.button("Discard").clicked() {
                                 *exit_confirm_open = false;
-                                *exit_confirm_action = Some(ExitConfirmAction::DiscardAndExit);
+                                pending_actions.push(OverlayAction::ExitConfirmed(
+                                    ExitConfirmAction::DiscardAndExit,
+                                ));
                             }
                             if ui.button("Cancel").clicked() {
                                 *exit_confirm_open = false;
-                                *exit_confirm_action = Some(ExitConfirmAction::Cancel);
+                                pending_actions
+                                    .push(OverlayAction::ExitConfirmed(ExitConfirmAction::Cancel));
                             }
                         });
                     });
@@ -465,7 +361,9 @@ impl EguiOverlay {
                 let (title, confirm_label, hint) = match action {
                     PathDialogAction::Save => ("Save Document", "Save", "Enter bundle output path"),
                     PathDialogAction::Load => ("Load Document", "Load", "Enter bundle input path"),
-                    PathDialogAction::Export => ("Export JPEG", "Export", "Enter .jpg or .jpeg output path"),
+                    PathDialogAction::Export => {
+                        ("Export JPEG", "Export", "Enter .jpg or .jpeg output path")
+                    }
                 };
                 egui::Window::new(title)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -497,7 +395,8 @@ impl EguiOverlay {
         }
         if cancel_path_dialog_flag {
             self.path_dialog_action = None;
-            self.path_dialog_cancelled = true;
+            self.pending_actions
+                .push(OverlayAction::PathDialogCancelled);
         }
         self.config_panel_rect = config_panel_rect;
 
@@ -506,15 +405,12 @@ impl EguiOverlay {
 
         // Auto-flush brush update when pointer leaves config panel
         let pointer_pos = self.ctx.input(|input| input.pointer.latest_pos());
-        if self.pending_brush_update.is_none()
-            && let (Some(rect), Some(pointer_pos)) = (config_panel_rect, pointer_pos)
+        if let (Some(rect), Some(pointer_pos)) = (config_panel_rect, pointer_pos)
             && !rect.contains(pointer_pos)
             && let Some(brush_state) = self.brush_states.get(self.selected_brush_index)
             && brush_state.dirty
         {
-            let brush_state = &mut self.brush_states[self.selected_brush_index];
-            brush_state.dirty = false;
-            self.pending_brush_update = Some((brush_state.kind, brush_state.values.clone()));
+            self.queue_brush_update_if_dirty(self.selected_brush_index);
         }
 
         if target_width == 0 || target_height == 0 {
@@ -538,10 +434,21 @@ impl EguiOverlay {
     }
 
     fn confirm_path_dialog(&mut self) {
+        let path = self.document_path.trim();
+        if path.is_empty() {
+            self.path_dialog_action = None;
+            return;
+        }
         match self.path_dialog_action.take() {
-            Some(PathDialogAction::Save) => self.pending_document_save = true,
-            Some(PathDialogAction::Load) => self.pending_document_load = true,
-            Some(PathDialogAction::Export) => self.pending_document_export = true,
+            Some(PathDialogAction::Save) => self
+                .pending_actions
+                .push(OverlayAction::DocumentSaveRequested(PathBuf::from(path))),
+            Some(PathDialogAction::Load) => self
+                .pending_actions
+                .push(OverlayAction::DocumentLoadRequested(PathBuf::from(path))),
+            Some(PathDialogAction::Export) => self
+                .pending_actions
+                .push(OverlayAction::DocumentExportRequested(PathBuf::from(path))),
             None => {}
         }
     }

@@ -15,10 +15,10 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::brush_ui::state::{BrushKind, BrushUiState, ROUND_BRUSH_ID, PIXEL_RECT_BRUSH_ID};
+use crate::brush_ui::state::{BrushKind, BrushUiState, PIXEL_RECT_BRUSH_ID, ROUND_BRUSH_ID};
 use crate::egui_renderer::EguiRenderer;
-use crate::input::{handle_window_event, MouseInputResult};
-use crate::overlay::{EguiOverlay, ExitConfirmAction, PathDialogAction};
+use crate::input::{MouseInputResult, handle_window_event};
+use crate::overlay::{EguiOverlay, ExitConfirmAction, OverlayAction, PathDialogAction};
 use crate::run_config::RunConfig;
 
 pub struct DesktopApp {
@@ -85,6 +85,7 @@ impl DesktopApp {
     }
 
     pub fn render_frame(&mut self) {
+        let mut overlay_actions = Vec::new();
         let mut should_advance_epoch = false;
         {
             let Some(integration) = &mut self.integration else {
@@ -114,143 +115,236 @@ impl DesktopApp {
                 }
                 integration.set_active_brush_color_rgb(overlay.selected_brush_color_rgb());
                 integration.set_active_brush_erase(overlay.selected_brush_erase());
-                if let Some((brush_kind, values)) = overlay.take_pending_brush_update() {
-                    match brush_kind {
-                        BrushKind::Round => match RoundBrush::from_config_values(&values) {
-                            Ok(updated_brush) => {
-                                if let Err(error) =
-                                    integration.update_brush(brush_kind.brush_id(), updated_brush)
-                                {
-                                    eprintln!("failed to update brush: {:?}", error);
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("failed to build round brush from config: {}", error);
-                            }
-                        },
-                        BrushKind::PixelRect => match PixelRectBrush::from_config_values(&values) {
-                            Ok(updated_brush) => {
-                                if let Err(error) =
-                                    integration.update_brush(brush_kind.brush_id(), updated_brush)
-                                {
-                                    eprintln!("failed to update brush: {:?}", error);
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("failed to build pixel rect brush from config: {}", error);
-                            }
-                        },
-                    }
-                }
-                if let Some(node_id) = overlay.take_pending_layer_select() {
-                    if integration.select_document_node(node_id) {
-                        should_advance_epoch = true;
-                    }
-                }
-                if overlay.take_path_dialog_cancelled() {
-                    self.shutdown_after_save = false;
-                }
-                if let Some(kind) = overlay.take_pending_layer_create() {
-                    match integration.create_layer_above_active(kind) {
-                        Ok(()) => {
-                            overlay.mark_document_dirty();
-                            should_advance_epoch = true;
-                        }
-                        Err(error) => eprintln!("failed to create layer: {:?}", error),
-                    }
-                }
-                if overlay.take_pending_group_create() {
-                    match integration.create_group_above_active() {
-                        Ok(()) => {
-                            overlay.mark_document_dirty();
-                            should_advance_epoch = true;
-                        }
-                        Err(error) => eprintln!("failed to create group: {:?}", error),
-                    }
-                }
-                if let Some((node_id, target)) = overlay.take_pending_layer_move() {
-                    if let Err(error) = integration.move_document_node(node_id, target) {
-                        eprintln!("failed to move layer: {:?}", error);
-                    } else {
-                        overlay.mark_document_dirty();
-                        should_advance_epoch = true;
-                    }
-                }
-                if let Some((node_id, visible)) = overlay.take_pending_layer_visibility() {
-                    if let Err(error) = integration.set_document_node_visibility(node_id, visible) {
-                        eprintln!("failed to set layer visibility: {:?}", error);
-                    } else {
-                        overlay.mark_document_dirty();
-                        should_advance_epoch = true;
-                    }
-                }
-                if let Some((node_id, opacity)) = overlay.take_pending_layer_opacity() {
-                    if let Err(error) = integration.set_document_node_opacity(node_id, opacity) {
-                        eprintln!("failed to set layer opacity: {:?}", error);
-                    } else {
-                        overlay.mark_document_dirty();
-                        should_advance_epoch = true;
-                    }
-                }
-                if let Some((node_id, blend_mode)) = overlay.take_pending_layer_blend_mode() {
-                    if let Err(error) =
-                        integration.set_document_node_blend_mode(node_id, blend_mode)
-                    {
-                        eprintln!("failed to set layer blend mode: {:?}", error);
-                    } else {
-                        overlay.mark_document_dirty();
-                        should_advance_epoch = true;
-                    }
-                }
-                if let Some(path) = overlay.take_pending_document_save() {
-                    match integration.save_document_bundle(&path) {
-                        Ok(()) => {
-                            overlay.set_document_status(format!("Saved {}", path.display()), false);
-                            overlay.mark_document_clean();
-                            if self.shutdown_after_save {
-                                self.shutdown_after_save = false;
-                                self.deferred_shutdown_requested = true;
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("failed to save document bundle: {}", error);
-                            overlay.set_document_status(format!("Save failed: {}", error), true);
-                            self.shutdown_after_save = false;
-                        }
-                    }
-                }
-                if let Some(path) = overlay.take_pending_document_load() {
-                    match integration.load_document_bundle(&path) {
-                        Ok(()) => {
-                            overlay
-                                .set_document_status(format!("Loaded {}", path.display()), false);
-                            overlay.mark_document_clean();
-                            should_advance_epoch = true;
-                        }
-                        Err(error) => {
-                            eprintln!("failed to load document bundle: {}", error);
-                            overlay.set_document_status(format!("Load failed: {}", error), true);
-                        }
-                    }
-                }
-                if let Some(path) = overlay.take_pending_document_export() {
-                    match integration.export_document_jpeg(&path) {
-                        Ok(()) => {
-                            overlay
-                                .set_document_status(format!("Exported {}", path.display()), false);
-                        }
-                        Err(error) => {
-                            eprintln!("failed to export document jpeg: {}", error);
-                            overlay.set_document_status(format!("Export failed: {}", error), true);
-                        }
-                    }
-                }
+                overlay_actions = overlay.take_pending_actions();
             } else {
                 integration.present_to_screen();
             }
         }
+        should_advance_epoch |= self.apply_overlay_actions(overlay_actions);
         if should_advance_epoch {
             self.advance_epoch();
+        }
+    }
+
+    fn apply_overlay_actions(&mut self, actions: Vec<OverlayAction>) -> bool {
+        let mut should_advance_epoch = false;
+        for action in actions {
+            match action {
+                OverlayAction::BrushUpdated(brush_kind, values) => {
+                    self.apply_brush_update(brush_kind, &values);
+                }
+                OverlayAction::LayerSelected(node_id) => {
+                    if let Some(integration) = self.integration.as_mut()
+                        && integration.select_document_node(node_id)
+                    {
+                        should_advance_epoch = true;
+                    }
+                }
+                OverlayAction::LayerCreated(kind) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        match integration.create_layer_above_active(kind) {
+                            Ok(()) => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.mark_document_dirty();
+                                }
+                                should_advance_epoch = true;
+                            }
+                            Err(error) => eprintln!("failed to create layer: {:?}", error),
+                        }
+                    }
+                }
+                OverlayAction::GroupCreated => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        match integration.create_group_above_active() {
+                            Ok(()) => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.mark_document_dirty();
+                                }
+                                should_advance_epoch = true;
+                            }
+                            Err(error) => eprintln!("failed to create group: {:?}", error),
+                        }
+                    }
+                }
+                OverlayAction::LayerMoved(node_id, target) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        if let Err(error) = integration.move_document_node(node_id, target) {
+                            eprintln!("failed to move layer: {:?}", error);
+                        } else {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                overlay.mark_document_dirty();
+                            }
+                            should_advance_epoch = true;
+                        }
+                    }
+                }
+                OverlayAction::LayerVisibilityChanged(node_id, visible) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        if let Err(error) =
+                            integration.set_document_node_visibility(node_id, visible)
+                        {
+                            eprintln!("failed to set layer visibility: {:?}", error);
+                        } else {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                overlay.mark_document_dirty();
+                            }
+                            should_advance_epoch = true;
+                        }
+                    }
+                }
+                OverlayAction::LayerOpacityChanged(node_id, opacity) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        if let Err(error) = integration.set_document_node_opacity(node_id, opacity)
+                        {
+                            eprintln!("failed to set layer opacity: {:?}", error);
+                        } else {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                overlay.mark_document_dirty();
+                            }
+                            should_advance_epoch = true;
+                        }
+                    }
+                }
+                OverlayAction::LayerBlendModeChanged(node_id, blend_mode) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        if let Err(error) =
+                            integration.set_document_node_blend_mode(node_id, blend_mode)
+                        {
+                            eprintln!("failed to set layer blend mode: {:?}", error);
+                        } else {
+                            if let Some(overlay) = self.overlay.as_mut() {
+                                overlay.mark_document_dirty();
+                            }
+                            should_advance_epoch = true;
+                        }
+                    }
+                }
+                OverlayAction::DocumentSaveRequested(path) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        match integration.save_document_bundle(&path) {
+                            Ok(()) => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.set_document_status(
+                                        format!("Saved {}", path.display()),
+                                        false,
+                                    );
+                                    overlay.mark_document_clean();
+                                }
+                                if self.shutdown_after_save {
+                                    self.shutdown_after_save = false;
+                                    self.deferred_shutdown_requested = true;
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("failed to save document bundle: {}", error);
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.set_document_status(
+                                        format!("Save failed: {}", error),
+                                        true,
+                                    );
+                                }
+                                self.shutdown_after_save = false;
+                            }
+                        }
+                    }
+                }
+                OverlayAction::DocumentLoadRequested(path) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        match integration.load_document_bundle(&path) {
+                            Ok(()) => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.set_document_status(
+                                        format!("Loaded {}", path.display()),
+                                        false,
+                                    );
+                                    overlay.mark_document_clean();
+                                }
+                                should_advance_epoch = true;
+                            }
+                            Err(error) => {
+                                eprintln!("failed to load document bundle: {}", error);
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.set_document_status(
+                                        format!("Load failed: {}", error),
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                OverlayAction::DocumentExportRequested(path) => {
+                    if let Some(integration) = self.integration.as_mut() {
+                        match integration.export_document_jpeg(&path) {
+                            Ok(()) => {
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.set_document_status(
+                                        format!("Exported {}", path.display()),
+                                        false,
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("failed to export document jpeg: {}", error);
+                                if let Some(overlay) = self.overlay.as_mut() {
+                                    overlay.set_document_status(
+                                        format!("Export failed: {}", error),
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                OverlayAction::ExitConfirmed(ExitConfirmAction::SaveAndExit) => {
+                    self.shutdown_after_save = true;
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.open_path_dialog(PathDialogAction::Save);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                OverlayAction::ExitConfirmed(ExitConfirmAction::DiscardAndExit) => {
+                    self.deferred_shutdown_requested = true;
+                }
+                OverlayAction::ExitConfirmed(ExitConfirmAction::Cancel)
+                | OverlayAction::PathDialogCancelled => {
+                    self.shutdown_after_save = false;
+                }
+            }
+        }
+        should_advance_epoch
+    }
+
+    fn apply_brush_update(&mut self, brush_kind: BrushKind, values: &[brushes::BrushConfigValue]) {
+        match brush_kind {
+            BrushKind::Round => match RoundBrush::from_config_values(values) {
+                Ok(updated_brush) => {
+                    if let Some(integration) = self.integration.as_mut()
+                        && let Err(error) =
+                            integration.update_brush(brush_kind.brush_id(), updated_brush)
+                    {
+                        eprintln!("failed to update brush: {:?}", error);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("failed to build round brush from config: {}", error);
+                }
+            },
+            BrushKind::PixelRect => match PixelRectBrush::from_config_values(values) {
+                Ok(updated_brush) => {
+                    if let Some(integration) = self.integration.as_mut()
+                        && let Err(error) =
+                            integration.update_brush(brush_kind.brush_id(), updated_brush)
+                    {
+                        eprintln!("failed to update brush: {:?}", error);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("failed to build pixel rect brush from config: {}", error);
+                }
+            },
         }
     }
 
@@ -494,24 +588,13 @@ impl ApplicationHandler for DesktopApp {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
-                if let Some(overlay) = self.overlay.as_mut() {
-                    match overlay.take_exit_confirm_action() {
-                        Some(ExitConfirmAction::SaveAndExit) => {
-                            self.shutdown_after_save = true;
-                            overlay.open_path_dialog(PathDialogAction::Save);
-                            self.render_frame();
-                        }
-                        Some(ExitConfirmAction::DiscardAndExit) => {
-                            self.perform_shutdown(event_loop)
-                        }
-                        Some(ExitConfirmAction::Cancel) => {
-                            self.shutdown_after_save = false;
-                        }
-                        None => {}
-                    }
-                }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state, logical_key, .. }, .. } => {
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state, logical_key, ..
+                },
+                ..
+            } => {
                 if ui_event_consumed {
                     return;
                 }
@@ -562,87 +645,32 @@ impl ApplicationHandler for DesktopApp {
                     }
                 }
             }
-            _ => {
-                match handle_window_event(self, &event, ui_event_consumed) {
-                    MouseInputResult::StrokeBegan => {
-                        if let Some(overlay) = &mut self.overlay {
-                            if let Some((brush_kind, values)) =
-                                overlay.flush_selected_brush_if_dirty()
-                            {
-                                match brush_kind {
-                                    crate::brush_ui::state::BrushKind::Round => {
-                                        match brushes::builtin_brushes::round::RoundBrush::from_config_values(
-                                            &values,
-                                        ) {
-                                            Ok(updated_brush) => {
-                                                if let Some(integration) = &mut self.integration {
-                                                    if let Err(error) = integration.update_brush(
-                                                        brush_kind.brush_id(),
-                                                        updated_brush,
-                                                    ) {
-                                                        eprintln!(
-                                                            "failed to update brush: {:?}",
-                                                            error
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Err(error) => {
-                                                eprintln!(
-                                                    "failed to build round brush from config: {}",
-                                                    error
-                                                );
-                                            }
-                                        }
-                                    }
-                                    crate::brush_ui::state::BrushKind::PixelRect => {
-                                        match brushes::builtin_brushes::pixel_rect::PixelRectBrush::from_config_values(
-                                            &values,
-                                        ) {
-                                            Ok(updated_brush) => {
-                                                if let Some(integration) = &mut self.integration {
-                                                    if let Err(error) = integration.update_brush(
-                                                        brush_kind.brush_id(),
-                                                        updated_brush,
-                                                    ) {
-                                                        eprintln!(
-                                                            "failed to update brush: {:?}",
-                                                            error
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Err(error) => {
-                                                eprintln!(
-                                                    "failed to build pixel rect brush from config: {}",
-                                                    error
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        self.render_frame();
-                        if let Some(integration) = &mut self.integration {
-                            if let Some(node_id) = integration.active_paint_node() {
-                                integration.begin_stroke(node_id);
-                            }
-                        }
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
+            _ => match handle_window_event(self, &event, ui_event_consumed) {
+                MouseInputResult::StrokeBegan => {
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.flush_selected_brush_if_dirty();
+                        let overlay_actions = overlay.take_pending_actions();
+                        self.apply_overlay_actions(overlay_actions);
+                    }
+                    self.render_frame();
+                    if let Some(integration) = &mut self.integration {
+                        if let Some(node_id) = integration.active_paint_node() {
+                            integration.begin_stroke(node_id);
                         }
                     }
-                    MouseInputResult::StrokeEnded
-                    | MouseInputResult::PanStarted
-                    | MouseInputResult::PanEnded
-                    | MouseInputResult::None => {
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
-            }
+                MouseInputResult::StrokeEnded
+                | MouseInputResult::PanStarted
+                | MouseInputResult::PanEnded
+                | MouseInputResult::None => {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            },
         }
     }
 

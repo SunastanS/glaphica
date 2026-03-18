@@ -20,19 +20,18 @@ pub enum PathDialogAction {
     Export,
 }
 
-#[derive(Default)]
-pub struct PendingActions {
-    pub brush_update: Option<(BrushKind, Vec<BrushConfigValue>)>,
-    pub layer_select: Option<NodeId>,
-    pub layer_create: Option<NewLayerKind>,
-    pub group_create: bool,
-    pub layer_move: Option<(NodeId, LayerMoveTarget)>,
-    pub layer_visibility: Option<(NodeId, bool)>,
-    pub layer_opacity: Option<(NodeId, f32)>,
-    pub layer_blend_mode: Option<(NodeId, UiBlendMode)>,
-    pub document_save: Option<PathBuf>,
-    pub document_load: Option<PathBuf>,
-    pub document_export: Option<PathBuf>,
-    pub exit_confirm_action: Option<ExitConfirmAction>,
-    pub path_dialog_cancelled: bool,
+pub enum OverlayAction {
+    BrushUpdated(BrushKind, Vec<BrushConfigValue>),
+    LayerSelected(NodeId),
+    LayerCreated(NewLayerKind),
+    GroupCreated,
+    LayerMoved(NodeId, LayerMoveTarget),
+    LayerVisibilityChanged(NodeId, bool),
+    LayerOpacityChanged(NodeId, f32),
+    LayerBlendModeChanged(NodeId, UiBlendMode),
+    DocumentSaveRequested(PathBuf),
+    DocumentLoadRequested(PathBuf),
+    DocumentExportRequested(PathBuf),
+    ExitConfirmed(ExitConfirmAction),
+    PathDialogCancelled,
 }
