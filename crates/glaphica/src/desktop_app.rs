@@ -52,7 +52,6 @@ pub enum AppActionError {
     DocumentSave(PathBuf, String),
     DocumentLoad(PathBuf, String),
     DocumentExport(PathBuf, String),
-    Multiple(Vec<AppActionError>),
 }
 
 impl std::fmt::Display for AppActionError {
@@ -81,13 +80,6 @@ impl std::fmt::Display for AppActionError {
             }
             AppActionError::DocumentExport(path, e) => {
                 write!(f, "document export failed ({}): {}", path.display(), e)
-            }
-            AppActionError::Multiple(errors) => {
-                writeln!(f, "multiple action errors:")?;
-                for error in errors {
-                    writeln!(f, "  {}", error)?;
-                }
-                Ok(())
             }
         }
     }
@@ -436,7 +428,6 @@ impl DesktopApp {
                 }
             })
             .inspect_err(|error| {
-                eprintln!("failed to save document bundle: {}", error);
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.set_document_status(format!("Save failed: {}", error), true);
                 }
@@ -462,7 +453,6 @@ impl DesktopApp {
                 }
             })
             .inspect_err(|error| {
-                eprintln!("failed to load document bundle: {}", error);
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.set_document_status(format!("Load failed: {}", error), true);
                 }
@@ -486,7 +476,6 @@ impl DesktopApp {
                 }
             })
             .inspect_err(|error| {
-                eprintln!("failed to export document jpeg: {}", error);
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.set_document_status(format!("Export failed: {}", error), true);
                 }
