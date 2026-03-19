@@ -7,7 +7,10 @@ mod storage;
 mod view;
 
 pub use document::{Document, LayerEditError, Metadata};
-pub use node::{LayerMoveTarget, NewLayerKind, UiBlendMode, UiLayerTreeItem, UiNodeKind};
+pub use node::{
+    BranchBlendMode, LayerMoveTarget, LeafBlendMode, NewLayerKind, UiBlendMode, UiLayerTreeItem,
+    UiNodeKind,
+};
 pub use shared_tree::{
     FlatLeafContent, FlatNodeKind, FlatRenderNode, FlatRenderTree, MaterializeParametricCmd,
     NodeConfig, ParametricMesh, ParametricVertex, RenderCmd, RenderSource, SharedRenderTree,
@@ -17,4 +20,3 @@ pub use storage::{
     RasterLayerExportRequest, StoredBranchBlendMode, StoredLayerNode, StoredLeafBlendMode,
 };
 pub use view::View;
-

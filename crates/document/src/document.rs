@@ -418,7 +418,7 @@ impl Document {
         }
     }
 
-    pub fn allocate_node_id(&mut self) -> NodeId {
+    fn allocate_node_id(&mut self) -> NodeId {
         let id = self.next_node_id;
         self.next_node_id = NodeId(id.0 + 1);
         id
