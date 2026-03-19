@@ -6,8 +6,8 @@ use images::ImageCreateError;
 use crate::layer_tree::{collect_raster_tile_keys_from_node, UiLayerTree};
 use crate::node::{
     BranchBlendMode, BranchConfig, LayerMoveTarget, LeafBlendMode, LeafConfig, NewLayerKind,
-    RenderLayerNode, RenderLeafNode, SolidColorLayer, SpecialLayer, UiBlendMode, UiBranchNode,
-    UiLayerNode, UiLayerTreeItem, UiLeafContent, UiLeafNode, UiNodeMeta,
+    SolidColorLayer, SpecialLayer, UiBlendMode, UiBranchNode, UiLayerNode, UiLayerTreeItem,
+    UiLeafContent, UiLeafNode, UiNodeMeta,
 };
 use crate::render_lowering::{infer_render_nodes, RenderLayerTree};
 use crate::shared_tree::{FlatLeafContent, FlatNodeKind, FlatRenderTree};
@@ -469,9 +469,9 @@ mod tests {
     use super::*;
     use crate::layer_tree::UiLayerTree;
     use crate::node::{
-        BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, RenderBranchNode,
-        RenderLayerNode, RenderLeafContent, RenderLeafNode, SolidColorLayer, SpecialLayer,
-        UiBranchNode, UiLayerNode, UiLeafContent, UiLeafNode, UiNodeKind, UiNodeMeta,
+        BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, RenderLayerNode,
+        RenderLeafContent, RenderLeafNode, SolidColorLayer, SpecialLayer, UiBranchNode,
+        UiLayerNode, UiLeafContent, UiLeafNode, UiNodeKind, UiNodeMeta,
     };
     use crate::render_lowering::RenderLayerTree;
     use crate::shared_tree::{
