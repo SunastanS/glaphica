@@ -33,6 +33,11 @@ impl ApplyActionsEffect {
     }
 }
 
+pub struct ApplyActionsReport {
+    pub effect: ApplyActionsEffect,
+    pub errors: Vec<AppActionError>,
+}
+
 #[derive(Debug)]
 pub enum AppActionError {
     BrushUpdate(String),
@@ -53,29 +58,29 @@ pub enum AppActionError {
 impl std::fmt::Display for AppActionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AppActionError::BrushUpdate(e) => write!(f, "brush update failed: {:?}", e),
+            AppActionError::BrushUpdate(e) => write!(f, "brush update failed: {}", e),
             AppActionError::BrushBuild(e) => write!(f, "brush build failed: {}", e),
             AppActionError::LayerSelectFailed(id) => write!(f, "layer select failed: {}", id.0),
-            AppActionError::LayerCreate(e) => write!(f, "layer create failed: {:?}", e),
-            AppActionError::GroupCreate(e) => write!(f, "group create failed: {:?}", e),
-            AppActionError::LayerMove(id, e) => write!(f, "layer move failed ({}): {:?}", id.0, e),
+            AppActionError::LayerCreate(e) => write!(f, "layer create failed: {}", e),
+            AppActionError::GroupCreate(e) => write!(f, "group create failed: {}", e),
+            AppActionError::LayerMove(id, e) => write!(f, "layer move failed ({}): {}", id.0, e),
             AppActionError::LayerVisibility(id, e) => {
-                write!(f, "layer visibility failed ({}): {:?}", id.0, e)
+                write!(f, "layer visibility failed ({}): {}", id.0, e)
             }
             AppActionError::LayerOpacity(id, e) => {
-                write!(f, "layer opacity failed ({}): {:?}", id.0, e)
+                write!(f, "layer opacity failed ({}): {}", id.0, e)
             }
             AppActionError::LayerBlendMode(id, e) => {
-                write!(f, "layer blend mode failed ({}): {:?}", id.0, e)
+                write!(f, "layer blend mode failed ({}): {}", id.0, e)
             }
             AppActionError::DocumentSave(path, e) => {
-                write!(f, "document save failed ({}): {:?}", path.display(), e)
+                write!(f, "document save failed ({}): {}", path.display(), e)
             }
             AppActionError::DocumentLoad(path, e) => {
-                write!(f, "document load failed ({}): {:?}", path.display(), e)
+                write!(f, "document load failed ({}): {}", path.display(), e)
             }
             AppActionError::DocumentExport(path, e) => {
-                write!(f, "document export failed ({}): {:?}", path.display(), e)
+                write!(f, "document export failed ({}): {}", path.display(), e)
             }
             AppActionError::Multiple(errors) => {
                 writeln!(f, "multiple action errors:")?;
@@ -186,24 +191,21 @@ impl DesktopApp {
                 integration.present_to_screen();
             }
         }
-        let effect = match self.apply_overlay_actions(overlay_actions) {
-            Ok(effect) => effect,
-            Err(error) => {
-                eprintln!("overlay action errors: {}", error);
-                ApplyActionsEffect::default()
-            }
-        };
-        if effect.advance_epoch {
+        let report = self.apply_overlay_actions(overlay_actions);
+        for error in report.errors {
+            eprintln!("overlay action errors: {}", error);
+        }
+        if report.effect.advance_epoch {
             self.advance_epoch();
         }
-        if effect.request_redraw {
+        if report.effect.request_redraw {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
     }
 
-    fn apply_overlay_actions(&mut self, actions: Vec<UiCommand>) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_overlay_actions(&mut self, actions: Vec<UiCommand>) -> ApplyActionsReport {
         let mut effect = ApplyActionsEffect::default();
         let mut errors = Vec::new();
         for action in actions {
@@ -212,11 +214,7 @@ impl DesktopApp {
                 Err(error) => errors.push(error),
             }
         }
-        if errors.is_empty() {
-            Ok(effect)
-        } else {
-            Err(AppActionError::Multiple(errors))
-        }
+        ApplyActionsReport { effect, errors }
     }
 
     fn apply_single_ui_command(&mut self, action: UiCommand) -> Result<ApplyActionsEffect, AppActionError> {
@@ -832,10 +830,11 @@ impl ApplicationHandler for DesktopApp {
                     if let Some(overlay) = &mut self.overlay {
                         overlay.flush_selected_brush_if_dirty();
                         let overlay_actions = overlay.take_pending_actions();
-                        match self.apply_overlay_actions(overlay_actions) {
-                            Ok(action_effect) => effect.merge(action_effect),
-                            Err(error) => eprintln!("overlay action errors: {}", error),
+                        let report = self.apply_overlay_actions(overlay_actions);
+                        for error in report.errors {
+                            eprintln!("overlay action errors: {}", error);
                         }
+                        effect.merge(report.effect);
                     }
                     if effect.advance_epoch {
                         self.advance_epoch();
