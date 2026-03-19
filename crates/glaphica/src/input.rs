@@ -32,7 +32,7 @@ pub fn handle_window_event(
     app: &mut DesktopApp,
     event: &WindowEvent,
     ui_event_consumed: bool,
-) -> MouseInputResult {
+) -> (MouseInputResult, bool) {
     match event {
         WindowEvent::MouseInput { button, state, .. } => {
             if ui_event_consumed {
@@ -42,29 +42,29 @@ pub fn handle_window_event(
         }
         WindowEvent::CursorMoved { position, .. } => {
             if app.is_replay_mode() {
-                return MouseInputResult::None;
+                return (MouseInputResult::None, false);
             }
             let current_position = (position.x as f32, position.y as f32);
             app.cursor_position = Some(current_position);
             if ui_event_consumed {
-                return MouseInputResult::None;
+                return (MouseInputResult::None, false);
             }
-            handle_cursor_moved(app, current_position);
-            MouseInputResult::None
+            let needs_redraw = handle_cursor_moved(app, current_position);
+            (MouseInputResult::None, needs_redraw)
         }
         WindowEvent::MouseWheel { delta, .. } => {
             if app.is_replay_mode() || ui_event_consumed {
-                return MouseInputResult::None;
+                return (MouseInputResult::None, false);
             }
-            handle_mouse_wheel(app, delta);
-            MouseInputResult::None
+            let needs_redraw = handle_mouse_wheel(app, delta);
+            (MouseInputResult::None, needs_redraw)
         }
         WindowEvent::ModifiersChanged(modifiers) => {
             app.ctrl_pressed = modifiers.state().control_key();
             app.shift_pressed = modifiers.state().shift_key();
-            MouseInputResult::None
+            (MouseInputResult::None, false)
         }
-        _ => MouseInputResult::None,
+        _ => (MouseInputResult::None, false),
     }
 }
 
@@ -72,7 +72,7 @@ fn handle_mouse_input_ui_consumed(
     app: &mut DesktopApp,
     button: &MouseButton,
     state: &ElementState,
-) -> MouseInputResult {
+) -> (MouseInputResult, bool) {
     match (button, state) {
         (MouseButton::Left, ElementState::Released) if app.stroke_active => {
             app.stroke_active = false;
@@ -82,14 +82,14 @@ fn handle_mouse_input_ui_consumed(
             if let Some(overlay) = &mut app.overlay {
                 overlay.mark_document_dirty();
             }
-            MouseInputResult::StrokeEnded
+            (MouseInputResult::StrokeEnded, true)
         }
         (MouseButton::Middle, ElementState::Released) => {
             app.middle_pan_active = false;
             app.middle_pan_last_position = None;
-            MouseInputResult::PanEnded
+            (MouseInputResult::PanEnded, true)
         }
-        _ => MouseInputResult::None,
+        _ => (MouseInputResult::None, false),
     }
 }
 
@@ -97,9 +97,9 @@ fn handle_mouse_input(
     app: &mut DesktopApp,
     button: &MouseButton,
     state: &ElementState,
-) -> MouseInputResult {
+) -> (MouseInputResult, bool) {
     if app.is_replay_mode() {
-        return MouseInputResult::None;
+        return (MouseInputResult::None, false);
     }
     match button {
         MouseButton::Left => match state {
@@ -108,10 +108,10 @@ fn handle_mouse_input(
                 if let Some(integration) = &mut app.integration {
                     if integration.active_paint_node().is_some() {
                         app.stroke_active = true;
-                        return MouseInputResult::StrokeBegan;
+                        return (MouseInputResult::StrokeBegan, false);
                     }
                 }
-                MouseInputResult::None
+                (MouseInputResult::None, false)
             }
             ElementState::Released => {
                 let stroke_was_active = app.stroke_active;
@@ -124,26 +124,28 @@ fn handle_mouse_input(
                         overlay.mark_document_dirty();
                     }
                 }
-                MouseInputResult::None
+                (MouseInputResult::None, false)
             }
         },
         MouseButton::Middle => match state {
             ElementState::Pressed => {
                 app.middle_pan_active = true;
                 app.middle_pan_last_position = app.cursor_position;
-                MouseInputResult::PanStarted
+                (MouseInputResult::PanStarted, true)
             }
             ElementState::Released => {
                 app.middle_pan_active = false;
                 app.middle_pan_last_position = None;
-                MouseInputResult::PanEnded
+                (MouseInputResult::PanEnded, true)
             }
         },
-        _ => MouseInputResult::None,
+        _ => (MouseInputResult::None, false),
     }
 }
 
-fn handle_cursor_moved(app: &mut DesktopApp, current_position: (f32, f32)) {
+fn handle_cursor_moved(app: &mut DesktopApp, current_position: (f32, f32)) -> bool {
+    let mut needs_redraw = false;
+
     if app.middle_pan_active {
         if let Some((last_x, last_y)) = app.middle_pan_last_position {
             let dx = current_position.0 - last_x;
@@ -151,6 +153,7 @@ fn handle_cursor_moved(app: &mut DesktopApp, current_position: (f32, f32)) {
             if let Some(integration) = &mut app.integration {
                 integration.pan_view(dx, dy);
             }
+            needs_redraw = true;
         }
         app.middle_pan_last_position = Some(current_position);
     }
@@ -173,12 +176,14 @@ fn handle_cursor_moved(app: &mut DesktopApp, current_position: (f32, f32)) {
             integration.push_input_sample(sample);
         }
     }
+
+    needs_redraw
 }
 
-fn handle_mouse_wheel(app: &mut DesktopApp, delta: &MouseScrollDelta) {
+fn handle_mouse_wheel(app: &mut DesktopApp, delta: &MouseScrollDelta) -> bool {
     let scroll = scroll_delta_lines(delta);
     if scroll.abs() <= f32::EPSILON {
-        return;
+        return false;
     }
 
     let (center_x, center_y) = match app.cursor_position {
@@ -188,7 +193,7 @@ fn handle_mouse_wheel(app: &mut DesktopApp, delta: &MouseScrollDelta) {
                 let size = window.inner_size();
                 (size.width as f32 * 0.5, size.height as f32 * 0.5)
             }
-            None => return,
+            None => return false,
         },
     };
 
@@ -199,4 +204,6 @@ fn handle_mouse_wheel(app: &mut DesktopApp, delta: &MouseScrollDelta) {
             integration.zoom_view((scroll * 0.12).exp(), center_x, center_y);
         }
     }
+
+    true
 }

@@ -813,40 +813,52 @@ impl ApplicationHandler for DesktopApp {
                     }
                 }
             }
-            _ => match handle_window_event(self, &event, ui_event_consumed) {
-                MouseInputResult::StrokeBegan => {
-                    let mut effect = ApplyActionsEffect::default();
-                    if let Some(overlay) = &mut self.overlay {
-                        overlay.flush_selected_brush_if_dirty();
-                        let overlay_actions = overlay.take_pending_actions();
-                        let report = self.apply_overlay_actions(overlay_actions);
-                        for error in report.errors {
-                            eprintln!("overlay action errors: {}", error);
+            _ => {
+                let (result, needs_redraw) = handle_window_event(self, &event, ui_event_consumed);
+                match result {
+                    MouseInputResult::StrokeBegan => {
+                        let mut effect = ApplyActionsEffect::default();
+                        if let Some(overlay) = &mut self.overlay {
+                            overlay.flush_selected_brush_if_dirty();
+                            let overlay_actions = overlay.take_pending_actions();
+                            let report = self.apply_overlay_actions(overlay_actions);
+                            for error in report.errors {
+                                eprintln!("overlay action errors: {}", error);
+                            }
+                            effect.merge(report.effect);
                         }
-                        effect.merge(report.effect);
-                    }
-                    if effect.advance_epoch {
-                        self.advance_epoch();
-                    }
-                    self.render_frame();
-                    if let Some(integration) = &mut self.integration {
-                        if let Some(node_id) = integration.active_paint_node() {
-                            integration.begin_stroke(node_id);
+                        if effect.advance_epoch {
+                            self.advance_epoch();
+                        }
+                        self.render_frame();
+                        if let Some(integration) = &mut self.integration {
+                            if let Some(node_id) = integration.active_paint_node() {
+                                integration.begin_stroke(node_id);
+                            }
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
                         }
                     }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
+                    MouseInputResult::StrokeEnded => {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    MouseInputResult::PanStarted | MouseInputResult::PanEnded => {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    MouseInputResult::None => {
+                        if needs_redraw {
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
                     }
                 }
-                MouseInputResult::StrokeEnded
-                | MouseInputResult::PanStarted
-                | MouseInputResult::PanEnded
-                | MouseInputResult::None => {
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                }
-            },
+            }
         }
     }
 
