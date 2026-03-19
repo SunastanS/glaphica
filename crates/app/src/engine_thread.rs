@@ -261,6 +261,20 @@ impl EngineThreadState {
         let old_keys = self.document.collect_raster_tile_keys();
         self.backend_manager.drop_tiles(old_keys);
         self.document = document;
+        self.reset_stroke_state();
+    }
+
+    pub fn resize_document_canvas_anchored_top_left(
+        &mut self,
+        layout: images::layout::ImageLayout,
+    ) -> Result<thread_protocol::RenderTreeUpdatedMsg, document::ImageCreateError> {
+        let result = self.document.resize_canvas_anchored_top_left(layout)?;
+        self.backend_manager.retire_tiles(result.removed_tile_keys);
+        self.reset_stroke_state();
+        self.rebuild_render_tree()
+    }
+
+    fn reset_stroke_state(&mut self) {
         self.pending_stroke_undo_tiles.clear();
         self.undo_strokes.clear();
         self.redo_strokes.clear();
@@ -667,10 +681,16 @@ fn cache_node_parity(
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineBackendManager, collect_render_cache_tile_keys, retire_stale_render_cache_tiles,
+        EngineBackendManager, EngineThreadState, collect_render_cache_tile_keys,
+        retire_stale_render_cache_tiles,
     };
-    use document::{FlatNodeKind, FlatRenderNode, FlatRenderTree, LeafBlendMode, NodeConfig};
-    use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
+    use document::{
+        Document, FlatNodeKind, FlatRenderNode, FlatRenderTree, LeafBlendMode, NodeConfig,
+        SharedRenderTree,
+    };
+    use glaphica_core::{
+        AtlasLayout, BackendId, IMAGE_TILE_SIZE, NodeId, RenderTreeGeneration, TileKey,
+    };
     use images::{Image, layout::ImageLayout};
     use std::{collections::HashMap, sync::Arc};
 
@@ -736,6 +756,56 @@ mod tests {
         assert_eq!(
             backend.tile_state(removed).unwrap(),
             atlas::TileState::Cached
+        );
+    }
+
+    #[test]
+    fn resize_document_canvas_retires_removed_raster_tiles() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
+        let document = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(0),
+            BackendId::new(1),
+        )
+        .unwrap();
+        let shared_tree = Arc::new(SharedRenderTree::new(FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::new()),
+            root_id: None,
+        }));
+        let mut engine = EngineThreadState::new(document, shared_tree, 8);
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        let tile_key = engine.allocate_leaf_tile(BackendId::new(0)).unwrap();
+        engine
+            .document_mut()
+            .get_leaf_image_mut(NodeId(1))
+            .unwrap()
+            .set_tile_key(1, tile_key)
+            .unwrap();
+
+        engine
+            .resize_document_canvas_anchored_top_left(ImageLayout::new(
+                IMAGE_TILE_SIZE,
+                IMAGE_TILE_SIZE,
+            ))
+            .unwrap();
+
+        let backend = engine.backend_manager().backend(BackendId::new(0)).unwrap();
+        assert_eq!(
+            backend.tile_state(tile_key).unwrap(),
+            atlas::TileState::Cached
+        );
+        assert_eq!(
+            engine.document().layout(),
+            ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE)
         );
     }
 }

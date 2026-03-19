@@ -606,6 +606,10 @@ impl AppThreadIntegration {
             .screen_to_document(screen_x, screen_y)
     }
 
+    pub fn map_document_to_screen(&self, doc_x: f32, doc_y: f32) -> (f32, f32) {
+        self.main_state.view().document_to_screen(doc_x, doc_y)
+    }
+
     pub fn pan_view(&mut self, dx: f32, dy: f32) {
         self.main_state.view_mut().pan(dx, dy);
     }
@@ -1312,6 +1316,20 @@ impl AppThreadIntegration {
 
     pub fn rebuild_render_tree(&mut self) -> Result<(), document::ImageCreateError> {
         let msg = self.engine_state.rebuild_render_tree()?;
+        let _ = self
+            .main_state
+            .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
+        Ok(())
+    }
+
+    pub fn resize_document_canvas_anchored_top_left(
+        &mut self,
+        layout: ImageLayout,
+    ) -> Result<(), document::ImageCreateError> {
+        let msg = self
+            .engine_state
+            .resize_document_canvas_anchored_top_left(layout)?;
+        self.document_layout = layout;
         let _ = self
             .main_state
             .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);

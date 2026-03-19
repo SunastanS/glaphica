@@ -26,6 +26,7 @@ pub enum MouseInputResult {
     StrokeEnded,
     PanStarted,
     PanEnded,
+    CanvasCropCommitted,
 }
 
 pub fn handle_window_event(
@@ -46,6 +47,9 @@ pub fn handle_window_event(
             }
             let current_position = (position.x as f32, position.y as f32);
             app.cursor_position = Some(current_position);
+            if app.update_canvas_crop_preview(current_position) {
+                return (MouseInputResult::None, true);
+            }
             if ui_event_consumed {
                 return (MouseInputResult::None, false);
             }
@@ -74,6 +78,10 @@ fn handle_mouse_input_ui_consumed(
     state: &ElementState,
 ) -> (MouseInputResult, bool) {
     match (button, state) {
+        (MouseButton::Left, ElementState::Released) if app.canvas_crop.active_drag => {
+            let applied = app.commit_canvas_crop();
+            (MouseInputResult::CanvasCropCommitted, applied)
+        }
         (MouseButton::Left, ElementState::Released) if app.stroke_active => {
             app.stroke_active = false;
             if let Some(integration) = &mut app.integration {
@@ -104,6 +112,15 @@ fn handle_mouse_input(
     match button {
         MouseButton::Left => match state {
             ElementState::Pressed => {
+                if app.canvas_crop_mode_active() {
+                    if let Some(cursor_position) = app.cursor_position
+                        && app.canvas_crop_handle_hit(cursor_position)
+                    {
+                        app.begin_canvas_crop_drag();
+                        return (MouseInputResult::None, true);
+                    }
+                    return (MouseInputResult::None, false);
+                }
                 app.stroke_active = false;
                 if let Some(integration) = &mut app.integration {
                     if integration.active_paint_node().is_some() {
@@ -114,6 +131,10 @@ fn handle_mouse_input(
                 (MouseInputResult::None, false)
             }
             ElementState::Released => {
+                if app.canvas_crop.active_drag {
+                    let applied = app.commit_canvas_crop();
+                    return (MouseInputResult::CanvasCropCommitted, applied);
+                }
                 let stroke_was_active = app.stroke_active;
                 app.stroke_active = false;
                 if let Some(integration) = &mut app.integration {

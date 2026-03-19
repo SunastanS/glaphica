@@ -6,7 +6,7 @@ mod shared_tree;
 mod storage;
 mod view;
 
-pub use document::{Document, LayerEditError, Metadata};
+pub use document::{CanvasResizeResult, Document, LayerEditError, Metadata};
 pub use images::ImageCreateError;
 pub use node::{
     BranchBlendMode, LayerMoveTarget, LeafBlendMode, NewLayerKind, UiBlendMode, UiLayerTreeItem,

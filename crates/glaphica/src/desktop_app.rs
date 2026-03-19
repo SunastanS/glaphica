@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use app::{AppThreadIntegration, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
+use egui::Pos2;
 use glaphica_core::{EpochId, NodeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::layout::ImageLayout;
@@ -110,6 +111,13 @@ pub struct DesktopApp {
     pub(crate) shift_pressed: bool,
     pub(crate) active_brush_kind: BrushKind,
     pub(crate) brush_states: Vec<BrushUiState>,
+    pub(crate) canvas_crop: CanvasCropState,
+}
+
+#[derive(Default)]
+pub struct CanvasCropState {
+    pub(crate) active_drag: bool,
+    pub(crate) preview_size: Option<(u32, u32)>,
 }
 
 impl DesktopApp {
@@ -137,6 +145,7 @@ impl DesktopApp {
             shift_pressed: false,
             active_brush_kind: BrushKind::Round,
             brush_states: Vec::new(),
+            canvas_crop: CanvasCropState::default(),
         }
     }
 
@@ -148,8 +157,89 @@ impl DesktopApp {
         self.epoch = EpochId(self.epoch.0.saturating_add(1));
     }
 
+    pub fn canvas_crop_mode_active(&self) -> bool {
+        self.overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.canvas_crop_mode_active())
+    }
+
+    pub fn canvas_crop_handle_hit(&self, screen_position: (f32, f32)) -> bool {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return false;
+        };
+        let Some(handle_center) = overlay.canvas_crop_handle_center() else {
+            return false;
+        };
+        handle_center.distance(Pos2::new(screen_position.0, screen_position.1)) <= 14.0
+    }
+
+    pub fn begin_canvas_crop_drag(&mut self) -> bool {
+        let Some(integration) = self.integration.as_ref() else {
+            return false;
+        };
+        self.canvas_crop.active_drag = true;
+        self.canvas_crop.preview_size = Some(integration.document_size());
+        true
+    }
+
+    pub fn update_canvas_crop_preview(&mut self, screen_position: (f32, f32)) -> bool {
+        if !self.canvas_crop.active_drag {
+            return false;
+        }
+        let Some(integration) = self.integration.as_ref() else {
+            return false;
+        };
+        let (doc_x, doc_y) =
+            integration.map_screen_to_document(screen_position.0, screen_position.1);
+        let next_size = (crop_extent_to_size(doc_x), crop_extent_to_size(doc_y));
+        if self.canvas_crop.preview_size == Some(next_size) {
+            return false;
+        }
+        self.canvas_crop.preview_size = Some(next_size);
+        true
+    }
+
+    pub fn commit_canvas_crop(&mut self) -> bool {
+        if !self.canvas_crop.active_drag {
+            return false;
+        }
+        self.canvas_crop.active_drag = false;
+        let Some((width, height)) = self.canvas_crop.preview_size.take() else {
+            return false;
+        };
+        let Some(integration) = self.integration.as_mut() else {
+            return false;
+        };
+        match integration.resize_document_canvas_anchored_top_left(ImageLayout::new(width, height))
+        {
+            Ok(()) => {
+                self.advance_epoch();
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.mark_document_dirty();
+                    overlay.set_document_status(
+                        format!("Canvas resized to {} x {}", width, height),
+                        false,
+                    );
+                }
+                true
+            }
+            Err(error) => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.set_document_status(format!("Canvas resize failed: {:?}", error), true);
+                }
+                false
+            }
+        }
+    }
+
+    pub fn cancel_canvas_crop_interaction(&mut self) {
+        self.canvas_crop.active_drag = false;
+        self.canvas_crop.preview_size = None;
+    }
+
     pub fn render_frame(&mut self) {
         let mut overlay_actions = Vec::new();
+        let mut clear_canvas_crop = false;
         {
             let Some(integration) = &mut self.integration else {
                 return;
@@ -162,6 +252,22 @@ impl DesktopApp {
                     integration.active_document_node(),
                     integration.take_layer_preview_updates(),
                 );
+                let crop_mode_active = overlay.canvas_crop_mode_active();
+                if crop_mode_active {
+                    let preview_size = self
+                        .canvas_crop
+                        .preview_size
+                        .unwrap_or(integration.document_size());
+                    let outline = crop_outline_screen_points(integration, preview_size);
+                    overlay.set_canvas_crop_overlay(
+                        Some(outline),
+                        Some(outline[2]),
+                        self.canvas_crop.active_drag,
+                    );
+                } else {
+                    clear_canvas_crop = true;
+                    overlay.set_canvas_crop_overlay(None, None, false);
+                }
                 let Some(window) = self.window.as_deref() else {
                     integration.present_to_screen();
                     return;
@@ -182,6 +288,9 @@ impl DesktopApp {
             } else {
                 integration.present_to_screen();
             }
+        }
+        if clear_canvas_crop {
+            self.cancel_canvas_crop_interaction();
         }
         let report = self.apply_overlay_actions(overlay_actions);
         for error in report.errors {
@@ -209,7 +318,10 @@ impl DesktopApp {
         ApplyActionsReport { effect, errors }
     }
 
-    fn apply_single_ui_command(&mut self, action: UiCommand) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_single_ui_command(
+        &mut self,
+        action: UiCommand,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         match action {
             UiCommand::BrushUpdated(brush_kind, values) => {
                 self.apply_brush_action(brush_kind, &values)
@@ -254,7 +366,10 @@ impl DesktopApp {
                         request_redraw: true,
                     })
                 }
-                Err(error) => Err(AppActionError::BrushBuild(format!("round brush: {}", error))),
+                Err(error) => Err(AppActionError::BrushBuild(format!(
+                    "round brush: {}",
+                    error
+                ))),
             },
             BrushKind::PixelRect => match PixelRectBrush::from_config_values(values) {
                 Ok(updated_brush) => {
@@ -269,12 +384,18 @@ impl DesktopApp {
                         request_redraw: true,
                     })
                 }
-                Err(error) => Err(AppActionError::BrushBuild(format!("pixel rect brush: {}", error))),
+                Err(error) => Err(AppActionError::BrushBuild(format!(
+                    "pixel rect brush: {}",
+                    error
+                ))),
             },
         }
     }
 
-    fn apply_layer_select(&mut self, node_id: NodeId) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_layer_select(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
             return Ok(ApplyActionsEffect::default());
         };
@@ -287,7 +408,10 @@ impl DesktopApp {
             .ok_or(AppActionError::LayerSelectFailed(node_id))
     }
 
-    fn apply_layer_create(&mut self, kind: document::NewLayerKind) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_layer_create(
+        &mut self,
+        kind: document::NewLayerKind,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
             return Ok(ApplyActionsEffect::default());
         };
@@ -411,7 +535,10 @@ impl DesktopApp {
             .map_err(|e| AppActionError::LayerBlendMode(node_id, format!("{:?}", e)))
     }
 
-    fn apply_document_save(&mut self, path: std::path::PathBuf) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_document_save(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
             return Ok(ApplyActionsEffect::default());
         };
@@ -440,7 +567,10 @@ impl DesktopApp {
             .map_err(|error| AppActionError::DocumentSave(path, format!("{:?}", error)))
     }
 
-    fn apply_document_load(&mut self, path: std::path::PathBuf) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_document_load(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
             return Ok(ApplyActionsEffect::default());
         };
@@ -464,7 +594,10 @@ impl DesktopApp {
             .map_err(|error| AppActionError::DocumentLoad(path, format!("{:?}", error)))
     }
 
-    fn apply_document_export(&mut self, path: std::path::PathBuf) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_document_export(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
             return Ok(ApplyActionsEffect::default());
         };
@@ -487,7 +620,10 @@ impl DesktopApp {
             .map_err(|error| AppActionError::DocumentExport(path, format!("{:?}", error)))
     }
 
-    fn apply_exit_confirm(&mut self, action: ExitConfirmAction) -> Result<ApplyActionsEffect, AppActionError> {
+    fn apply_exit_confirm(
+        &mut self,
+        action: ExitConfirmAction,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         match action {
             ExitConfirmAction::SaveAndExit => {
                 self.shutdown_after_save = true;
@@ -567,6 +703,27 @@ impl DesktopApp {
         self.finalize_outputs();
         event_loop.exit();
     }
+}
+
+fn crop_outline_screen_points(
+    integration: &AppThreadIntegration,
+    document_size: (u32, u32),
+) -> [Pos2; 4] {
+    let (width, height) = document_size;
+    let corners = [
+        integration.map_document_to_screen(0.0, 0.0),
+        integration.map_document_to_screen(width as f32, 0.0),
+        integration.map_document_to_screen(width as f32, height as f32),
+        integration.map_document_to_screen(0.0, height as f32),
+    ];
+    corners.map(|(x, y)| Pos2::new(x, y))
+}
+
+fn crop_extent_to_size(value: f32) -> u32 {
+    if !value.is_finite() {
+        return 1;
+    }
+    value.max(1.0).ceil().min(u32::MAX as f32) as u32
 }
 
 impl ApplicationHandler for DesktopApp {
@@ -758,9 +915,13 @@ impl ApplicationHandler for DesktopApp {
                 self.render_frame();
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state, logical_key, repeat, ..
-                },
+                event:
+                    KeyEvent {
+                        state,
+                        logical_key,
+                        repeat,
+                        ..
+                    },
                 ..
             } => {
                 if ui_event_consumed {
@@ -846,6 +1007,11 @@ impl ApplicationHandler for DesktopApp {
                         }
                     }
                     MouseInputResult::PanStarted | MouseInputResult::PanEnded => {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    MouseInputResult::CanvasCropCommitted => {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }

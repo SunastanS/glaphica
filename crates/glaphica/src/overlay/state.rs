@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use app::{AppStats, LayerPreviewBitmap};
 use document::UiLayerTreeItem;
-use egui::Rect;
+use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use egui_winit::EventResponse;
 use glaphica_core::NodeId;
 use winit::{event::WindowEvent, event_loop::ActiveEventLoop, window::Window};
@@ -11,7 +11,7 @@ use winit::{event::WindowEvent, event_loop::ActiveEventLoop, window::Window};
 use crate::brush_ui::state::{BrushKind, BrushUiState};
 use crate::components::{ConfigPanel, Sidebar, StatusBar, TopBar};
 use crate::egui_renderer::EguiRenderer;
-use crate::overlay::actions::{ExitConfirmAction, UiCommand, PathDialogAction};
+use crate::overlay::actions::{ExitConfirmAction, PathDialogAction, UiCommand};
 use crate::overlay::texture_cache::LayerTextureCache;
 use crate::theme::Theme;
 
@@ -38,6 +38,10 @@ pub struct EguiOverlay {
     pub exit_confirm_open: bool,
     pub config_panel_rect: Option<Rect>,
     pub app_stats: Option<AppStats>,
+    pub canvas_crop_mode_active: bool,
+    pub canvas_crop_outline: Option<[Pos2; 4]>,
+    pub canvas_crop_handle_center: Option<Pos2>,
+    pub canvas_crop_dragging: bool,
     pending_actions: Vec<UiCommand>,
 }
 
@@ -89,6 +93,10 @@ impl EguiOverlay {
             exit_confirm_open: false,
             config_panel_rect: None,
             app_stats: None,
+            canvas_crop_mode_active: false,
+            canvas_crop_outline: None,
+            canvas_crop_handle_center: None,
+            canvas_crop_dragging: false,
             pending_actions: Vec::new(),
         }
     }
@@ -148,6 +156,25 @@ impl EguiOverlay {
 
     pub fn mark_document_clean(&mut self) {
         self.document_dirty = false;
+    }
+
+    pub fn canvas_crop_mode_active(&self) -> bool {
+        self.canvas_crop_mode_active
+    }
+
+    pub fn set_canvas_crop_overlay(
+        &mut self,
+        outline: Option<[Pos2; 4]>,
+        handle_center: Option<Pos2>,
+        dragging: bool,
+    ) {
+        self.canvas_crop_outline = outline;
+        self.canvas_crop_handle_center = handle_center;
+        self.canvas_crop_dragging = dragging;
+    }
+
+    pub fn canvas_crop_handle_center(&self) -> Option<Pos2> {
+        self.canvas_crop_handle_center
     }
 
     pub fn flush_selected_brush_if_dirty(&mut self) {
@@ -242,7 +269,10 @@ impl EguiOverlay {
         let full_output = self.ctx.run(raw_input, |ctx| {
             // Top bar
             let mut top_bar = TopBar::new();
-            let top_bar_output = top_bar.render(ctx, &theme);
+            let top_bar_output = top_bar.render(ctx, &theme, self.canvas_crop_mode_active);
+            if top_bar_output.toggle_canvas_crop_mode {
+                self.canvas_crop_mode_active = !self.canvas_crop_mode_active;
+            }
             if top_bar_output.save_clicked {
                 requested_path_dialog = Some(PathDialogAction::Save);
             }
@@ -280,10 +310,7 @@ impl EguiOverlay {
                 pending_actions.push(UiCommand::LayerSelected(node_id));
             }
             if let Some(layer_move) = sidebar_output.move_layer {
-                pending_actions.push(UiCommand::LayerMoved(
-                    layer_move.node_id,
-                    layer_move.target,
-                ));
+                pending_actions.push(UiCommand::LayerMoved(layer_move.node_id, layer_move.target));
             }
             if let Some((node_id, visible)) = sidebar_output.set_layer_visibility {
                 pending_actions.push(UiCommand::LayerVisibilityChanged(node_id, visible));
@@ -337,9 +364,8 @@ impl EguiOverlay {
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
                                 *exit_confirm_open = false;
-                                pending_actions.push(UiCommand::ExitConfirmed(
-                                    ExitConfirmAction::SaveAndExit,
-                                ));
+                                pending_actions
+                                    .push(UiCommand::ExitConfirmed(ExitConfirmAction::SaveAndExit));
                             }
                             if ui.button("Discard").clicked() {
                                 *exit_confirm_open = false;
@@ -395,13 +421,16 @@ impl EguiOverlay {
         }
         if cancel_path_dialog_flag {
             self.path_dialog_action = None;
-            self.pending_actions
-                .push(UiCommand::PathDialogCancelled);
+            self.pending_actions.push(UiCommand::PathDialogCancelled);
         }
         self.config_panel_rect = config_panel_rect;
 
         self.state
             .handle_platform_output(window, full_output.platform_output);
+
+        if self.canvas_crop_mode_active {
+            self.paint_canvas_crop_overlay();
+        }
 
         // Auto-flush brush update when pointer leaves config panel
         let pointer_pos = self.ctx.input(|input| input.pointer.latest_pos());
@@ -430,6 +459,39 @@ impl EguiOverlay {
             target_view,
             [target_width, target_height],
             full_output.pixels_per_point,
+        );
+    }
+
+    fn paint_canvas_crop_overlay(&self) {
+        let Some(outline) = self.canvas_crop_outline else {
+            return;
+        };
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("canvas-crop"));
+        let painter = self.ctx.layer_painter(layer);
+        let outer_color = self.theme.accent_color.linear_multiply(0.18);
+        let inner_color = if self.canvas_crop_dragging {
+            Color32::from_rgb(124, 196, 255)
+        } else {
+            self.theme.accent_color
+        };
+
+        for index in 0..outline.len() {
+            let start = outline[index];
+            let end = outline[(index + 1) % outline.len()];
+            painter.line_segment([start, end], Stroke::new(10.0, outer_color));
+            painter.line_segment([start, end], Stroke::new(2.5, inner_color));
+        }
+
+        let Some(handle_center) = self.canvas_crop_handle_center else {
+            return;
+        };
+        let handle_rect = Rect::from_center_size(handle_center, Vec2::splat(16.0));
+        painter.rect_filled(handle_rect, 4.0, inner_color);
+        painter.rect_stroke(
+            handle_rect.expand(3.0),
+            6.0,
+            Stroke::new(4.0, outer_color),
+            StrokeKind::Outside,
         );
     }
 

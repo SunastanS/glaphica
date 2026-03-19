@@ -1,9 +1,9 @@
-use glaphica_core::{BackendId, ImageDirtyTracker, NodeId, RenderTreeGeneration};
-use images::layout::ImageLayout;
+use glaphica_core::{BackendId, ImageDirtyTracker, NodeId, RenderTreeGeneration, TileKey};
 use images::Image;
 use images::ImageCreateError;
+use images::layout::ImageLayout;
 
-use crate::layer_tree::{collect_raster_tile_keys_from_node, UiLayerTree};
+use crate::layer_tree::{UiLayerTree, collect_raster_tile_keys_from_node};
 use crate::node::{
     BranchBlendMode, BranchConfig, LayerMoveTarget, LeafBlendMode, LeafConfig, NewLayerKind,
     SolidColorLayer, SpecialLayer, UiBlendMode, UiBranchNode, UiLayerNode, UiLayerTreeItem,
@@ -26,6 +26,10 @@ pub struct Document {
 
 pub struct Metadata {
     name: String,
+}
+
+pub struct CanvasResizeResult {
+    pub removed_tile_keys: Vec<TileKey>,
 }
 
 impl Metadata {
@@ -162,6 +166,32 @@ impl Document {
 
     pub fn layout(&self) -> ImageLayout {
         self.layout
+    }
+
+    pub fn resize_canvas_anchored_top_left(
+        &mut self,
+        new_layout: ImageLayout,
+    ) -> Result<CanvasResizeResult, ImageCreateError> {
+        if self.layout == new_layout {
+            return Ok(CanvasResizeResult {
+                removed_tile_keys: Vec::new(),
+            });
+        }
+
+        let mut removed_tile_keys = Vec::new();
+        let mut resize_error = None;
+        self.layer_tree.visit_raster_images_mut(&mut |_, image| {
+            let result = image.resize_anchored_top_left(new_layout);
+            match result {
+                Ok(mut removed) => removed_tile_keys.append(&mut removed),
+                Err(error) => resize_error = Some(error),
+            }
+        });
+        if let Some(error) = resize_error {
+            return Err(error);
+        }
+        self.layout = new_layout;
+        Ok(CanvasResizeResult { removed_tile_keys })
     }
 
     pub fn metadata(&self) -> &Metadata {
@@ -478,7 +508,7 @@ mod tests {
         FlatLeafContent, FlatNodeKind, FlatRenderNode, FlatRenderTree, NodeConfig,
     };
     use crate::{ParametricMesh, ParametricVertex};
-    use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
+    use glaphica_core::{BackendId, IMAGE_TILE_SIZE, NodeId, RenderTreeGeneration, TileKey};
     use images::Image;
     use images::layout::ImageLayout;
     use std::sync::Arc;
@@ -742,10 +772,37 @@ mod tests {
         };
 
         assert_eq!(mesh.vertices[0].color, [0.8, 0.1, 0.4, 1.0]);
-        assert!(mesh
-            .vertices
-            .iter()
-            .all(|vertex| vertex.color == [0.8, 0.1, 0.4, 1.0]));
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|vertex| vertex.color == [0.8, 0.1, 0.4, 1.0])
+        );
+    }
+
+    #[test]
+    fn test_resize_canvas_updates_document_layout_and_raster_images() {
+        let old_layout = ImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
+        let new_layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let mut doc = Document::new(
+            "default".to_string(),
+            old_layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+        let removed_key = TileKey::from_parts(1, 1, 99);
+        doc.get_leaf_image_mut(NodeId(1))
+            .unwrap()
+            .set_tile_key(1, removed_key)
+            .unwrap();
+
+        let result = doc.resize_canvas_anchored_top_left(new_layout).unwrap();
+
+        assert_eq!(doc.layout(), new_layout);
+        let raster = doc.get_leaf_image(NodeId(1)).unwrap();
+        assert_eq!(*raster.layout(), new_layout);
+        assert_eq!(raster.tile_count(), new_layout.total_tiles() as usize);
+        assert_eq!(result.removed_tile_keys, vec![removed_key]);
     }
 
     #[test]

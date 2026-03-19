@@ -98,6 +98,48 @@ impl Image {
         Ok(())
     }
 
+    pub fn resize_anchored_top_left(
+        &mut self,
+        new_layout: ImageLayout,
+    ) -> Result<Vec<TileKey>, ImageCreateError> {
+        if self.layout == new_layout {
+            return Ok(Vec::new());
+        }
+
+        let old_layout = self.layout;
+        let old_tile_keys = std::mem::replace(
+            &mut self.tile_keys,
+            vec![
+                TileKey::EMPTY;
+                usize::try_from(new_layout.total_tiles())
+                    .map_err(|_| ImageCreateError::TooManyTiles)?
+            ]
+            .into_boxed_slice(),
+        );
+        let overlap_tile_x = old_layout.tile_x().min(new_layout.tile_x()) as usize;
+        let overlap_tile_y = old_layout.tile_y().min(new_layout.tile_y()) as usize;
+        let old_stride = old_layout.tile_x() as usize;
+        let new_stride = new_layout.tile_x() as usize;
+
+        let mut removed_tile_keys = Vec::new();
+        for (tile_index, tile_key) in old_tile_keys.iter().copied().enumerate() {
+            let tile_x = tile_index % old_stride;
+            let tile_y = tile_index / old_stride;
+            if tile_x < overlap_tile_x && tile_y < overlap_tile_y {
+                let new_index = tile_y * new_stride + tile_x;
+                self.tile_keys[new_index] = tile_key;
+                continue;
+            }
+
+            if tile_key != TileKey::EMPTY {
+                removed_tile_keys.push(tile_key);
+            }
+        }
+
+        self.layout = new_layout;
+        Ok(removed_tile_keys)
+    }
+
     pub fn non_empty_tile_bounds(&self) -> Option<NonEmptyTileBounds> {
         let tile_x = self.layout.tile_x() as usize;
         let mut bounds: Option<NonEmptyTileBounds> = None;
@@ -256,5 +298,31 @@ mod tests {
                 max_tile_y: 1,
             })
         );
+    }
+
+    #[test]
+    fn resize_anchored_top_left_remaps_overlapping_tiles_and_reports_removed() {
+        let old_layout = ImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2);
+        let mut image = Image::new(old_layout, BackendId::new(1)).unwrap();
+        let kept_top_left = TileKey::from_parts(1, 1, 10);
+        let kept_bottom_left = TileKey::from_parts(1, 1, 11);
+        let removed_top_right = TileKey::from_parts(1, 1, 12);
+        let removed_bottom_right = TileKey::from_parts(1, 1, 13);
+        image.set_tile_key(0, kept_top_left).unwrap();
+        image.set_tile_key(1, removed_top_right).unwrap();
+        image.set_tile_key(2, kept_bottom_left).unwrap();
+        image.set_tile_key(3, removed_bottom_right).unwrap();
+
+        let removed = image
+            .resize_anchored_top_left(ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE * 2))
+            .unwrap();
+
+        assert_eq!(
+            *image.layout(),
+            ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE * 2)
+        );
+        assert_eq!(image.tile_key(0), Some(kept_top_left));
+        assert_eq!(image.tile_key(1), Some(kept_bottom_left));
+        assert_eq!(removed, vec![removed_top_right, removed_bottom_right]);
     }
 }
