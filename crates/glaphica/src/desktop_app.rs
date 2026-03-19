@@ -759,14 +759,14 @@ impl ApplicationHandler for DesktopApp {
             }
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
-                    state, logical_key, ..
+                    state, logical_key, repeat, ..
                 },
                 ..
             } => {
                 if ui_event_consumed {
                     return;
                 }
-                if state == ElementState::Pressed {
+                if state == ElementState::Pressed && !repeat {
                     match logical_key {
                         Key::Character(value)
                             if self.ctrl_pressed
