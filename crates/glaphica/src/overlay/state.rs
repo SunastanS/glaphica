@@ -11,7 +11,7 @@ use winit::{event::WindowEvent, event_loop::ActiveEventLoop, window::Window};
 use crate::brush_ui::state::{BrushKind, BrushUiState};
 use crate::components::{ConfigPanel, Sidebar, StatusBar, TopBar};
 use crate::egui_renderer::EguiRenderer;
-use crate::overlay::actions::{ExitConfirmAction, OverlayAction, PathDialogAction};
+use crate::overlay::actions::{ExitConfirmAction, UiCommand, PathDialogAction};
 use crate::overlay::texture_cache::LayerTextureCache;
 use crate::theme::Theme;
 
@@ -38,7 +38,7 @@ pub struct EguiOverlay {
     pub exit_confirm_open: bool,
     pub config_panel_rect: Option<Rect>,
     pub app_stats: Option<AppStats>,
-    pending_actions: Vec<OverlayAction>,
+    pending_actions: Vec<UiCommand>,
 }
 
 impl EguiOverlay {
@@ -133,7 +133,7 @@ impl EguiOverlay {
             .retain(|node_id| valid_ids.contains(node_id));
     }
 
-    pub fn take_pending_actions(&mut self) -> Vec<OverlayAction> {
+    pub fn take_pending_actions(&mut self) -> Vec<UiCommand> {
         std::mem::take(&mut self.pending_actions)
     }
 
@@ -163,7 +163,7 @@ impl EguiOverlay {
             return;
         }
         brush_state.dirty = false;
-        self.pending_actions.push(OverlayAction::BrushUpdated(
+        self.pending_actions.push(UiCommand::BrushUpdated(
             brush_state.kind,
             brush_state.values.clone(),
         ));
@@ -271,28 +271,28 @@ impl EguiOverlay {
                 *left_panel_collapsed = !*left_panel_collapsed;
             }
             if let Some(kind) = sidebar_output.create_layer {
-                pending_actions.push(OverlayAction::LayerCreated(kind));
+                pending_actions.push(UiCommand::LayerCreated(kind));
             }
             if sidebar_output.create_group {
-                pending_actions.push(OverlayAction::GroupCreated);
+                pending_actions.push(UiCommand::GroupCreated);
             }
             if let Some(node_id) = sidebar_output.select_layer {
-                pending_actions.push(OverlayAction::LayerSelected(node_id));
+                pending_actions.push(UiCommand::LayerSelected(node_id));
             }
             if let Some(layer_move) = sidebar_output.move_layer {
-                pending_actions.push(OverlayAction::LayerMoved(
+                pending_actions.push(UiCommand::LayerMoved(
                     layer_move.node_id,
                     layer_move.target,
                 ));
             }
             if let Some((node_id, visible)) = sidebar_output.set_layer_visibility {
-                pending_actions.push(OverlayAction::LayerVisibilityChanged(node_id, visible));
+                pending_actions.push(UiCommand::LayerVisibilityChanged(node_id, visible));
             }
             if let Some((node_id, opacity)) = sidebar_output.set_layer_opacity {
-                pending_actions.push(OverlayAction::LayerOpacityChanged(node_id, opacity));
+                pending_actions.push(UiCommand::LayerOpacityChanged(node_id, opacity));
             }
             if let Some((node_id, blend_mode)) = sidebar_output.set_layer_blend_mode {
-                pending_actions.push(OverlayAction::LayerBlendModeChanged(node_id, blend_mode));
+                pending_actions.push(UiCommand::LayerBlendModeChanged(node_id, blend_mode));
             }
             if let Some(rect) = sidebar_output.panel_rect {
                 *left_panel_width = rect.width();
@@ -313,7 +313,7 @@ impl EguiOverlay {
                 *right_panel_collapsed = !*right_panel_collapsed;
             }
             if let Some((kind, values)) = config_output.pending_brush_update {
-                pending_actions.push(OverlayAction::BrushUpdated(kind, values));
+                pending_actions.push(UiCommand::BrushUpdated(kind, values));
             }
             if config_output.brush_selection_changed {
                 if let Some(new_index) = config_output.new_selected_index {
@@ -337,20 +337,20 @@ impl EguiOverlay {
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
                                 *exit_confirm_open = false;
-                                pending_actions.push(OverlayAction::ExitConfirmed(
+                                pending_actions.push(UiCommand::ExitConfirmed(
                                     ExitConfirmAction::SaveAndExit,
                                 ));
                             }
                             if ui.button("Discard").clicked() {
                                 *exit_confirm_open = false;
-                                pending_actions.push(OverlayAction::ExitConfirmed(
+                                pending_actions.push(UiCommand::ExitConfirmed(
                                     ExitConfirmAction::DiscardAndExit,
                                 ));
                             }
                             if ui.button("Cancel").clicked() {
                                 *exit_confirm_open = false;
                                 pending_actions
-                                    .push(OverlayAction::ExitConfirmed(ExitConfirmAction::Cancel));
+                                    .push(UiCommand::ExitConfirmed(ExitConfirmAction::Cancel));
                             }
                         });
                     });
@@ -396,7 +396,7 @@ impl EguiOverlay {
         if cancel_path_dialog_flag {
             self.path_dialog_action = None;
             self.pending_actions
-                .push(OverlayAction::PathDialogCancelled);
+                .push(UiCommand::PathDialogCancelled);
         }
         self.config_panel_rect = config_panel_rect;
 
@@ -442,13 +442,13 @@ impl EguiOverlay {
         match self.path_dialog_action.take() {
             Some(PathDialogAction::Save) => self
                 .pending_actions
-                .push(OverlayAction::DocumentSaveRequested(PathBuf::from(path))),
+                .push(UiCommand::DocumentSaveRequested(PathBuf::from(path))),
             Some(PathDialogAction::Load) => self
                 .pending_actions
-                .push(OverlayAction::DocumentLoadRequested(PathBuf::from(path))),
+                .push(UiCommand::DocumentLoadRequested(PathBuf::from(path))),
             Some(PathDialogAction::Export) => self
                 .pending_actions
-                .push(OverlayAction::DocumentExportRequested(PathBuf::from(path))),
+                .push(UiCommand::DocumentExportRequested(PathBuf::from(path))),
             None => {}
         }
     }

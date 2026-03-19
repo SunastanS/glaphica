@@ -17,8 +17,21 @@ use winit::{
 
 use crate::brush_ui::state::{BrushKind, BrushUiState, PIXEL_RECT_BRUSH_ID, ROUND_BRUSH_ID};
 use crate::input::{MouseInputResult, handle_window_event};
-use crate::overlay::{EguiOverlay, ExitConfirmAction, OverlayAction, PathDialogAction};
+use crate::overlay::{EguiOverlay, ExitConfirmAction, PathDialogAction, UiCommand};
 use crate::run_config::RunConfig;
+
+#[derive(Debug, Default)]
+pub struct ApplyActionsEffect {
+    pub advance_epoch: bool,
+    pub request_redraw: bool,
+}
+
+impl ApplyActionsEffect {
+    pub fn merge(&mut self, other: Self) {
+        self.advance_epoch |= other.advance_epoch;
+        self.request_redraw |= other.request_redraw;
+    }
+}
 
 #[derive(Debug)]
 pub enum AppActionError {
@@ -140,7 +153,6 @@ impl DesktopApp {
 
     pub fn render_frame(&mut self) {
         let mut overlay_actions = Vec::new();
-        let mut should_advance_epoch = false;
         {
             let Some(integration) = &mut self.integration else {
                 return;
@@ -174,54 +186,62 @@ impl DesktopApp {
                 integration.present_to_screen();
             }
         }
-        match self.apply_overlay_actions(overlay_actions) {
-            Ok(advance) => should_advance_epoch |= advance,
-            Err(error) => eprintln!("overlay action errors: {}", error),
-        }
-        if should_advance_epoch {
+        let effect = match self.apply_overlay_actions(overlay_actions) {
+            Ok(effect) => effect,
+            Err(error) => {
+                eprintln!("overlay action errors: {}", error);
+                ApplyActionsEffect::default()
+            }
+        };
+        if effect.advance_epoch {
             self.advance_epoch();
+        }
+        if effect.request_redraw {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
     }
 
-    fn apply_overlay_actions(&mut self, actions: Vec<OverlayAction>) -> Result<bool, AppActionError> {
-        let mut should_advance_epoch = false;
+    fn apply_overlay_actions(&mut self, actions: Vec<UiCommand>) -> Result<ApplyActionsEffect, AppActionError> {
+        let mut effect = ApplyActionsEffect::default();
         let mut errors = Vec::new();
         for action in actions {
-            match self.apply_single_overlay_action(action) {
-                Ok(advance) => should_advance_epoch |= advance,
+            match self.apply_single_ui_command(action) {
+                Ok(action_effect) => effect.merge(action_effect),
                 Err(error) => errors.push(error),
             }
         }
         if errors.is_empty() {
-            Ok(should_advance_epoch)
+            Ok(effect)
         } else {
             Err(AppActionError::Multiple(errors))
         }
     }
 
-    fn apply_single_overlay_action(&mut self, action: OverlayAction) -> Result<bool, AppActionError> {
+    fn apply_single_ui_command(&mut self, action: UiCommand) -> Result<ApplyActionsEffect, AppActionError> {
         match action {
-            OverlayAction::BrushUpdated(brush_kind, values) => {
+            UiCommand::BrushUpdated(brush_kind, values) => {
                 self.apply_brush_action(brush_kind, &values)
             }
-            OverlayAction::LayerSelected(node_id) => self.apply_layer_select(node_id),
-            OverlayAction::LayerCreated(kind) => self.apply_layer_create(kind),
-            OverlayAction::GroupCreated => self.apply_group_create(),
-            OverlayAction::LayerMoved(node_id, target) => self.apply_layer_move(node_id, target),
-            OverlayAction::LayerVisibilityChanged(node_id, visible) => {
+            UiCommand::LayerSelected(node_id) => self.apply_layer_select(node_id),
+            UiCommand::LayerCreated(kind) => self.apply_layer_create(kind),
+            UiCommand::GroupCreated => self.apply_group_create(),
+            UiCommand::LayerMoved(node_id, target) => self.apply_layer_move(node_id, target),
+            UiCommand::LayerVisibilityChanged(node_id, visible) => {
                 self.apply_layer_visibility(node_id, visible)
             }
-            OverlayAction::LayerOpacityChanged(node_id, opacity) => {
+            UiCommand::LayerOpacityChanged(node_id, opacity) => {
                 self.apply_layer_opacity(node_id, opacity)
             }
-            OverlayAction::LayerBlendModeChanged(node_id, blend_mode) => {
+            UiCommand::LayerBlendModeChanged(node_id, blend_mode) => {
                 self.apply_layer_blend_mode(node_id, blend_mode)
             }
-            OverlayAction::DocumentSaveRequested(path) => self.apply_document_save(path),
-            OverlayAction::DocumentLoadRequested(path) => self.apply_document_load(path),
-            OverlayAction::DocumentExportRequested(path) => self.apply_document_export(path),
-            OverlayAction::ExitConfirmed(action) => self.apply_exit_confirm(action),
-            OverlayAction::PathDialogCancelled => self.apply_path_dialog_cancel(),
+            UiCommand::DocumentSaveRequested(path) => self.apply_document_save(path),
+            UiCommand::DocumentLoadRequested(path) => self.apply_document_load(path),
+            UiCommand::DocumentExportRequested(path) => self.apply_document_export(path),
+            UiCommand::ExitConfirmed(action) => self.apply_exit_confirm(action),
+            UiCommand::PathDialogCancelled => self.apply_path_dialog_cancel(),
         }
     }
 
@@ -229,48 +249,57 @@ impl DesktopApp {
         &mut self,
         brush_kind: BrushKind,
         values: &[brushes::BrushConfigValue],
-    ) -> Result<bool, AppActionError> {
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         match brush_kind {
             BrushKind::Round => match RoundBrush::from_config_values(values) {
                 Ok(updated_brush) => {
                     let Some(integration) = self.integration.as_mut() else {
-                        return Ok(false);
+                        return Ok(ApplyActionsEffect::default());
                     };
                     integration
                         .update_brush(brush_kind.brush_id(), updated_brush)
                         .map_err(|e| AppActionError::BrushUpdate(format!("{:?}", e)))?;
-                    Ok(true)
+                    Ok(ApplyActionsEffect {
+                        advance_epoch: true,
+                        request_redraw: true,
+                    })
                 }
                 Err(error) => Err(AppActionError::BrushBuild(format!("round brush: {}", error))),
             },
             BrushKind::PixelRect => match PixelRectBrush::from_config_values(values) {
                 Ok(updated_brush) => {
                     let Some(integration) = self.integration.as_mut() else {
-                        return Ok(false);
+                        return Ok(ApplyActionsEffect::default());
                     };
                     integration
                         .update_brush(brush_kind.brush_id(), updated_brush)
                         .map_err(|e| AppActionError::BrushUpdate(format!("{:?}", e)))?;
-                    Ok(true)
+                    Ok(ApplyActionsEffect {
+                        advance_epoch: true,
+                        request_redraw: true,
+                    })
                 }
                 Err(error) => Err(AppActionError::BrushBuild(format!("pixel rect brush: {}", error))),
             },
         }
     }
 
-    fn apply_layer_select(&mut self, node_id: NodeId) -> Result<bool, AppActionError> {
+    fn apply_layer_select(&mut self, node_id: NodeId) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .select_document_node(node_id)
-            .then_some(true)
+            .then_some(ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .ok_or(AppActionError::LayerSelectFailed(node_id))
     }
 
-    fn apply_layer_create(&mut self, kind: document::NewLayerKind) -> Result<bool, AppActionError> {
+    fn apply_layer_create(&mut self, kind: document::NewLayerKind) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .create_layer_above_active(kind)
@@ -279,13 +308,16 @@ impl DesktopApp {
                     overlay.mark_document_dirty();
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|e| AppActionError::LayerCreate(format!("{:?}", e)))
     }
 
-    fn apply_group_create(&mut self) -> Result<bool, AppActionError> {
+    fn apply_group_create(&mut self) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .create_group_above_active()
@@ -294,7 +326,10 @@ impl DesktopApp {
                     overlay.mark_document_dirty();
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|e| AppActionError::GroupCreate(format!("{:?}", e)))
     }
 
@@ -302,9 +337,9 @@ impl DesktopApp {
         &mut self,
         node_id: NodeId,
         target: document::LayerMoveTarget,
-    ) -> Result<bool, AppActionError> {
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .move_document_node(node_id, target)
@@ -313,7 +348,10 @@ impl DesktopApp {
                     overlay.mark_document_dirty();
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|e| AppActionError::LayerMove(node_id, format!("{:?}", e)))
     }
 
@@ -321,9 +359,9 @@ impl DesktopApp {
         &mut self,
         node_id: NodeId,
         visible: bool,
-    ) -> Result<bool, AppActionError> {
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .set_document_node_visibility(node_id, visible)
@@ -332,7 +370,10 @@ impl DesktopApp {
                     overlay.mark_document_dirty();
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|e| AppActionError::LayerVisibility(node_id, format!("{:?}", e)))
     }
 
@@ -340,9 +381,9 @@ impl DesktopApp {
         &mut self,
         node_id: NodeId,
         opacity: f32,
-    ) -> Result<bool, AppActionError> {
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .set_document_node_opacity(node_id, opacity)
@@ -351,7 +392,10 @@ impl DesktopApp {
                     overlay.mark_document_dirty();
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|e| AppActionError::LayerOpacity(node_id, format!("{:?}", e)))
     }
 
@@ -359,9 +403,9 @@ impl DesktopApp {
         &mut self,
         node_id: NodeId,
         blend_mode: document::UiBlendMode,
-    ) -> Result<bool, AppActionError> {
+    ) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .set_document_node_blend_mode(node_id, blend_mode)
@@ -370,13 +414,16 @@ impl DesktopApp {
                     overlay.mark_document_dirty();
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|e| AppActionError::LayerBlendMode(node_id, format!("{:?}", e)))
     }
 
-    fn apply_document_save(&mut self, path: std::path::PathBuf) -> Result<bool, AppActionError> {
+    fn apply_document_save(&mut self, path: std::path::PathBuf) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .save_document_bundle(&path)
@@ -397,13 +444,16 @@ impl DesktopApp {
                 }
                 self.shutdown_after_save = false;
             })
-            .map(|()| false)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: false,
+                request_redraw: true,
+            })
             .map_err(|error| AppActionError::DocumentSave(path, format!("{:?}", error)))
     }
 
-    fn apply_document_load(&mut self, path: std::path::PathBuf) -> Result<bool, AppActionError> {
+    fn apply_document_load(&mut self, path: std::path::PathBuf) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .load_document_bundle(&path)
@@ -419,13 +469,16 @@ impl DesktopApp {
                     overlay.set_document_status(format!("Load failed: {}", error), true);
                 }
             })
-            .map(|()| true)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
             .map_err(|error| AppActionError::DocumentLoad(path, format!("{:?}", error)))
     }
 
-    fn apply_document_export(&mut self, path: std::path::PathBuf) -> Result<bool, AppActionError> {
+    fn apply_document_export(&mut self, path: std::path::PathBuf) -> Result<ApplyActionsEffect, AppActionError> {
         let Some(integration) = self.integration.as_mut() else {
-            return Ok(false);
+            return Ok(ApplyActionsEffect::default());
         };
         integration
             .export_document_jpeg(&path)
@@ -440,19 +493,19 @@ impl DesktopApp {
                     overlay.set_document_status(format!("Export failed: {}", error), true);
                 }
             })
-            .map(|()| false)
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: false,
+                request_redraw: true,
+            })
             .map_err(|error| AppActionError::DocumentExport(path, format!("{:?}", error)))
     }
 
-    fn apply_exit_confirm(&mut self, action: ExitConfirmAction) -> Result<bool, AppActionError> {
+    fn apply_exit_confirm(&mut self, action: ExitConfirmAction) -> Result<ApplyActionsEffect, AppActionError> {
         match action {
             ExitConfirmAction::SaveAndExit => {
                 self.shutdown_after_save = true;
                 if let Some(overlay) = self.overlay.as_mut() {
                     overlay.open_path_dialog(PathDialogAction::Save);
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
                 }
             }
             ExitConfirmAction::DiscardAndExit => {
@@ -462,12 +515,18 @@ impl DesktopApp {
                 self.shutdown_after_save = false;
             }
         }
-        Ok(false)
+        Ok(ApplyActionsEffect {
+            advance_epoch: false,
+            request_redraw: true,
+        })
     }
 
-    fn apply_path_dialog_cancel(&mut self) -> Result<bool, AppActionError> {
+    fn apply_path_dialog_cancel(&mut self) -> Result<ApplyActionsEffect, AppActionError> {
         self.shutdown_after_save = false;
-        Ok(false)
+        Ok(ApplyActionsEffect {
+            advance_epoch: false,
+            request_redraw: true,
+        })
     }
 
     pub fn finalize_outputs(&mut self) {
@@ -769,12 +828,17 @@ impl ApplicationHandler for DesktopApp {
             }
             _ => match handle_window_event(self, &event, ui_event_consumed) {
                 MouseInputResult::StrokeBegan => {
+                    let mut effect = ApplyActionsEffect::default();
                     if let Some(overlay) = &mut self.overlay {
                         overlay.flush_selected_brush_if_dirty();
                         let overlay_actions = overlay.take_pending_actions();
-                        if let Err(error) = self.apply_overlay_actions(overlay_actions) {
-                            eprintln!("overlay action errors: {}", error);
+                        match self.apply_overlay_actions(overlay_actions) {
+                            Ok(action_effect) => effect.merge(action_effect),
+                            Err(error) => eprintln!("overlay action errors: {}", error),
                         }
+                    }
+                    if effect.advance_epoch {
+                        self.advance_epoch();
                     }
                     self.render_frame();
                     if let Some(integration) = &mut self.integration {

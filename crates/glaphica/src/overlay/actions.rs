@@ -20,7 +20,7 @@ pub enum PathDialogAction {
     Export,
 }
 
-pub enum OverlayAction {
+pub enum UiCommand {
     BrushUpdated(BrushKind, Vec<BrushConfigValue>),
     LayerSelected(NodeId),
     LayerCreated(NewLayerKind),
