@@ -3,16 +3,27 @@ use images::Image;
 
 use crate::node::{
     branch_blend_mode_from_ui, leaf_blend_mode_from_ui, ui_blend_mode_from_branch,
-    ui_blend_mode_from_leaf, BranchBlendMode, LayerMoveTarget, LeafBlendMode, SpecialLayer,
-    UiBlendMode, UiBranchNode, UiLayerNode, UiLayerTreeItem, UiLeafContent, UiLeafNode, UiNodeKind,
+    ui_blend_mode_from_leaf, LayerMoveTarget, SpecialLayer, UiBlendMode, UiLayerNode,
+    UiLayerTreeItem, UiLeafContent, UiLeafNode, UiNodeKind,
 };
 use crate::LayerEditError;
 
 pub struct UiLayerTree {
-    pub root: UiLayerNode,
+    pub(crate) root: UiLayerNode,
 }
 
 impl UiLayerTree {
+    pub fn new(root: UiLayerNode) -> Self {
+        Self { root }
+    }
+
+    pub fn root(&self) -> &UiLayerNode {
+        &self.root
+    }
+
+    pub(crate) fn root_mut(&mut self) -> &mut UiLayerNode {
+        &mut self.root
+    }
     pub fn items(&self) -> Vec<UiLayerTreeItem> {
         vec![build_layer_tree_item(&self.root)]
     }
