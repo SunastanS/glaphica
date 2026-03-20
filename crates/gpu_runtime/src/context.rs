@@ -97,11 +97,11 @@ impl GpuContext {
         Self::init_with_surface(desc, None).await
     }
 
-    pub async fn init_with_surface<'surface, 'window>(
+    pub async fn init_with_instance_and_surface<'surface, 'window>(
         desc: &GpuContextInitDescriptor,
+        instance: wgpu::Instance,
         compatible_surface: Option<&'surface wgpu::Surface<'window>>,
     ) -> Result<Self, GpuContextInitError> {
-        let instance = wgpu::Instance::new(&desc.instance);
         let adapter = match desc.adapter_selection {
             AdapterSelection::Request => {
                 let options = wgpu::RequestAdapterOptions {
@@ -157,6 +157,18 @@ impl GpuContext {
             device,
             queue,
         })
+    }
+
+    pub async fn init_with_surface<'surface, 'window>(
+        desc: &GpuContextInitDescriptor,
+        compatible_surface: Option<&'surface wgpu::Surface<'window>>,
+    ) -> Result<Self, GpuContextInitError> {
+        Self::init_with_instance_and_surface(
+            desc,
+            wgpu::Instance::new(&desc.instance),
+            compatible_surface,
+        )
+        .await
     }
 
     #[cfg(feature = "blocking")]

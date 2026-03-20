@@ -7,7 +7,7 @@ use app::{AppThreadIntegration, trace::TraceRecorder};
 use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
 use egui::Pos2;
 use glaphica_core::{EpochId, NodeId};
-use gpu_runtime::surface_runtime::SurfaceRuntime;
+use gpu_runtime::{GpuContext, GpuContextInitDescriptor, surface_runtime::SurfaceRuntime};
 use images::layout::ImageLayout;
 use winit::{
     application::ApplicationHandler,
@@ -742,7 +742,18 @@ impl ApplicationHandler for DesktopApp {
             self.started_at = Some(Instant::now());
         }
 
+        let mut surface = None;
         if self.integration.is_none() {
+            let gpu_init_desc = GpuContextInitDescriptor::default();
+            let instance = wgpu::Instance::new(&gpu_init_desc.instance);
+            let init_surface = match instance.create_surface(window.clone()) {
+                Ok(surface) => surface,
+                Err(error) => {
+                    eprintln!("failed to create surface: {}", error);
+                    event_loop.exit();
+                    return;
+                }
+            };
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
                 Err(error) => {
@@ -751,13 +762,31 @@ impl ApplicationHandler for DesktopApp {
                     return;
                 }
             };
-            let integration = rt.block_on(async {
-                AppThreadIntegration::new("test-document".to_string(), ImageLayout::new(1024, 1024))
-                    .await
+            let init_result = rt.block_on(async move {
+                let gpu_context = GpuContext::init_with_instance_and_surface(
+                    &gpu_init_desc,
+                    instance,
+                    Some(&init_surface),
+                )
+                .await
+                .map(std::sync::Arc::new)
+                .map_err(app::InitError::GpuContext)?;
+                let adapter_info = gpu_context.adapter.get_info();
+                eprintln!(
+                    "Using GPU adapter: {} ({:?}, {:?})",
+                    adapter_info.name, adapter_info.backend, adapter_info.device_type
+                );
+                let integration = AppThreadIntegration::new_with_gpu_context(
+                    "test-document".to_string(),
+                    ImageLayout::new(1024, 1024),
+                    gpu_context,
+                )
+                .await?;
+                Ok::<_, app::InitError>((integration, init_surface))
             });
 
-            let mut integration = match integration {
-                Ok(i) => i,
+            let (mut integration, init_surface) = match init_result {
+                Ok(result) => result,
                 Err(error) => {
                     eprintln!("failed to init app: {:?}", error);
                     event_loop.exit();
@@ -797,21 +826,23 @@ impl ApplicationHandler for DesktopApp {
             }
 
             self.integration = Some(integration);
+            surface = Some(init_surface);
         }
 
         if let Some(integration) = &mut self.integration {
             let gpu_context = integration.main_state().gpu_context().clone();
-            let instance = &gpu_context.instance;
             let adapter = &gpu_context.adapter;
             let device = &gpu_context.device;
-
-            let surface = match instance.create_surface(window.clone()) {
-                Ok(surface) => surface,
-                Err(error) => {
-                    eprintln!("failed to create surface: {}", error);
-                    event_loop.exit();
-                    return;
-                }
+            let surface = match surface {
+                Some(surface) => surface,
+                None => match gpu_context.instance.create_surface(window.clone()) {
+                    Ok(surface) => surface,
+                    Err(error) => {
+                        eprintln!("failed to create surface: {}", error);
+                        event_loop.exit();
+                        return;
+                    }
+                },
             };
 
             let size = (window.inner_size().width, window.inner_size().height);

@@ -501,7 +501,20 @@ impl AppThreadIntegration {
     }
 
     pub async fn new(document_name: String, layout: ImageLayout) -> Result<Self, crate::InitError> {
-        let mut main_state = MainThreadState::init().await?;
+        let gpu_context = Arc::new(
+            gpu_runtime::GpuContext::init(&gpu_runtime::GpuContextInitDescriptor::default())
+                .await
+                .map_err(crate::InitError::GpuContext)?,
+        );
+        Self::new_with_gpu_context(document_name, layout, gpu_context).await
+    }
+
+    pub async fn new_with_gpu_context(
+        document_name: String,
+        layout: ImageLayout,
+        gpu_context: Arc<gpu_runtime::GpuContext>,
+    ) -> Result<Self, crate::InitError> {
+        let mut main_state = MainThreadState::init_with_gpu_context(gpu_context).await?;
 
         let document = Document::new(
             document_name,
