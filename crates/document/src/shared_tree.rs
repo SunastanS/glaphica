@@ -5,7 +5,7 @@ use arc_swap::ArcSwap;
 use glaphica_core::{CanvasVec2, ImageDirtyTracker, NodeId, RenderTreeGeneration, TileKey};
 use images::Image;
 
-use crate::LeafBlendMode;
+use crate::node::LeafBlendMode;
 
 pub enum RenderSource {
     Tile {

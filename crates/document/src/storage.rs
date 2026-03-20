@@ -4,9 +4,11 @@ use glaphica_core::{BackendId, NodeId};
 use images::layout::ImageLayout;
 use images::{Image, ImageCreateError};
 
-use crate::{
-    BranchBlendMode, BranchConfig, Document, LeafBlendMode, LeafConfig, Metadata, SolidColorLayer,
-    SpecialLayer, UiBranchNode, UiLayerNode, UiLayerTree, UiLeafContent, UiLeafNode, UiNodeMeta,
+use crate::document::{Document, Metadata};
+use crate::layer_tree::UiLayerTree;
+use crate::node::{
+    BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, SolidColorLayer, SpecialLayer,
+    UiBranchNode, UiLayerNode, UiLeafContent, UiLeafNode, UiNodeMeta,
 };
 
 const STORAGE_VERSION: u32 = 1;
@@ -115,7 +117,7 @@ impl Document {
     pub fn storage_manifest(&self) -> DocumentStorageManifest {
         DocumentStorageManifest {
             version: STORAGE_VERSION,
-            name: self.metadata.name.clone(),
+            name: self.metadata.name().to_string(),
             canvas_width: self.layout.size_x(),
             canvas_height: self.layout.size_y(),
             root: export_layer_node(&self.layer_tree.root),
@@ -148,11 +150,9 @@ impl Document {
         let root = import_layer_node(&manifest.root, layout, leaf_backend)?;
 
         Ok(Document {
-            layer_tree: UiLayerTree { root, layout },
+            layer_tree: UiLayerTree::new(root),
             layout,
-            metadata: Metadata {
-                name: manifest.name,
-            },
+            metadata: Metadata::new(manifest.name),
             leaf_backend,
             render_cache_backend,
             next_node_id: NodeId(manifest.next_node_id),
@@ -383,7 +383,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(restored.metadata().name, "storage");
+        assert_eq!(restored.metadata().name(), "storage");
         assert_eq!(restored.layout().size_x(), 128);
         assert_eq!(restored.layout().size_y(), 64);
         assert_eq!(restored.storage_manifest(), manifest);
