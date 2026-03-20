@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use glaphica_core::{CanvasVec2, NodeId};
-use images::layout::ImageLayout;
 use images::Image;
+use images::layout::ImageLayout;
 
 use crate::shared_tree::{ParametricMesh, ParametricVertex};
 
@@ -153,13 +155,8 @@ pub struct RenderLeafNode {
 
 #[derive(Clone, PartialEq)]
 pub enum RenderLeafContent {
-    Raster {
-        image: Image,
-    },
-    Parametric {
-        mesh: ParametricMesh,
-        render_cache: Image,
-    },
+    Raster { image: Image },
+    Parametric { mesh: Arc<ParametricMesh> },
 }
 
 #[derive(Clone, PartialEq)]

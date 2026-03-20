@@ -263,9 +263,12 @@ impl FrameBatch {
         stats.render_source_count = render_cmds
             .iter()
             .map(|cmd| {
-                cmd.from
+                cmd.sources
                     .iter()
-                    .map(|source| source.tile_keys.len())
+                    .map(|source| match source {
+                        document::RenderSource::Tile { tile_keys, .. } => tile_keys.len(),
+                        document::RenderSource::Parametric { .. } => cmd.to.len(),
+                    })
                     .sum::<usize>()
             })
             .sum();

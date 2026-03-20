@@ -7,19 +7,27 @@ use images::Image;
 
 use crate::node::LeafBlendMode;
 
-pub struct RenderSource {
-    pub tile_keys: Vec<TileKey>,
-    pub config: NodeConfig,
+pub enum RenderSource {
+    Tile {
+        tile_keys: Vec<TileKey>,
+        config: NodeConfig,
+    },
+    Parametric {
+        mesh: Arc<ParametricMesh>,
+        config: NodeConfig,
+    },
 }
 
 pub struct RenderCmd {
-    pub from: Vec<RenderSource>,
+    pub sources: Vec<RenderSource>,
+    pub tile_indices: Vec<usize>,
+    pub tile_origins: Vec<CanvasVec2>,
     pub to: Vec<TileKey>,
 }
 
 pub struct MaterializeParametricCmd {
     pub node_id: NodeId,
-    pub mesh: ParametricMesh,
+    pub mesh: Arc<ParametricMesh>,
     pub tile_indices: Vec<usize>,
     pub tile_origins: Vec<CanvasVec2>,
     pub dst_tile_keys: Vec<TileKey>,
@@ -36,29 +44,8 @@ impl FlatRenderTree {
         &self,
         dirty: &ImageDirtyTracker,
     ) -> Vec<MaterializeParametricCmd> {
-        let mut groups: HashMap<NodeId, Vec<usize>> = HashMap::new();
-
-        for key in dirty.iter() {
-            let Some(node) = self.nodes.get(&key.node_id) else {
-                continue;
-            };
-            let FlatNodeKind::Leaf {
-                content: FlatLeafContent::Parametric { .. },
-            } = &node.kind
-            else {
-                continue;
-            };
-            groups.entry(key.node_id).or_default().push(key.tile_index);
-        }
-
-        let mut cmds = Vec::new();
-        for (node_id, mut tile_indices) in groups {
-            tile_indices.sort_unstable();
-            if let Some(cmd) = self.build_parametric_cmd(node_id, &tile_indices) {
-                cmds.push(cmd);
-            }
-        }
-        cmds
+        let _ = dirty;
+        Vec::new()
     }
 
     pub fn build_render_cmds(&self, dirty: &ImageDirtyTracker) -> Vec<RenderCmd> {
@@ -122,18 +109,12 @@ impl FlatRenderTree {
                 }
                 (
                     FlatNodeKind::Leaf {
-                        content: FlatLeafContent::Parametric { render_cache, .. },
+                        content: FlatLeafContent::Parametric { .. },
                     },
                     FlatNodeKind::Leaf {
-                        content:
-                            FlatLeafContent::Parametric {
-                                render_cache: old_render_cache,
-                                ..
-                            },
+                        content: FlatLeafContent::Parametric { .. },
                     },
-                ) => {
-                    *render_cache = old_render_cache.clone();
-                }
+                ) => {}
                 _ => {}
             }
         }
@@ -212,20 +193,12 @@ impl FlatRenderTree {
             ) => a_cache.backend() == b_cache.backend() && a_cache.layout() == b_cache.layout(),
             (
                 FlatNodeKind::Leaf {
-                    content:
-                        FlatLeafContent::Parametric {
-                            render_cache: a_cache,
-                            ..
-                        },
+                    content: FlatLeafContent::Parametric { .. },
                 },
                 FlatNodeKind::Leaf {
-                    content:
-                        FlatLeafContent::Parametric {
-                            render_cache: b_cache,
-                            ..
-                        },
+                    content: FlatLeafContent::Parametric { .. },
                 },
-            ) => a_cache.backend() == b_cache.backend() && a_cache.layout() == b_cache.layout(),
+            ) => true,
             (
                 FlatNodeKind::Leaf {
                     content: FlatLeafContent::Raster { .. },
@@ -298,73 +271,61 @@ impl FlatRenderTree {
             FlatNodeKind::Leaf { .. } => return None,
         };
 
-        let mut from: Vec<RenderSource> = Vec::with_capacity(children.len());
+        let mut sources = Vec::with_capacity(children.len());
         for &child_id in children {
             let child = self.nodes.get(&child_id)?;
-            let image = child.kind.render_image()?;
-
-            let mut tile_keys = Vec::with_capacity(tile_indices.len());
-            for &idx in tile_indices {
-                let key = image.tile_key(idx).unwrap_or(TileKey::EMPTY);
-                tile_keys.push(key);
+            match &child.kind {
+                FlatNodeKind::Branch { render_cache, .. } => {
+                    let mut tile_keys = Vec::with_capacity(tile_indices.len());
+                    for &idx in tile_indices {
+                        let key = render_cache.tile_key(idx).unwrap_or(TileKey::EMPTY);
+                        tile_keys.push(key);
+                    }
+                    sources.push(RenderSource::Tile {
+                        tile_keys,
+                        config: child.config,
+                    });
+                }
+                FlatNodeKind::Leaf { content } => match content {
+                    FlatLeafContent::Raster { image } => {
+                        let mut tile_keys = Vec::with_capacity(tile_indices.len());
+                        for &idx in tile_indices {
+                            let key = image.tile_key(idx).unwrap_or(TileKey::EMPTY);
+                            tile_keys.push(key);
+                        }
+                        sources.push(RenderSource::Tile {
+                            tile_keys,
+                            config: child.config,
+                        });
+                    }
+                    FlatLeafContent::Parametric { mesh } => {
+                        sources.push(RenderSource::Parametric {
+                            mesh: mesh.clone(),
+                            config: child.config,
+                        });
+                    }
+                },
             }
-
-            from.push(RenderSource {
-                tile_keys,
-                config: child.config,
-            });
         }
-
-        let mut to = Vec::with_capacity(tile_indices.len());
-        for &idx in tile_indices {
-            let key = render_cache.tile_key(idx).unwrap_or(TileKey::EMPTY);
-            to.push(key);
-        }
-
-        Some(RenderCmd { from, to })
-    }
-
-    fn build_parametric_cmd(
-        &self,
-        node_id: NodeId,
-        tile_indices: &[usize],
-    ) -> Option<MaterializeParametricCmd> {
-        let node = self.nodes.get(&node_id)?;
-        let FlatNodeKind::Leaf {
-            content: FlatLeafContent::Parametric { mesh, render_cache },
-        } = &node.kind
-        else {
-            return None;
-        };
 
         let mut filtered_indices = Vec::with_capacity(tile_indices.len());
         let mut tile_origins = Vec::with_capacity(tile_indices.len());
-        let mut dst_tile_keys = Vec::with_capacity(tile_indices.len());
-        for &tile_index in tile_indices {
-            let Some(dst_tile_key) = render_cache.tile_key(tile_index) else {
+        let mut to = Vec::with_capacity(tile_indices.len());
+        for &idx in tile_indices {
+            let Some(tile_origin) = render_cache.tile_canvas_origin(idx) else {
                 continue;
             };
-            if dst_tile_key == TileKey::EMPTY {
-                continue;
-            }
-            let Some(tile_origin) = render_cache.tile_canvas_origin(tile_index) else {
-                continue;
-            };
-            filtered_indices.push(tile_index);
+            let key = render_cache.tile_key(idx).unwrap_or(TileKey::EMPTY);
+            filtered_indices.push(idx);
             tile_origins.push(tile_origin);
-            dst_tile_keys.push(dst_tile_key);
+            to.push(key);
         }
 
-        if dst_tile_keys.is_empty() {
-            return None;
-        }
-
-        Some(MaterializeParametricCmd {
-            node_id,
-            mesh: mesh.clone(),
+        Some(RenderCmd {
+            sources,
             tile_indices: filtered_indices,
             tile_origins,
-            dst_tile_keys,
+            to,
         })
     }
 }
@@ -395,13 +356,8 @@ pub enum FlatNodeKind {
 
 #[derive(Clone)]
 pub enum FlatLeafContent {
-    Raster {
-        image: Image,
-    },
-    Parametric {
-        mesh: ParametricMesh,
-        render_cache: Image,
-    },
+    Raster { image: Image },
+    Parametric { mesh: Arc<ParametricMesh> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -450,28 +406,28 @@ impl FlatLeafContent {
     pub fn render_image(&self) -> Option<&Image> {
         match self {
             Self::Raster { image } => Some(image),
-            Self::Parametric { render_cache, .. } => Some(render_cache),
+            Self::Parametric { .. } => None,
         }
     }
 
     pub fn render_image_mut(&mut self) -> Option<&mut Image> {
         match self {
             Self::Raster { image } => Some(image),
-            Self::Parametric { render_cache, .. } => Some(render_cache),
+            Self::Parametric { .. } => None,
         }
     }
 
     pub fn render_cache(&self) -> Option<&Image> {
         match self {
             Self::Raster { .. } => None,
-            Self::Parametric { render_cache, .. } => Some(render_cache),
+            Self::Parametric { .. } => None,
         }
     }
 
     pub fn render_cache_mut(&mut self) -> Option<&mut Image> {
         match self {
             Self::Raster { .. } => None,
-            Self::Parametric { render_cache, .. } => Some(render_cache),
+            Self::Parametric { .. } => None,
         }
     }
 
@@ -610,17 +566,15 @@ mod tests {
 
         assert_eq!(cmds.len(), 1, "Should have 1 render cmd for the branch");
         assert_eq!(cmds[0].to.len(), 1, "Should composite only 1 tile");
-        assert_eq!(cmds[0].from.len(), 2, "Should have 2 source layers");
-        assert_eq!(
-            cmds[0].from[0].tile_keys.len(),
-            1,
-            "Source 1 should have 1 tile key"
-        );
-        assert_eq!(
-            cmds[0].from[1].tile_keys.len(),
-            1,
-            "Source 2 should have 1 tile key"
-        );
+        assert_eq!(cmds[0].sources.len(), 2, "Should have 2 source layers");
+        assert!(matches!(
+            &cmds[0].sources[0],
+            RenderSource::Tile { tile_keys, .. } if tile_keys.len() == 1
+        ));
+        assert!(matches!(
+            &cmds[0].sources[1],
+            RenderSource::Tile { tile_keys, .. } if tile_keys.len() == 1
+        ));
 
         // Test 2: Both tiles are dirty
         let mut dirty_tracker = ImageDirtyTracker::default();
@@ -631,31 +585,21 @@ mod tests {
 
         assert_eq!(cmds.len(), 1, "Should have 1 render cmd for the branch");
         assert_eq!(cmds[0].to.len(), 2, "Should composite 2 tiles");
-        assert_eq!(
-            cmds[0].from[0].tile_keys.len(),
-            2,
-            "Source 1 should have 2 tile keys"
-        );
-        assert_eq!(
-            cmds[0].from[1].tile_keys.len(),
-            2,
-            "Source 2 should have 2 tile keys"
-        );
+        assert!(matches!(
+            &cmds[0].sources[0],
+            RenderSource::Tile { tile_keys, .. } if tile_keys.len() == 2
+        ));
+        assert!(matches!(
+            &cmds[0].sources[1],
+            RenderSource::Tile { tile_keys, .. } if tile_keys.len() == 2
+        ));
     }
 
     #[test]
     fn test_raster_dirty_under_parametric_background_does_not_materialize_background() {
         let layout = ImageLayout::new(256, 128);
 
-        let mut background_cache = Image::new(layout, BackendId::new(1)).unwrap();
-        background_cache
-            .set_tile_key(0, TileKey::from_parts(1, 0, 10))
-            .unwrap();
-        background_cache
-            .set_tile_key(1, TileKey::from_parts(1, 0, 11))
-            .unwrap();
-
-        let background_mesh = ParametricMesh {
+        let background_mesh = Arc::new(ParametricMesh {
             vertices: vec![
                 ParametricVertex {
                     position: glaphica_core::CanvasVec2::new(0.0, 0.0),
@@ -675,7 +619,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2, 2, 1, 3],
-        };
+        });
 
         let mut raster_image = Image::new(layout, BackendId::new(2)).unwrap();
         raster_image
@@ -705,7 +649,6 @@ mod tests {
                 kind: FlatNodeKind::Leaf {
                     content: FlatLeafContent::Parametric {
                         mesh: background_mesh,
-                        render_cache: background_cache,
                     },
                 },
             },
@@ -768,20 +711,19 @@ mod tests {
             "should composite only dirty raster tiles"
         );
         assert_eq!(
-            render_cmds[0].from.len(),
+            render_cmds[0].sources.len(),
             2,
             "root should still see both child layers"
         );
-        assert_eq!(
-            render_cmds[0].from[0].tile_keys,
-            vec![TileKey::from_parts(1, 0, 10), TileKey::from_parts(1, 0, 11)],
-            "background should be read from its stable render cache"
-        );
-        assert_eq!(
-            render_cmds[0].from[1].tile_keys,
-            vec![TileKey::from_parts(2, 0, 20), TileKey::from_parts(2, 0, 21)],
-            "foreground raster tiles should be read directly from the raster image"
-        );
+        assert!(matches!(
+            &render_cmds[0].sources[0],
+            RenderSource::Parametric { .. }
+        ));
+        assert!(matches!(
+            &render_cmds[0].sources[1],
+            RenderSource::Tile { tile_keys, .. }
+                if tile_keys == &vec![TileKey::from_parts(2, 0, 20), TileKey::from_parts(2, 0, 21)]
+        ));
     }
 
     #[test]
@@ -867,9 +809,8 @@ mod tests {
     }
 
     #[test]
-    fn test_carry_forward_render_cache_reuses_unchanged_parametric_cache() {
-        let layout = ImageLayout::new(64, 64);
-        let mesh = ParametricMesh {
+    fn test_carry_forward_render_cache_keeps_unchanged_parametric_leaf() {
+        let mesh = Arc::new(ParametricMesh {
             vertices: vec![
                 ParametricVertex {
                     position: CanvasVec2::new(0.0, 0.0),
@@ -885,13 +826,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2],
-        };
-
-        let mut old_cache = Image::new(layout, BackendId::new(1)).unwrap();
-        old_cache
-            .set_tile_key(0, TileKey::from_parts(1, 0, 10))
-            .unwrap();
-        let new_cache = Image::new(layout, BackendId::new(1)).unwrap();
+        });
 
         let old_tree = FlatRenderTree {
             generation: RenderTreeGeneration(0),
@@ -904,10 +839,7 @@ mod tests {
                         blend_mode: LeafBlendMode::Normal,
                     },
                     kind: FlatNodeKind::Leaf {
-                        content: FlatLeafContent::Parametric {
-                            mesh: mesh.clone(),
-                            render_cache: old_cache,
-                        },
+                        content: FlatLeafContent::Parametric { mesh: mesh.clone() },
                     },
                 },
             )])),
@@ -925,10 +857,7 @@ mod tests {
                         blend_mode: LeafBlendMode::Normal,
                     },
                     kind: FlatNodeKind::Leaf {
-                        content: FlatLeafContent::Parametric {
-                            mesh,
-                            render_cache: new_cache,
-                        },
+                        content: FlatLeafContent::Parametric { mesh },
                     },
                 },
             )])),
@@ -939,16 +868,13 @@ mod tests {
 
         let node = new_tree.nodes.get(&NodeId(1)).unwrap();
         let FlatNodeKind::Leaf {
-            content: FlatLeafContent::Parametric { render_cache, .. },
+            content: FlatLeafContent::Parametric { mesh },
         } = &node.kind
         else {
             panic!("expected parametric leaf");
         };
 
-        assert_eq!(
-            render_cache.tile_key(0),
-            Some(TileKey::from_parts(1, 0, 10))
-        );
+        assert_eq!(mesh.indices, vec![0, 1, 2]);
     }
 
     #[test]

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glaphica_core::{BackendId, NodeId, RenderTreeGeneration};
-use images::layout::ImageLayout;
 use images::Image;
 use images::ImageCreateError;
+use images::layout::ImageLayout;
 
 use crate::node::{
     BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, RenderBranchNode, RenderLayerNode,
@@ -71,11 +71,8 @@ fn flatten_node(
                         image: image.clone(),
                     },
                 },
-                RenderLeafContent::Parametric { mesh, render_cache } => FlatNodeKind::Leaf {
-                    content: FlatLeafContent::Parametric {
-                        mesh: mesh.clone(),
-                        render_cache: render_cache.clone(),
-                    },
+                RenderLeafContent::Parametric { mesh } => FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric { mesh: mesh.clone() },
                 },
             };
             nodes.insert(
@@ -200,7 +197,7 @@ fn infer_render_leaf(
     leaf: &UiLeafNode,
     parent_opacity: f32,
     is_bottom: bool,
-    render_cache_backend: BackendId,
+    _render_cache_backend: BackendId,
     layout: ImageLayout,
 ) -> Result<Vec<RenderLayerNode>, ImageCreateError> {
     let blend_mode = if is_bottom {
@@ -214,8 +211,7 @@ fn infer_render_leaf(
             image: image.clone(),
         },
         UiLeafContent::Special(layer) => RenderLeafContent::Parametric {
-            mesh: layer.to_parametric_mesh(layout),
-            render_cache: Image::new(layout, render_cache_backend)?,
+            mesh: Arc::new(layer.to_parametric_mesh(layout)),
         },
     };
 

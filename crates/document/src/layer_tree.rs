@@ -1,12 +1,12 @@
 use glaphica_core::NodeId;
 use images::Image;
 
-use crate::node::{
-    branch_blend_mode_from_ui, leaf_blend_mode_from_ui, ui_blend_mode_from_branch,
-    ui_blend_mode_from_leaf, LayerMoveTarget, SpecialLayer, UiBlendMode, UiLayerNode,
-    UiLayerTreeItem, UiLeafContent, UiLeafNode, UiNodeKind,
-};
 use crate::LayerEditError;
+use crate::node::{
+    LayerMoveTarget, SpecialLayer, UiBlendMode, UiLayerNode, UiLayerTreeItem, UiLeafContent,
+    UiLeafNode, UiNodeKind, branch_blend_mode_from_ui, leaf_blend_mode_from_ui,
+    ui_blend_mode_from_branch, ui_blend_mode_from_leaf,
+};
 
 pub struct UiLayerTree {
     pub(crate) root: UiLayerNode,
@@ -119,6 +119,13 @@ impl UiLayerTree {
 
     pub fn get_leaf_image_mut(&mut self, node_id: NodeId) -> Option<&mut Image> {
         get_leaf_image_from_node_mut(&mut self.root, node_id)
+    }
+
+    pub(crate) fn visit_raster_images_mut<F>(&mut self, visit: &mut F)
+    where
+        F: FnMut(NodeId, &mut Image),
+    {
+        visit_raster_images_mut_from_node(&mut self.root, visit);
     }
 
     pub fn get_solid_color(&self, node_id: NodeId) -> Option<[f32; 4]> {
@@ -389,6 +396,25 @@ fn get_leaf_image_from_node_mut(node: &mut UiLayerNode, node_id: NodeId) -> Opti
             } else {
                 None
             }
+        }
+    }
+}
+
+fn visit_raster_images_mut_from_node<F>(node: &mut UiLayerNode, visit: &mut F)
+where
+    F: FnMut(NodeId, &mut Image),
+{
+    match node {
+        UiLayerNode::Branch(branch) => {
+            for child in &mut branch.children {
+                visit_raster_images_mut_from_node(child, visit);
+            }
+        }
+        UiLayerNode::Leaf(leaf) => {
+            let UiLeafContent::Raster { image } = &mut leaf.content else {
+                return;
+            };
+            visit(leaf.meta.id, image);
         }
     }
 }

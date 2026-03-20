@@ -9,7 +9,7 @@ use crate::node::{
     SolidColorLayer, SpecialLayer, UiBlendMode, UiBranchNode, UiLayerNode, UiLayerTreeItem,
     UiLeafContent, UiLeafNode, UiNodeMeta,
 };
-use crate::render_lowering::{infer_render_nodes, RenderLayerTree};
+use crate::render_lowering::{RenderLayerTree, infer_render_nodes};
 use crate::shared_tree::{FlatLeafContent, FlatNodeKind, FlatRenderTree};
 
 pub struct Document {
@@ -401,7 +401,7 @@ impl Document {
                 let image = match &mut node.kind {
                     FlatNodeKind::Leaf { content } => match content {
                         FlatLeafContent::Raster { image } => image,
-                        FlatLeafContent::Parametric { render_cache, .. } => render_cache,
+                        FlatLeafContent::Parametric { .. } => continue,
                     },
                     FlatNodeKind::Branch { render_cache, .. } => render_cache,
                 };
@@ -479,8 +479,8 @@ mod tests {
     };
     use crate::{ParametricMesh, ParametricVertex};
     use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
-    use images::layout::ImageLayout;
     use images::Image;
+    use images::layout::ImageLayout;
     use std::sync::Arc;
 
     fn test_meta(id: NodeId, label: &str) -> UiNodeMeta {
@@ -591,9 +591,7 @@ mod tests {
 
     #[test]
     fn test_flatten_preserves_parametric_mesh() {
-        let layout = ImageLayout::new(128, 128);
-        let render_cache = Image::new(layout, BackendId::new(2)).unwrap();
-        let mesh = ParametricMesh {
+        let mesh = Arc::new(ParametricMesh {
             vertices: vec![
                 ParametricVertex {
                     position: glaphica_core::CanvasVec2::new(0.0, 0.0),
@@ -609,7 +607,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2],
-        };
+        });
 
         let tree = RenderLayerTree {
             root: RenderLayerNode::Leaf(RenderLeafNode {
@@ -618,10 +616,7 @@ mod tests {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
                 },
-                content: RenderLeafContent::Parametric {
-                    mesh: mesh.clone(),
-                    render_cache,
-                },
+                content: RenderLeafContent::Parametric { mesh: mesh.clone() },
             }),
         };
 
@@ -670,10 +665,10 @@ mod tests {
         let flat = RenderLayerTree { root }.flatten(RenderTreeGeneration(2));
         let node = flat.nodes.get(&NodeId(9)).unwrap();
 
-        let (mesh, render_cache) = match &node.kind {
+        let mesh = match &node.kind {
             FlatNodeKind::Leaf {
-                content: FlatLeafContent::Parametric { mesh, render_cache },
-            } => (mesh, render_cache),
+                content: FlatLeafContent::Parametric { mesh },
+            } => mesh,
             FlatNodeKind::Leaf {
                 content: FlatLeafContent::Raster { .. },
             }
@@ -693,7 +688,6 @@ mod tests {
             glaphica_core::CanvasVec2::new(128.0, 64.0)
         );
         assert_eq!(mesh.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
-        assert_eq!(*render_cache.layout(), layout);
     }
 
     #[test]

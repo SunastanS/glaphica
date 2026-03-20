@@ -4,12 +4,12 @@ use glaphica_core::{BackendId, NodeId};
 use images::layout::ImageLayout;
 use images::{Image, ImageCreateError};
 
+use crate::document::{Document, Metadata};
 use crate::layer_tree::UiLayerTree;
 use crate::node::{
     BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, SolidColorLayer, SpecialLayer,
     UiBranchNode, UiLayerNode, UiLeafContent, UiLeafNode, UiNodeMeta,
 };
-use crate::{Document, Metadata};
 
 const STORAGE_VERSION: u32 = 1;
 
