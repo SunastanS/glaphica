@@ -155,13 +155,8 @@ pub struct RenderLeafNode {
 
 #[derive(Clone, PartialEq)]
 pub enum RenderLeafContent {
-    Raster {
-        image: Image,
-    },
-    Parametric {
-        mesh: ParametricMesh,
-        render_cache: Image,
-    },
+    Raster { image: Image },
+    Parametric { mesh: Arc<ParametricMesh> },
 }
 
 #[derive(Clone, PartialEq)]

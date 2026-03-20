@@ -10,7 +10,6 @@ use crate::node::{
     BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, SolidColorLayer, SpecialLayer,
     UiBranchNode, UiLayerNode, UiLeafContent, UiLeafNode, UiNodeMeta,
 };
-use crate::{Document, Metadata};
 
 const STORAGE_VERSION: u32 = 1;
 

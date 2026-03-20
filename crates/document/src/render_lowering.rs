@@ -71,11 +71,8 @@ fn flatten_node(
                         image: image.clone(),
                     },
                 },
-                RenderLeafContent::Parametric { mesh, render_cache } => FlatNodeKind::Leaf {
-                    content: FlatLeafContent::Parametric {
-                        mesh: mesh.clone(),
-                        render_cache: render_cache.clone(),
-                    },
+                RenderLeafContent::Parametric { mesh } => FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric { mesh: mesh.clone() },
                 },
             };
             nodes.insert(
@@ -215,7 +212,6 @@ fn infer_render_leaf(
         },
         UiLeafContent::Special(layer) => RenderLeafContent::Parametric {
             mesh: Arc::new(layer.to_parametric_mesh(layout)),
-            render_cache: Image::new(layout, render_cache_backend)?,
         },
     };
 
