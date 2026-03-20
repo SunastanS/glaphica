@@ -808,4 +808,58 @@ mod tests {
             ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE)
         );
     }
+
+    #[test]
+    fn resize_document_canvas_preserves_overlapping_render_cache_tiles() {
+        let old_layout = ImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2);
+        let new_layout = ImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
+        let document = Document::new(
+            "default".to_string(),
+            old_layout,
+            BackendId::new(0),
+            BackendId::new(1),
+        )
+        .unwrap();
+        let shared_tree = Arc::new(SharedRenderTree::new(FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::new()),
+            root_id: None,
+        }));
+        let mut engine = EngineThreadState::new(document, shared_tree, 8);
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+
+        engine.rebuild_render_tree().unwrap();
+        let old_tree = engine.shared_tree().read();
+        let old_root = old_tree
+            .root_id
+            .and_then(|root_id| old_tree.nodes.get(&root_id))
+            .and_then(|node| node.kind.render_cache())
+            .unwrap();
+        let old_keys = (0..old_root.tile_count())
+            .map(|tile_index| old_root.tile_key(tile_index).unwrap())
+            .collect::<Vec<_>>();
+
+        engine
+            .resize_document_canvas_anchored_top_left(new_layout)
+            .unwrap();
+
+        let new_tree = engine.shared_tree().read();
+        let new_root = new_tree
+            .root_id
+            .and_then(|root_id| new_tree.nodes.get(&root_id))
+            .and_then(|node| node.kind.render_cache())
+            .unwrap();
+
+        assert_eq!(new_root.tile_key(0), Some(old_keys[0]));
+        assert_eq!(new_root.tile_key(1), Some(old_keys[1]));
+        assert_eq!(new_root.tile_key(3), Some(old_keys[2]));
+        assert_eq!(new_root.tile_key(4), Some(old_keys[3]));
+    }
 }

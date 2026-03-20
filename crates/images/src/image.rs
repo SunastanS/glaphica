@@ -325,4 +325,24 @@ mod tests {
         assert_eq!(image.tile_key(1), Some(kept_bottom_left));
         assert_eq!(removed, vec![removed_top_right, removed_bottom_right]);
     }
+
+    #[test]
+    fn resize_anchored_top_left_moves_tile_keys_by_tile_coords() {
+        let old_layout = ImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2);
+        let new_layout = ImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
+        let mut image = Image::new(old_layout, BackendId::new(1)).unwrap();
+        let top_right = TileKey::from_parts(1, 2, 100);
+        let bottom_left = TileKey::from_parts(1, 2, 101);
+        let bottom_right = TileKey::from_parts(1, 2, 102);
+        image.set_tile_key(1, top_right).unwrap();
+        image.set_tile_key(2, bottom_left).unwrap();
+        image.set_tile_key(3, bottom_right).unwrap();
+
+        let removed = image.resize_anchored_top_left(new_layout).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(image.tile_key(1), Some(top_right));
+        assert_eq!(image.tile_key(3), Some(bottom_left));
+        assert_eq!(image.tile_key(4), Some(bottom_right));
+    }
 }

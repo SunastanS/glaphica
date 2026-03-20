@@ -105,7 +105,14 @@ impl FlatRenderTree {
                         ..
                     },
                 ) => {
-                    *render_cache = old_render_cache.clone();
+                    let mut carried = old_render_cache.clone();
+                    let new_layout = *render_cache.layout();
+                    if carried.layout() != &new_layout
+                        && carried.resize_anchored_top_left(new_layout).is_err()
+                    {
+                        continue;
+                    }
+                    *render_cache = carried;
                 }
                 (
                     FlatNodeKind::Leaf {
@@ -190,7 +197,7 @@ impl FlatRenderTree {
                     render_cache: b_cache,
                     ..
                 },
-            ) => a_cache.backend() == b_cache.backend() && a_cache.layout() == b_cache.layout(),
+            ) => a_cache.backend() == b_cache.backend(),
             (
                 FlatNodeKind::Leaf {
                     content: FlatLeafContent::Parametric { .. },
@@ -215,15 +222,20 @@ impl FlatRenderTree {
         match (&a.kind, &b.kind) {
             (
                 FlatNodeKind::Branch {
+                    render_cache: a_cache,
                     children: a_children,
                     ..
                 },
                 FlatNodeKind::Branch {
+                    render_cache: b_cache,
                     children: b_children,
                     ..
                 },
             ) => {
                 if a_children.len() != b_children.len() {
+                    return false;
+                }
+                if a_cache.layout() != b_cache.layout() {
                     return false;
                 }
                 if a.config != b.config {
@@ -466,7 +478,9 @@ impl SharedRenderTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glaphica_core::{BackendId, ImageDirtyTracker, RenderTreeGeneration, TileKey};
+    use glaphica_core::{
+        BackendId, IMAGE_TILE_SIZE, ImageDirtyTracker, RenderTreeGeneration, TileKey,
+    };
     use images::layout::ImageLayout;
 
     #[test]
@@ -936,6 +950,87 @@ mod tests {
             render_cache.tile_key(0),
             Some(TileKey::from_parts(1, 0, 10))
         );
+        assert_eq!(
+            new_tree.diff_render_cache_dirty(&old_tree),
+            vec![NodeId(100)]
+        );
+    }
+
+    #[test]
+    fn test_carry_forward_render_cache_resizes_by_tile_coords() {
+        let old_layout = ImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2);
+        let new_layout = ImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
+
+        let mut old_cache = Image::new(old_layout, BackendId::new(1)).unwrap();
+        old_cache
+            .set_tile_key(1, TileKey::from_parts(1, 0, 10))
+            .unwrap();
+        old_cache
+            .set_tile_key(2, TileKey::from_parts(1, 0, 11))
+            .unwrap();
+        old_cache
+            .set_tile_key(3, TileKey::from_parts(1, 0, 12))
+            .unwrap();
+        let new_cache = Image::new(new_layout, BackendId::new(1)).unwrap();
+
+        let old_tree = FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::from([(
+                NodeId(100),
+                FlatRenderNode {
+                    parent_id: None,
+                    config: NodeConfig {
+                        opacity: 1.0,
+                        blend_mode: LeafBlendMode::Normal,
+                    },
+                    kind: FlatNodeKind::Branch {
+                        children: vec![NodeId(1)],
+                        render_cache: old_cache,
+                    },
+                },
+            )])),
+            root_id: Some(NodeId(100)),
+        };
+
+        let mut new_tree = FlatRenderTree {
+            generation: RenderTreeGeneration(1),
+            nodes: Arc::new(HashMap::from([(
+                NodeId(100),
+                FlatRenderNode {
+                    parent_id: None,
+                    config: NodeConfig {
+                        opacity: 1.0,
+                        blend_mode: LeafBlendMode::Normal,
+                    },
+                    kind: FlatNodeKind::Branch {
+                        children: vec![NodeId(1)],
+                        render_cache: new_cache,
+                    },
+                },
+            )])),
+            root_id: Some(NodeId(100)),
+        };
+
+        new_tree.carry_forward_render_caches(&old_tree);
+
+        let node = new_tree.nodes.get(&NodeId(100)).unwrap();
+        let FlatNodeKind::Branch { render_cache, .. } = &node.kind else {
+            panic!("expected branch");
+        };
+
+        assert_eq!(
+            render_cache.tile_key(1),
+            Some(TileKey::from_parts(1, 0, 10))
+        );
+        assert_eq!(
+            render_cache.tile_key(3),
+            Some(TileKey::from_parts(1, 0, 11))
+        );
+        assert_eq!(
+            render_cache.tile_key(4),
+            Some(TileKey::from_parts(1, 0, 12))
+        );
+        assert_eq!(render_cache.tile_key(2), Some(TileKey::EMPTY));
         assert_eq!(
             new_tree.diff_render_cache_dirty(&old_tree),
             vec![NodeId(100)]
