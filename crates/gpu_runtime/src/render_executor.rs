@@ -1743,6 +1743,14 @@ fn encode_cmd(
 
         for tile in prepared_pass.tiles {
             debug_assert_eq!(tile.pass_key, prepared_pass.key);
+            pass.set_viewport(
+                tile.scissor_x as f32,
+                tile.scissor_y as f32,
+                ATLAS_TILE_SIZE as f32,
+                ATLAS_TILE_SIZE as f32,
+                0.0,
+                1.0,
+            );
             pass.set_scissor_rect(
                 tile.scissor_x,
                 tile.scissor_y,

@@ -19,8 +19,8 @@ struct VertexOutput {
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     let tile_xy = input.position - params.tile_origin + vec2<f32>(f32(1u), f32(1u));
-    let ndc_x = tile_xy.x / f32(66u) * 2.0 - 1.0;
-    let ndc_y = 1.0 - tile_xy.y / f32(66u) * 2.0;
+    let ndc_x = tile_xy.x / f32(64u) * 2.0 - 1.0;
+    let ndc_y = 1.0 - tile_xy.y / f32(64u) * 2.0;
     var output: VertexOutput;
     output.clip_position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
     output.color = input.color;

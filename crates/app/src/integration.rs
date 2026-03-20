@@ -1969,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn repro_solid_white_document_root_image_has_transparent_top_left_pixel() {
+    fn solid_white_document_root_image_fills_canvas() {
         let mut app = pollster::block_on(AppThreadIntegration::new(
             "repro".to_string(),
             ImageLayout::new(1024, 1024),
@@ -1977,11 +1977,35 @@ mod tests {
         .unwrap();
         let tree = app.engine_state.shared_tree().read();
         let root_id = tree.root_id.unwrap();
-        let root_image = tree.nodes.get(&root_id).unwrap().kind.render_image().unwrap();
+        let root_image = tree
+            .nodes
+            .get(&root_id)
+            .unwrap()
+            .kind
+            .render_image()
+            .unwrap();
         let image = app.main_state.export_layer_image(root_image).unwrap();
 
         assert_eq!(image.width(), 1024);
         assert_eq!(image.height(), 1024);
-        assert_eq!(&image.pixels_rgba8()[..4], &[0, 0, 0, 0]);
+        assert_eq!(&image.pixels_rgba8()[..4], &[255, 255, 255, 255]);
+
+        let top_right = ((1024 - 1) * 4) as usize;
+        assert_eq!(
+            &image.pixels_rgba8()[top_right..top_right + 4],
+            &[255, 255, 255, 255]
+        );
+
+        let bottom_left = (((1024 - 1) * 1024) * 4) as usize;
+        assert_eq!(
+            &image.pixels_rgba8()[bottom_left..bottom_left + 4],
+            &[255, 255, 255, 255]
+        );
+
+        let bottom_right = (((1024 * 1024) - 1) * 4) as usize;
+        assert_eq!(
+            &image.pixels_rgba8()[bottom_right..bottom_right + 4],
+            &[255, 255, 255, 255]
+        );
     }
 }
