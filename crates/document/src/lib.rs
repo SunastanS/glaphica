@@ -1342,7 +1342,7 @@ fn infer_render_leaf(
             image: image.clone(),
         },
         UiLeafContent::Special(layer) => RenderLeafContent::Parametric {
-            mesh: layer.to_parametric_mesh(layout),
+            mesh: Arc::new(layer.to_parametric_mesh(layout)),
         },
     };
 
@@ -1492,7 +1492,7 @@ pub struct RenderLeafNode {
 #[derive(Clone, PartialEq)]
 pub enum RenderLeafContent {
     Raster { image: Image },
-    Parametric { mesh: ParametricMesh },
+    Parametric { mesh: Arc<ParametricMesh> },
 }
 
 #[derive(Clone, PartialEq)]
@@ -1646,7 +1646,7 @@ mod tests {
     #[test]
     fn test_flatten_preserves_parametric_mesh() {
         let layout = ImageLayout::new(128, 128);
-        let mesh = ParametricMesh {
+        let mesh = Arc::new(ParametricMesh {
             vertices: vec![
                 ParametricVertex {
                     position: glaphica_core::CanvasVec2::new(0.0, 0.0),
@@ -1662,7 +1662,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2],
-        };
+        });
 
         let tree = RenderLayerTree {
             root: RenderLayerNode::Leaf(RenderLeafNode {

@@ -13,7 +13,7 @@ pub enum RenderSource {
         config: NodeConfig,
     },
     Parametric {
-        mesh: ParametricMesh,
+        mesh: Arc<ParametricMesh>,
         config: NodeConfig,
     },
 }
@@ -27,7 +27,7 @@ pub struct RenderCmd {
 
 pub struct MaterializeParametricCmd {
     pub node_id: NodeId,
-    pub mesh: ParametricMesh,
+    pub mesh: Arc<ParametricMesh>,
     pub tile_indices: Vec<usize>,
     pub tile_origins: Vec<CanvasVec2>,
     pub dst_tile_keys: Vec<TileKey>,
@@ -357,7 +357,7 @@ pub enum FlatNodeKind {
 #[derive(Clone)]
 pub enum FlatLeafContent {
     Raster { image: Image },
-    Parametric { mesh: ParametricMesh },
+    Parametric { mesh: Arc<ParametricMesh> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -599,7 +599,7 @@ mod tests {
     fn test_raster_dirty_under_parametric_background_does_not_materialize_background() {
         let layout = ImageLayout::new(256, 128);
 
-        let background_mesh = ParametricMesh {
+        let background_mesh = Arc::new(ParametricMesh {
             vertices: vec![
                 ParametricVertex {
                     position: glaphica_core::CanvasVec2::new(0.0, 0.0),
@@ -619,7 +619,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2, 2, 1, 3],
-        };
+        });
 
         let mut raster_image = Image::new(layout, BackendId::new(2)).unwrap();
         raster_image
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_carry_forward_render_cache_keeps_unchanged_parametric_leaf() {
-        let mesh = ParametricMesh {
+        let mesh = Arc::new(ParametricMesh {
             vertices: vec![
                 ParametricVertex {
                     position: CanvasVec2::new(0.0, 0.0),
@@ -826,7 +826,7 @@ mod tests {
                 },
             ],
             indices: vec![0, 1, 2],
-        };
+        });
 
         let old_tree = FlatRenderTree {
             generation: RenderTreeGeneration(0),
