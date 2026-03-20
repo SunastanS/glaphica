@@ -1658,6 +1658,7 @@ mod tests {
     use flate2::{Compression, read::GzDecoder, write::GzEncoder};
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
     use images::StoredImage;
+    use images::layout::ImageLayout;
     use thread_protocol::{
         CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
         WriteBlendMode, WriteOp,
@@ -1965,5 +1966,22 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn repro_solid_white_document_root_image_has_transparent_top_left_pixel() {
+        let mut app = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        ))
+        .unwrap();
+        let tree = app.engine_state.shared_tree().read();
+        let root_id = tree.root_id.unwrap();
+        let root_image = tree.nodes.get(&root_id).unwrap().kind.render_image().unwrap();
+        let image = app.main_state.export_layer_image(root_image).unwrap();
+
+        assert_eq!(image.width(), 1024);
+        assert_eq!(image.height(), 1024);
+        assert_eq!(&image.pixels_rgba8()[..4], &[0, 0, 0, 0]);
     }
 }

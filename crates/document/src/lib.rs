@@ -450,9 +450,8 @@ impl Document {
                 let image = match &mut node.kind {
                     FlatNodeKind::Leaf { content } => match content {
                         FlatLeafContent::Raster { image } => image,
-                        FlatLeafContent::Parametric { render_cache, .. } => render_cache,
+                        FlatLeafContent::Parametric { .. } => continue,
                     },
-                    //TODO: We should update that after definede the parametric layer kind
                     FlatNodeKind::Branch { render_cache, .. } => render_cache,
                 };
                 if image.set_tile_key(*tile_index, new_tile_key).is_err() {
@@ -1203,11 +1202,8 @@ fn flatten_node(
                         image: image.clone(),
                     },
                 },
-                RenderLeafContent::Parametric { mesh, render_cache } => FlatNodeKind::Leaf {
-                    content: FlatLeafContent::Parametric {
-                        mesh: mesh.clone(),
-                        render_cache: render_cache.clone(),
-                    },
+                RenderLeafContent::Parametric { mesh } => FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Parametric { mesh: mesh.clone() },
                 },
             };
             nodes.insert(
@@ -1332,7 +1328,7 @@ fn infer_render_leaf(
     leaf: &UiLeafNode,
     parent_opacity: f32,
     is_bottom: bool,
-    render_cache_backend: BackendId,
+    _render_cache_backend: BackendId,
     layout: ImageLayout,
 ) -> Result<Vec<RenderLayerNode>, ImageCreateError> {
     let blend_mode = if is_bottom {
@@ -1347,7 +1343,6 @@ fn infer_render_leaf(
         },
         UiLeafContent::Special(layer) => RenderLeafContent::Parametric {
             mesh: layer.to_parametric_mesh(layout),
-            render_cache: Image::new(layout, render_cache_backend)?,
         },
     };
 
@@ -1496,13 +1491,8 @@ pub struct RenderLeafNode {
 
 #[derive(Clone, PartialEq)]
 pub enum RenderLeafContent {
-    Raster {
-        image: Image,
-    },
-    Parametric {
-        mesh: ParametricMesh,
-        render_cache: Image,
-    },
+    Raster { image: Image },
+    Parametric { mesh: ParametricMesh },
 }
 
 #[derive(Clone, PartialEq)]
@@ -1656,7 +1646,6 @@ mod tests {
     #[test]
     fn test_flatten_preserves_parametric_mesh() {
         let layout = ImageLayout::new(128, 128);
-        let render_cache = Image::new(layout, BackendId::new(2)).unwrap();
         let mesh = ParametricMesh {
             vertices: vec![
                 ParametricVertex {
@@ -1682,10 +1671,7 @@ mod tests {
                     opacity: 1.0,
                     blend_mode: LeafBlendMode::Normal,
                 },
-                content: RenderLeafContent::Parametric {
-                    mesh: mesh.clone(),
-                    render_cache,
-                },
+                content: RenderLeafContent::Parametric { mesh: mesh.clone() },
             }),
             layout,
         };
@@ -1730,10 +1716,10 @@ mod tests {
         let flat = render_tree.flatten(RenderTreeGeneration(2));
         let node = flat.nodes.get(&NodeId(9)).unwrap();
 
-        let (mesh, render_cache) = match &node.kind {
+        let mesh = match &node.kind {
             FlatNodeKind::Leaf {
-                content: FlatLeafContent::Parametric { mesh, render_cache },
-            } => (mesh, render_cache),
+                content: FlatLeafContent::Parametric { mesh },
+            } => mesh,
             FlatNodeKind::Leaf {
                 content: FlatLeafContent::Raster { .. },
             }
@@ -1747,7 +1733,6 @@ mod tests {
         assert_eq!(mesh.vertices[0].position, CanvasVec2::new(0.0, 0.0));
         assert_eq!(mesh.vertices[3].position, CanvasVec2::new(128.0, 64.0));
         assert_eq!(mesh.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
-        assert_eq!(*render_cache.layout(), layout);
     }
 
     #[test]

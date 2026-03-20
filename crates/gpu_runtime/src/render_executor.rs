@@ -4,8 +4,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wgpu::util::DeviceExt;
 
-use document::{LeafBlendMode, MaterializeParametricCmd, ParametricVertex, RenderCmd};
-use glaphica_core::{ATLAS_TILE_SIZE, GUTTER_SIZE, TileKey};
+use document::{
+    LeafBlendMode, MaterializeParametricCmd, ParametricVertex, RenderCmd, RenderSource,
+};
+use glaphica_core::{ATLAS_TILE_SIZE, CanvasVec2, TileKey};
 use thread_protocol::{ClearOp, CompositeBlendMode, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
@@ -46,13 +48,15 @@ struct PipelineCache {
     multiply: wgpu::RenderPipeline,
     image_normal: wgpu::RenderPipeline,
     image_multiply: wgpu::RenderPipeline,
+    parametric_normal: wgpu::RenderPipeline,
+    parametric_multiply: wgpu::RenderPipeline,
     write_erase: wgpu::RenderPipeline,
     composite_normal: wgpu::RenderPipeline,
     composite_multiply: wgpu::RenderPipeline,
-    parametric: wgpu::RenderPipeline,
     clear: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     composite_bind_group_layout: wgpu::BindGroupLayout,
+    parametric_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
 }
 
@@ -67,9 +71,18 @@ struct RenderPassKey {
     format: wgpu::TextureFormat,
 }
 
-struct PreparedRenderSource {
-    bind_group: wgpu::BindGroup,
-    blend_mode: LeafBlendMode,
+enum PreparedRenderSource {
+    Tile {
+        bind_group: wgpu::BindGroup,
+        blend_mode: LeafBlendMode,
+    },
+    Parametric {
+        bind_group: wgpu::BindGroup,
+        vertex_buffer: wgpu::Buffer,
+        index_buffer: wgpu::Buffer,
+        index_count: u32,
+        blend_mode: LeafBlendMode,
+    },
 }
 
 struct PreparedRenderTile {
@@ -104,6 +117,14 @@ struct PreparedWriteCall {
 struct GpuParametricVertex {
     position: [f32; 2],
     color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ParametricParams {
+    tile_origin: [f32; 2],
+    opacity: f32,
+    _padding: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -388,6 +409,21 @@ fn encode_parametric_cmd(
                 contents: bytemuck::cast_slice(&index_data),
                 usage: wgpu::BufferUsages::INDEX,
             });
+    let vertices: Vec<GpuParametricVertex> = cmd
+        .mesh
+        .vertices
+        .iter()
+        .map(|vertex| map_parametric_vertex(*vertex))
+        .collect();
+    let vertex_buffer =
+        context
+            .gpu_context
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("glaphica-parametric-vertex-buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
     for ((&dst_tile_key, &tile_origin), &_tile_index) in cmd
         .dst_tile_keys
@@ -405,21 +441,12 @@ fn encode_parametric_cmd(
         )?;
         encode_clear_resolved_tile(context.gpu_context, &cache.clear, &dst_resolved, encoder);
 
-        let vertices: Vec<GpuParametricVertex> = cmd
-            .mesh
-            .vertices
-            .iter()
-            .map(|vertex| map_parametric_vertex(*vertex, tile_origin))
-            .collect();
-        let vertex_buffer =
-            context
-                .gpu_context
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("glaphica-parametric-vertex-buffer"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+        let bind_group = create_parametric_bind_group(
+            context,
+            &cache.parametric_bind_group_layout,
+            tile_origin,
+            1.0,
+        );
 
         let backend = context
             .atlas_storage
@@ -457,7 +484,8 @@ fn encode_parametric_cmd(
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&cache.parametric);
+        pass.set_pipeline(&cache.parametric_normal);
+        pass.set_bind_group(0, &bind_group, &[]);
         pass.set_viewport(
             dst_resolved.address.texel_offset.0 as f32,
             dst_resolved.address.texel_offset.1 as f32,
@@ -479,16 +507,9 @@ fn encode_parametric_cmd(
     Ok(())
 }
 
-fn map_parametric_vertex(
-    vertex: ParametricVertex,
-    tile_origin: glaphica_core::CanvasVec2,
-) -> GpuParametricVertex {
-    let tile_x = vertex.position.x - tile_origin.x + GUTTER_SIZE as f32;
-    let tile_y = vertex.position.y - tile_origin.y + GUTTER_SIZE as f32;
-    let ndc_x = tile_x / ATLAS_TILE_SIZE as f32 * 2.0 - 1.0;
-    let ndc_y = 1.0 - tile_y / ATLAS_TILE_SIZE as f32 * 2.0;
+fn map_parametric_vertex(vertex: ParametricVertex) -> GpuParametricVertex {
     GpuParametricVertex {
-        position: [ndc_x, ndc_y],
+        position: [vertex.position.x, vertex.position.y],
         color: vertex.color,
     }
 }
@@ -521,28 +542,73 @@ impl RenderExecutor {
             encode_clear_resolved_tile(context.gpu_context, &cache.clear, &dst_resolved, encoder);
 
             let mut sources = Vec::new();
-            for source in &cmd.from {
-                if tile_idx >= source.tile_keys.len() {
-                    continue;
-                }
-                let src_tile_key = source.tile_keys[tile_idx];
-                if src_tile_key == TileKey::EMPTY {
-                    continue;
-                }
+            let tile_origin = *cmd
+                .tile_origins
+                .get(tile_idx)
+                .ok_or(RenderExecutorError::PipelineNotInitialized)?;
+            for source in &cmd.sources {
+                match source {
+                    RenderSource::Tile { tile_keys, config } => {
+                        if tile_idx >= tile_keys.len() {
+                            continue;
+                        }
+                        let src_tile_key = tile_keys[tile_idx];
+                        if src_tile_key == TileKey::EMPTY {
+                            continue;
+                        }
 
-                let bind_group = create_bind_group(
-                    context,
-                    &cache.bind_group_layout,
-                    &cache.sampler,
-                    src_tile_key,
-                    source.config.opacity,
-                    None,
-                    None,
-                )?;
-                sources.push(PreparedRenderSource {
-                    bind_group,
-                    blend_mode: source.config.blend_mode,
-                });
+                        let bind_group = create_bind_group(
+                            context,
+                            &cache.bind_group_layout,
+                            &cache.sampler,
+                            src_tile_key,
+                            config.opacity,
+                            None,
+                            None,
+                        )?;
+                        sources.push(PreparedRenderSource::Tile {
+                            bind_group,
+                            blend_mode: config.blend_mode,
+                        });
+                    }
+                    RenderSource::Parametric { mesh, config } => {
+                        if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+                            continue;
+                        }
+                        let bind_group = create_parametric_bind_group(
+                            context,
+                            &cache.parametric_bind_group_layout,
+                            tile_origin,
+                            config.opacity,
+                        );
+                        let vertex_data: Vec<GpuParametricVertex> = mesh
+                            .vertices
+                            .iter()
+                            .map(|vertex| map_parametric_vertex(*vertex))
+                            .collect();
+                        let vertex_buffer = context.gpu_context.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("glaphica-render-parametric-source-vertex-buffer"),
+                                contents: bytemuck::cast_slice(&vertex_data),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            },
+                        );
+                        let index_buffer = context.gpu_context.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("glaphica-render-parametric-source-index-buffer"),
+                                contents: bytemuck::cast_slice(&mesh.indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            },
+                        );
+                        sources.push(PreparedRenderSource::Parametric {
+                            bind_group,
+                            vertex_buffer,
+                            index_buffer,
+                            index_count: u32::try_from(mesh.indices.len()).unwrap_or(0),
+                            blend_mode: config.blend_mode,
+                        });
+                    }
+                }
             }
 
             if sources.is_empty() {
@@ -1192,10 +1258,24 @@ impl RenderExecutor {
                 bind_group_layouts: &[],
                 immediate_size: 0,
             });
+        let parametric_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glaphica-render-parametric-bind-group-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let parametric_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("glaphica-render-parametric-pipeline-layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&parametric_bind_group_layout],
                 immediate_size: 0,
             });
         let composite_normal = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1254,60 +1334,20 @@ impl RenderExecutor {
             multiview_mask: None,
             cache: None,
         });
-        let parametric = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glaphica-render-pipeline-parametric"),
-            layout: Some(&parametric_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &parametric_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GpuParametricVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 8,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                    ],
-                }],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &parametric_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let parametric_normal = Self::create_parametric_pipeline(
+            device,
+            &parametric_pipeline_layout,
+            &parametric_shader,
+            format,
+            LeafBlendMode::Normal,
+        );
+        let parametric_multiply = Self::create_parametric_pipeline(
+            device,
+            &parametric_pipeline_layout,
+            &parametric_shader,
+            format,
+            LeafBlendMode::Multiply,
+        );
         let clear = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("glaphica-render-pipeline-clear"),
             layout: Some(&clear_pipeline_layout),
@@ -1354,13 +1394,15 @@ impl RenderExecutor {
             multiply,
             image_normal,
             image_multiply,
+            parametric_normal,
+            parametric_multiply,
             write_erase,
             composite_normal,
             composite_multiply,
-            parametric,
             clear,
             bind_group_layout,
             composite_bind_group_layout,
+            parametric_bind_group_layout,
             sampler,
         });
     }
@@ -1540,6 +1582,94 @@ impl RenderExecutor {
             cache: None,
         })
     }
+
+    fn create_parametric_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+        blend_mode: LeafBlendMode,
+    ) -> wgpu::RenderPipeline {
+        let (blend, fs_entry) = match blend_mode {
+            LeafBlendMode::Normal => (
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                "fs_normal",
+            ),
+            LeafBlendMode::Multiply => (
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Dst,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                "fs_multiply",
+            ),
+        };
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!(
+                "glaphica-render-parametric-pipeline-{:?}",
+                blend_mode
+            )),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuParametricVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 8,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                    ],
+                }],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some(fs_entry),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
 }
 
 fn encode_cmd(
@@ -1548,23 +1678,27 @@ fn encode_cmd(
     cache: &PipelineCache,
     encoder: &mut wgpu::CommandEncoder,
 ) -> Result<(), RenderExecutorError> {
-    if cmd.to.is_empty() || cmd.from.is_empty() {
+    if cmd.to.is_empty() || cmd.sources.is_empty() {
         return Ok(());
     }
 
     // Dev assertion: verify all sources have matching tile_keys length
     #[cfg(debug_assertions)]
     {
-        for (i, source) in cmd.from.iter().enumerate() {
-            debug_assert!(
-                source.tile_keys.len() == cmd.to.len(),
-                "RenderCmd source {} has {} tile_keys but cmd.to has {} tiles. \
-                 This indicates a bug in build_render_cmds - all sources must have \
-                 matching tile_counts for the dirty tile indices.",
-                i,
-                source.tile_keys.len(),
-                cmd.to.len()
-            );
+        debug_assert_eq!(cmd.tile_indices.len(), cmd.to.len());
+        debug_assert_eq!(cmd.tile_origins.len(), cmd.to.len());
+        for (i, source) in cmd.sources.iter().enumerate() {
+            if let RenderSource::Tile { tile_keys, .. } = source {
+                debug_assert!(
+                    tile_keys.len() == cmd.to.len(),
+                    "RenderCmd source {} has {} tile_keys but cmd.to has {} tiles. \
+                     This indicates a bug in build_render_cmds - all tile sources must have \
+                     matching tile_counts for the dirty tile indices.",
+                    i,
+                    tile_keys.len(),
+                    cmd.to.len()
+                );
+            }
         }
     }
 
@@ -1616,13 +1750,37 @@ fn encode_cmd(
                 ATLAS_TILE_SIZE,
             );
             for source in tile.sources {
-                let pipeline = match source.blend_mode {
-                    LeafBlendMode::Normal => &cache.image_normal,
-                    LeafBlendMode::Multiply => &cache.image_multiply,
-                };
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, &source.bind_group, &[]);
-                pass.draw(0..3, 0..1);
+                match source {
+                    PreparedRenderSource::Tile {
+                        bind_group,
+                        blend_mode,
+                    } => {
+                        let pipeline = match blend_mode {
+                            LeafBlendMode::Normal => &cache.image_normal,
+                            LeafBlendMode::Multiply => &cache.image_multiply,
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                    PreparedRenderSource::Parametric {
+                        bind_group,
+                        vertex_buffer,
+                        index_buffer,
+                        index_count,
+                        blend_mode,
+                    } => {
+                        let pipeline = match blend_mode {
+                            LeafBlendMode::Normal => &cache.parametric_normal,
+                            LeafBlendMode::Multiply => &cache.parametric_multiply,
+                        };
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..index_count, 0, 0..1);
+                    }
+                }
             }
         }
     }
@@ -1738,6 +1896,39 @@ fn create_bind_group(
                 },
             ],
         }))
+}
+
+fn create_parametric_bind_group(
+    context: &RenderContext<'_>,
+    layout: &wgpu::BindGroupLayout,
+    tile_origin: CanvasVec2,
+    opacity: f32,
+) -> wgpu::BindGroup {
+    let params = ParametricParams {
+        tile_origin: [tile_origin.x, tile_origin.y],
+        opacity,
+        _padding: 0.0,
+    };
+    let buffer = context
+        .gpu_context
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glaphica-render-parametric-params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+    context
+        .gpu_context
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-render-parametric-bind-group"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        })
 }
 
 fn create_composite_bind_group(
