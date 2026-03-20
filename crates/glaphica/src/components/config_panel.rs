@@ -1,5 +1,5 @@
+use crate::brush_ui::state::{BrushKind, BrushUiState};
 use crate::theme::Theme;
-use crate::{BrushKind, BrushUiState};
 use brushes::{
     BrushConfigKind, BrushConfigValue, UnitIntervalPoint, eval_unit_interval_curve_polynomial,
 };

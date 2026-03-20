@@ -10,6 +10,7 @@ use crate::node::{
     BranchBlendMode, BranchConfig, LeafBlendMode, LeafConfig, SolidColorLayer, SpecialLayer,
     UiBranchNode, UiLayerNode, UiLeafContent, UiLeafNode, UiNodeMeta,
 };
+use crate::{Document, Metadata};
 
 const STORAGE_VERSION: u32 = 1;
 
@@ -120,7 +121,7 @@ impl Document {
             name: self.metadata.name().to_string(),
             canvas_width: self.layout.size_x(),
             canvas_height: self.layout.size_y(),
-            root: export_layer_node(&self.layer_tree.root),
+            root: export_layer_node(self.layer_tree().root()),
             active_node_id: self.active_node.map(|node_id| node_id.0),
             next_node_id: self.next_node_id.0,
             next_layer_label_index: self.next_layer_label_index,
@@ -130,7 +131,7 @@ impl Document {
 
     pub fn raster_layer_export_requests(&self) -> Vec<RasterLayerExportRequest> {
         let mut requests = Vec::new();
-        collect_raster_layer_export_requests(&self.layer_tree.root, &mut requests);
+        collect_raster_layer_export_requests(self.layer_tree().root(), &mut requests);
         requests
     }
 
