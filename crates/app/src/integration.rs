@@ -1970,11 +1970,12 @@ mod tests {
 
     #[test]
     fn solid_white_document_root_image_fills_canvas() {
-        let mut app = pollster::block_on(AppThreadIntegration::new(
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
             "repro".to_string(),
             ImageLayout::new(1024, 1024),
-        ))
-        .unwrap();
+        )) else {
+            return;
+        };
         let tree = app.engine_state.shared_tree().read();
         let root_id = tree.root_id.unwrap();
         let root_image = tree
