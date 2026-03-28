@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ pub struct FrameBatch {
     has_commands: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct FrameBatchPerfStats {
     pub render_tree_collect: Duration,
     pub parametric_materialize: Duration,
@@ -31,6 +32,7 @@ pub struct FrameBatchPerfStats {
     pub render_cmd_count: usize,
     pub render_dst_tile_count: usize,
     pub render_source_count: usize,
+    pub render_tile_indices: Vec<usize>,
 }
 
 pub struct FrameBatchContext<'a> {
@@ -288,6 +290,13 @@ impl FrameBatch {
                     .sum::<usize>()
             })
             .sum();
+        let mut render_tile_indices = BTreeSet::new();
+        for cmd in &render_cmds {
+            for tile_index in &cmd.tile_indices {
+                render_tile_indices.insert(*tile_index);
+            }
+        }
+        stats.render_tile_indices = render_tile_indices.into_iter().collect();
 
         if !parametric_cmds.is_empty() {
             let mut render_ctx = RenderContext {

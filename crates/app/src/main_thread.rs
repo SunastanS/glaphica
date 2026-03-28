@@ -30,7 +30,7 @@ use crate::{
     screen_blitter::ScreenBlitter,
 };
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct GpuSubmitPerfStats {
     pub frame_batch: FrameBatchPerfStats,
     pub dirty_tile_count: usize,
@@ -80,10 +80,48 @@ fn pipeline_trace_enabled() -> bool {
     })
 }
 
+fn tile_timeline_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLAPHICA_DEBUG_TILE_TIMELINE")
+            .ok()
+            .is_some_and(|value| value != "0")
+    })
+}
+
+fn collect_sorted_unique_tile_indices<I>(iter: I) -> Vec<usize>
+where
+    I: Iterator<Item = usize>,
+{
+    let mut indices = iter.collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+fn tile_index_span(indices: &[usize]) -> (usize, usize) {
+    (
+        indices.first().copied().unwrap_or(0),
+        indices.last().copied().unwrap_or(0),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DrawLaneKey {
     node_id: NodeId,
     tile_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileRuntimeStage {
+    ApplyVisibleUpdates,
+    ProcessRenderComposite,
+}
+
+#[derive(Debug, Clone)]
+pub struct TileRuntimeEvent {
+    pub stage: TileRuntimeStage,
+    pub tile_indices: Vec<usize>,
 }
 
 fn draw_lane_key(cmd: &GpuCmdMsg) -> Option<DrawLaneKey> {
@@ -355,6 +393,7 @@ pub struct MainThreadState {
     stroke_draw_ctx_cache_ring: StrokeCtxRingBuffer,
     next_brush_cache_backend_id: u8,
     layer_image_exporter: LayerImageExporter,
+    tile_runtime_events: Vec<TileRuntimeEvent>,
 }
 
 impl MainThreadState {
@@ -421,6 +460,7 @@ impl MainThreadState {
             stroke_draw_ctx_cache_ring: StrokeCtxRingBuffer::with_capacity(16),
             next_brush_cache_backend_id: 2,
             layer_image_exporter: LayerImageExporter::new(),
+            tile_runtime_events: Vec::new(),
         })
     }
 
@@ -560,6 +600,13 @@ impl MainThreadState {
             u32,
         ),
     {
+        if tile_timeline_trace_enabled() {
+            eprintln!(
+                "[TRACE][tile_timeline][present] pending_updates={} dirty_keys={}",
+                self.pending_visible_tile_updates.len(),
+                self.image_dirty_tracker.iter().count()
+            );
+        }
         self.promote_completed_tile_updates();
         let surface = self
             .surface_runtime
@@ -607,10 +654,44 @@ impl MainThreadState {
     pub fn process_render(&mut self) -> bool {
         self.promote_completed_tile_updates();
         let tree = self.shared_tree.read();
+        let dirty_tile_indices = if tile_timeline_trace_enabled() {
+            collect_sorted_unique_tile_indices(
+                self.image_dirty_tracker.iter().map(|key| key.tile_index),
+            )
+        } else {
+            Vec::new()
+        };
         let cmds = tree.build_render_cmds(&self.image_dirty_tracker);
         let mut has_work = false;
 
+        if tile_timeline_trace_enabled() {
+            let render_tile_indices = collect_sorted_unique_tile_indices(
+                cmds.iter().flat_map(|cmd| cmd.tile_indices.iter().copied()),
+            );
+            let (dirty_min, dirty_max) = tile_index_span(&dirty_tile_indices);
+            let (render_min, render_max) = tile_index_span(&render_tile_indices);
+            eprintln!(
+                "[TRACE][tile_timeline][process_render] dirty_count={} dirty_span={}..{} render_count={} render_span={}..{} render_cmds={}",
+                dirty_tile_indices.len(),
+                dirty_min,
+                dirty_max,
+                render_tile_indices.len(),
+                render_min,
+                render_max,
+                cmds.len()
+            );
+        }
+
         if !cmds.is_empty() {
+            let render_tile_indices = collect_sorted_unique_tile_indices(
+                cmds.iter().flat_map(|cmd| cmd.tile_indices.iter().copied()),
+            );
+            if !render_tile_indices.is_empty() {
+                self.tile_runtime_events.push(TileRuntimeEvent {
+                    stage: TileRuntimeStage::ProcessRenderComposite,
+                    tile_indices: render_tile_indices,
+                });
+            }
             let mut context = RenderContext {
                 gpu_context: &self.gpu_context,
                 atlas_storage: &self.atlas_storage,
@@ -643,6 +724,11 @@ impl MainThreadState {
         self.pending_preview_nodes.clear();
         self.blocked_preview_nodes.clear();
         self.layer_preview_updates.clear();
+        self.tile_runtime_events.clear();
+    }
+
+    pub fn take_tile_runtime_events(&mut self) -> Vec<TileRuntimeEvent> {
+        std::mem::take(&mut self.tile_runtime_events)
     }
 
     pub fn take_layer_preview_updates(&mut self) -> Vec<LayerPreviewBitmap> {
@@ -897,9 +983,79 @@ impl MainThreadState {
         }
     }
 
+    pub fn has_pending_visible_tile_updates(&self) -> bool {
+        !self.pending_visible_tile_updates.is_empty()
+    }
+
+    pub fn has_pending_render_work(&self) -> bool {
+        !self.image_dirty_tracker.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pending_visible_tile_update_batches(&self) -> Vec<Vec<usize>> {
+        self.pending_visible_tile_updates
+            .iter()
+            .map(|batch| {
+                collect_sorted_unique_tile_indices(
+                    batch.updates.iter().map(|(_, tile_index, _)| *tile_index),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dirty_tile_indices(&self) -> Vec<usize> {
+        collect_sorted_unique_tile_indices(
+            self.image_dirty_tracker.iter().map(|key| key.tile_index),
+        )
+    }
+
+    pub fn flush_visible_tile_updates(&mut self) {
+        while let Some(batch) = self.pending_visible_tile_updates.front() {
+            let poll = self.gpu_context.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(batch.submission_index.clone()),
+                timeout: None,
+            });
+            match poll {
+                Ok(status) if status.wait_finished() => {}
+                Ok(_) | Err(wgpu::PollError::Timeout) => continue,
+                Err(error) => {
+                    eprintln!("GPU poll failed while flushing tile updates: {error}");
+                    break;
+                }
+            }
+
+            if let Some(batch) = self.pending_visible_tile_updates.pop_front() {
+                self.apply_visible_tile_updates(&batch.updates);
+            }
+        }
+    }
+
     fn apply_visible_tile_updates(&mut self, updates: &[(NodeId, usize, TileKey)]) {
         if updates.is_empty() {
             return;
+        }
+        if tile_timeline_trace_enabled() {
+            let tile_indices = collect_sorted_unique_tile_indices(
+                updates.iter().map(|(_, tile_index, _)| *tile_index),
+            );
+            let (min_tile, max_tile) = tile_index_span(&tile_indices);
+            eprintln!(
+                "[TRACE][tile_timeline][apply_visible_tile_updates] updates={} unique_tiles={} span={}..{}",
+                updates.len(),
+                tile_indices.len(),
+                min_tile,
+                max_tile
+            );
+        }
+        let updated_tile_indices = collect_sorted_unique_tile_indices(
+            updates.iter().map(|(_, tile_index, _)| *tile_index),
+        );
+        if !updated_tile_indices.is_empty() {
+            self.tile_runtime_events.push(TileRuntimeEvent {
+                stage: TileRuntimeStage::ApplyVisibleUpdates,
+                tile_indices: updated_tile_indices,
+            });
         }
 
         let tree = self.shared_tree.read();
@@ -1085,7 +1241,8 @@ impl MainThreadState {
         width: u32,
         height: u32,
     ) -> Result<Vec<u8>, ExportImageError> {
-        self.promote_completed_tile_updates();
+        self.flush_visible_tile_updates();
+        self.process_render();
         if width == 0 || height == 0 {
             return Err(ExportImageError::InvalidSize);
         }

@@ -168,7 +168,9 @@ struct CachedAtlasBindGroupLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StrokeAtlasBindGroupKey {
     source_backend_id: u8,
+    source_layer: u32,
     cache_backend_id: Option<u8>,
+    cache_layer: Option<u32>,
     has_ref_image: bool,
     has_cache_tile: bool,
     layout_key: AtlasBindGroupLayoutKey,
@@ -422,7 +424,9 @@ impl WgpuBrushExecutor {
             device,
             atlas_storage,
             key.source_backend_id,
+            key.source_layer,
             key.cache_backend_id,
+            key.cache_layer,
             layout,
             brush_id,
             key.has_ref_image,
@@ -729,7 +733,9 @@ impl WgpuBrushExecutor {
         device: &wgpu::Device,
         atlas_storage: &AtlasStorageRuntime,
         source_backend_id: u8,
+        source_layer: u32,
         cache_backend_id: Option<u8>,
+        cache_layer: Option<u32>,
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
         brush_id: BrushId,
         has_ref_image: bool,
@@ -742,25 +748,33 @@ impl WgpuBrushExecutor {
                     backend_id: source_backend_id,
                 },
             )?;
-            create_atlas_sampling_view(source_backend, "glaphica-brush-source-atlas-view")
+            create_atlas_sampling_view(
+                source_backend,
+                source_layer,
+                "glaphica-brush-source-atlas-view",
+            )
         } else {
             // Use dummy texture when there's no ref_image to avoid binding the same texture
             // as both RESOURCE and COLOR_TARGET
             self.ensure_dummy_cache_texture(device).clone()
         };
 
-        let cache_view = match (cache_backend_id, has_cache_tile) {
-            (_, false) => self.ensure_dummy_cache_texture(device).clone(),
-            (Some(cache_backend_id), true) => {
+        let cache_view = match (cache_backend_id, cache_layer, has_cache_tile) {
+            (_, _, false) => self.ensure_dummy_cache_texture(device).clone(),
+            (Some(cache_backend_id), Some(cache_layer), true) => {
                 let cache_backend = atlas_storage.backend_resource(cache_backend_id).ok_or(
                     WgpuBrushExecutorError::MissingCacheBackend {
                         brush_id,
                         backend_id: cache_backend_id,
                     },
                 )?;
-                create_atlas_sampling_view(cache_backend, "glaphica-brush-cache-atlas-view")
+                create_atlas_sampling_view(
+                    cache_backend,
+                    cache_layer,
+                    "glaphica-brush-cache-atlas-view",
+                )
             }
-            (None, true) => self.ensure_dummy_cache_texture(device).clone(),
+            _ => self.ensure_dummy_cache_texture(device).clone(),
         };
 
         let atlas_sampler = self.ensure_atlas_sampler(device);
@@ -928,7 +942,9 @@ impl WgpuBrushExecutor {
         }
         let atlas_bind_group_key = StrokeAtlasBindGroupKey {
             source_backend_id,
+            source_layer: source_resolved.address.layer,
             cache_backend_id,
+            cache_layer: cache_resolved.map(|resolved| resolved.address.layer),
             has_ref_image: draw_op.ref_image.is_some(),
             has_cache_tile: cache_resolved.is_some(),
             layout_key: atlas_layout_key,
@@ -1057,21 +1073,19 @@ impl WgpuBrushExecutor {
             input_len: draw_op.input.len() as u32,
             tile_origin_x: resolved.address.texel_offset.0,
             tile_origin_y: resolved.address.texel_offset.1,
-            tile_layer: resolved.address.layer,
+            tile_layer: 0,
             tile_size_x: ATLAS_TILE_SIZE,
             tile_size_y: ATLAS_TILE_SIZE,
             src_tile_origin_x: source_resolved.address.texel_offset.0,
             src_tile_origin_y: source_resolved.address.texel_offset.1,
-            src_tile_layer: source_resolved.address.layer,
+            src_tile_layer: 0,
             cache_tile_origin_x: cache_resolved
                 .map(|resolved| resolved.address.texel_offset.0)
                 .unwrap_or(0),
             cache_tile_origin_y: cache_resolved
                 .map(|resolved| resolved.address.texel_offset.1)
                 .unwrap_or(0),
-            cache_tile_layer: cache_resolved
-                .map(|resolved| resolved.address.layer)
-                .unwrap_or(0),
+            cache_tile_layer: 0,
             has_cache_tile: if cache_resolved.is_some() { 1 } else { 0 },
             erase: 0,
             tint_r: rgb[0],
@@ -1425,6 +1439,7 @@ impl BrushDrawExecutor<WgpuBrushContext<'_>> for WgpuBrushExecutor {
 
 fn create_atlas_sampling_view(
     backend: AtlasBackendResource<'_>,
+    layer: u32,
     label: &'static str,
 ) -> wgpu::TextureView {
     backend
@@ -1437,8 +1452,8 @@ fn create_atlas_sampling_view(
             aspect: wgpu::TextureAspect::All,
             base_mip_level: 0,
             mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(backend.layers),
+            base_array_layer: layer,
+            array_layer_count: Some(1),
         })
 }
 
@@ -1478,7 +1493,10 @@ fn encode_shader_params_bytes(params: BrushShaderParams) -> [u8; 72] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrushShaderParams, encode_input_bytes, encode_shader_params_bytes};
+    use super::{
+        AtlasBindGroupLayoutKey, BrushShaderParams, StrokeAtlasBindGroupKey, encode_input_bytes,
+        encode_shader_params_bytes,
+    };
 
     #[test]
     fn encode_input_bytes_keeps_empty_input_buffer_non_zero_sized() {
@@ -1530,5 +1548,45 @@ mod tests {
             f32::from_ne_bytes([encoded[68], encoded[69], encoded[70], encoded[71]]),
             0.0
         );
+    }
+
+    #[test]
+    fn stroke_bind_group_key_distinguishes_source_layer() {
+        let layout_key = AtlasBindGroupLayoutKey {
+            source_sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            cache_sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        };
+        let key_a = StrokeAtlasBindGroupKey {
+            source_backend_id: 1,
+            source_layer: 2,
+            cache_backend_id: Some(3),
+            cache_layer: Some(4),
+            has_ref_image: true,
+            has_cache_tile: true,
+            layout_key,
+        };
+        let mut key_b = key_a;
+        key_b.source_layer = 5;
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn stroke_bind_group_key_distinguishes_cache_layer() {
+        let layout_key = AtlasBindGroupLayoutKey {
+            source_sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            cache_sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        };
+        let key_a = StrokeAtlasBindGroupKey {
+            source_backend_id: 1,
+            source_layer: 2,
+            cache_backend_id: Some(3),
+            cache_layer: Some(4),
+            has_ref_image: true,
+            has_cache_tile: true,
+            layout_key,
+        };
+        let mut key_b = key_a;
+        key_b.cache_layer = Some(6);
+        assert_ne!(key_a, key_b);
     }
 }

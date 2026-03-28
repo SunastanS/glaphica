@@ -25,7 +25,10 @@ use thread_protocol::{
 };
 use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 
-use crate::trace::{TraceAppControl, TraceInputFrame, TraceIoError, TraceRecorder};
+use crate::trace::{
+    TraceAppControl, TraceDrawCompaction, TraceInputFrame, TraceIoError, TraceRecorder,
+    TraceRuntimeTileEvent, TraceRuntimeTileStage,
+};
 use crate::{
     BrushRegisterError, EngineThreadState, ExportImageError, LayerImageExportError,
     LayerPreviewBitmap, MainThreadState, config,
@@ -345,6 +348,19 @@ pub struct AppStats {
 }
 
 impl AppThreadIntegration {
+    fn collect_unique_draw_tile_indices(commands: &[GpuCmdMsg]) -> Vec<usize> {
+        let mut indices = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
     fn should_merge_draw_in_frame(draw_op: &thread_protocol::DrawOp) -> bool {
         draw_op.stroke_ctx.is_some_and(|ctx| {
             ctx.frame_merge == DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
@@ -364,6 +380,7 @@ impl AppThreadIntegration {
         struct CompositeKey {
             node_id: NodeId,
             tile_index: usize,
+            tile_key: TileKey,
             brush_id: BrushId,
         }
 
@@ -383,6 +400,7 @@ impl AppThreadIntegration {
                 CompositeKey {
                     node_id: ctx.node_id,
                     tile_index: draw_op.tile_index,
+                    tile_key: draw_op.tile_key,
                     brush_id: ctx.brush_id,
                 },
                 index,
@@ -403,6 +421,7 @@ impl AppThreadIntegration {
                                 .get(&CompositeKey {
                                     node_id: ctx.node_id,
                                     tile_index: draw_op.tile_index,
+                                    tile_key: draw_op.tile_key,
                                     brush_id: ctx.brush_id,
                                 })
                                 .copied()
@@ -1181,6 +1200,7 @@ impl AppThreadIntegration {
         mut perf: Option<&mut EngineFramePerf>,
     ) -> bool {
         let mut generated_gpu_command_count = 0usize;
+        let mut draw_compaction = None;
         if !self.input_samples.is_empty()
             && let Some(node_id) = self.active_stroke_node
         {
@@ -1225,15 +1245,22 @@ impl AppThreadIntegration {
                     perf.brush_handling = brush_handling_started.elapsed();
                 }
 
+                let pre_compact_draw_tile_indices =
+                    Self::collect_unique_draw_tile_indices(&self.gpu_commands);
                 Self::compact_frame_mergeable_draws(&mut self.gpu_commands);
                 Self::compact_frame_mergeable_copy_write(&mut self.gpu_commands);
                 Self::move_setup_ops_before_draws(&mut self.gpu_commands);
-                Self::move_mergeable_writes_to_end(&mut self.gpu_commands);
                 Self::move_metadata_updates_to_end(&mut self.gpu_commands);
                 Self::compact_draw_ops_by_stroke_ctx(
                     &mut self.gpu_commands,
                     &mut self.streaming_compact_stroke_id,
                 );
+                let post_compact_draw_tile_indices =
+                    Self::collect_unique_draw_tile_indices(&self.gpu_commands);
+                draw_compaction = Some(TraceDrawCompaction {
+                    pre_compact_draw_tile_indices,
+                    post_compact_draw_tile_indices,
+                });
 
                 let pending_gpu_cmds = std::mem::take(&mut self.gpu_commands);
                 generated_gpu_command_count = pending_gpu_cmds.len();
@@ -1271,14 +1298,12 @@ impl AppThreadIntegration {
             perf.gpu_command_count = self.gpu_commands.len();
         }
 
-        if let Some(trace_recorder) = &mut self.trace_recorder {
-            trace_recorder.record_output_frame(&self.gpu_commands);
-        }
-
         let has_commands = !self.gpu_commands.is_empty();
+        let mut frame_batch_stats = None;
         if has_commands {
             let submit_to_gpu_started = Instant::now();
             let submit_stats = self.main_state.process_gpu_commands(&self.gpu_commands);
+            frame_batch_stats = Some(submit_stats.frame_batch.clone());
             if let Some(perf) = perf.as_deref_mut() {
                 perf.submit_to_gpu = submit_to_gpu_started.elapsed();
                 perf.submit_collect_render_tree = submit_stats.frame_batch.render_tree_collect;
@@ -1297,6 +1322,30 @@ impl AppThreadIntegration {
                 perf.submit_dirty_bbox_tile_area = submit_stats.dirty_bbox_tile_area;
                 perf.submit_dirty_node_count = submit_stats.dirty_node_count;
             }
+        }
+        if let Some(trace_recorder) = &mut self.trace_recorder {
+            let runtime_tile_events = self
+                .main_state
+                .take_tile_runtime_events()
+                .into_iter()
+                .map(|event| TraceRuntimeTileEvent {
+                    stage: match event.stage {
+                        crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates => {
+                            TraceRuntimeTileStage::ApplyVisibleUpdates
+                        }
+                        crate::main_thread::TileRuntimeStage::ProcessRenderComposite => {
+                            TraceRuntimeTileStage::ProcessRenderComposite
+                        }
+                    },
+                    tile_indices: event.tile_indices,
+                })
+                .collect::<Vec<_>>();
+            trace_recorder.record_output_frame(
+                &self.gpu_commands,
+                frame_batch_stats.as_ref(),
+                runtime_tile_events,
+                draw_compaction,
+            );
         }
 
         if let Some(perf) = perf {
@@ -1458,6 +1507,22 @@ impl AppThreadIntegration {
         if let Err(e) = self.main_state.present_to_screen_with_overlay(overlay) {
             eprintln!("Screen present failed: {e:?}");
         }
+    }
+
+    pub fn has_pending_visible_tile_updates(&self) -> bool {
+        self.main_state.has_pending_visible_tile_updates()
+    }
+
+    pub fn has_pending_render_work(&self) -> bool {
+        self.main_state.has_pending_render_work()
+    }
+
+    pub fn has_pending_engine_gpu_commands(&self) -> bool {
+        !self.pending_send_gpu_commands.is_empty()
+    }
+
+    pub fn flush_visible_tile_updates(&mut self) {
+        self.main_state.flush_visible_tile_updates();
     }
 
     pub fn save_screenshot(
@@ -1833,8 +1898,11 @@ fn current_time_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
     use document::StoredLayerNode;
     use flate2::{Compression, read::GzDecoder, write::GzEncoder};
     use glaphica_core::{BlendMode, BrushId, NodeId, StrokeId, TileKey};
@@ -1849,6 +1917,179 @@ mod tests {
         AppThreadIntegration, PackedDocumentFile, PackedLayerAsset, collect_manifest_raster_assets,
         decode_png_rgba8, encode_png_rgba8, load_png_rgba8, save_png_rgba8,
     };
+    use crate::trace::{TraceOutputFile, TraceRecorder};
+
+    fn issue10_replay_input_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/records/tile_update_omitted.json")
+    }
+
+    fn issue10_trace_output_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("glaphica-issue10-trace-{unique}.json"))
+    }
+
+    fn issue10_missing_tile_indices() -> Vec<usize> {
+        vec![59, 60, 61, 76, 77, 78, 93, 94, 95, 110, 111, 112]
+    }
+
+    fn issue10_updated_tile_indices() -> Vec<usize> {
+        vec![
+            59, 60, 61, 62, 63, 64, 65, 76, 77, 78, 79, 80, 81, 82, 93, 94, 95, 96, 97, 98, 99,
+            110, 111, 112, 113, 114, 115, 116,
+        ]
+    }
+
+    fn register_default_test_brushes(app: &mut AppThreadIntegration) {
+        let round_brush = RoundBrush::with_default_curves(3.0, 0.8).unwrap();
+        let pixel_rect_brush = PixelRectBrush::new(8);
+        app.register_brush(BrushId(0), round_brush).unwrap();
+        app.register_brush(BrushId(1), pixel_rect_brush).unwrap();
+        app.set_active_brush(BrushId(0));
+    }
+
+    fn run_issue10_headless_replay() -> TraceOutputFile {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+        app.enable_trace_recording();
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let _ = app.process_main_render();
+            }
+
+            if replay_finished
+                && !has_work
+                && !has_pending_engine_gpu_commands
+                && !has_pending_visible_tile_updates
+                && !has_pending_render_work
+            {
+                break;
+            }
+        }
+
+        let output_path = issue10_trace_output_path();
+        app.save_trace_files(None, Some(&output_path)).unwrap();
+        let output: TraceOutputFile =
+            serde_json::from_reader(File::open(&output_path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&output_path);
+        output
+    }
+
+    #[derive(Debug)]
+    struct Issue10LoopSnapshot {
+        source_was_input_frame: bool,
+        pending_batches_before_render: Vec<Vec<usize>>,
+        dirty_tiles_before_render: Vec<usize>,
+        render_ran: bool,
+        runtime_tile_events: Vec<crate::main_thread::TileRuntimeEvent>,
+    }
+
+    fn capture_issue10_loop_snapshots() -> Vec<Issue10LoopSnapshot> {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+        let mut snapshots = Vec::new();
+
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let source_was_input_frame;
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    source_was_input_frame = true;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    source_was_input_frame = false;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                source_was_input_frame = false;
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let pending_batches_before_render =
+                    app.main_state.test_pending_visible_tile_update_batches();
+                let dirty_tiles_before_render = app.main_state.test_dirty_tile_indices();
+                app.main_state.take_tile_runtime_events();
+                let render_ran = app.process_main_render();
+                let runtime_tile_events = app.main_state.take_tile_runtime_events();
+                snapshots.push(Issue10LoopSnapshot {
+                    source_was_input_frame,
+                    pending_batches_before_render,
+                    dirty_tiles_before_render,
+                    render_ran,
+                    runtime_tile_events,
+                });
+            }
+
+            if replay_finished
+                && !has_work
+                && !has_pending_engine_gpu_commands
+                && !has_pending_visible_tile_updates
+                && !has_pending_render_work
+            {
+                break;
+            }
+        }
+
+        snapshots
+    }
 
     #[test]
     fn compact_copy_and_write_keeps_first_copy_and_last_write() {
@@ -2016,6 +2257,68 @@ mod tests {
         assert!(matches!(commands[2], GpuCmdMsg::DrawOp(_)));
         assert!(matches!(commands[3], GpuCmdMsg::WriteOp(_)));
         assert!(matches!(commands[4], GpuCmdMsg::TileSlotKeyUpdate(_)));
+    }
+
+    #[test]
+    fn compact_draws_does_not_merge_different_tile_keys_for_same_tile_index() {
+        let buffer_tile_a = TileKey::from_parts(2, 0, 10);
+        let buffer_tile_b = TileKey::from_parts(2, 0, 11);
+        let draw = |tile_key: TileKey, value: f32| {
+            GpuCmdMsg::DrawOp(DrawOp {
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
+                    blend_mode: BlendMode::Additive,
+                    frame_merge: DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
+                tile_index: 3,
+                tile_key,
+                origin_tile: TileKey::EMPTY,
+                ref_image: None,
+                input: vec![value],
+                stroke_id: StrokeId(5),
+            })
+        };
+        let write = |src: TileKey, dst: TileKey| {
+            GpuCmdMsg::WriteOp(WriteOp {
+                src_tile_key: src,
+                dst_tile_key: dst,
+                blend_mode: BlendMode::Normal,
+                kind: WriteKind::Paint,
+                opacity: 1.0,
+                rgb: Some([1.0, 0.0, 0.0]),
+                frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
+            })
+        };
+
+        let dst_a = TileKey::from_parts(0, 0, 1);
+        let dst_b = TileKey::from_parts(0, 0, 2);
+        let mut commands = vec![
+            draw(buffer_tile_a, 1.0),
+            write(buffer_tile_a, dst_a),
+            draw(buffer_tile_b, 2.0),
+            write(buffer_tile_b, dst_b),
+        ];
+        AppThreadIntegration::compact_frame_mergeable_draws(&mut commands);
+
+        assert_eq!(commands.len(), 4);
+        let GpuCmdMsg::DrawOp(first) = &commands[0] else {
+            panic!("expected first draw op");
+        };
+        assert_eq!(first.tile_key, buffer_tile_a);
+        assert_eq!(first.input, vec![1.0]);
+        let GpuCmdMsg::WriteOp(_) = &commands[1] else {
+            panic!("expected first write op");
+        };
+        let GpuCmdMsg::DrawOp(second) = &commands[2] else {
+            panic!("expected second draw op (must not be merged away)");
+        };
+        assert_eq!(second.tile_key, buffer_tile_b);
+        assert_eq!(second.input, vec![2.0]);
+        let GpuCmdMsg::WriteOp(_) = &commands[3] else {
+            panic!("expected second write op");
+        };
     }
 
     #[test]
@@ -2193,5 +2496,122 @@ mod tests {
             &image.pixels_rgba8()[bottom_right..bottom_right + 4],
             &[255, 255, 255, 255]
         );
+    }
+
+    #[test]
+    fn issue10_replay_exposes_missing_updated_tiles_without_present() {
+        let output = run_issue10_headless_replay();
+
+        let expected_missing = issue10_missing_tile_indices();
+        assert!(output.frames.iter().any(|frame| {
+            frame
+                .tile_timeline
+                .as_ref()
+                .is_some_and(|timeline| timeline.missing_updated_tile_indices == expected_missing)
+        }));
+    }
+
+    #[test]
+    fn issue10_pending_updates_render_all_tiles_once_flushed() {
+        let output = run_issue10_headless_replay();
+        let expected_tiles = issue10_updated_tile_indices();
+        assert!(output.frames.iter().any(|frame| {
+            frame.commands.is_empty()
+                && frame.runtime_tile_events.len() >= 2
+                && frame.runtime_tile_events.iter().any(|event| {
+                    matches!(
+                        event.stage,
+                        crate::trace::TraceRuntimeTileStage::ApplyVisibleUpdates
+                    ) && event.tile_indices == expected_tiles
+                })
+                && frame.runtime_tile_events.iter().any(|event| {
+                    matches!(
+                        event.stage,
+                        crate::trace::TraceRuntimeTileStage::ProcessRenderComposite
+                    ) && event.tile_indices == expected_tiles
+                })
+        }));
+    }
+
+    #[test]
+    fn issue10_missing_draw_frame_is_followed_by_runtime_only_recovery_frame() {
+        let output = run_issue10_headless_replay();
+        let expected_missing = issue10_missing_tile_indices();
+        let expected_updated = issue10_updated_tile_indices();
+
+        let missing_frame_index = output
+            .frames
+            .iter()
+            .position(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.updated_tile_indices == expected_updated
+                        && timeline.missing_updated_tile_indices == expected_missing
+                })
+            })
+            .expect("missing-updated frame not found");
+        let recovery_frame = output
+            .frames
+            .get(missing_frame_index + 1)
+            .expect("recovery frame after missing-updated frame");
+
+        assert!(recovery_frame.commands.is_empty());
+        assert!(recovery_frame.tile_timeline.is_none());
+        assert_eq!(recovery_frame.runtime_tile_events.len(), 2);
+        assert!(recovery_frame.runtime_tile_events.iter().any(|event| {
+            matches!(
+                event.stage,
+                crate::trace::TraceRuntimeTileStage::ApplyVisibleUpdates
+            ) && event.tile_indices == expected_updated
+        }));
+        assert!(recovery_frame.runtime_tile_events.iter().any(|event| {
+            matches!(
+                event.stage,
+                crate::trace::TraceRuntimeTileStage::ProcessRenderComposite
+            ) && event.tile_indices == expected_updated
+        }));
+    }
+
+    #[test]
+    fn issue10_render_skip_happens_while_full_update_batch_is_still_pending() {
+        let snapshots = capture_issue10_loop_snapshots();
+        let expected_updated = issue10_updated_tile_indices();
+
+        let stalled_index = snapshots
+            .iter()
+            .position(|snapshot| {
+                snapshot.pending_batches_before_render == vec![expected_updated.clone()]
+                    && !snapshot.runtime_tile_events.iter().any(|event| {
+                        matches!(
+                            event.stage,
+                            crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                        ) && event.tile_indices == expected_updated
+                    })
+            })
+            .expect("stalled pending-update render pass not found");
+        let stalled = &snapshots[stalled_index];
+        assert!(!stalled.render_ran);
+        assert!(stalled.dirty_tiles_before_render.is_empty());
+
+        let recovery = snapshots
+            .iter()
+            .skip(stalled_index + 1)
+            .find(|snapshot| {
+                !snapshot.source_was_input_frame
+                    && snapshot.pending_batches_before_render == vec![expected_updated.clone()]
+                    && snapshot.runtime_tile_events.iter().any(|event| {
+                        matches!(
+                            event.stage,
+                            crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                        ) && event.tile_indices == expected_updated
+                    })
+                    && snapshot.runtime_tile_events.iter().any(|event| {
+                        matches!(
+                            event.stage,
+                            crate::main_thread::TileRuntimeStage::ProcessRenderComposite
+                        ) && event.tile_indices == expected_updated
+                    })
+            })
+            .expect("runtime recovery pass after stalled render not found");
+        assert!(recovery.dirty_tiles_before_render.is_empty());
     }
 }

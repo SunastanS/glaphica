@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
@@ -9,6 +10,7 @@ use glaphica_core::{
     BlendMode, BrushId, CanvasVec2, EpochId, InputDeviceKind, MappedCursor, NodeId, RadianVec2,
     RenderTreeGeneration, StrokeId, TileKey,
 };
+use gpu_runtime::FrameBatchPerfStats;
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
     ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
@@ -74,6 +76,46 @@ pub struct TraceInputFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceOutputFrame {
     pub commands: Vec<TraceGpuCmd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_timeline: Option<TraceTileTimeline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_render: Option<TraceSubmitRender>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_tile_events: Vec<TraceRuntimeTileEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_compaction: Option<TraceDrawCompaction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceTileTimeline {
+    pub updated_tile_indices: Vec<usize>,
+    pub drawn_tile_indices: Vec<usize>,
+    pub missing_updated_tile_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSubmitRender {
+    pub render_cmd_count: usize,
+    pub render_dst_tile_count: usize,
+    pub render_tile_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceRuntimeTileEvent {
+    pub stage: TraceRuntimeTileStage,
+    pub tile_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceRuntimeTileStage {
+    ApplyVisibleUpdates,
+    ProcessRenderComposite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceDrawCompaction {
+    pub pre_compact_draw_tile_indices: Vec<usize>,
+    pub post_compact_draw_tile_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -324,16 +366,58 @@ impl TraceRecorder {
         });
     }
 
-    pub fn record_output_frame(&mut self, commands: &[GpuCmdMsg]) {
-        if commands.is_empty() {
+    pub fn record_output_frame(
+        &mut self,
+        commands: &[GpuCmdMsg],
+        submit_stats: Option<&FrameBatchPerfStats>,
+        runtime_tile_events: Vec<TraceRuntimeTileEvent>,
+        draw_compaction: Option<TraceDrawCompaction>,
+    ) {
+        if commands.is_empty() && runtime_tile_events.is_empty() {
             return;
         }
+        let mut updated = BTreeSet::new();
+        let mut drawn = BTreeSet::new();
+        for command in commands {
+            match command {
+                GpuCmdMsg::TileSlotKeyUpdate(msg) => {
+                    for (_, tile_index, _) in &msg.updates {
+                        updated.insert(*tile_index);
+                    }
+                }
+                GpuCmdMsg::DrawOp(draw_op) => {
+                    drawn.insert(draw_op.tile_index);
+                }
+                _ => {}
+            }
+        }
+        let tile_timeline = if updated.is_empty() && drawn.is_empty() {
+            None
+        } else {
+            let updated_tile_indices = updated.iter().copied().collect::<Vec<_>>();
+            let drawn_tile_indices = drawn.iter().copied().collect::<Vec<_>>();
+            let missing_updated_tile_indices =
+                updated.difference(&drawn).copied().collect::<Vec<_>>();
+            Some(TraceTileTimeline {
+                updated_tile_indices,
+                drawn_tile_indices,
+                missing_updated_tile_indices,
+            })
+        };
         let mut trace_commands = Vec::with_capacity(commands.len());
         for command in commands {
             trace_commands.push(TraceGpuCmd::from(command.clone()));
         }
         self.output_frames.push(TraceOutputFrame {
             commands: trace_commands,
+            tile_timeline,
+            submit_render: submit_stats.map(|stats| TraceSubmitRender {
+                render_cmd_count: stats.render_cmd_count,
+                render_dst_tile_count: stats.render_dst_tile_count,
+                render_tile_indices: stats.render_tile_indices.clone(),
+            }),
+            runtime_tile_events,
+            draw_compaction,
         });
     }
 

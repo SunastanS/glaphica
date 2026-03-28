@@ -823,6 +823,66 @@ mod tests {
     }
 
     #[test]
+    fn build_render_cmds_keeps_sparse_dirty_tile_indices() {
+        let layout = ImageLayout::new(1024, 1024);
+        let mut child_image = Image::new(layout, BackendId::new(2)).unwrap();
+        let mut root_cache = Image::new(layout, BackendId::new(3)).unwrap();
+        let dirty_indices = [59usize, 60, 61, 62];
+        for &tile_index in &dirty_indices {
+            child_image
+                .set_tile_key(tile_index, TileKey::from_parts(2, 0, tile_index as u32))
+                .unwrap();
+            root_cache
+                .set_tile_key(tile_index, TileKey::from_parts(3, 0, tile_index as u32))
+                .unwrap();
+        }
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            NodeId(1),
+            FlatRenderNode {
+                parent_id: Some(NodeId(100)),
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Leaf {
+                    content: FlatLeafContent::Raster { image: child_image },
+                },
+            },
+        );
+        nodes.insert(
+            NodeId(100),
+            FlatRenderNode {
+                parent_id: None,
+                config: NodeConfig {
+                    opacity: 1.0,
+                    blend_mode: LeafBlendMode::Normal,
+                },
+                kind: FlatNodeKind::Branch {
+                    children: vec![NodeId(1)],
+                    render_cache: root_cache,
+                },
+            },
+        );
+
+        let tree = FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(nodes),
+            root_id: Some(NodeId(100)),
+        };
+        let mut dirty = ImageDirtyTracker::default();
+        for &tile_index in &dirty_indices {
+            dirty.mark(NodeId(1), tile_index);
+        }
+
+        let cmds = tree.build_render_cmds(&dirty);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].tile_indices, dirty_indices);
+        assert_eq!(cmds[0].to.len(), dirty_indices.len());
+    }
+
+    #[test]
     fn test_carry_forward_render_cache_keeps_unchanged_parametric_leaf() {
         let mesh = Arc::new(ParametricMesh {
             vertices: vec![

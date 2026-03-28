@@ -631,6 +631,9 @@ impl DesktopApp {
         if self.integration.is_none() {
             return;
         }
+        if let Some(integration) = &mut self.integration {
+            integration.flush_visible_tile_updates();
+        }
         self.render_frame();
 
         if let Some(screenshot_path) = &self.run_config.screenshot_path {
@@ -1077,19 +1080,32 @@ impl ApplicationHandler for DesktopApp {
                     integration.process_replay_input_frame(input_frame)
                 } else {
                     self.replay_finished = true;
-                    false
+                    integration.process_engine_frame(Duration::from_millis(0))
                 }
             } else {
                 integration.process_engine_frame(Duration::from_millis(0))
             };
-            if has_work {
+            let has_pending_engine_gpu_commands = integration.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = integration.has_pending_visible_tile_updates();
+            let has_pending_render_work = integration.has_pending_render_work();
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
 
             if replay_mode && self.replay_finished {
-                self.request_shutdown(event_loop);
+                if !has_work
+                    && !has_pending_engine_gpu_commands
+                    && !has_pending_visible_tile_updates
+                    && !has_pending_render_work
+                {
+                    self.request_shutdown(event_loop);
+                }
             }
         }
     }
