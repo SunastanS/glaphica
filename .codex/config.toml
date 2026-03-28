@@ -1,0 +1,3 @@
+[mcp_servers.glaphica_test_mcp]
+command = "/home/sunastans/Code/Graphic/glaphica/target/release/glaphica_test_mcp"
+startup_timeout_sec = 30

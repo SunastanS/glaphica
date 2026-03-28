@@ -49,6 +49,28 @@ cargo run -p glaphica
 
 For development builds, you will need a working Rust toolchain and a graphics environment supported by `wgpu`.
 
+## Test MCP (GUI Replay)
+
+The workspace includes a minimal MCP server and an external bridge daemon mode:
+
+```bash
+# MCP server mode (for Codex)
+cargo run -p glaphica_test_mcp
+
+# Bridge daemon mode (run outside sandbox in a GUI-capable environment)
+cargo run -p glaphica_test_mcp -- --bridge-daemon
+```
+
+`replay_record_gui` now sends replay requests to `test/mcp_bridge/requests/` and waits for bridge responses from `test/mcp_bridge/responses/`.
+
+Tool arguments:
+
+- `record` (required): file name or relative path under `test/records`
+- `exit_after_ms` (optional): hard timeout for app exit
+- `debug_lines` (optional): trailing stdout/stderr lines returned on failure (sync mode)
+- `detached` (optional): return immediately after daemon starts the replay process
+- `bridge_timeout_ms` (optional): wait timeout for daemon response (default: 120000)
+
 ## Repository layout
 
 ```text

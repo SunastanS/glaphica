@@ -3,3 +3,5 @@ Cargo.lock
 .opencode/
 docs/
 TODO
+test/mcp_bridge/
+test/mcp_logs/

@@ -10,6 +10,7 @@ members = [
     "crates/document",
     "crates/brushes",
     "crates/glaphica",
+    "crates/glaphica_test_mcp",
 ]
 
 resolver = "3"
