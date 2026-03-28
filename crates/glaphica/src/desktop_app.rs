@@ -641,6 +641,12 @@ impl DesktopApp {
                 }
             }
         }
+        if let Some(bundle_path) = &self.run_config.document_bundle_path
+            && let Some(integration) = &mut self.integration
+            && let Err(error) = integration.save_document_bundle(bundle_path)
+        {
+            eprintln!("Document bundle save failed: {}", error);
+        }
 
         if self.run_config.record_input_path.is_some()
             || self.run_config.record_output_path.is_some()

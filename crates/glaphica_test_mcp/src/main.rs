@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -19,6 +20,8 @@ struct BridgeRequest {
     pub id: String,
     pub workspace_root: String,
     pub record: String,
+    pub output_json: Option<String>,
+    pub document_output: Option<String>,
     pub exit_after_ms: Option<u64>,
     pub detached: bool,
     pub debug_lines: usize,
@@ -294,6 +297,14 @@ fn tools_list_result() -> Value {
                             "type": "string",
                             "description": "File name or relative path under test/records, such as draw_a_circle_input.json"
                         },
+                        "document_output": {
+                            "type": "string",
+                            "description": "Optional workspace-relative .glaphica output path, such as test/records/draw_a_circle_replay_output.glaphica"
+                        },
+                        "output_json": {
+                            "type": "string",
+                            "description": "Optional workspace-relative trace output json path, passed to --record-output"
+                        },
                         "exit_after_ms": {
                             "type": "integer",
                             "minimum": 1,
@@ -318,6 +329,81 @@ fn tools_list_result() -> Value {
                     "required": ["record"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "compare_output_json",
+                "description": "Compare two output json files and report structured differences",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "left": {
+                            "type": "string",
+                            "description": "Workspace-relative json path, such as test/records/a.json"
+                        },
+                        "right": {
+                            "type": "string",
+                            "description": "Workspace-relative json path, such as test/records/b.json"
+                        },
+                        "max_diffs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": "Maximum number of diffs to include in output"
+                        }
+                    },
+                    "required": ["left", "right"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "compare_output_screenshot",
+                "description": "Compare two screenshots and report pixel-level difference summary",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "left": {
+                            "type": "string",
+                            "description": "Workspace-relative image path, such as test/records/a.png"
+                        },
+                        "right": {
+                            "type": "string",
+                            "description": "Workspace-relative image path, such as test/records/b.png"
+                        },
+                        "max_samples": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "description": "Maximum number of sampled diff pixels to print"
+                        }
+                    },
+                    "required": ["left", "right"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "compare_output_glaphica",
+                "description": "Compare two .glaphica bundle files by decoded json structure",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "left": {
+                            "type": "string",
+                            "description": "Workspace-relative .glaphica path, such as test/records/a.glaphica"
+                        },
+                        "right": {
+                            "type": "string",
+                            "description": "Workspace-relative .glaphica path, such as test/records/b.glaphica"
+                        },
+                        "max_diffs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "description": "Maximum number of diffs to include in output"
+                        }
+                    },
+                    "required": ["left", "right"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -339,6 +425,9 @@ fn tools_call_result(
 
     match tool_name {
         "replay_record_gui" => Ok(replay_record_gui(workspace_root, &args)),
+        "compare_output_json" => Ok(compare_output_json(workspace_root, &args)),
+        "compare_output_screenshot" => Ok(compare_output_screenshot(workspace_root, &args)),
+        "compare_output_glaphica" => Ok(compare_output_glaphica(workspace_root, &args)),
         _ => Err((-32602, format!("unknown tool: {tool_name}"))),
     }
 }
@@ -354,11 +443,33 @@ fn replay_record_gui(workspace_root: &Path, args: &Map<String, Value>) -> Value 
     if !replay_file.is_file() {
         return tool_error(format!("record file not found: {}", replay_file.display()));
     }
+    let document_output = match args.get("document_output").and_then(Value::as_str) {
+        Some(path) => {
+            if !is_safe_relative_path(path) {
+                return tool_error(
+                    "document_output must be a safe relative path under workspace root",
+                );
+            }
+            Some(path.to_string())
+        }
+        None => None,
+    };
+    let output_json = match args.get("output_json").and_then(Value::as_str) {
+        Some(path) => {
+            if !is_safe_relative_path(path) {
+                return tool_error("output_json must be a safe relative path under workspace root");
+            }
+            Some(path.to_string())
+        }
+        None => None,
+    };
 
     let request = BridgeRequest {
         id: next_request_id(),
         workspace_root: workspace_root.display().to_string(),
         record: record.to_string(),
+        output_json,
+        document_output,
         exit_after_ms: args.get("exit_after_ms").and_then(Value::as_u64),
         detached: args
             .get("detached")
@@ -380,6 +491,257 @@ fn replay_record_gui(workspace_root: &Path, args: &Map<String, Value>) -> Value 
         Ok(response) => tool_error(response.message),
         Err(error) => tool_error(error),
     }
+}
+
+fn compare_output_json(workspace_root: &Path, args: &Map<String, Value>) -> Value {
+    let Some(left_arg) = args.get("left").and_then(Value::as_str) else {
+        return tool_error("missing required argument: left");
+    };
+    let Some(right_arg) = args.get("right").and_then(Value::as_str) else {
+        return tool_error("missing required argument: right");
+    };
+    let max_diffs = args
+        .get("max_diffs")
+        .and_then(Value::as_u64)
+        .unwrap_or(30)
+        .clamp(1, 200) as usize;
+
+    let left = match resolve_workspace_relative_file(workspace_root, left_arg, "left") {
+        Ok(path) => path,
+        Err(error) => return tool_error(error),
+    };
+    let right = match resolve_workspace_relative_file(workspace_root, right_arg, "right") {
+        Ok(path) => path,
+        Err(error) => return tool_error(error),
+    };
+
+    let left_json = match read_json_file::<Value>(&left) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error(format!(
+                "failed reading left json {}: {error}",
+                left.display()
+            ));
+        }
+    };
+    let right_json = match read_json_file::<Value>(&right) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error(format!(
+                "failed reading right json {}: {error}",
+                right.display()
+            ));
+        }
+    };
+
+    if left_json == right_json {
+        return tool_text(format!(
+            "json outputs are identical\nleft={}\nright={}",
+            left.display(),
+            right.display()
+        ));
+    }
+
+    let mut diffs = Vec::new();
+    collect_json_diffs("$", &left_json, &right_json, max_diffs, &mut diffs);
+    let truncated = diffs.len() == max_diffs;
+    let mut message = format!(
+        "json outputs differ\nleft={}\nright={}\nshowing_diffs={}",
+        left.display(),
+        right.display(),
+        diffs.len()
+    );
+    for diff in diffs {
+        message.push('\n');
+        message.push_str("- ");
+        message.push_str(&diff);
+    }
+    if truncated {
+        message.push_str("\n(diff list reached max_diffs limit)");
+    }
+    tool_error(message)
+}
+
+fn compare_output_screenshot(workspace_root: &Path, args: &Map<String, Value>) -> Value {
+    let Some(left_arg) = args.get("left").and_then(Value::as_str) else {
+        return tool_error("missing required argument: left");
+    };
+    let Some(right_arg) = args.get("right").and_then(Value::as_str) else {
+        return tool_error("missing required argument: right");
+    };
+    let max_samples = args
+        .get("max_samples")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 100) as usize;
+
+    let left = match resolve_workspace_relative_file(workspace_root, left_arg, "left") {
+        Ok(path) => path,
+        Err(error) => return tool_error(error),
+    };
+    let right = match resolve_workspace_relative_file(workspace_root, right_arg, "right") {
+        Ok(path) => path,
+        Err(error) => return tool_error(error),
+    };
+
+    let left_img = match image::open(&left) {
+        Ok(img) => img.to_rgba8(),
+        Err(error) => {
+            return tool_error(format!(
+                "failed reading left image {}: {error}",
+                left.display()
+            ));
+        }
+    };
+    let right_img = match image::open(&right) {
+        Ok(img) => img.to_rgba8(),
+        Err(error) => {
+            return tool_error(format!(
+                "failed reading right image {}: {error}",
+                right.display()
+            ));
+        }
+    };
+
+    let left_dim = left_img.dimensions();
+    let right_dim = right_img.dimensions();
+    if left_dim != right_dim {
+        return tool_error(format!(
+            "image dimensions differ\nleft={} ({:?})\nright={} ({:?})",
+            left.display(),
+            left_dim,
+            right.display(),
+            right_dim
+        ));
+    }
+
+    let mut diff_pixels: u64 = 0;
+    let mut max_channel_delta: u8 = 0;
+    let mut total_channel_delta: u64 = 0;
+    let mut samples = Vec::new();
+    for (x, y, left_pixel) in left_img.enumerate_pixels() {
+        let right_pixel = right_img.get_pixel(x, y);
+        if left_pixel == right_pixel {
+            continue;
+        }
+        diff_pixels += 1;
+        let mut pixel_max_delta = 0u8;
+        for i in 0..4 {
+            let left_v = left_pixel.0[i];
+            let right_v = right_pixel.0[i];
+            let delta = left_v.abs_diff(right_v);
+            pixel_max_delta = pixel_max_delta.max(delta);
+            total_channel_delta += u64::from(delta);
+        }
+        max_channel_delta = max_channel_delta.max(pixel_max_delta);
+        if samples.len() < max_samples {
+            samples.push(format!(
+                "x={} y={} left={:?} right={:?} max_delta={}",
+                x, y, left_pixel.0, right_pixel.0, pixel_max_delta
+            ));
+        }
+    }
+
+    let total_pixels = u64::from(left_dim.0) * u64::from(left_dim.1);
+    if diff_pixels == 0 {
+        return tool_text(format!(
+            "screenshots are identical\nleft={}\nright={}\nresolution={}x{}",
+            left.display(),
+            right.display(),
+            left_dim.0,
+            left_dim.1
+        ));
+    }
+
+    let avg_channel_delta = total_channel_delta as f64 / (diff_pixels * 4) as f64;
+    let diff_ratio = diff_pixels as f64 / total_pixels as f64;
+    let mut message = format!(
+        "screenshots differ\nleft={}\nright={}\nresolution={}x{}\ndiff_pixels={}/{} ({:.4}%)\nmax_channel_delta={}\navg_channel_delta={:.3}",
+        left.display(),
+        right.display(),
+        left_dim.0,
+        left_dim.1,
+        diff_pixels,
+        total_pixels,
+        diff_ratio * 100.0,
+        max_channel_delta,
+        avg_channel_delta
+    );
+    for sample in samples {
+        message.push('\n');
+        message.push_str("- ");
+        message.push_str(&sample);
+    }
+    tool_error(message)
+}
+
+fn compare_output_glaphica(workspace_root: &Path, args: &Map<String, Value>) -> Value {
+    let Some(left_arg) = args.get("left").and_then(Value::as_str) else {
+        return tool_error("missing required argument: left");
+    };
+    let Some(right_arg) = args.get("right").and_then(Value::as_str) else {
+        return tool_error("missing required argument: right");
+    };
+    let max_diffs = args
+        .get("max_diffs")
+        .and_then(Value::as_u64)
+        .unwrap_or(30)
+        .clamp(1, 200) as usize;
+
+    let left = match resolve_workspace_relative_file(workspace_root, left_arg, "left") {
+        Ok(path) => path,
+        Err(error) => return tool_error(error),
+    };
+    let right = match resolve_workspace_relative_file(workspace_root, right_arg, "right") {
+        Ok(path) => path,
+        Err(error) => return tool_error(error),
+    };
+
+    let left_doc = match read_glaphica_bundle_json(&left) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error(format!(
+                "failed reading left .glaphica bundle {}: {error}",
+                left.display()
+            ));
+        }
+    };
+    let right_doc = match read_glaphica_bundle_json(&right) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error(format!(
+                "failed reading right .glaphica bundle {}: {error}",
+                right.display()
+            ));
+        }
+    };
+
+    if left_doc == right_doc {
+        return tool_text(format!(
+            ".glaphica outputs are identical\nleft={}\nright={}",
+            left.display(),
+            right.display()
+        ));
+    }
+
+    let mut diffs = Vec::new();
+    collect_json_diffs("$", &left_doc, &right_doc, max_diffs, &mut diffs);
+    let truncated = diffs.len() == max_diffs;
+    let mut message = format!(
+        ".glaphica outputs differ\nleft={}\nright={}\nshowing_diffs={}",
+        left.display(),
+        right.display(),
+        diffs.len()
+    );
+    for diff in diffs {
+        message.push('\n');
+        message.push_str("- ");
+        message.push_str(&diff);
+    }
+    if truncated {
+        message.push_str("\n(diff list reached max_diffs limit)");
+    }
+    tool_error(message)
 }
 
 fn submit_bridge_request(
@@ -445,6 +807,24 @@ fn handle_bridge_request(
             message: "record path is not a safe relative path".to_string(),
         };
     }
+    if let Some(path) = &request.document_output
+        && !is_safe_relative_path(path)
+    {
+        return BridgeResponse {
+            id: request.id,
+            ok: false,
+            message: "document_output path is not a safe relative path".to_string(),
+        };
+    }
+    if let Some(path) = &request.output_json
+        && !is_safe_relative_path(path)
+    {
+        return BridgeResponse {
+            id: request.id,
+            ok: false,
+            message: "output_json path is not a safe relative path".to_string(),
+        };
+    }
     let replay_file = workspace_root
         .join("test")
         .join("records")
@@ -457,8 +837,13 @@ fn handle_bridge_request(
         };
     }
 
-    let (command_path, command_args) =
-        build_replay_command(workspace_root, &replay_file, request.exit_after_ms);
+    let (command_path, command_args) = build_replay_command(
+        workspace_root,
+        &replay_file,
+        request.output_json.as_deref(),
+        request.document_output.as_deref(),
+        request.exit_after_ms,
+    );
     let command_text = format!("{} {}", command_path.display(), command_args.join(" "));
 
     if request.detached {
@@ -576,6 +961,8 @@ fn handle_bridge_request(
 fn build_replay_command(
     workspace_root: &Path,
     replay_file: &Path,
+    output_json: Option<&str>,
+    document_output: Option<&str>,
     exit_after_ms: Option<u64>,
 ) -> (PathBuf, Vec<String>) {
     let release_bin = workspace_root
@@ -587,6 +974,14 @@ fn build_replay_command(
             "--replay-input".to_string(),
             replay_file.display().to_string(),
         ];
+        if let Some(path) = output_json {
+            args.push("--record-output".to_string());
+            args.push(workspace_root.join(path).display().to_string());
+        }
+        if let Some(path) = document_output {
+            args.push("--document-bundle".to_string());
+            args.push(workspace_root.join(path).display().to_string());
+        }
         if let Some(ms) = exit_after_ms {
             args.push("--exit-after-ms".to_string());
             args.push(ms.to_string());
@@ -602,6 +997,14 @@ fn build_replay_command(
         "--replay-input".to_string(),
         replay_file.display().to_string(),
     ];
+    if let Some(path) = output_json {
+        args.push("--record-output".to_string());
+        args.push(workspace_root.join(path).display().to_string());
+    }
+    if let Some(path) = document_output {
+        args.push("--document-bundle".to_string());
+        args.push(workspace_root.join(path).display().to_string());
+    }
     if let Some(ms) = exit_after_ms {
         args.push("--exit-after-ms".to_string());
         args.push(ms.to_string());
@@ -609,9 +1012,113 @@ fn build_replay_command(
     (PathBuf::from("cargo"), args)
 }
 
+fn resolve_workspace_relative_file(
+    workspace_root: &Path,
+    value: &str,
+    argument_name: &str,
+) -> Result<PathBuf, String> {
+    if !is_safe_relative_path(value) {
+        return Err(format!(
+            "{argument_name} must be a safe relative path under workspace root"
+        ));
+    }
+    let path = workspace_root.join(value);
+    if !path.is_file() {
+        return Err(format!(
+            "{argument_name} file not found: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn collect_json_diffs(
+    path: &str,
+    left: &Value,
+    right: &Value,
+    max_diffs: usize,
+    diffs: &mut Vec<String>,
+) {
+    if diffs.len() >= max_diffs {
+        return;
+    }
+    if left == right {
+        return;
+    }
+    match (left, right) {
+        (Value::Object(left_obj), Value::Object(right_obj)) => {
+            for (key, left_value) in left_obj {
+                if diffs.len() >= max_diffs {
+                    return;
+                }
+                let child_path = format!("{path}.{key}");
+                match right_obj.get(key) {
+                    Some(right_value) => {
+                        collect_json_diffs(&child_path, left_value, right_value, max_diffs, diffs)
+                    }
+                    None => diffs.push(format!("{child_path}: missing on right")),
+                }
+            }
+            for key in right_obj.keys() {
+                if diffs.len() >= max_diffs {
+                    return;
+                }
+                if !left_obj.contains_key(key) {
+                    diffs.push(format!("{path}.{key}: missing on left"));
+                }
+            }
+        }
+        (Value::Array(left_arr), Value::Array(right_arr)) => {
+            if left_arr.len() != right_arr.len() {
+                diffs.push(format!(
+                    "{path}: array length differs left={} right={}",
+                    left_arr.len(),
+                    right_arr.len()
+                ));
+            }
+            let common_len = left_arr.len().min(right_arr.len());
+            for index in 0..common_len {
+                if diffs.len() >= max_diffs {
+                    return;
+                }
+                let child_path = format!("{path}[{index}]");
+                collect_json_diffs(
+                    &child_path,
+                    &left_arr[index],
+                    &right_arr[index],
+                    max_diffs,
+                    diffs,
+                );
+            }
+        }
+        _ => {
+            diffs.push(format!(
+                "{path}: left={} right={}",
+                json_value_preview(left),
+                json_value_preview(right)
+            ));
+        }
+    }
+}
+
+fn json_value_preview(value: &Value) -> String {
+    let text = value.to_string();
+    if text.len() <= 120 {
+        return text;
+    }
+    format!("{}...", &text[..120])
+}
+
 fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     serde_json::from_slice::<T>(&bytes).map_err(|error| error.to_string())
+}
+
+fn read_glaphica_bundle_json(path: &Path) -> Result<Value, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let decoder = GzDecoder::new(reader);
+    serde_json::from_reader(decoder).map_err(|error| error.to_string())
 }
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
