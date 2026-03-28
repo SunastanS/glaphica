@@ -238,6 +238,33 @@ struct CachedStrokeDrawCtx {
 }
 
 #[derive(Debug)]
+struct StrokeCtxRingBuffer {
+    slots: Vec<Option<StrokeId>>,
+    next_slot: usize,
+}
+
+impl StrokeCtxRingBuffer {
+    fn with_capacity(capacity: usize) -> Self {
+        let mut slots = Vec::with_capacity(capacity);
+        slots.resize_with(capacity, || None);
+        Self { slots, next_slot: 0 }
+    }
+
+    fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn push(&mut self, stroke_id: StrokeId) -> Option<StrokeId> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let evicted = self.slots[self.next_slot].replace(stroke_id);
+        self.next_slot = (self.next_slot + 1) % self.slots.len();
+        evicted
+    }
+}
+
+#[derive(Debug)]
 struct PendingVisibleTileUpdateBatch {
     submission_index: wgpu::SubmissionIndex,
     updates: Vec<(NodeId, usize, TileKey)>,
@@ -322,6 +349,7 @@ pub struct MainThreadState {
     pending_preview_nodes: Vec<NodeId>,
     blocked_preview_nodes: HashSet<NodeId>,
     stroke_draw_ctx_cache: HashMap<StrokeId, CachedStrokeDrawCtx>,
+    stroke_draw_ctx_cache_ring: StrokeCtxRingBuffer,
     next_brush_cache_backend_id: u8,
     layer_image_exporter: LayerImageExporter,
 }
@@ -387,6 +415,7 @@ impl MainThreadState {
             pending_preview_nodes: Vec::new(),
             blocked_preview_nodes: HashSet::new(),
             stroke_draw_ctx_cache: HashMap::new(),
+            stroke_draw_ctx_cache_ring: StrokeCtxRingBuffer::with_capacity(16),
             next_brush_cache_backend_id: 2,
             layer_image_exporter: LayerImageExporter::new(),
         })
@@ -1168,62 +1197,74 @@ impl MainThreadState {
         &mut self,
         draw_op: &thread_protocol::DrawOp,
     ) -> Option<thread_protocol::DrawOp> {
-        const MAX_STROKE_DRAW_CTX_CACHE: usize = 16;
-        if self.stroke_draw_ctx_cache.len() > MAX_STROKE_DRAW_CTX_CACHE {
-            self.stroke_draw_ctx_cache.clear();
-        }
-
-        let resolved = match draw_op.stroke_ctx {
-            Some(incoming_ctx) => {
-                let incoming = CachedStrokeDrawCtx {
-                    node_id: incoming_ctx.node_id,
-                    brush_id: incoming_ctx.brush_id,
-                    rgb: incoming_ctx.rgb,
-                    blend_mode: incoming_ctx.blend_mode,
-                    frame_merge: incoming_ctx.frame_merge,
-                };
-                match self.stroke_draw_ctx_cache.get(&draw_op.stroke_id).copied() {
-                    None => {
-                        self.stroke_draw_ctx_cache
-                            .insert(draw_op.stroke_id, incoming);
-                    }
-                    Some(existing) if existing == incoming => {}
-                    Some(existing) => {
-                        eprintln!(
-                            "[BUG][stroke_ctx] stroke {:?} draw context changed in-flight: cached={:?} incoming={:?}",
-                            draw_op.stroke_id, existing, incoming
-                        );
-                        debug_assert_eq!(
-                            existing, incoming,
-                            "stroke draw context must stay stable"
-                        );
-                    }
-                }
-                incoming_ctx
-            }
-            None => {
-                let Some(cached_ctx) = self.stroke_draw_ctx_cache.get(&draw_op.stroke_id).copied()
-                else {
-                    eprintln!(
-                        "[BUG][stroke_ctx] missing cached context for stroke {:?}",
-                        draw_op.stroke_id
-                    );
-                    debug_assert!(false, "draw op without ctx requires cached stroke context");
-                    return None;
-                };
-                thread_protocol::DrawStrokeCtx {
-                    node_id: cached_ctx.node_id,
-                    brush_id: cached_ctx.brush_id,
-                    rgb: cached_ctx.rgb,
-                    blend_mode: cached_ctx.blend_mode,
-                    frame_merge: cached_ctx.frame_merge,
-                }
-            }
-        };
+        let resolved = resolve_cached_stroke_draw_ctx(
+            &mut self.stroke_draw_ctx_cache,
+            &mut self.stroke_draw_ctx_cache_ring,
+            draw_op,
+        )?;
 
         let mut expanded = draw_op.clone();
         expanded.stroke_ctx = Some(resolved);
         Some(expanded)
+    }
+}
+
+fn resolve_cached_stroke_draw_ctx(
+    cache: &mut HashMap<StrokeId, CachedStrokeDrawCtx>,
+    cache_ring: &mut StrokeCtxRingBuffer,
+    draw_op: &thread_protocol::DrawOp,
+) -> Option<thread_protocol::DrawStrokeCtx> {
+    match draw_op.stroke_ctx {
+        Some(incoming_ctx) => {
+            let incoming = CachedStrokeDrawCtx {
+                node_id: incoming_ctx.node_id,
+                brush_id: incoming_ctx.brush_id,
+                rgb: incoming_ctx.rgb,
+                blend_mode: incoming_ctx.blend_mode,
+                frame_merge: incoming_ctx.frame_merge,
+            };
+            match cache.get(&draw_op.stroke_id).copied() {
+                None => {
+                    if cache.len() >= cache_ring.capacity() {
+                        if let Some(evicted_stroke_id) = cache_ring.push(draw_op.stroke_id) {
+                            cache.remove(&evicted_stroke_id);
+                        }
+                    } else {
+                        let _ = cache_ring.push(draw_op.stroke_id);
+                    }
+                    cache.insert(draw_op.stroke_id, incoming);
+                }
+                Some(existing) if existing == incoming => {}
+                Some(existing) => {
+                    eprintln!(
+                        "[BUG][stroke_ctx] stroke {:?} draw context changed in-flight: cached={:?} incoming={:?}",
+                        draw_op.stroke_id, existing, incoming
+                    );
+                    debug_assert_eq!(
+                        existing, incoming,
+                        "stroke draw context must stay stable"
+                    );
+                }
+            }
+            Some(incoming_ctx)
+        }
+        None => {
+            let Some(cached_ctx) = cache.get(&draw_op.stroke_id).copied() else {
+                eprintln!(
+                    "[BUG][stroke_ctx] missing cached context for stroke {:?}",
+                    draw_op.stroke_id
+                );
+                debug_assert!(false, "draw op without ctx requires cached stroke context");
+                return None;
+            };
+            Some(thread_protocol::DrawStrokeCtx {
+                node_id: cached_ctx.node_id,
+                brush_id: cached_ctx.brush_id,
+                rgb: cached_ctx.rgb,
+                blend_mode: cached_ctx.blend_mode,
+                frame_merge: cached_ctx.frame_merge,
+            })
+        }
     }
 }
 
@@ -1491,7 +1532,11 @@ fn save_jpeg_rgba8(path: &Path, image: &images::StoredImage) -> Result<(), Expor
 
 #[cfg(test)]
 mod tests {
-    use super::compact_round_draws;
+    use super::{
+        compact_round_draws, resolve_cached_stroke_draw_ctx, CachedStrokeDrawCtx,
+        StrokeCtxRingBuffer,
+    };
+    use std::collections::HashMap;
     use brushes::builtin_brushes::round::ROUND_DRAW_LAYOUT;
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
     use thread_protocol::{BlendMode, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdMsg};
@@ -1529,5 +1574,46 @@ mod tests {
         assert_eq!(draw_op.input.len(), 12);
         assert_eq!(&draw_op.input[..6], &[1.0; 6]);
         assert_eq!(&draw_op.input[6..], &[2.0; 6]);
+    }
+
+    #[test]
+    fn stroke_ctx_cache_keeps_current_stroke_when_cache_reaches_limit() {
+        let mut cache: HashMap<StrokeId, CachedStrokeDrawCtx> = HashMap::new();
+        let mut ring = StrokeCtxRingBuffer::with_capacity(16);
+        let make_draw = |stroke_id: u64, stroke_ctx: Option<DrawStrokeCtx>| DrawOp {
+            stroke_ctx,
+            tile_index: 0,
+            tile_key: TileKey::from_parts(0, 0, 0),
+            origin_tile: TileKey::EMPTY,
+            ref_image: None,
+            input: vec![1.0],
+            stroke_id: StrokeId(stroke_id),
+        };
+        let make_ctx = |stroke_id: u64| DrawStrokeCtx {
+            node_id: NodeId(1),
+            brush_id: BrushId(2),
+            rgb: [1.0, 0.0, 0.0],
+            blend_mode: if stroke_id == 17 {
+                BlendMode::Additive
+            } else {
+                BlendMode::Alpha
+            },
+            frame_merge: DrawFrameMergePolicy::None,
+        };
+
+        for stroke_id in 1..=16 {
+            let draw = make_draw(stroke_id, Some(make_ctx(stroke_id)));
+            assert!(resolve_cached_stroke_draw_ctx(&mut cache, &mut ring, &draw).is_some());
+        }
+        assert_eq!(cache.len(), 16);
+
+        let stroke17_first = make_draw(17, Some(make_ctx(17)));
+        assert!(resolve_cached_stroke_draw_ctx(&mut cache, &mut ring, &stroke17_first).is_some());
+        assert_eq!(cache.len(), 16);
+        assert!(cache.contains_key(&StrokeId(17)));
+
+        let stroke17_follow = make_draw(17, None);
+        let resolved = resolve_cached_stroke_draw_ctx(&mut cache, &mut ring, &stroke17_follow);
+        assert!(resolved.is_some(), "stroke 17 ctx should still be recoverable");
     }
 }
