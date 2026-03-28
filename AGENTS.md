@@ -31,6 +31,15 @@
 * Be cautious when debugging, unless there are appearant logic or santax errors, agents should use logs or tests to first locate and reappear the error before fixing it.
 * For `wgpu` / atlas render-pass changes, check `crates/gpu_runtime/wgpu.md` first. In particular, texture read views must be narrowed to the exact sampled layer(s) to avoid false `RESOURCE` + `COLOR_TARGET` conflicts.
 
+# MCP replay/testing notes
+
+* Prefer running external bridge with `--bridge-supervisor` to avoid manual daemon restarts after binary updates.
+* For replay validation, prioritize comparing durable artifacts over GUI screenshots:
+  - trace json (`output_json`)
+  - document bundle (`document_output`, `.glaphica`)
+  - front-end no-GUI jpg (`frontend_screenshot_jpg`)
+* When testing MCP tool updates, verify via real MCP tool calls first. If the client-side tool schema is stale, use direct JSON-RPC call to `glaphica_test_mcp` as fallback to validate server behavior.
+
 # Project Structure
 
 ```

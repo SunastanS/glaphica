@@ -647,6 +647,12 @@ impl DesktopApp {
         {
             eprintln!("Document bundle save failed: {}", error);
         }
+        if let Some(frontend_jpg_path) = &self.run_config.frontend_screenshot_jpg_path
+            && let Some(integration) = &mut self.integration
+            && let Err(error) = integration.export_frontend_jpeg(frontend_jpg_path)
+        {
+            eprintln!("Frontend screenshot jpg export failed: {}", error);
+        }
 
         if self.run_config.record_input_path.is_some()
             || self.run_config.record_output_path.is_some()

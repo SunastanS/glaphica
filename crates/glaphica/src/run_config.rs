@@ -6,6 +6,7 @@ pub struct RunConfig {
     pub record_input_path: Option<PathBuf>,
     pub record_output_path: Option<PathBuf>,
     pub screenshot_path: Option<PathBuf>,
+    pub frontend_screenshot_jpg_path: Option<PathBuf>,
     pub document_bundle_path: Option<PathBuf>,
     pub exit_after_ms: Option<u64>,
 }
@@ -42,6 +43,12 @@ impl RunConfig {
                 "--screenshot" => {
                     if let Some(path) = args.get(index + 1) {
                         config.screenshot_path = Some(resolve_path(path));
+                    }
+                    index += 2;
+                }
+                "--frontend-screenshot-jpg" => {
+                    if let Some(path) = args.get(index + 1) {
+                        config.frontend_screenshot_jpg_path = Some(resolve_path(path));
                     }
                     index += 2;
                 }

@@ -1059,6 +1059,27 @@ impl MainThreadState {
         save_jpeg_rgba8(output_path, &stored)
     }
 
+    pub fn export_frontend_jpeg(&mut self, output_path: &Path) -> Result<(), ExportImageError> {
+        if !matches_jpeg_extension(output_path) {
+            return Err(ExportImageError::InvalidExtension);
+        }
+        if let Some(parent_dir) = output_path.parent()
+            && !parent_dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent_dir).map_err(ExportImageError::Io)?;
+        }
+
+        let (width, height) = self
+            .surface_runtime
+            .as_ref()
+            .map(|surface| (surface.width(), surface.height()))
+            .ok_or(ExportImageError::NoSurface)?;
+        let pixels = self.read_final_image_rgba8(width, height)?;
+        let image = images::StoredImage::new_rgba8(width, height, pixels)
+            .map_err(|_| ExportImageError::InvalidSize)?;
+        save_jpeg_rgba8(output_path, &image)
+    }
+
     fn read_final_image_rgba8(
         &mut self,
         width: u32,
@@ -1283,6 +1304,7 @@ fn map_export_image_error_to_screenshot(error: ExportImageError) -> ScreenshotEr
     match error {
         ExportImageError::InvalidExtension
         | ExportImageError::MissingDocumentImage
+        | ExportImageError::NoSurface
         | ExportImageError::InvalidSize
         | ExportImageError::LayerExport(_) => ScreenshotError::InvalidSize,
         ExportImageError::Io(error) => ScreenshotError::Io(error),
@@ -1483,6 +1505,7 @@ impl std::error::Error for ScreenshotError {}
 pub enum ExportImageError {
     InvalidExtension,
     MissingDocumentImage,
+    NoSurface,
     InvalidSize,
     Io(std::io::Error),
     Map(wgpu::BufferAsyncError),
@@ -1496,6 +1519,7 @@ impl Display for ExportImageError {
         match self {
             Self::InvalidExtension => write!(f, "export path must end with .jpg or .jpeg"),
             Self::MissingDocumentImage => write!(f, "document render image is unavailable"),
+            Self::NoSurface => write!(f, "frontend surface is unavailable"),
             Self::InvalidSize => write!(f, "invalid export image size"),
             Self::Io(error) => write!(f, "export image io error: {error}"),
             Self::Map(error) => write!(f, "export image map error: {error}"),

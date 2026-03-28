@@ -22,6 +22,7 @@ struct BridgeRequest {
     pub record: String,
     pub output_json: Option<String>,
     pub document_output: Option<String>,
+    pub frontend_screenshot_jpg: Option<String>,
     pub exit_after_ms: Option<u64>,
     pub detached: bool,
     pub debug_lines: usize,
@@ -48,15 +49,78 @@ fn run() -> Result<(), String> {
         if flag == "--bridge-daemon" {
             return run_bridge_daemon(&workspace_root);
         }
+        if flag == "--bridge-supervisor" {
+            return run_bridge_supervisor(&workspace_root);
+        }
         if flag == "--help" || flag == "-h" {
             println!("glaphica_test_mcp");
             println!("  default mode: MCP server over stdio");
             println!("  daemon mode : --bridge-daemon");
+            println!("  supervisor  : --bridge-supervisor");
             return Ok(());
         }
         eprintln!("glaphica_test_mcp: ignoring unknown startup arg: {flag}");
     }
     run_mcp_server(&workspace_root)
+}
+
+fn run_bridge_supervisor(workspace_root: &Path) -> Result<(), String> {
+    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut last_signature = daemon_binary_signature(&current_exe);
+    loop {
+        let mut child = Command::new(&current_exe)
+            .arg("--bridge-daemon")
+            .current_dir(workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "bridge supervisor started daemon pid={} exe={}",
+            child.id(),
+            current_exe.display()
+        );
+
+        loop {
+            let current_signature = daemon_binary_signature(&current_exe);
+            if current_signature != last_signature {
+                eprintln!(
+                    "bridge supervisor detected binary update; restarting daemon pid={}",
+                    child.id()
+                );
+                if let Err(error) = child.kill() {
+                    eprintln!("bridge supervisor failed killing daemon: {error}");
+                }
+                let _ = child.wait();
+                last_signature = current_signature;
+                break;
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!("bridge daemon exited with status={status}; restarting");
+                    thread::sleep(Duration::from_millis(500));
+                    break;
+                }
+                Ok(None) => {
+                    thread::sleep(Duration::from_millis(BRIDGE_POLL_INTERVAL_MS));
+                }
+                Err(error) => {
+                    eprintln!("bridge supervisor failed waiting daemon: {error}");
+                    thread::sleep(Duration::from_millis(500));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn daemon_binary_signature(path: &Path) -> Option<(u64, u128)> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let modified_ms = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    Some((metadata.len(), modified_ms))
 }
 
 fn run_mcp_server(workspace_root: &Path) -> Result<(), String> {
@@ -305,6 +369,10 @@ fn tools_list_result() -> Value {
                             "type": "string",
                             "description": "Optional workspace-relative trace output json path, passed to --record-output"
                         },
+                        "frontend_screenshot_jpg": {
+                            "type": "string",
+                            "description": "Optional workspace-relative frontend screenshot jpg path (without GUI overlay)"
+                        },
                         "exit_after_ms": {
                             "type": "integer",
                             "minimum": 1,
@@ -454,6 +522,18 @@ fn replay_record_gui(workspace_root: &Path, args: &Map<String, Value>) -> Value 
         }
         None => None,
     };
+    let frontend_screenshot_jpg = match args.get("frontend_screenshot_jpg").and_then(Value::as_str)
+    {
+        Some(path) => {
+            if !is_safe_relative_path(path) {
+                return tool_error(
+                    "frontend_screenshot_jpg must be a safe relative path under workspace root",
+                );
+            }
+            Some(path.to_string())
+        }
+        None => None,
+    };
     let output_json = match args.get("output_json").and_then(Value::as_str) {
         Some(path) => {
             if !is_safe_relative_path(path) {
@@ -470,6 +550,7 @@ fn replay_record_gui(workspace_root: &Path, args: &Map<String, Value>) -> Value 
         record: record.to_string(),
         output_json,
         document_output,
+        frontend_screenshot_jpg,
         exit_after_ms: args.get("exit_after_ms").and_then(Value::as_u64),
         detached: args
             .get("detached")
@@ -825,6 +906,15 @@ fn handle_bridge_request(
             message: "output_json path is not a safe relative path".to_string(),
         };
     }
+    if let Some(path) = &request.frontend_screenshot_jpg
+        && !is_safe_relative_path(path)
+    {
+        return BridgeResponse {
+            id: request.id,
+            ok: false,
+            message: "frontend_screenshot_jpg path is not a safe relative path".to_string(),
+        };
+    }
     let replay_file = workspace_root
         .join("test")
         .join("records")
@@ -842,6 +932,7 @@ fn handle_bridge_request(
         &replay_file,
         request.output_json.as_deref(),
         request.document_output.as_deref(),
+        request.frontend_screenshot_jpg.as_deref(),
         request.exit_after_ms,
     );
     let command_text = format!("{} {}", command_path.display(), command_args.join(" "));
@@ -963,6 +1054,7 @@ fn build_replay_command(
     replay_file: &Path,
     output_json: Option<&str>,
     document_output: Option<&str>,
+    frontend_screenshot_jpg: Option<&str>,
     exit_after_ms: Option<u64>,
 ) -> (PathBuf, Vec<String>) {
     let release_bin = workspace_root
@@ -980,6 +1072,10 @@ fn build_replay_command(
         }
         if let Some(path) = document_output {
             args.push("--document-bundle".to_string());
+            args.push(workspace_root.join(path).display().to_string());
+        }
+        if let Some(path) = frontend_screenshot_jpg {
+            args.push("--frontend-screenshot-jpg".to_string());
             args.push(workspace_root.join(path).display().to_string());
         }
         if let Some(ms) = exit_after_ms {
@@ -1003,6 +1099,10 @@ fn build_replay_command(
     }
     if let Some(path) = document_output {
         args.push("--document-bundle".to_string());
+        args.push(workspace_root.join(path).display().to_string());
+    }
+    if let Some(path) = frontend_screenshot_jpg {
+        args.push("--frontend-screenshot-jpg".to_string());
         args.push(workspace_root.join(path).display().to_string());
     }
     if let Some(ms) = exit_after_ms {

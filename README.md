@@ -51,7 +51,7 @@ For development builds, you will need a working Rust toolchain and a graphics en
 
 ## Test MCP (GUI Replay)
 
-The workspace includes a minimal MCP server and an external bridge daemon mode:
+The workspace includes a minimal MCP server plus an external bridge daemon/supervisor mode:
 
 ```bash
 # MCP server mode (for Codex)
@@ -59,6 +59,10 @@ cargo run -p glaphica_test_mcp
 
 # Bridge daemon mode (run outside sandbox in a GUI-capable environment)
 cargo run -p glaphica_test_mcp -- --bridge-daemon
+
+# Bridge supervisor mode (recommended for external process management)
+# It will auto-restart daemon on crash and when daemon binary is updated.
+cargo run -p glaphica_test_mcp --release -- --bridge-supervisor
 ```
 
 `replay_record_gui` now sends replay requests to `test/mcp_bridge/requests/` and waits for bridge responses from `test/mcp_bridge/responses/`.
@@ -70,6 +74,21 @@ Tool arguments:
 - `debug_lines` (optional): trailing stdout/stderr lines returned on failure (sync mode)
 - `detached` (optional): return immediately after daemon starts the replay process
 - `bridge_timeout_ms` (optional): wait timeout for daemon response (default: 120000)
+- `output_json` (optional): workspace-relative trace output path, forwarded to `--record-output`
+- `document_output` (optional): workspace-relative `.glaphica` output path, forwarded to `--document-bundle`
+- `frontend_screenshot_jpg` (optional): workspace-relative JPG path, exported from front-end render path without GUI overlay
+
+Comparison tools exposed by MCP:
+
+- `compare_output_json`
+- `compare_output_glaphica`
+- `compare_output_screenshot`
+
+Useful CLI options for local replay/record debugging:
+
+- `--record-output <path>`: save trace output json
+- `--document-bundle <path>`: save `.glaphica` bundle
+- `--frontend-screenshot-jpg <path>`: save front-end rendering JPG (no GUI overlay)
 
 ## Repository layout
 
