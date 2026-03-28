@@ -1,5 +1,6 @@
 pub use glaphica_core::{
-    AtlasLayout, BrushId, EpochId, InputDeviceKind, MappedCursor, RenderTreeGeneration, TileKey,
+    AtlasLayout, BlendMode, BrushId, EpochId, InputDeviceKind, MappedCursor,
+    RenderTreeGeneration, TileKey,
 };
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
@@ -55,9 +56,8 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CompositeBlendMode, CompositeOp, CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp,
-    GpuCmdFrameMergeTag, GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
-    WriteBlendMode, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
+    RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteKind, WriteOp,
 };
 
 mod gpu_feedback;
@@ -69,10 +69,10 @@ pub use gpu_feedback::{
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushId, ClearOp, CompleteWaterline, CompositeBlendMode, CompositeOp, CopyOp,
-        DrawBlendMode, DrawFrameMergePolicy, DrawOp, ExecutedBatchWaterline, GpuCmdFrameMergeTag,
-        GpuCmdMsg, GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp,
-        MergeItem, RefImage, SubmitWaterline, TileKey, WriteBlendMode, WriteOp,
+        BlendMode, BrushId, ClearOp, CompleteWaterline, CompositeOp, CopyOp, DrawFrameMergePolicy,
+        DrawOp, ExecutedBatchWaterline, GpuCmdFrameMergeTag, GpuCmdMsg, GpuFeedbackFrame,
+        GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem, RefImage,
+        SubmitWaterline, TileKey, WriteKind, WriteOp,
     };
 
     use glaphica_core::PresentFrameId;
@@ -282,7 +282,7 @@ mod tests {
             node_id: NodeId(1),
             tile_index: 0,
             tile_key: TileKey::from_parts(2, 3, 4),
-            blend_mode: DrawBlendMode::Alpha,
+            blend_mode: BlendMode::Alpha,
             frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::from_parts(11, 12, 13),
             ref_image: Some(RefImage {
@@ -290,7 +290,6 @@ mod tests {
             }),
             input: vec![1.0, 0.5, 9.0],
             rgb: [1.0, 0.0, 0.0],
-            erase: false,
             brush_id: BrushId(7),
             stroke_id: StrokeId(17),
         });
@@ -309,7 +308,6 @@ mod tests {
                 );
                 assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
                 assert_eq!(draw_op.rgb, [1.0, 0.0, 0.0]);
-                assert!(!draw_op.erase);
                 assert_eq!(draw_op.brush_id, BrushId(7));
                 assert_eq!(draw_op.stroke_id, StrokeId(17));
             }
@@ -350,10 +348,10 @@ mod tests {
         let cmd = GpuCmdMsg::WriteOp(WriteOp {
             src_tile_key: TileKey::from_parts(1, 2, 3),
             dst_tile_key: TileKey::from_parts(4, 5, 6),
-            blend_mode: WriteBlendMode::Normal,
+            blend_mode: BlendMode::Normal,
+            kind: WriteKind::Paint,
             opacity: 0.7,
             rgb: Some([1.0, 0.0, 0.0]),
-            origin_tile_key: None,
             frame_merge: GpuCmdFrameMergeTag::None,
         });
 
@@ -361,10 +359,10 @@ mod tests {
             GpuCmdMsg::WriteOp(write_op) => {
                 assert_eq!(write_op.src_tile_key, TileKey::from_parts(1, 2, 3));
                 assert_eq!(write_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
-                assert_eq!(write_op.blend_mode, WriteBlendMode::Normal);
+                assert_eq!(write_op.blend_mode, BlendMode::Normal);
+                assert_eq!(write_op.kind, WriteKind::Paint);
                 assert_eq!(write_op.opacity, 0.7);
                 assert_eq!(write_op.rgb, Some([1.0, 0.0, 0.0]));
-                assert_eq!(write_op.origin_tile_key, None);
                 assert_eq!(write_op.frame_merge, GpuCmdFrameMergeTag::None);
             }
             GpuCmdMsg::DrawOp(_)
@@ -382,7 +380,7 @@ mod tests {
             base_tile_key: TileKey::from_parts(1, 2, 3),
             overlay_tile_key: TileKey::from_parts(4, 5, 6),
             dst_tile_key: TileKey::from_parts(7, 8, 9),
-            blend_mode: CompositeBlendMode::Multiply,
+            blend_mode: BlendMode::Multiply,
             opacity: 0.6,
         });
 
@@ -391,7 +389,7 @@ mod tests {
                 assert_eq!(composite_op.base_tile_key, TileKey::from_parts(1, 2, 3));
                 assert_eq!(composite_op.overlay_tile_key, TileKey::from_parts(4, 5, 6));
                 assert_eq!(composite_op.dst_tile_key, TileKey::from_parts(7, 8, 9));
-                assert_eq!(composite_op.blend_mode, CompositeBlendMode::Multiply);
+                assert_eq!(composite_op.blend_mode, BlendMode::Multiply);
                 assert_eq!(composite_op.opacity, 0.6);
             }
             GpuCmdMsg::DrawOp(_)

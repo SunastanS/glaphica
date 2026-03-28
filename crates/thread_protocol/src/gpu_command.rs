@@ -1,30 +1,4 @@
-use glaphica_core::{BrushId, NodeId, RenderTreeGeneration, StrokeId, TileKey};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DrawBlendMode {
-    /// Standard alpha compositing for brush dab rendering.
-    Alpha,
-    /// Linear additive accumulation for stroke-buffer thickness fields.
-    Additive,
-    /// Replace destination content in draw pipeline.
-    Replace,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteBlendMode {
-    /// Normal blend on top of destination.
-    Normal,
-    /// Erase from the origin snapshot using source alpha as the erase mask.
-    Erase,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompositeBlendMode {
-    /// Standard source-over compositing.
-    Normal,
-    /// Multiply blend in source-over composition.
-    Multiply,
-}
+use glaphica_core::{BlendMode, BrushId, NodeId, RenderTreeGeneration, StrokeId, TileKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawFrameMergePolicy {
@@ -52,7 +26,7 @@ pub struct DrawOp {
     pub tile_index: usize,
     /// Destination atlas tile key.
     pub tile_key: TileKey,
-    pub blend_mode: DrawBlendMode,
+    pub blend_mode: BlendMode,
     /// In-frame merge hint used by frame scheduler/runtime.
     pub frame_merge: DrawFrameMergePolicy,
     /// Optional "origin snapshot" tile key used by brush pipelines that need read/restore.
@@ -64,11 +38,21 @@ pub struct DrawOp {
     pub input: Vec<f32>,
     /// App-owned brush RGB tint in [0, 1].
     pub rgb: [f32; 3],
-    /// Whether this direct draw should erase instead of painting.
-    pub erase: bool,
     pub brush_id: BrushId,
     /// Stroke identity from input pipeline.
     pub stroke_id: StrokeId,
+}
+
+impl DrawOp {
+    pub const BLEND_MODE_SUBSET: [BlendMode; 3] =
+        [BlendMode::Alpha, BlendMode::Additive, BlendMode::Replace];
+
+    pub const fn supports_blend_mode(blend_mode: BlendMode) -> bool {
+        matches!(
+            blend_mode,
+            BlendMode::Alpha | BlendMode::Additive | BlendMode::Replace
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,14 +74,28 @@ pub struct WriteOp {
     ///
     /// Semantics preserve destination and apply `blend_mode` on top.
     pub dst_tile_key: TileKey,
-    pub blend_mode: WriteBlendMode,
+    pub blend_mode: BlendMode,
+    pub kind: WriteKind,
     /// Global write opacity multiplier in [0, 1].
     pub opacity: f32,
     /// Optional app-owned RGB tint in [0, 1]. When absent, source rgb is preserved.
     pub rgb: Option<[f32; 3]>,
-    /// Optional origin snapshot tile used by erase writes.
-    pub origin_tile_key: Option<TileKey>,
     pub frame_merge: GpuCmdFrameMergeTag,
+}
+
+impl WriteOp {
+    pub const BLEND_MODE_SUBSET: [BlendMode; 1] = [BlendMode::Normal];
+
+    pub const fn supports_blend_mode(blend_mode: BlendMode) -> bool {
+        matches!(blend_mode, BlendMode::Normal)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteKind {
+    Paint,
+    /// Erase from the origin snapshot using source alpha as the erase mask.
+    Erase { origin_tile_key: TileKey },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -112,9 +110,17 @@ pub struct CompositeOp {
     pub overlay_tile_key: TileKey,
     /// Destination tile in atlas space.
     pub dst_tile_key: TileKey,
-    pub blend_mode: CompositeBlendMode,
+    pub blend_mode: BlendMode,
     /// Global composite opacity multiplier in [0, 1].
     pub opacity: f32,
+}
+
+impl CompositeOp {
+    pub const BLEND_MODE_SUBSET: [BlendMode; 2] = [BlendMode::Normal, BlendMode::Multiply];
+
+    pub const fn supports_blend_mode(blend_mode: BlendMode) -> bool {
+        matches!(blend_mode, BlendMode::Normal | BlendMode::Multiply)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

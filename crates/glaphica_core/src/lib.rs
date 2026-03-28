@@ -46,6 +46,15 @@ pub enum InputDeviceKind {
     Finger(u32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlendMode {
+    Alpha,
+    Additive,
+    Replace,
+    Normal,
+    Multiply,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawCursor {
     pub cursor: ScreenVec2,

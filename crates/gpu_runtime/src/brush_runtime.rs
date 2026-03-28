@@ -222,7 +222,8 @@ mod tests {
         BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry, BrushSpec,
     };
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
-    use thread_protocol::{ClearOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
+    use glaphica_core::BlendMode;
+    use thread_protocol::{ClearOp, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
 
     use super::{BrushDrawExecutor, BrushGpuApplyOutcome, BrushGpuDispatchError, BrushGpuRuntime};
 
@@ -294,13 +295,12 @@ mod tests {
             node_id: NodeId(0),
             tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
-            blend_mode: DrawBlendMode::Alpha,
+            blend_mode: BlendMode::Alpha,
             frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0, 3.0],
             rgb: [1.0, 0.0, 0.0],
-            erase: false,
             brush_id: BrushId(2),
             stroke_id: StrokeId(1),
         };
@@ -326,13 +326,12 @@ mod tests {
             node_id: NodeId(0),
             tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
-            blend_mode: DrawBlendMode::Alpha,
+            blend_mode: BlendMode::Alpha,
             frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0],
             rgb: [1.0, 0.0, 0.0],
-            erase: false,
             brush_id: BrushId(1),
             stroke_id: StrokeId(2),
         };

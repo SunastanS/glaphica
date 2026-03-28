@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use brushes::{BrushDrawInputLayout, BrushGpuPipelineSpec, BrushPipelineError};
-use glaphica_core::{ATLAS_TILE_SIZE, BrushId, TextureFormat};
-use thread_protocol::{DrawBlendMode, DrawOp};
+use glaphica_core::{ATLAS_TILE_SIZE, BlendMode, BrushId, TextureFormat};
+use thread_protocol::DrawOp;
 
 use crate::atlas_runtime::{AtlasBackendResource, AtlasStorageRuntime};
 use crate::brush_runtime::BrushDrawExecutor;
@@ -35,6 +35,10 @@ pub enum WgpuBrushExecutorError {
     PipelineCreationPanicked {
         brush_id: BrushId,
         label: &'static str,
+    },
+    UnsupportedDrawBlendMode {
+        brush_id: BrushId,
+        blend_mode: BlendMode,
     },
     UnsupportedAtlasSampleType {
         brush_id: BrushId,
@@ -95,6 +99,14 @@ impl Display for WgpuBrushExecutorError {
             Self::PipelineCreationPanicked { brush_id, label } => write!(
                 f,
                 "wgpu pipeline creation panicked for brush {} (label: {label})",
+                brush_id.0
+            ),
+            Self::UnsupportedDrawBlendMode {
+                brush_id,
+                blend_mode,
+            } => write!(
+                f,
+                "blend mode {blend_mode:?} is unsupported for brush draw {}",
                 brush_id.0
             ),
             Self::UnsupportedAtlasSampleType {
@@ -633,8 +645,31 @@ impl WgpuBrushExecutor {
         draw_bind_group_layout: &wgpu::BindGroupLayout,
         atlas_bind_group_layout: &wgpu::BindGroupLayout,
         brush_id: BrushId,
-        blend_mode: DrawBlendMode,
+        blend_mode: BlendMode,
     ) -> Result<wgpu::RenderPipeline, WgpuBrushExecutorError> {
+        let blend = match blend_mode {
+            BlendMode::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+            BlendMode::Additive => Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            BlendMode::Replace => Some(wgpu::BlendState::REPLACE),
+            _ => {
+                return Err(WgpuBrushExecutorError::UnsupportedDrawBlendMode {
+                    brush_id,
+                    blend_mode,
+                });
+            }
+        };
+
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(spec.label),
             source: wgpu::ShaderSource::Wgsl(spec.wgsl_source.into()),
@@ -645,22 +680,6 @@ impl WgpuBrushExecutor {
             immediate_size: 0,
         });
         let create_pipeline = || {
-            let blend = match blend_mode {
-                DrawBlendMode::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
-                DrawBlendMode::Additive => Some(wgpu::BlendState {
-                    color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::One,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                }),
-                DrawBlendMode::Replace => Some(wgpu::BlendState::REPLACE),
-            };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(spec.label),
                 layout: Some(&pipeline_layout),
@@ -919,7 +938,7 @@ impl WgpuBrushExecutor {
                 &draw_bind_group_layout,
                 &atlas_bind_group_layout,
                 draw_op.brush_id,
-                DrawBlendMode::Alpha,
+                BlendMode::Alpha,
             )?;
             let brush_context = self
                 .brushes
@@ -943,7 +962,7 @@ impl WgpuBrushExecutor {
                 &draw_bind_group_layout,
                 &atlas_bind_group_layout,
                 draw_op.brush_id,
-                DrawBlendMode::Additive,
+                BlendMode::Additive,
             )?;
             let brush_context = self
                 .brushes
@@ -967,7 +986,7 @@ impl WgpuBrushExecutor {
                 &draw_bind_group_layout,
                 &atlas_bind_group_layout,
                 draw_op.brush_id,
-                DrawBlendMode::Replace,
+                BlendMode::Replace,
             )?;
             let brush_context = self
                 .brushes
@@ -996,7 +1015,7 @@ impl WgpuBrushExecutor {
                     brush_id: draw_op.brush_id,
                 })?;
             match draw_op.blend_mode {
-                DrawBlendMode::Alpha => brush_context
+                BlendMode::Alpha => brush_context
                     .alpha_pipeline
                     .as_ref()
                     .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
@@ -1004,7 +1023,7 @@ impl WgpuBrushExecutor {
                         context: "alpha pipeline should be created before draw",
                     })?
                     .clone(),
-                DrawBlendMode::Additive => brush_context
+                BlendMode::Additive => brush_context
                     .additive_pipeline
                     .as_ref()
                     .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
@@ -1012,7 +1031,7 @@ impl WgpuBrushExecutor {
                         context: "additive pipeline should be created before draw",
                     })?
                     .clone(),
-                DrawBlendMode::Replace => brush_context
+                BlendMode::Replace => brush_context
                     .replace_pipeline
                     .as_ref()
                     .ok_or(WgpuBrushExecutorError::InternalInvariantViolation {
@@ -1020,6 +1039,12 @@ impl WgpuBrushExecutor {
                         context: "replace pipeline should be created before draw",
                     })?
                     .clone(),
+                _ => {
+                    return Err(Box::new(WgpuBrushExecutorError::UnsupportedDrawBlendMode {
+                        brush_id: draw_op.brush_id,
+                        blend_mode: draw_op.blend_mode,
+                    }));
+                }
             }
         };
 
@@ -1044,7 +1069,7 @@ impl WgpuBrushExecutor {
                 .map(|resolved| resolved.address.layer)
                 .unwrap_or(0),
             has_cache_tile: if cache_resolved.is_some() { 1 } else { 0 },
-            erase: if draw_op.erase { 1 } else { 0 },
+            erase: 0,
             tint_r: draw_op.rgb[0],
             tint_g: draw_op.rgb[1],
             tint_b: draw_op.rgb[2],

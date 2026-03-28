@@ -1687,12 +1687,11 @@ mod tests {
 
     use document::StoredLayerNode;
     use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use glaphica_core::{BlendMode, BrushId, NodeId, StrokeId, TileKey};
     use images::StoredImage;
     use images::layout::ImageLayout;
     use thread_protocol::{
-        CopyOp, DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
-        WriteBlendMode, WriteOp,
+        CopyOp, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg, WriteKind, WriteOp,
     };
 
     use super::{
@@ -1714,13 +1713,12 @@ mod tests {
                 node_id: NodeId(1),
                 tile_index: 3,
                 tile_key: buffer_tile,
-                blend_mode: DrawBlendMode::Alpha,
+                blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![value],
                 rgb: [1.0, 0.0, 0.0],
-                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             })
@@ -1729,10 +1727,10 @@ mod tests {
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
                 dst_tile_key: dst_tile,
-                blend_mode: WriteBlendMode::Normal,
+                blend_mode: BlendMode::Normal,
+                kind: WriteKind::Paint,
                 opacity,
                 rgb: Some([1.0, 0.0, 0.0]),
-                origin_tile_key: None,
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             })
         };
@@ -1764,13 +1762,12 @@ mod tests {
                 node_id: NodeId(1),
                 tile_index: 3,
                 tile_key: buffer_tile,
-                blend_mode: DrawBlendMode::Alpha,
+                blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![1.0],
                 rgb: [1.0, 0.0, 0.0],
-                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
@@ -1781,23 +1778,22 @@ mod tests {
                 node_id: NodeId(2),
                 tile_index: 4,
                 tile_key: buffer_tile,
-                blend_mode: DrawBlendMode::Alpha,
+                blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![2.0],
                 rgb: [1.0, 0.0, 0.0],
-                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
                 dst_tile_key: dst_tile,
-                blend_mode: WriteBlendMode::Normal,
+                blend_mode: BlendMode::Normal,
+                kind: WriteKind::Paint,
                 opacity: 0.8,
                 rgb: Some([1.0, 0.0, 0.0]),
-                origin_tile_key: None,
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             }),
         ];
@@ -1821,13 +1817,12 @@ mod tests {
                 node_id: NodeId(1),
                 tile_index: 3,
                 tile_key: buffer_tile,
-                blend_mode: DrawBlendMode::Alpha,
+                blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![1.0],
                 rgb: [1.0, 0.0, 0.0],
-                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
@@ -1842,10 +1837,10 @@ mod tests {
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
                 dst_tile_key: dst_tile,
-                blend_mode: WriteBlendMode::Normal,
+                blend_mode: BlendMode::Normal,
+                kind: WriteKind::Paint,
                 opacity: 0.8,
                 rgb: Some([1.0, 0.0, 0.0]),
-                origin_tile_key: None,
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             }),
             GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {

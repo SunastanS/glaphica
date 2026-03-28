@@ -11,8 +11,8 @@ use document::{
     LeafBlendMode, MaterializeParametricCmd, ParametricMesh, ParametricVertex, RenderCmd,
     RenderSource,
 };
-use glaphica_core::{ATLAS_TILE_SIZE, CanvasVec2, TileKey};
-use thread_protocol::{ClearOp, CompositeBlendMode, CompositeOp, CopyOp, WriteBlendMode, WriteOp};
+use glaphica_core::{ATLAS_TILE_SIZE, BlendMode, CanvasVec2, TileKey};
+use thread_protocol::{ClearOp, CompositeOp, CopyOp, WriteKind, WriteOp};
 
 use crate::atlas_runtime::{AtlasResolvedAddress, AtlasStorageRuntime};
 use crate::context::GpuContext;
@@ -21,6 +21,10 @@ use crate::context::GpuContext;
 pub enum RenderExecutorError {
     MissingTileBackend { tile_key: TileKey },
     PipelineNotInitialized,
+    UnsupportedBlendMode {
+        op: &'static str,
+        blend_mode: BlendMode,
+    },
 }
 
 impl Display for RenderExecutorError {
@@ -34,6 +38,9 @@ impl Display for RenderExecutorError {
                     f,
                     "render pipeline not initialized, ensure_pipelines must be called first"
                 )
+            }
+            Self::UnsupportedBlendMode { op, blend_mode } => {
+                write!(f, "unsupported blend mode {blend_mode:?} for {op}")
             }
         }
     }
@@ -118,7 +125,7 @@ struct PreparedWriteCall {
     scissor_x: u32,
     scissor_y: u32,
     bind_group: wgpu::BindGroup,
-    blend_mode: WriteBlendMode,
+    kind: WriteKind,
 }
 
 #[repr(C)]
@@ -751,7 +758,7 @@ impl RenderExecutor {
                             src_tile_key,
                             config.opacity,
                             None,
-                            None,
+                            WriteKind::Paint,
                         )?;
                         sources.push(PreparedRenderSource::Tile {
                             bind_group,
@@ -982,9 +989,9 @@ impl RenderExecutor {
             });
 
             for call in &prepared[start..end] {
-                let pipeline = match call.blend_mode {
-                    WriteBlendMode::Normal => &cache.normal,
-                    WriteBlendMode::Erase => &cache.write_erase,
+                let pipeline = match call.kind {
+                    WriteKind::Paint => &cache.normal,
+                    WriteKind::Erase { .. } => &cache.write_erase,
                 };
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &call.bind_group, &[]);
@@ -1008,6 +1015,12 @@ impl RenderExecutor {
         write_op: &WriteOp,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), RenderExecutorError> {
+        if !WriteOp::supports_blend_mode(write_op.blend_mode) {
+            return Err(RenderExecutorError::UnsupportedBlendMode {
+                op: "write",
+                blend_mode: write_op.blend_mode,
+            });
+        }
         if context
             .atlas_storage
             .resolve(write_op.src_tile_key)
@@ -1054,12 +1067,12 @@ impl RenderExecutor {
             write_op.src_tile_key,
             write_op.opacity,
             write_op.rgb,
-            write_op.origin_tile_key,
+            write_op.kind,
         )?;
         let dst_view = create_render_attachment_view(&dst_resolved);
-        let pipeline = match write_op.blend_mode {
-            WriteBlendMode::Normal => &cache.normal,
-            WriteBlendMode::Erase => &cache.write_erase,
+        let pipeline = match write_op.kind {
+            WriteKind::Paint => &cache.normal,
+            WriteKind::Erase { .. } => &cache.write_erase,
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1098,6 +1111,12 @@ impl RenderExecutor {
     ) -> Result<Vec<PreparedWriteCall>, RenderExecutorError> {
         let mut prepared = Vec::with_capacity(write_ops.len());
         for write_op in write_ops {
+            if !WriteOp::supports_blend_mode(write_op.blend_mode) {
+                return Err(RenderExecutorError::UnsupportedBlendMode {
+                    op: "write",
+                    blend_mode: write_op.blend_mode,
+                });
+            }
             if context
                 .atlas_storage
                 .resolve(write_op.src_tile_key)
@@ -1144,7 +1163,7 @@ impl RenderExecutor {
                 write_op.src_tile_key,
                 write_op.opacity,
                 write_op.rgb,
-                write_op.origin_tile_key,
+                write_op.kind,
             )?;
             prepared.push(PreparedWriteCall {
                 pass_key: WritePassKey {
@@ -1155,7 +1174,7 @@ impl RenderExecutor {
                 scissor_x: dst_resolved.address.texel_offset.0,
                 scissor_y: dst_resolved.address.texel_offset.1,
                 bind_group,
-                blend_mode: write_op.blend_mode,
+                kind: write_op.kind,
             });
         }
         Ok(prepared)
@@ -1221,9 +1240,16 @@ impl RenderExecutor {
         let bind_group =
             create_composite_bind_group(context, &cache.composite_bind_group_layout, composite_op)?;
         let dst_view = create_render_attachment_view(&dst_resolved);
+        if !CompositeOp::supports_blend_mode(composite_op.blend_mode) {
+            return Err(RenderExecutorError::UnsupportedBlendMode {
+                op: "composite",
+                blend_mode: composite_op.blend_mode,
+            });
+        }
         let pipeline = match composite_op.blend_mode {
-            CompositeBlendMode::Normal => &cache.composite_normal,
-            CompositeBlendMode::Multiply => &cache.composite_multiply,
+            BlendMode::Normal => &cache.composite_normal,
+            BlendMode::Multiply => &cache.composite_multiply,
+            _ => unreachable!("composite blend mode is prevalidated"),
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2014,7 +2040,7 @@ fn create_bind_group(
     src_tile_key: TileKey,
     opacity: f32,
     rgb: Option<[f32; 3]>,
-    origin_tile_key: Option<TileKey>,
+    write_kind: WriteKind,
 ) -> Result<wgpu::BindGroup, RenderExecutorError> {
     let src_resolved = context.atlas_storage.resolve(src_tile_key).ok_or(
         RenderExecutorError::MissingTileBackend {
@@ -2036,8 +2062,17 @@ fn create_bind_group(
             array_layer_count: Some(1),
         });
 
-    let origin_resolved =
-        origin_tile_key.and_then(|tile_key| context.atlas_storage.resolve(tile_key));
+    let origin_resolved = match write_kind {
+        WriteKind::Paint => None,
+        WriteKind::Erase { origin_tile_key } => Some(
+            context
+                .atlas_storage
+                .resolve(origin_tile_key)
+                .ok_or(RenderExecutorError::MissingTileBackend {
+                    tile_key: origin_tile_key,
+                })?,
+        ),
+    };
     let origin_view = origin_resolved
         .map(|resolved| {
             resolved
@@ -2309,8 +2344,8 @@ mod tests {
         RenderCmd, RenderSource,
     };
     use glaphica_core::CanvasVec2;
-    use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, TileKey};
-    use thread_protocol::{ClearOp, CompositeBlendMode, CompositeOp, WriteBlendMode, WriteOp};
+    use glaphica_core::{ATLAS_TILE_SIZE, AtlasLayout, BackendKind, BlendMode, TileKey};
+    use thread_protocol::{ClearOp, CompositeOp, WriteKind, WriteOp};
 
     #[test]
     fn clear_tile_does_not_modify_neighbor_tile_in_same_layer() {
@@ -2639,10 +2674,12 @@ mod tests {
             &WriteOp {
                 src_tile_key: mask_tile,
                 dst_tile_key: dst_tile,
-                blend_mode: WriteBlendMode::Erase,
+                blend_mode: BlendMode::Normal,
+                kind: WriteKind::Erase {
+                    origin_tile_key: origin_tile,
+                },
                 opacity: 1.0,
                 rgb: None,
-                origin_tile_key: Some(origin_tile),
                 frame_merge: thread_protocol::GpuCmdFrameMergeTag::None,
             },
         );
@@ -2729,7 +2766,7 @@ mod tests {
                 base_tile_key: base_tile,
                 overlay_tile_key: overlay_tile,
                 dst_tile_key: dst_tile,
-                blend_mode: CompositeBlendMode::Multiply,
+                blend_mode: BlendMode::Multiply,
                 opacity: 0.5,
             },
         );

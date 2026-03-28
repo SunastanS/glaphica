@@ -236,7 +236,7 @@ fn compact_round_draws(
         let can_merge = match (cmd, layout) {
             (GpuCmdMsg::DrawOp(draw_op), Some(layout))
                 if layout.kind() == BrushDrawKind::Round
-                    && draw_op.blend_mode == thread_protocol::DrawBlendMode::Additive
+                    && draw_op.blend_mode == thread_protocol::BlendMode::Additive
                     && draw_op.origin_tile == TileKey::EMPTY
                     && draw_op.ref_image.is_none() =>
             {
@@ -1382,7 +1382,7 @@ mod tests {
     use super::compact_round_draws;
     use brushes::builtin_brushes::round::ROUND_DRAW_LAYOUT;
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
-    use thread_protocol::{DrawBlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
+    use thread_protocol::{BlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
 
     #[test]
     fn compact_round_draws_merges_same_tile_inputs() {
@@ -1392,13 +1392,12 @@ mod tests {
                 node_id: NodeId(1),
                 tile_index: 3,
                 tile_key,
-                blend_mode: DrawBlendMode::Additive,
+                blend_mode: BlendMode::Additive,
                 frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input,
                 rgb: [1.0, 0.0, 0.0],
-                erase: false,
                 brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             })
