@@ -1,6 +1,6 @@
 pub use glaphica_core::{
-    AtlasLayout, BlendMode, BrushId, EpochId, InputDeviceKind, MappedCursor,
-    RenderTreeGeneration, TileKey,
+    AtlasLayout, BlendMode, BrushId, EpochId, InputDeviceKind, MappedCursor, RenderTreeGeneration,
+    TileKey,
 };
 
 /// This crate defines the bottom communication protocol of app thread and engine thread
@@ -56,8 +56,8 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
-    RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteKind, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
+    GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteKind, WriteOp,
 };
 
 mod gpu_feedback;
@@ -70,9 +70,9 @@ pub use gpu_feedback::{
 mod tests {
     use super::{
         BlendMode, BrushId, ClearOp, CompleteWaterline, CompositeOp, CopyOp, DrawFrameMergePolicy,
-        DrawOp, ExecutedBatchWaterline, GpuCmdFrameMergeTag, GpuCmdMsg, GpuFeedbackFrame,
-        GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem, RefImage,
-        SubmitWaterline, TileKey, WriteKind, WriteOp,
+        DrawOp, DrawStrokeCtx, ExecutedBatchWaterline, GpuCmdFrameMergeTag, GpuCmdMsg,
+        GpuFeedbackFrame, GpuFeedbackMergeState, InputControlEvent, InputControlOp, MergeItem,
+        RefImage, SubmitWaterline, TileKey, WriteKind, WriteOp,
     };
 
     use glaphica_core::PresentFrameId;
@@ -279,24 +279,29 @@ mod tests {
     fn gpu_cmd_draw_op_carries_tile_key_input_and_brush_id() {
         use glaphica_core::{NodeId, StrokeId};
         let cmd = GpuCmdMsg::DrawOp(DrawOp {
-            node_id: NodeId(1),
+            stroke_ctx: Some(DrawStrokeCtx {
+                node_id: NodeId(1),
+                blend_mode: BlendMode::Alpha,
+                frame_merge: DrawFrameMergePolicy::None,
+                rgb: [1.0, 0.0, 0.0],
+                brush_id: BrushId(7),
+            }),
             tile_index: 0,
             tile_key: TileKey::from_parts(2, 3, 4),
-            blend_mode: BlendMode::Alpha,
-            frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::from_parts(11, 12, 13),
             ref_image: Some(RefImage {
                 tile_key: TileKey::from_parts(8, 9, 10),
             }),
             input: vec![1.0, 0.5, 9.0],
-            rgb: [1.0, 0.0, 0.0],
-            brush_id: BrushId(7),
             stroke_id: StrokeId(17),
         });
 
         match cmd {
             GpuCmdMsg::DrawOp(draw_op) => {
-                assert_eq!(draw_op.node_id, NodeId(1));
+                let stroke_ctx = draw_op
+                    .stroke_ctx
+                    .expect("test draw op must carry stroke ctx");
+                assert_eq!(stroke_ctx.node_id, NodeId(1));
                 assert_eq!(draw_op.tile_index, 0);
                 assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
                 assert_eq!(draw_op.origin_tile, TileKey::from_parts(11, 12, 13));
@@ -307,8 +312,8 @@ mod tests {
                     })
                 );
                 assert_eq!(draw_op.input, vec![1.0, 0.5, 9.0]);
-                assert_eq!(draw_op.rgb, [1.0, 0.0, 0.0]);
-                assert_eq!(draw_op.brush_id, BrushId(7));
+                assert_eq!(stroke_ctx.rgb, [1.0, 0.0, 0.0]);
+                assert_eq!(stroke_ctx.brush_id, BrushId(7));
                 assert_eq!(draw_op.stroke_id, StrokeId(17));
             }
             GpuCmdMsg::CopyOp(_)

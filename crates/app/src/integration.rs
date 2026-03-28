@@ -303,6 +303,7 @@ pub struct AppThreadIntegration {
     active_stroke_node: Option<NodeId>,
     current_brush_id: Option<BrushId>,
     active_stroke_brush_id: Option<BrushId>,
+    streaming_compact_stroke_id: Option<StrokeId>,
     current_brush_color_rgb: [f32; 3],
     current_brush_erase: bool,
     active_stroke_color_rgb: [f32; 3],
@@ -322,7 +323,9 @@ pub struct AppStats {
 
 impl AppThreadIntegration {
     fn should_merge_draw_in_frame(draw_op: &thread_protocol::DrawOp) -> bool {
-        draw_op.frame_merge == DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+        draw_op.stroke_ctx.is_some_and(|ctx| {
+            ctx.frame_merge == DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+        })
     }
 
     fn should_keep_first_copy_in_frame(copy_op: &thread_protocol::CopyOp) -> bool {
@@ -349,11 +352,15 @@ impl AppThreadIntegration {
             if !Self::should_merge_draw_in_frame(draw_op) {
                 continue;
             }
+            let Some(ctx) = draw_op.stroke_ctx else {
+                debug_assert!(false, "draw op must carry stroke ctx before compaction");
+                continue;
+            };
             latest_composite_indices.insert(
                 CompositeKey {
-                    node_id: draw_op.node_id,
+                    node_id: ctx.node_id,
                     tile_index: draw_op.tile_index,
-                    brush_id: draw_op.brush_id,
+                    brush_id: ctx.brush_id,
                 },
                 index,
             );
@@ -367,14 +374,22 @@ impl AppThreadIntegration {
         for (index, cmd) in commands.drain(..).enumerate() {
             let keep = match &cmd {
                 GpuCmdMsg::DrawOp(draw_op) if Self::should_merge_draw_in_frame(draw_op) => {
-                    latest_composite_indices
-                        .get(&CompositeKey {
-                            node_id: draw_op.node_id,
-                            tile_index: draw_op.tile_index,
-                            brush_id: draw_op.brush_id,
-                        })
-                        .copied()
-                        == Some(index)
+                    match draw_op.stroke_ctx {
+                        Some(ctx) => {
+                            latest_composite_indices
+                                .get(&CompositeKey {
+                                    node_id: ctx.node_id,
+                                    tile_index: draw_op.tile_index,
+                                    brush_id: ctx.brush_id,
+                                })
+                                .copied()
+                                == Some(index)
+                        }
+                        None => {
+                            debug_assert!(false, "draw op must carry stroke ctx before compaction");
+                            false
+                        }
+                    }
                 }
                 _ => true,
             };
@@ -501,6 +516,22 @@ impl AppThreadIntegration {
         *commands = gpu_commands;
     }
 
+    fn compact_draw_ops_by_stroke_ctx(
+        commands: &mut Vec<GpuCmdMsg>,
+        streaming_compact_stroke_id: &mut Option<StrokeId>,
+    ) {
+        for cmd in commands.iter_mut() {
+            let GpuCmdMsg::DrawOp(draw_op) = cmd else {
+                continue;
+            };
+            if *streaming_compact_stroke_id != Some(draw_op.stroke_id) {
+                *streaming_compact_stroke_id = Some(draw_op.stroke_id);
+                continue;
+            }
+            draw_op.stroke_ctx = None;
+        }
+    }
+
     pub async fn new(document_name: String, layout: ImageLayout) -> Result<Self, crate::InitError> {
         let gpu_context = Arc::new(
             gpu_runtime::GpuContext::init(&gpu_runtime::GpuContextInitDescriptor::default())
@@ -579,6 +610,7 @@ impl AppThreadIntegration {
             active_stroke_node: None,
             current_brush_id: None,
             active_stroke_brush_id: None,
+            streaming_compact_stroke_id: None,
             current_brush_color_rgb: [1.0, 0.0, 0.0],
             current_brush_erase: false,
             active_stroke_color_rgb: [1.0, 0.0, 0.0],
@@ -649,6 +681,7 @@ impl AppThreadIntegration {
             .blocking_push(InputControlEvent::Control(control));
         self.active_stroke_node = Some(node_id);
         self.active_stroke_brush_id = self.current_brush_id;
+        self.streaming_compact_stroke_id = None;
         self.active_stroke_color_rgb = self.current_brush_color_rgb;
         self.active_stroke_erase = self.current_brush_erase;
     }
@@ -859,6 +892,7 @@ impl AppThreadIntegration {
         }
         self.active_stroke_node = None;
         self.active_stroke_brush_id = None;
+        self.streaming_compact_stroke_id = None;
     }
 
     pub fn undo_stroke(&mut self) -> bool {
@@ -932,6 +966,7 @@ impl AppThreadIntegration {
         match control {
             AppControl::StrokeBoundary { node_id, begin } => {
                 if *begin {
+                    self.streaming_compact_stroke_id = None;
                     self.engine_state.invalidate_redo_strokes();
                     let stroke_id = StrokeId(self.next_stroke_id);
                     self.next_stroke_id += 1;
@@ -939,6 +974,7 @@ impl AppThreadIntegration {
                     self.main_state.begin_preview_stroke(*node_id);
                     self.engine_state.begin_stroke(stroke_id);
                 } else {
+                    self.streaming_compact_stroke_id = None;
                     self.active_stroke_node = None;
                     self.engine_state.end_stroke();
                     self.main_state.end_preview_stroke(*node_id);
@@ -1092,6 +1128,10 @@ impl AppThreadIntegration {
                 Self::move_setup_ops_before_draws(&mut self.gpu_commands);
                 Self::move_mergeable_writes_to_end(&mut self.gpu_commands);
                 Self::move_metadata_updates_to_end(&mut self.gpu_commands);
+                Self::compact_draw_ops_by_stroke_ctx(
+                    &mut self.gpu_commands,
+                    &mut self.streaming_compact_stroke_id,
+                );
 
                 let pending_gpu_cmds = std::mem::take(&mut self.gpu_commands);
                 generated_gpu_command_count = pending_gpu_cmds.len();
@@ -1695,7 +1735,8 @@ mod tests {
     use images::StoredImage;
     use images::layout::ImageLayout;
     use thread_protocol::{
-        CopyOp, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg, WriteKind, WriteOp,
+        CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag, GpuCmdMsg,
+        WriteKind, WriteOp,
     };
 
     use super::{
@@ -1714,16 +1755,18 @@ mod tests {
         });
         let draw = |value| {
             GpuCmdMsg::DrawOp(DrawOp {
-                node_id: NodeId(1),
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
+                    blend_mode: BlendMode::Alpha,
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
                 tile_index: 3,
                 tile_key: buffer_tile,
-                blend_mode: BlendMode::Alpha,
-                frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![value],
-                rgb: [1.0, 0.0, 0.0],
-                brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             })
         };
@@ -1763,32 +1806,36 @@ mod tests {
                 frame_merge: GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile,
             }),
             GpuCmdMsg::DrawOp(DrawOp {
-                node_id: NodeId(1),
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
+                    blend_mode: BlendMode::Alpha,
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
                 tile_index: 3,
                 tile_key: buffer_tile,
-                blend_mode: BlendMode::Alpha,
-                frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![1.0],
-                rgb: [1.0, 0.0, 0.0],
-                brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
             GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {
                 updates: vec![(NodeId(1), 3, dst_tile)],
             }),
             GpuCmdMsg::DrawOp(DrawOp {
-                node_id: NodeId(2),
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(2),
+                    blend_mode: BlendMode::Alpha,
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
                 tile_index: 4,
                 tile_key: buffer_tile,
-                blend_mode: BlendMode::Alpha,
-                frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![2.0],
-                rgb: [1.0, 0.0, 0.0],
-                brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
             GpuCmdMsg::WriteOp(WriteOp {
@@ -1818,16 +1865,18 @@ mod tests {
         let buffer_tile = TileKey::from_parts(2, 0, 9);
         let mut commands = vec![
             GpuCmdMsg::DrawOp(DrawOp {
-                node_id: NodeId(1),
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
+                    blend_mode: BlendMode::Alpha,
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
                 tile_index: 3,
                 tile_key: buffer_tile,
-                blend_mode: BlendMode::Alpha,
-                frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input: vec![1.0],
-                rgb: [1.0, 0.0, 0.0],
-                brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             }),
             GpuCmdMsg::CopyOp(CopyOp {

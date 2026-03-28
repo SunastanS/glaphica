@@ -5,8 +5,8 @@ use std::fmt::{Display, Formatter};
 use glaphica_core::{BackendId, BlendMode, BrushId, BrushInput, CanvasVec2, NodeId, TileKey};
 use images::Image;
 use thread_protocol::{
-    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
-    RefImage, WriteKind, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
+    GpuCmdMsg, RefImage, WriteKind, WriteOp,
 };
 
 use crate::brush_registry::BrushRegistry;
@@ -319,20 +319,22 @@ impl BrushEngineRuntime {
             .encode_draw_input(brush_input, tile_key, CanvasVec2::new(0.0, 0.0))
             .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
         Ok(DrawOp {
-            node_id,
+            stroke_ctx: Some(DrawStrokeCtx {
+                node_id,
+                blend_mode: if erase {
+                    BlendMode::Replace
+                } else {
+                    BlendMode::Alpha
+                },
+                frame_merge: DrawFrameMergePolicy::None,
+                rgb,
+                brush_id,
+            }),
             tile_index,
             tile_key,
-            blend_mode: if erase {
-                BlendMode::Replace
-            } else {
-                BlendMode::Alpha
-            },
-            frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::EMPTY,
             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
             input: encoded_input,
-            rgb,
-            brush_id,
             stroke_id: brush_input.stroke,
         })
     }
@@ -488,22 +490,24 @@ impl BrushEngineRuntime {
                 .encode_draw_input(brush_input, affected_tile.tile_key, tile_canvas_origin)
                 .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
             emit(DrawOp {
-                node_id,
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id,
+                    blend_mode: if erase {
+                        BlendMode::Replace
+                    } else {
+                        BlendMode::Alpha
+                    },
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb,
+                    brush_id,
+                }),
                 tile_index: affected_tile.tile_index,
                 tile_key: affected_tile.tile_key,
-                blend_mode: if erase {
-                    BlendMode::Replace
-                } else {
-                    BlendMode::Alpha
-                },
-                frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: affected_tile
                     .ref_tile_key
                     .map(|tile_key| RefImage { tile_key }),
                 input: encoded_input,
-                rgb,
-                brush_id,
                 stroke_id: brush_input.stroke,
             });
         }
@@ -676,16 +680,18 @@ impl BrushEngineRuntime {
                 output.push(StrokeDrawOutput {
                     clear_op,
                     draw_op: Some(DrawOp {
-                        node_id,
+                        stroke_ctx: Some(DrawStrokeCtx {
+                            node_id,
+                            blend_mode: BlendMode::Additive,
+                            frame_merge: DrawFrameMergePolicy::None,
+                            rgb,
+                            brush_id,
+                        }),
                         tile_index,
                         tile_key: buffer_tile_key,
-                        blend_mode: BlendMode::Additive,
-                        frame_merge: DrawFrameMergePolicy::None,
                         origin_tile: TileKey::EMPTY,
                         ref_image: None,
                         input: encoded_dab_input,
-                        rgb,
-                        brush_id,
                         stroke_id: brush_input.stroke,
                     }),
                     copy_op,
@@ -728,7 +734,10 @@ impl BrushEngineRuntime {
             } else {
                 let draw_tile_key = if erase {
                     let (erase_mask_tile_key, _) = self.prepare_stroke_buffer_tile(
-                        StrokeTileKey { node_id, tile_index },
+                        StrokeTileKey {
+                            node_id,
+                            tile_index,
+                        },
                         final_tile_key.backend(),
                         allocator,
                     );
@@ -778,20 +787,22 @@ impl BrushEngineRuntime {
                 output.push(StrokeDrawOutput {
                     clear_op: None,
                     draw_op: Some(DrawOp {
-                        node_id,
+                        stroke_ctx: Some(DrawStrokeCtx {
+                            node_id,
+                            blend_mode: if erase {
+                                BlendMode::Replace
+                            } else {
+                                BlendMode::Alpha
+                            },
+                            frame_merge: DrawFrameMergePolicy::None,
+                            rgb,
+                            brush_id,
+                        }),
                         tile_index,
                         tile_key: draw_tile_key,
-                        blend_mode: if erase {
-                            BlendMode::Replace
-                        } else {
-                            BlendMode::Alpha
-                        },
-                        frame_merge: DrawFrameMergePolicy::None,
                         origin_tile,
                         ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
                         input: encoded_input,
-                        rgb,
-                        brush_id,
                         stroke_id: brush_input.stroke,
                     }),
                     copy_op,

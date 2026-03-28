@@ -10,9 +10,9 @@ use glaphica_core::{
 };
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
-    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, GpuCmdFrameMergeTag, GpuCmdMsg,
-    InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg,
-    WriteKind, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
+    GpuCmdMsg, InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg,
+    TileSlotKeyUpdateMsg, WriteKind, WriteOp,
 };
 
 use crate::AppControl;
@@ -162,24 +162,21 @@ pub enum TraceGpuCmd {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceDrawOp {
-    pub node_id: u64,
+    pub node_id: Option<u64>,
     #[serde(default)]
     pub stroke_id: u64,
     pub tile_index: usize,
     pub tile_key: TraceTileKey,
-    #[serde(default = "trace_draw_blend_mode_alpha")]
-    pub blend_mode: TraceDrawBlendMode,
-    #[serde(default = "trace_draw_frame_merge_none")]
-    pub frame_merge: TraceDrawFrameMergePolicy,
+    pub blend_mode: Option<TraceDrawBlendMode>,
+    pub frame_merge: Option<TraceDrawFrameMergePolicy>,
     #[serde(default = "trace_empty_tile_key")]
     pub origin_tile_key: TraceTileKey,
     pub ref_image_tile_key: Option<TraceTileKey>,
     pub input: Vec<f32>,
-    #[serde(default = "trace_rgb_red")]
-    pub rgb: [f32; 3],
+    pub rgb: Option<[f32; 3]>,
     #[serde(default)]
     pub erase: bool,
-    pub brush_id: u64,
+    pub brush_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -569,31 +566,31 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
     fn from(value: GpuCmdMsg) -> Self {
         match value {
             GpuCmdMsg::DrawOp(draw_op) => Self::DrawOp(TraceDrawOp {
-                node_id: draw_op.node_id.0,
+                node_id: draw_op.stroke_ctx.map(|ctx| ctx.node_id.0),
                 stroke_id: draw_op.stroke_id.0,
                 tile_index: draw_op.tile_index,
-                tile_key: TraceTileKey::from(draw_op.tile_key),
-                blend_mode: match draw_op.blend_mode {
+                tile_key: draw_op.tile_key.into(),
+                origin_tile_key: draw_op.origin_tile.into(),
+                ref_image_tile_key: draw_op.ref_image.map(|ref_image| ref_image.tile_key.into()),
+                input: draw_op.input,
+                blend_mode: draw_op.stroke_ctx.map(|ctx| match ctx.blend_mode {
                     BlendMode::Alpha => TraceDrawBlendMode::Alpha,
                     BlendMode::Additive => TraceDrawBlendMode::Additive,
                     BlendMode::Replace => TraceDrawBlendMode::Replace,
                     _ => {
-                        debug_assert!(DrawOp::supports_blend_mode(draw_op.blend_mode));
+                        debug_assert!(DrawOp::supports_blend_mode(ctx.blend_mode));
                         unreachable!("trace draw only supports draw-op blend mode subset");
                     }
-                },
-                frame_merge: match draw_op.frame_merge {
+                }),
+                frame_merge: draw_op.stroke_ctx.map(|ctx| match ctx.frame_merge {
                     DrawFrameMergePolicy::None => TraceDrawFrameMergePolicy::None,
                     DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush => {
                         TraceDrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
                     }
-                },
-                origin_tile_key: TraceTileKey::from(draw_op.origin_tile),
-                ref_image_tile_key: draw_op.ref_image.map(|ref_image| ref_image.tile_key.into()),
-                input: draw_op.input,
-                rgb: draw_op.rgb,
+                }),
+                rgb: draw_op.stroke_ctx.map(|ctx| ctx.rgb),
                 erase: false,
-                brush_id: draw_op.brush_id.0,
+                brush_id: draw_op.stroke_ctx.map(|ctx| ctx.brush_id.0),
             }),
             GpuCmdMsg::CopyOp(copy_op) => Self::CopyOp(TraceCopyOp {
                 src_tile_key: copy_op.src_tile_key.into(),
@@ -640,7 +637,9 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                     BlendMode::Multiply => TraceCompositeBlendMode::Multiply,
                     _ => {
                         debug_assert!(CompositeOp::supports_blend_mode(composite_op.blend_mode));
-                        unreachable!("trace composite only supports composite-op blend mode subset");
+                        unreachable!(
+                            "trace composite only supports composite-op blend mode subset"
+                        );
                     }
                 },
                 opacity: composite_op.opacity,
@@ -677,28 +676,52 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
     fn from(value: TraceGpuCmd) -> Self {
         match value {
             TraceGpuCmd::DrawOp(draw_op) => Self::DrawOp(DrawOp {
-                node_id: NodeId(draw_op.node_id),
                 stroke_id: StrokeId(draw_op.stroke_id),
-                tile_index: draw_op.tile_index,
-                tile_key: draw_op.tile_key.into(),
-                blend_mode: match draw_op.blend_mode {
-                    TraceDrawBlendMode::Alpha => BlendMode::Alpha,
-                    TraceDrawBlendMode::Additive => BlendMode::Additive,
-                    TraceDrawBlendMode::Replace => BlendMode::Replace,
-                },
-                frame_merge: match draw_op.frame_merge {
-                    TraceDrawFrameMergePolicy::None => DrawFrameMergePolicy::None,
-                    TraceDrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush => {
-                        DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+                stroke_ctx: match (
+                    draw_op.node_id,
+                    draw_op.blend_mode,
+                    draw_op.frame_merge,
+                    draw_op.rgb,
+                    draw_op.brush_id,
+                ) {
+                    (
+                        Some(node_id),
+                        Some(blend_mode),
+                        Some(frame_merge),
+                        Some(rgb),
+                        Some(brush_id),
+                    ) => Some(DrawStrokeCtx {
+                        node_id: NodeId(node_id),
+                        blend_mode: match blend_mode {
+                            TraceDrawBlendMode::Alpha => BlendMode::Alpha,
+                            TraceDrawBlendMode::Additive => BlendMode::Additive,
+                            TraceDrawBlendMode::Replace => BlendMode::Replace,
+                        },
+                        frame_merge: match frame_merge {
+                            TraceDrawFrameMergePolicy::None => DrawFrameMergePolicy::None,
+                            TraceDrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush => {
+                                DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush
+                            }
+                        },
+                        rgb,
+                        brush_id: BrushId(brush_id),
+                    }),
+                    (None, None, None, None, None) => None,
+                    _ => {
+                        debug_assert!(
+                            false,
+                            "trace draw op stroke ctx fields must be fully present or fully absent"
+                        );
+                        None
                     }
                 },
+                tile_index: draw_op.tile_index,
+                tile_key: draw_op.tile_key.into(),
                 origin_tile: draw_op.origin_tile_key.into(),
                 ref_image: draw_op.ref_image_tile_key.map(|tile_key| RefImage {
                     tile_key: tile_key.into(),
                 }),
                 input: draw_op.input,
-                rgb: draw_op.rgb,
-                brush_id: BrushId(draw_op.brush_id),
             }),
             TraceGpuCmd::CopyOp(copy_op) => Self::CopyOp(CopyOp {
                 src_tile_key: copy_op.src_tile_key.into(),

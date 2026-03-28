@@ -18,17 +18,26 @@ pub struct RefImage {
     pub tile_key: TileKey,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct DrawOp {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrawStrokeCtx {
     /// Image node that owns `tile_index`.
     pub node_id: NodeId,
+    pub blend_mode: BlendMode,
+    /// In-frame merge hint used by frame scheduler/runtime.
+    pub frame_merge: DrawFrameMergePolicy,
+    /// App-owned brush RGB tint in [0, 1].
+    pub rgb: [f32; 3],
+    pub brush_id: BrushId,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawOp {
+    /// Optional stroke-level context. `None` means receiver should resolve from cached stroke ctx.
+    pub stroke_ctx: Option<DrawStrokeCtx>,
     /// Tile index in image-space tile grid (without gutter).
     pub tile_index: usize,
     /// Destination atlas tile key.
     pub tile_key: TileKey,
-    pub blend_mode: BlendMode,
-    /// In-frame merge hint used by frame scheduler/runtime.
-    pub frame_merge: DrawFrameMergePolicy,
     /// Optional "origin snapshot" tile key used by brush pipelines that need read/restore.
     /// `TileKey::EMPTY` means no origin snapshot.
     pub origin_tile: TileKey,
@@ -36,9 +45,6 @@ pub struct DrawOp {
     pub ref_image: Option<RefImage>,
     /// Brush-defined draw payload.
     pub input: Vec<f32>,
-    /// App-owned brush RGB tint in [0, 1].
-    pub rgb: [f32; 3],
-    pub brush_id: BrushId,
     /// Stroke identity from input pipeline.
     pub stroke_id: StrokeId,
 }
@@ -95,7 +101,9 @@ impl WriteOp {
 pub enum WriteKind {
     Paint,
     /// Erase from the origin snapshot using source alpha as the erase mask.
-    Erase { origin_tile_key: TileKey },
+    Erase {
+        origin_tile_key: TileKey,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

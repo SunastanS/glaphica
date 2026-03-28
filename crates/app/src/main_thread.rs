@@ -88,10 +88,16 @@ struct DrawLaneKey {
 
 fn draw_lane_key(cmd: &GpuCmdMsg) -> Option<DrawLaneKey> {
     match cmd {
-        GpuCmdMsg::DrawOp(draw_op) => Some(DrawLaneKey {
-            node_id: draw_op.node_id,
-            tile_index: draw_op.tile_index,
-        }),
+        GpuCmdMsg::DrawOp(draw_op) => {
+            let Some(stroke_ctx) = draw_op.stroke_ctx else {
+                debug_assert!(false, "draw lane key requires resolved stroke ctx");
+                return None;
+            };
+            Some(DrawLaneKey {
+                node_id: stroke_ctx.node_id,
+                tile_index: draw_op.tile_index,
+            })
+        }
         _ => None,
     }
 }
@@ -103,8 +109,12 @@ fn validate_draw_lane_contract(commands: &[GpuCmdMsg]) {
         let GpuCmdMsg::DrawOp(draw_op) = cmd else {
             continue;
         };
+        let Some(stroke_ctx) = draw_op.stroke_ctx else {
+            debug_assert!(false, "draw lane validation requires resolved stroke ctx");
+            continue;
+        };
         let lane = DrawLaneKey {
-            node_id: draw_op.node_id,
+            node_id: stroke_ctx.node_id,
             tile_index: draw_op.tile_index,
         };
         match lane_to_tile_key.get(&lane).copied() {
@@ -245,18 +255,24 @@ fn compact_round_draws(
         let can_merge = match (cmd, layout) {
             (GpuCmdMsg::DrawOp(draw_op), Some(layout))
                 if layout.kind() == BrushDrawKind::Round
-                    && draw_op.blend_mode == thread_protocol::BlendMode::Additive
+                    && draw_op.stroke_ctx.is_some_and(|ctx| {
+                        ctx.blend_mode == thread_protocol::BlendMode::Additive
+                    })
                     && draw_op.origin_tile == TileKey::EMPTY
                     && draw_op.ref_image.is_none() =>
             {
+                let Some(stroke_ctx) = draw_op.stroke_ctx else {
+                    debug_assert!(false, "round draw merge requires resolved stroke ctx");
+                    continue;
+                };
                 // Round stroke-buffer draws only accumulate thickness into a transient tile.
                 // Within one frame that makes same-tile dabs mergeable as a single packed draw:
                 // no origin/ref sampling is involved and the final write happens later.
                 Some(MergeableRoundDrawKey {
-                    node_id: draw_op.node_id,
+                    node_id: stroke_ctx.node_id,
                     tile_index: draw_op.tile_index,
                     tile_key: draw_op.tile_key,
-                    brush_id: draw_op.brush_id,
+                    brush_id: stroke_ctx.brush_id,
                     stroke_id: draw_op.stroke_id,
                 })
             }
@@ -631,16 +647,17 @@ impl MainThreadState {
         if trace_config.enabled {
             trace_gpu_commands(commands, trace_config.max_commands);
         }
-        validate_draw_lane_contract(commands);
-        let draw_lane_plan = build_draw_lane_plan(commands);
+        let commands = self.expand_draw_ops_with_cached_ctx(commands);
+        validate_draw_lane_contract(&commands);
+        let draw_lane_plan = build_draw_lane_plan(&commands);
         let prevalidated_draw_layouts =
-            prevalidate_draw_layouts_parallel(commands, &self.brush_layouts, &draw_lane_plan);
+            prevalidate_draw_layouts_parallel(&commands, &self.brush_layouts, &draw_lane_plan);
         let original_draw_count = commands
             .iter()
             .filter(|cmd| matches!(cmd, GpuCmdMsg::DrawOp(_)))
             .count();
         let (commands, prevalidated_draw_layouts) =
-            compact_round_draws(commands, &prevalidated_draw_layouts);
+            compact_round_draws(&commands, &prevalidated_draw_layouts);
         if pipeline_trace_enabled() {
             let compacted_draw_count = commands
                 .iter()
@@ -675,7 +692,6 @@ impl MainThreadState {
                         let GpuCmdMsg::DrawOp(draw_op) = &commands[end] else {
                             break;
                         };
-                        self.cache_and_validate_stroke_draw_ctx(draw_op);
                         let Some(layout) = prevalidated_draw_layouts[end] else {
                             break;
                         };
@@ -730,9 +746,6 @@ impl MainThreadState {
                     index = end;
                 }
                 _ => {
-                    if let GpuCmdMsg::DrawOp(draw_op) = cmd {
-                        self.cache_and_validate_stroke_draw_ctx(draw_op);
-                    }
                     let mut context = FrameBatchContext {
                         gpu_context: &self.gpu_context,
                         atlas_storage: &self.atlas_storage,
@@ -1134,33 +1147,83 @@ impl MainThreadState {
 }
 
 impl MainThreadState {
-    fn cache_and_validate_stroke_draw_ctx(&mut self, draw_op: &thread_protocol::DrawOp) {
+    fn expand_draw_ops_with_cached_ctx(&mut self, commands: &[GpuCmdMsg]) -> Vec<GpuCmdMsg> {
+        let mut expanded = Vec::with_capacity(commands.len());
+        for cmd in commands {
+            match cmd {
+                GpuCmdMsg::DrawOp(draw_op) => {
+                    let Some(expanded_draw) = self.cache_and_validate_stroke_draw_ctx(draw_op)
+                    else {
+                        continue;
+                    };
+                    expanded.push(GpuCmdMsg::DrawOp(expanded_draw));
+                }
+                _ => expanded.push(cmd.clone()),
+            }
+        }
+        expanded
+    }
+
+    fn cache_and_validate_stroke_draw_ctx(
+        &mut self,
+        draw_op: &thread_protocol::DrawOp,
+    ) -> Option<thread_protocol::DrawOp> {
         const MAX_STROKE_DRAW_CTX_CACHE: usize = 16;
         if self.stroke_draw_ctx_cache.len() > MAX_STROKE_DRAW_CTX_CACHE {
             self.stroke_draw_ctx_cache.clear();
         }
 
-        let incoming = CachedStrokeDrawCtx {
-            node_id: draw_op.node_id,
-            brush_id: draw_op.brush_id,
-            rgb: draw_op.rgb,
-            blend_mode: draw_op.blend_mode,
-            frame_merge: draw_op.frame_merge,
-        };
-        match self.stroke_draw_ctx_cache.get(&draw_op.stroke_id).copied() {
+        let resolved = match draw_op.stroke_ctx {
+            Some(incoming_ctx) => {
+                let incoming = CachedStrokeDrawCtx {
+                    node_id: incoming_ctx.node_id,
+                    brush_id: incoming_ctx.brush_id,
+                    rgb: incoming_ctx.rgb,
+                    blend_mode: incoming_ctx.blend_mode,
+                    frame_merge: incoming_ctx.frame_merge,
+                };
+                match self.stroke_draw_ctx_cache.get(&draw_op.stroke_id).copied() {
+                    None => {
+                        self.stroke_draw_ctx_cache
+                            .insert(draw_op.stroke_id, incoming);
+                    }
+                    Some(existing) if existing == incoming => {}
+                    Some(existing) => {
+                        eprintln!(
+                            "[BUG][stroke_ctx] stroke {:?} draw context changed in-flight: cached={:?} incoming={:?}",
+                            draw_op.stroke_id, existing, incoming
+                        );
+                        debug_assert_eq!(
+                            existing, incoming,
+                            "stroke draw context must stay stable"
+                        );
+                    }
+                }
+                incoming_ctx
+            }
             None => {
-                self.stroke_draw_ctx_cache
-                    .insert(draw_op.stroke_id, incoming);
+                let Some(cached_ctx) = self.stroke_draw_ctx_cache.get(&draw_op.stroke_id).copied()
+                else {
+                    eprintln!(
+                        "[BUG][stroke_ctx] missing cached context for stroke {:?}",
+                        draw_op.stroke_id
+                    );
+                    debug_assert!(false, "draw op without ctx requires cached stroke context");
+                    return None;
+                };
+                thread_protocol::DrawStrokeCtx {
+                    node_id: cached_ctx.node_id,
+                    brush_id: cached_ctx.brush_id,
+                    rgb: cached_ctx.rgb,
+                    blend_mode: cached_ctx.blend_mode,
+                    frame_merge: cached_ctx.frame_merge,
+                }
             }
-            Some(existing) if existing == incoming => {}
-            Some(existing) => {
-                eprintln!(
-                    "[BUG][stroke_ctx] stroke {:?} draw context changed in-flight: cached={:?} incoming={:?}",
-                    draw_op.stroke_id, existing, incoming
-                );
-                debug_assert_eq!(existing, incoming, "stroke draw context must stay stable");
-            }
-        }
+        };
+
+        let mut expanded = draw_op.clone();
+        expanded.stroke_ctx = Some(resolved);
+        Some(expanded)
     }
 }
 
@@ -1261,10 +1324,13 @@ fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
     for (index, cmd) in commands.iter().take(max_commands).enumerate() {
         match cmd {
             GpuCmdMsg::DrawOp(op) => {
+                let node_id = op.stroke_ctx.map(|ctx| ctx.node_id.0);
                 eprintln!(
-                    "[PERF][gpu_cmd_trace][{}] DrawOp node={} tile_index={} tile_key={:?} origin_tile={:?} ref_tile={:?} input_len={}",
+                    "[PERF][gpu_cmd_trace][{}] DrawOp stroke={:?} node={:?} has_ctx={} tile_index={} tile_key={:?} origin_tile={:?} ref_tile={:?} input_len={}",
                     index,
-                    op.node_id.0,
+                    op.stroke_id,
+                    node_id,
+                    op.stroke_ctx.is_some(),
                     op.tile_index,
                     op.tile_key,
                     op.origin_tile,
@@ -1428,23 +1494,25 @@ mod tests {
     use super::compact_round_draws;
     use brushes::builtin_brushes::round::ROUND_DRAW_LAYOUT;
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
-    use thread_protocol::{BlendMode, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
+    use thread_protocol::{BlendMode, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdMsg};
 
     #[test]
     fn compact_round_draws_merges_same_tile_inputs() {
         let tile_key = TileKey::from_parts(2, 0, 9);
         let draw = |input: Vec<f32>| {
             GpuCmdMsg::DrawOp(DrawOp {
-                node_id: NodeId(1),
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
+                    blend_mode: BlendMode::Additive,
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
                 tile_index: 3,
                 tile_key,
-                blend_mode: BlendMode::Additive,
-                frame_merge: DrawFrameMergePolicy::None,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
                 input,
-                rgb: [1.0, 0.0, 0.0],
-                brush_id: BrushId(2),
                 stroke_id: StrokeId(4),
             })
         };

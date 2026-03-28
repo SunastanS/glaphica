@@ -38,6 +38,9 @@ pub trait BrushDrawExecutor<Context>: Send {
 #[derive(Debug)]
 pub enum BrushGpuDispatchError {
     Registry(BrushRegistryError),
+    MissingStrokeCtx {
+        stroke_id: glaphica_core::StrokeId,
+    },
     InputLayoutMismatch {
         brush_id: BrushId,
         layout: BrushDrawInputLayout,
@@ -53,6 +56,9 @@ impl Display for BrushGpuDispatchError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Registry(err) => write!(f, "{err}"),
+            Self::MissingStrokeCtx { stroke_id } => {
+                write!(f, "draw op missing stroke ctx for stroke {}", stroke_id.0)
+            }
             Self::InputLayoutMismatch {
                 brush_id,
                 layout,
@@ -78,7 +84,7 @@ impl Error for BrushGpuDispatchError {
         match self {
             Self::Registry(err) => Some(err),
             Self::Executor { source, .. } => Some(source.as_ref()),
-            Self::InputLayoutMismatch { .. } => None,
+            Self::MissingStrokeCtx { .. } | Self::InputLayoutMismatch { .. } => None,
         }
     }
 }
@@ -99,11 +105,20 @@ pub struct BrushGpuRuntime<Executor> {
     executor: Executor,
 }
 
+fn brush_id_from_draw_op(draw_op: &DrawOp) -> Result<BrushId, BrushGpuDispatchError> {
+    draw_op
+        .stroke_ctx
+        .map(|ctx| ctx.brush_id)
+        .ok_or(BrushGpuDispatchError::MissingStrokeCtx {
+            stroke_id: draw_op.stroke_id,
+        })
+}
+
 pub fn validate_draw_op_layout(
     draw_op: &DrawOp,
     layout_registry: &BrushLayoutRegistry,
 ) -> Result<BrushDrawInputLayout, BrushGpuDispatchError> {
-    let brush_id = draw_op.brush_id;
+    let brush_id = brush_id_from_draw_op(draw_op)?;
     let layout = layout_registry.layout(brush_id)?;
     if !layout.validate_input(&draw_op.input) {
         return Err(BrushGpuDispatchError::InputLayoutMismatch {
@@ -133,7 +148,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
     where
         Executor: BrushDrawExecutor<Context>,
     {
-        let brush_id = draw_op.brush_id;
+        let brush_id = brush_id_from_draw_op(draw_op)?;
         let layout = validate_draw_op_layout(draw_op, layout_registry)?;
         self.executor
             .execute_draw(context, draw_op, layout)
@@ -164,7 +179,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
     where
         Executor: BrushDrawExecutor<Context>,
     {
-        let brush_id = draw_op.brush_id;
+        let brush_id = brush_id_from_draw_op(draw_op)?;
         self.executor
             .execute_draw_with_encoder(context, draw_op, layout, encoder)
             .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
@@ -184,7 +199,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
         if draw_ops.is_empty() {
             return Ok(());
         }
-        let brush_id = draw_ops[0].brush_id;
+        let brush_id = brush_id_from_draw_op(draw_ops[0])?;
         self.executor
             .execute_draw_batch_with_encoder(context, draw_ops, layouts, encoder)
             .map_err(|source| BrushGpuDispatchError::Executor { brush_id, source })
@@ -221,9 +236,9 @@ mod tests {
         BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind, BrushEngineRuntime,
         BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry, BrushSpec,
     };
-    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
     use glaphica_core::BlendMode;
-    use thread_protocol::{ClearOp, DrawFrameMergePolicy, DrawOp, GpuCmdMsg};
+    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use thread_protocol::{ClearOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdMsg};
 
     use super::{BrushDrawExecutor, BrushGpuApplyOutcome, BrushGpuDispatchError, BrushGpuRuntime};
 
@@ -292,16 +307,18 @@ mod tests {
         );
 
         let draw_op = DrawOp {
-            node_id: NodeId(0),
+            stroke_ctx: Some(DrawStrokeCtx {
+                node_id: NodeId(0),
+                blend_mode: BlendMode::Alpha,
+                frame_merge: DrawFrameMergePolicy::None,
+                rgb: [1.0, 0.0, 0.0],
+                brush_id: BrushId(2),
+            }),
             tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
-            blend_mode: BlendMode::Alpha,
-            frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0, 3.0],
-            rgb: [1.0, 0.0, 0.0],
-            brush_id: BrushId(2),
             stroke_id: StrokeId(1),
         };
         let mut context = TestContext::default();
@@ -323,16 +340,18 @@ mod tests {
         );
 
         let draw_op = DrawOp {
-            node_id: NodeId(0),
+            stroke_ctx: Some(DrawStrokeCtx {
+                node_id: NodeId(0),
+                blend_mode: BlendMode::Alpha,
+                frame_merge: DrawFrameMergePolicy::None,
+                rgb: [1.0, 0.0, 0.0],
+                brush_id: BrushId(1),
+            }),
             tile_index: 0,
             tile_key: TileKey::from_parts(0, 0, 0),
-            blend_mode: BlendMode::Alpha,
-            frame_merge: DrawFrameMergePolicy::None,
             origin_tile: TileKey::EMPTY,
             ref_image: None,
             input: vec![1.0, 2.0],
-            rgb: [1.0, 0.0, 0.0],
-            brush_id: BrushId(1),
             stroke_id: StrokeId(2),
         };
         let mut context = TestContext::default();

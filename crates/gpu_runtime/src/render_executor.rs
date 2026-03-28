@@ -19,7 +19,9 @@ use crate::context::GpuContext;
 
 #[derive(Debug)]
 pub enum RenderExecutorError {
-    MissingTileBackend { tile_key: TileKey },
+    MissingTileBackend {
+        tile_key: TileKey,
+    },
     PipelineNotInitialized,
     UnsupportedBlendMode {
         op: &'static str,
@@ -2064,14 +2066,13 @@ fn create_bind_group(
 
     let origin_resolved = match write_kind {
         WriteKind::Paint => None,
-        WriteKind::Erase { origin_tile_key } => Some(
-            context
-                .atlas_storage
-                .resolve(origin_tile_key)
-                .ok_or(RenderExecutorError::MissingTileBackend {
+        WriteKind::Erase { origin_tile_key } => {
+            Some(context.atlas_storage.resolve(origin_tile_key).ok_or(
+                RenderExecutorError::MissingTileBackend {
                     tile_key: origin_tile_key,
-                })?,
-        ),
+                },
+            )?)
+        }
     };
     let origin_view = origin_resolved
         .map(|resolved| {

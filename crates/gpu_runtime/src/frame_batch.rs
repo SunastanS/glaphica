@@ -99,8 +99,16 @@ impl FrameBatch {
                     }
                 }
 
+                let Some(stroke_ctx) = draw_op.stroke_ctx else {
+                    eprintln!(
+                        "[BUG][stroke_ctx] frame batch draw missing stroke ctx for stroke {:?}",
+                        draw_op.stroke_id
+                    );
+                    debug_assert!(false, "frame batch draw requires resolved stroke ctx");
+                    return Ok(());
+                };
                 ctx.image_dirty_tracker
-                    .mark(draw_op.node_id, draw_op.tile_index);
+                    .mark(stroke_ctx.node_id, draw_op.tile_index);
                 ctx.tile_dirty_tracker.mark(draw_op.tile_key);
                 self.has_commands = true;
             }
@@ -207,8 +215,16 @@ impl FrameBatch {
             .map_err(FrameBatchError::BrushError)?;
 
         for draw_op in draw_ops {
+            let Some(stroke_ctx) = draw_op.stroke_ctx else {
+                eprintln!(
+                    "[BUG][stroke_ctx] draw batch missing stroke ctx for stroke {:?}",
+                    draw_op.stroke_id
+                );
+                debug_assert!(false, "draw batch requires resolved stroke ctx");
+                continue;
+            };
             ctx.image_dirty_tracker
-                .mark(draw_op.node_id, draw_op.tile_index);
+                .mark(stroke_ctx.node_id, draw_op.tile_index);
             ctx.tile_dirty_tracker.mark(draw_op.tile_key);
         }
         self.has_commands = true;
