@@ -302,6 +302,7 @@ pub struct AppThreadIntegration {
     trace_recorder: Option<TraceRecorder>,
     active_stroke_node: Option<NodeId>,
     current_brush_id: Option<BrushId>,
+    active_stroke_brush_id: Option<BrushId>,
     current_brush_color_rgb: [f32; 3],
     current_brush_erase: bool,
     active_stroke_color_rgb: [f32; 3],
@@ -577,6 +578,7 @@ impl AppThreadIntegration {
             trace_recorder: None,
             active_stroke_node: None,
             current_brush_id: None,
+            active_stroke_brush_id: None,
             current_brush_color_rgb: [1.0, 0.0, 0.0],
             current_brush_erase: false,
             active_stroke_color_rgb: [1.0, 0.0, 0.0],
@@ -646,6 +648,7 @@ impl AppThreadIntegration {
             .input_control_queue
             .blocking_push(InputControlEvent::Control(control));
         self.active_stroke_node = Some(node_id);
+        self.active_stroke_brush_id = self.current_brush_id;
         self.active_stroke_color_rgb = self.current_brush_color_rgb;
         self.active_stroke_erase = self.current_brush_erase;
     }
@@ -855,6 +858,7 @@ impl AppThreadIntegration {
                 .blocking_push(InputControlEvent::Control(control));
         }
         self.active_stroke_node = None;
+        self.active_stroke_brush_id = None;
     }
 
     pub fn undo_stroke(&mut self) -> bool {
@@ -1042,7 +1046,7 @@ impl AppThreadIntegration {
         if !self.input_samples.is_empty()
             && let Some(node_id) = self.active_stroke_node
         {
-            if let Some(brush_id) = self.current_brush_id {
+            if let Some(brush_id) = self.active_stroke_brush_id {
                 self.brush_inputs.clear();
                 self.gpu_commands.clear();
 

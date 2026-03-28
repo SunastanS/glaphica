@@ -11,7 +11,7 @@ use brushes::{
 use document::{FlatRenderTree, SharedRenderTree, View};
 use glaphica_core::{
     AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId, RenderTreeGeneration,
-    TextureFormat, TileDirtyTracker, TileKey,
+    StrokeId, TextureFormat, TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
     FrameBatch, FrameBatchContext, FrameBatchPerfStats, GpuContext, GpuContextInitDescriptor,
@@ -218,6 +218,15 @@ struct MergeableRoundDrawKey {
     stroke_id: glaphica_core::StrokeId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CachedStrokeDrawCtx {
+    node_id: NodeId,
+    brush_id: BrushId,
+    rgb: [f32; 3],
+    blend_mode: thread_protocol::BlendMode,
+    frame_merge: thread_protocol::DrawFrameMergePolicy,
+}
+
 #[derive(Debug)]
 struct PendingVisibleTileUpdateBatch {
     submission_index: wgpu::SubmissionIndex,
@@ -296,6 +305,7 @@ pub struct MainThreadState {
     layer_preview_updates: Vec<LayerPreviewBitmap>,
     pending_preview_nodes: Vec<NodeId>,
     blocked_preview_nodes: HashSet<NodeId>,
+    stroke_draw_ctx_cache: HashMap<StrokeId, CachedStrokeDrawCtx>,
     next_brush_cache_backend_id: u8,
     layer_image_exporter: LayerImageExporter,
 }
@@ -360,6 +370,7 @@ impl MainThreadState {
             layer_preview_updates: Vec::new(),
             pending_preview_nodes: Vec::new(),
             blocked_preview_nodes: HashSet::new(),
+            stroke_draw_ctx_cache: HashMap::new(),
             next_brush_cache_backend_id: 2,
             layer_image_exporter: LayerImageExporter::new(),
         })
@@ -664,6 +675,7 @@ impl MainThreadState {
                         let GpuCmdMsg::DrawOp(draw_op) = &commands[end] else {
                             break;
                         };
+                        self.cache_and_validate_stroke_draw_ctx(draw_op);
                         let Some(layout) = prevalidated_draw_layouts[end] else {
                             break;
                         };
@@ -718,6 +730,9 @@ impl MainThreadState {
                     index = end;
                 }
                 _ => {
+                    if let GpuCmdMsg::DrawOp(draw_op) = cmd {
+                        self.cache_and_validate_stroke_draw_ctx(draw_op);
+                    }
                     let mut context = FrameBatchContext {
                         gpu_context: &self.gpu_context,
                         atlas_storage: &self.atlas_storage,
@@ -1115,6 +1130,37 @@ impl MainThreadState {
         drop(mapped_range);
         output_buffer.unmap();
         Ok(pixels)
+    }
+}
+
+impl MainThreadState {
+    fn cache_and_validate_stroke_draw_ctx(&mut self, draw_op: &thread_protocol::DrawOp) {
+        const MAX_STROKE_DRAW_CTX_CACHE: usize = 16;
+        if self.stroke_draw_ctx_cache.len() > MAX_STROKE_DRAW_CTX_CACHE {
+            self.stroke_draw_ctx_cache.clear();
+        }
+
+        let incoming = CachedStrokeDrawCtx {
+            node_id: draw_op.node_id,
+            brush_id: draw_op.brush_id,
+            rgb: draw_op.rgb,
+            blend_mode: draw_op.blend_mode,
+            frame_merge: draw_op.frame_merge,
+        };
+        match self.stroke_draw_ctx_cache.get(&draw_op.stroke_id).copied() {
+            None => {
+                self.stroke_draw_ctx_cache
+                    .insert(draw_op.stroke_id, incoming);
+            }
+            Some(existing) if existing == incoming => {}
+            Some(existing) => {
+                eprintln!(
+                    "[BUG][stroke_ctx] stroke {:?} draw context changed in-flight: cached={:?} incoming={:?}",
+                    draw_op.stroke_id, existing, incoming
+                );
+                debug_assert_eq!(existing, incoming, "stroke draw context must stay stable");
+            }
+        }
     }
 }
 
