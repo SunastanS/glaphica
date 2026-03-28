@@ -373,6 +373,8 @@ mod tests {
     fn gpu_cmd_write_op_carries_source_destination_and_blend_mode() {
         let cmd = GpuCmdMsg::WriteOp(WriteOp {
             src_tile_key: TileKey::from_parts(1, 2, 3),
+            node_id: glaphica_core::NodeId(7),
+            tile_index: 8,
             dst_tile_key: TileKey::from_parts(4, 5, 6),
             blend_mode: BlendMode::Normal,
             kind: WriteKind::Paint,
@@ -384,6 +386,8 @@ mod tests {
         match cmd {
             GpuCmdMsg::WriteOp(write_op) => {
                 assert_eq!(write_op.src_tile_key, TileKey::from_parts(1, 2, 3));
+                assert_eq!(write_op.node_id, glaphica_core::NodeId(7));
+                assert_eq!(write_op.tile_index, 8);
                 assert_eq!(write_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
                 assert_eq!(write_op.blend_mode, BlendMode::Normal);
                 assert_eq!(write_op.kind, WriteKind::Paint);

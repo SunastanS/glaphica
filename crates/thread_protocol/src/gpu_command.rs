@@ -76,6 +76,10 @@ pub struct CopyOp {
 pub struct WriteOp {
     /// Source tile in atlas space.
     pub src_tile_key: TileKey,
+    /// Image node that owns `tile_index`.
+    pub node_id: NodeId,
+    /// Tile index in image-space tile grid (without gutter).
+    pub tile_index: usize,
     /// Destination tile in atlas space.
     ///
     /// Semantics preserve destination and apply `blend_mode` on top.

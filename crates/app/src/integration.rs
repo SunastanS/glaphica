@@ -1942,6 +1942,10 @@ mod tests {
         ]
     }
 
+    fn issue10_non_missing_updated_tile_indices() -> Vec<usize> {
+        vec![62, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116]
+    }
+
     fn register_default_test_brushes(app: &mut AppThreadIntegration) {
         let round_brush = RoundBrush::with_default_curves(3.0, 0.8).unwrap();
         let pixel_rect_brush = PixelRectBrush::new(8);
@@ -1950,16 +1954,7 @@ mod tests {
         app.set_active_brush(BrushId(0));
     }
 
-    fn run_issue10_headless_replay() -> TraceOutputFile {
-        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
-            "repro".to_string(),
-            ImageLayout::new(1024, 1024),
-        )) else {
-            panic!("failed to initialize app integration");
-        };
-        register_default_test_brushes(&mut app);
-        app.enable_trace_recording();
-
+    fn drive_issue10_replay_to_idle(app: &mut AppThreadIntegration) {
         let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
         let mut replay_index = 0usize;
         let mut replay_finished = false;
@@ -2001,6 +1996,44 @@ mod tests {
                 break;
             }
         }
+    }
+
+    fn run_issue10_headless_replay() -> TraceOutputFile {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+        app.enable_trace_recording();
+        drive_issue10_replay_to_idle(&mut app);
+
+        let output_path = issue10_trace_output_path();
+        app.save_trace_files(None, Some(&output_path)).unwrap();
+        let output: TraceOutputFile =
+            serde_json::from_reader(File::open(&output_path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&output_path);
+        output
+    }
+
+    fn run_issue10_headless_replay_prefix(prefix_len: usize) -> TraceOutputFile {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+        app.enable_trace_recording();
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        for frame in replay.frames.iter().take(prefix_len) {
+            let has_work = app.process_replay_input_frame(frame);
+            if has_work || app.has_pending_visible_tile_updates() || app.has_pending_render_work() {
+                let _ = app.process_main_render();
+            }
+        }
 
         let output_path = issue10_trace_output_path();
         app.save_trace_files(None, Some(&output_path)).unwrap();
@@ -2013,10 +2046,14 @@ mod tests {
     #[derive(Debug)]
     struct Issue10LoopSnapshot {
         source_was_input_frame: bool,
+        accepted_gpu_command_count: usize,
+        pending_engine_gpu_command_count_after: usize,
         pending_batches_before_render: Vec<Vec<usize>>,
         dirty_tiles_before_render: Vec<usize>,
         render_ran: bool,
         runtime_tile_events: Vec<crate::main_thread::TileRuntimeEvent>,
+        updated_tiles_in_accepted_commands: Vec<usize>,
+        drawn_tiles_in_accepted_commands: Vec<usize>,
     }
 
     fn capture_issue10_loop_snapshots() -> Vec<Issue10LoopSnapshot> {
@@ -2066,15 +2103,44 @@ mod tests {
                 let pending_batches_before_render =
                     app.main_state.test_pending_visible_tile_update_batches();
                 let dirty_tiles_before_render = app.main_state.test_dirty_tile_indices();
+                let accepted_gpu_command_count = app.gpu_commands.len();
+                let pending_engine_gpu_command_count_after = app.pending_send_gpu_commands.len();
+                let mut updated_tiles_in_accepted_commands = app
+                    .gpu_commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
+                            update.updates.iter().map(|(_, tile_index, _)| *tile_index),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                updated_tiles_in_accepted_commands.sort_unstable();
+                updated_tiles_in_accepted_commands.dedup();
+                let mut drawn_tiles_in_accepted_commands = app
+                    .gpu_commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                drawn_tiles_in_accepted_commands.sort_unstable();
+                drawn_tiles_in_accepted_commands.dedup();
                 app.main_state.take_tile_runtime_events();
                 let render_ran = app.process_main_render();
                 let runtime_tile_events = app.main_state.take_tile_runtime_events();
                 snapshots.push(Issue10LoopSnapshot {
                     source_was_input_frame,
+                    accepted_gpu_command_count,
+                    pending_engine_gpu_command_count_after,
                     pending_batches_before_render,
                     dirty_tiles_before_render,
                     render_ran,
                     runtime_tile_events,
+                    updated_tiles_in_accepted_commands,
+                    drawn_tiles_in_accepted_commands,
                 });
             }
 
@@ -2089,6 +2155,368 @@ mod tests {
         }
 
         snapshots
+    }
+
+    fn run_issue10_headless_replay_and_export_images() -> (StoredImage, Vec<(NodeId, StoredImage)>) {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+        drive_issue10_replay_to_idle(&mut app);
+
+        let tree = app.engine_state.shared_tree().read();
+        let root_id = tree.root_id.expect("root render node");
+        let root_image = tree
+            .nodes
+            .get(&root_id)
+            .and_then(|node| node.kind.render_image())
+            .expect("root render image");
+        let exported_root = app.main_state.export_layer_image(root_image).unwrap();
+        let exported_non_root = tree
+            .nodes
+            .iter()
+            .filter_map(|(node_id, node)| {
+                if *node_id == root_id {
+                    None
+                } else {
+                    node.kind
+                        .render_image()
+                        .map(|image| (*node_id, app.main_state.export_layer_image(image).unwrap()))
+                }
+            })
+            .collect();
+
+        (exported_root, exported_non_root)
+    }
+
+    fn export_current_root_image(app: &mut AppThreadIntegration) -> StoredImage {
+        let tree = app.engine_state.shared_tree().read();
+        let root_id = tree.root_id.expect("root render node");
+        let root_image = tree
+            .nodes
+            .get(&root_id)
+            .and_then(|node| node.kind.render_image())
+            .expect("root render image");
+        app.main_state.export_layer_image(root_image).unwrap()
+    }
+
+    fn current_tree_tile_keys(
+        app: &AppThreadIntegration,
+        tile_indices: &[usize],
+    ) -> Vec<(NodeId, Vec<TileKey>)> {
+        let tree = app.engine_state.shared_tree().read();
+        let root_id = tree.root_id;
+        let mut entries = tree
+            .nodes
+            .iter()
+            .filter_map(|(node_id, node)| {
+                let image = node.kind.render_image()?;
+                Some((
+                    *node_id,
+                    tile_indices
+                        .iter()
+                        .map(|&tile_index| image.tile_key(tile_index).unwrap_or(TileKey::EMPTY))
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(node_id, _)| {
+            (
+                if Some(*node_id) == root_id { 0u8 } else { 1u8 },
+                node_id.0,
+            )
+        });
+        entries
+    }
+
+    fn run_issue10_headless_replay_and_capture_frontend_image() -> (StoredImage, StoredImage) {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+        drive_issue10_replay_to_idle(&mut app);
+
+        let exported_root = export_current_root_image(&mut app);
+        let frontend_image = app
+            .main_state
+            .test_read_final_image_rgba8(1024, 1024)
+            .unwrap();
+
+        (exported_root, frontend_image)
+    }
+
+    fn capture_issue10_stalled_and_recovered_root_images() -> (StoredImage, StoredImage) {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let expected_updated = issue10_updated_tile_indices();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+        let mut stalled_root = None;
+
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let pending_batches_before_render =
+                    app.main_state.test_pending_visible_tile_update_batches();
+                let dirty_tiles_before_render = app.main_state.test_dirty_tile_indices();
+                app.main_state.take_tile_runtime_events();
+                let render_ran = app.process_main_render();
+                let runtime_tile_events = app.main_state.take_tile_runtime_events();
+
+                if stalled_root.is_none()
+                    && pending_batches_before_render == vec![expected_updated.clone()]
+                    && dirty_tiles_before_render.is_empty()
+                    && !render_ran
+                    && !runtime_tile_events.iter().any(|event| {
+                        matches!(
+                            event.stage,
+                            crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                        ) && event.tile_indices == expected_updated
+                    })
+                {
+                    stalled_root = Some(export_current_root_image(&mut app));
+                }
+
+                let saw_apply_updates = runtime_tile_events.iter().any(|event| {
+                    matches!(
+                        event.stage,
+                        crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                    ) && event.tile_indices == expected_updated
+                });
+                let saw_recovery_render = runtime_tile_events.iter().any(|event| {
+                    matches!(
+                        event.stage,
+                        crate::main_thread::TileRuntimeStage::ProcessRenderComposite
+                    ) && event.tile_indices == expected_updated
+                });
+                if saw_apply_updates && saw_recovery_render && let Some(stalled_root) = stalled_root.take() {
+                    let recovered_root = export_current_root_image(&mut app);
+                    return (stalled_root, recovered_root);
+                }
+            }
+        }
+    }
+
+    fn capture_issue10_stalled_and_recovered_tree_tile_keys(
+    ) -> (Vec<(NodeId, Vec<TileKey>)>, Vec<(NodeId, Vec<TileKey>)>) {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let expected_updated = issue10_updated_tile_indices();
+        let missing_tiles = issue10_missing_tile_indices();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+        let mut stalled_keys = None;
+
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let pending_batches_before_render =
+                    app.main_state.test_pending_visible_tile_update_batches();
+                let dirty_tiles_before_render = app.main_state.test_dirty_tile_indices();
+                app.main_state.take_tile_runtime_events();
+                let render_ran = app.process_main_render();
+                let runtime_tile_events = app.main_state.take_tile_runtime_events();
+
+                if stalled_keys.is_none()
+                    && pending_batches_before_render == vec![expected_updated.clone()]
+                    && dirty_tiles_before_render.is_empty()
+                    && !render_ran
+                    && !runtime_tile_events.iter().any(|event| {
+                        matches!(
+                            event.stage,
+                            crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                        ) && event.tile_indices == expected_updated
+                    })
+                {
+                    stalled_keys = Some(current_tree_tile_keys(&app, &missing_tiles));
+                }
+
+                let saw_apply_updates = runtime_tile_events.iter().any(|event| {
+                    matches!(
+                        event.stage,
+                        crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                    ) && event.tile_indices == expected_updated
+                });
+                let saw_recovery_render = runtime_tile_events.iter().any(|event| {
+                    matches!(
+                        event.stage,
+                        crate::main_thread::TileRuntimeStage::ProcessRenderComposite
+                    ) && event.tile_indices == expected_updated
+                });
+                if saw_apply_updates && saw_recovery_render && let Some(stalled_keys) = stalled_keys.take() {
+                    let recovered_keys = current_tree_tile_keys(&app, &missing_tiles);
+                    return (stalled_keys, recovered_keys);
+                }
+            }
+        }
+    }
+
+    fn capture_issue10_stalled_app() -> AppThreadIntegration {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let expected_updated = issue10_updated_tile_indices();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let pending_batches_before_render =
+                    app.main_state.test_pending_visible_tile_update_batches();
+                let dirty_tiles_before_render = app.main_state.test_dirty_tile_indices();
+                app.main_state.take_tile_runtime_events();
+                let render_ran = app.process_main_render();
+                let runtime_tile_events = app.main_state.take_tile_runtime_events();
+
+                if pending_batches_before_render == vec![expected_updated.clone()]
+                    && dirty_tiles_before_render.is_empty()
+                    && !render_ran
+                    && !runtime_tile_events.iter().any(|event| {
+                        matches!(
+                            event.stage,
+                            crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                        ) && event.tile_indices == expected_updated
+                    })
+                {
+                    return app;
+                }
+            }
+        }
+    }
+
+    fn stored_image_tile_alpha_sum(image: &StoredImage, tile_index: usize) -> u64 {
+        stored_image_tile_metric(image, tile_index, |rgba| u64::from(rgba[3]))
+    }
+
+    fn stored_image_tile_non_white_sum(image: &StoredImage, tile_index: usize) -> u64 {
+        stored_image_tile_metric(image, tile_index, |rgba| {
+            u64::from(255u8.saturating_sub(rgba[0]))
+                + u64::from(255u8.saturating_sub(rgba[1]))
+                + u64::from(255u8.saturating_sub(rgba[2]))
+        })
+    }
+
+    fn stored_image_tile_metric<F>(image: &StoredImage, tile_index: usize, mut pixel_metric: F) -> u64
+    where
+        F: FnMut([u8; 4]) -> u64,
+    {
+        let tile_size = glaphica_core::IMAGE_TILE_SIZE as usize;
+        let width = image.width() as usize;
+        let tiles_per_row = width / tile_size;
+        let tile_x = tile_index % tiles_per_row;
+        let tile_y = tile_index / tiles_per_row;
+        let origin_x = tile_x * tile_size;
+        let origin_y = tile_y * tile_size;
+        let pixels = image.pixels_rgba8();
+        let mut sum = 0u64;
+        for y in 0..tile_size {
+            for x in 0..tile_size {
+                let pixel_index = ((origin_y + y) * width + origin_x + x) * 4;
+                sum += pixel_metric([
+                    pixels[pixel_index],
+                    pixels[pixel_index + 1],
+                    pixels[pixel_index + 2],
+                    pixels[pixel_index + 3],
+                ]);
+            }
+        }
+        sum
     }
 
     #[test]
@@ -2120,6 +2548,8 @@ mod tests {
         let write = |opacity| {
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
+                node_id: NodeId(1),
+                tile_index: 3,
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2187,6 +2617,8 @@ mod tests {
             }),
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
+                node_id: NodeId(1),
+                tile_index: 3,
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2236,6 +2668,8 @@ mod tests {
             }),
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
+                node_id: NodeId(1),
+                tile_index: 3,
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2283,6 +2717,8 @@ mod tests {
         let write = |src: TileKey, dst: TileKey| {
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: src,
+                node_id: NodeId(1),
+                tile_index: 3,
                 dst_tile_key: dst,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2503,15 +2939,671 @@ mod tests {
         let output = run_issue10_headless_replay();
 
         let expected_missing = issue10_missing_tile_indices();
+        let expected_updated = issue10_updated_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+        let missing_frame = output
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.updated_tile_indices == expected_updated
+                        && timeline.drawn_tile_indices == expected_drawn
+                        && timeline.missing_updated_tile_indices == expected_missing
+                })
+            })
+            .expect("missing-updated replay frame");
+
+        let tile_update_tiles = missing_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::TileSlotKeyUpdate(update) => Some(
+                    update
+                        .updates
+                        .iter()
+                        .map(|(_, tile_index, _)| *tile_index)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut drawn_tiles = missing_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::DrawOp(draw_op) => Some(draw_op.tile_index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        drawn_tiles.sort_unstable();
+        drawn_tiles.dedup();
+        let mut flattened_updated_tiles = tile_update_tiles
+            .iter()
+            .flat_map(|tiles| tiles.iter().copied())
+            .collect::<Vec<_>>();
+        flattened_updated_tiles.sort_unstable();
+
+        assert_eq!(flattened_updated_tiles, expected_updated);
+        assert_eq!(tile_update_tiles.len(), 7);
+        assert!(tile_update_tiles.iter().all(|tiles| tiles.len() == 4));
+        assert_eq!(drawn_tiles, expected_drawn);
+        assert!(missing_frame.runtime_tile_events.is_empty());
+        assert!(missing_frame.submit_render.is_some());
+        assert!(missing_frame.draw_compaction.is_none());
+    }
+
+    #[test]
+    fn issue10_replay_should_not_drop_any_updated_tiles() {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let expected_updated = issue10_updated_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+        let expected_missing = issue10_missing_tile_indices();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let mut updated_tiles_in_accepted_commands = app
+                    .gpu_commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
+                            update.updates.iter().map(|(_, tile_index, _)| *tile_index),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                updated_tiles_in_accepted_commands.sort_unstable();
+                updated_tiles_in_accepted_commands.dedup();
+                let mut drawn_tiles_in_accepted_commands = app
+                    .gpu_commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                drawn_tiles_in_accepted_commands.sort_unstable();
+                drawn_tiles_in_accepted_commands.dedup();
+
+                let _ = app.process_main_render();
+
+                if updated_tiles_in_accepted_commands == expected_updated
+                    && drawn_tiles_in_accepted_commands == expected_drawn
+                {
+                    let root_image = export_current_root_image(&mut app);
+                    let missing_non_white = expected_missing
+                        .iter()
+                        .map(|&tile_index| stored_image_tile_non_white_sum(&root_image, tile_index))
+                        .collect::<Vec<_>>();
+
+                    assert!(
+                        missing_non_white.iter().any(|&value| value > 0),
+                        "updated tiles should already be visible in root image, missing={missing_non_white:?}"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue10_failing_frame_command_mix_shows_updates_without_matching_draws() {
+        let output = run_issue10_headless_replay();
+        let expected_updated = issue10_updated_tile_indices();
+        let expected_missing = issue10_missing_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+
+        let failing_frame = output
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.updated_tile_indices == expected_updated
+                        && timeline.missing_updated_tile_indices == expected_missing
+                })
+            })
+            .expect("issue10 failing replay frame");
+
+        let mut updated_groups = Vec::new();
+        let mut draw_tiles = Vec::new();
+        let mut draw_count = 0usize;
+        let mut clear_count = 0usize;
+        let mut copy_count = 0usize;
+        let mut write_count = 0usize;
+        let mut composite_count = 0usize;
+
+        for command in &failing_frame.commands {
+            match command {
+                crate::trace::TraceGpuCmd::TileSlotKeyUpdate(update) => {
+                    updated_groups.push(
+                        update
+                            .updates
+                            .iter()
+                            .map(|(_, tile_index, _)| *tile_index)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+                crate::trace::TraceGpuCmd::DrawOp(draw_op) => {
+                    draw_count += 1;
+                    draw_tiles.push(draw_op.tile_index)
+                }
+                crate::trace::TraceGpuCmd::ClearOp(_) => clear_count += 1,
+                crate::trace::TraceGpuCmd::CopyOp(_) => copy_count += 1,
+                crate::trace::TraceGpuCmd::WriteOp(_) => write_count += 1,
+                crate::trace::TraceGpuCmd::CompositeOp(_) => composite_count += 1,
+                crate::trace::TraceGpuCmd::RenderTreeUpdated(_) => {}
+            }
+        }
+
+        draw_tiles.sort_unstable();
+        draw_tiles.dedup();
+
+        eprintln!("issue10 failing frame updated groups {:?}", updated_groups);
+        eprintln!("issue10 failing frame draw tiles {:?}", draw_tiles);
+        eprintln!(
+            "issue10 failing frame command counts draw={} clear={} copy={} write={} composite={}",
+            draw_count, clear_count, copy_count, write_count, composite_count
+        );
+
+        assert_eq!(updated_groups.len(), 7);
+        assert_eq!(draw_tiles, expected_drawn);
+        assert!(expected_missing.iter().all(|tile| !draw_tiles.contains(tile)));
+        assert!(draw_count > 0);
+        assert_eq!(copy_count, 0);
+        assert!(write_count > 0);
+        assert_eq!(composite_count, 0);
+    }
+
+    #[test]
+    fn issue10_missing_tiles_were_already_drawn_in_previous_output_frame() {
+        let output = run_issue10_headless_replay();
+        let expected_missing = issue10_missing_tile_indices();
+
+        let failing_index = output
+            .frames
+            .iter()
+            .position(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.missing_updated_tile_indices == expected_missing
+                })
+            })
+            .expect("issue10 failing replay frame index");
+        assert!(failing_index > 0);
+
+        let previous_frame = &output.frames[failing_index - 1];
+        let mut previous_drawn_tiles = previous_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::DrawOp(draw_op) => Some(draw_op.tile_index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        previous_drawn_tiles.sort_unstable();
+        previous_drawn_tiles.dedup();
+
+        let previous_updated_tiles = previous_frame
+            .tile_timeline
+            .as_ref()
+            .map(|timeline| timeline.updated_tile_indices.clone())
+            .unwrap_or_default();
+
+        eprintln!(
+            "issue10 previous frame updated={:?} drawn={:?}",
+            previous_updated_tiles, previous_drawn_tiles
+        );
+
+        assert!(
+            expected_missing
+                .iter()
+                .all(|tile| previous_drawn_tiles.contains(tile))
+        );
+        assert!(
+            expected_missing
+                .iter()
+                .all(|tile| !previous_updated_tiles.contains(tile))
+        );
+    }
+
+    #[test]
+    fn issue10_missing_tiles_are_not_written_in_previous_output_frame() {
+        let output = run_issue10_headless_replay();
+        let expected_missing = issue10_missing_tile_indices();
+
+        let failing_index = output
+            .frames
+            .iter()
+            .position(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.missing_updated_tile_indices == expected_missing
+                })
+            })
+            .expect("issue10 failing replay frame index");
+        assert!(failing_index > 0);
+
+        let previous_frame = &output.frames[failing_index - 1];
+        let previous_write_dst_tiles = previous_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::WriteOp(write_op) => Some(write_op.dst_tile_key.slot),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "issue10 previous frame write dst slots {:?}",
+            previous_write_dst_tiles
+        );
+
+        assert!(previous_write_dst_tiles.is_empty());
+    }
+
+    #[test]
+    fn issue10_failing_frame_contains_write_ops_for_missing_tile_targets() {
+        let output = run_issue10_headless_replay();
+        let expected_missing = issue10_missing_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+
+        let failing_frame = output
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.missing_updated_tile_indices == expected_missing
+                        && timeline.drawn_tile_indices == expected_drawn
+                })
+            })
+            .expect("issue10 failing replay frame");
+
+        let updated_slots = failing_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::TileSlotKeyUpdate(update) => Some(update.updates.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|(_, tile_index, tile_key)| (*tile_index, tile_key.slot))
+            .collect::<std::collections::HashMap<_, _>>();
+        let write_dst_slots = failing_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::WriteOp(write_op) => Some(write_op.dst_tile_key.slot),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+
+        let missing_slots = expected_missing
+            .iter()
+            .map(|tile| updated_slots[tile])
+            .collect::<Vec<_>>();
+        let visible_slots = expected_drawn
+            .iter()
+            .map(|tile| updated_slots[tile])
+            .collect::<Vec<_>>();
+
+        eprintln!("issue10 failing frame missing update slots {:?}", missing_slots);
+        eprintln!("issue10 failing frame visible update slots {:?}", visible_slots);
+
+        assert!(expected_missing
+            .iter()
+            .all(|tile| write_dst_slots.contains(&updated_slots[tile])));
+        assert!(expected_drawn
+            .iter()
+            .all(|tile| write_dst_slots.contains(&updated_slots[tile])));
+    }
+
+    #[test]
+    fn issue10_updated_tiles_are_visible_in_root_image_during_failing_command_iteration() {
+        let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
+            "repro".to_string(),
+            ImageLayout::new(1024, 1024),
+        )) else {
+            panic!("failed to initialize app integration");
+        };
+        register_default_test_brushes(&mut app);
+
+        let replay = TraceRecorder::load_input_file(&issue10_replay_input_path()).unwrap();
+        let expected_updated = issue10_updated_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+        let expected_missing = issue10_missing_tile_indices();
+        let mut replay_index = 0usize;
+        let mut replay_finished = false;
+        let mut iterations = 0usize;
+
+        loop {
+            iterations += 1;
+            assert!(iterations < 4096, "headless replay loop did not quiesce");
+
+            let has_work = if !replay_finished {
+                if let Some(frame) = replay.frames.get(replay_index) {
+                    replay_index += 1;
+                    app.process_replay_input_frame(frame)
+                } else {
+                    replay_finished = true;
+                    app.process_engine_frame(Duration::from_millis(0))
+                }
+            } else {
+                app.process_engine_frame(Duration::from_millis(0))
+            };
+
+            let has_pending_engine_gpu_commands = app.has_pending_engine_gpu_commands();
+            let has_pending_visible_tile_updates = app.has_pending_visible_tile_updates();
+            let has_pending_render_work = app.has_pending_render_work();
+
+            if has_work
+                || has_pending_engine_gpu_commands
+                || has_pending_visible_tile_updates
+                || has_pending_render_work
+            {
+                let mut updated_tiles_in_accepted_commands = app
+                    .gpu_commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
+                            update.updates.iter().map(|(_, tile_index, _)| *tile_index),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                updated_tiles_in_accepted_commands.sort_unstable();
+                updated_tiles_in_accepted_commands.dedup();
+                let mut drawn_tiles_in_accepted_commands = app
+                    .gpu_commands
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                drawn_tiles_in_accepted_commands.sort_unstable();
+                drawn_tiles_in_accepted_commands.dedup();
+
+                let _ = app.process_main_render();
+
+                if updated_tiles_in_accepted_commands == expected_updated
+                    && drawn_tiles_in_accepted_commands == expected_drawn
+                {
+                    let root_image = export_current_root_image(&mut app);
+                    let missing_non_white = expected_missing
+                        .iter()
+                        .map(|&tile_index| stored_image_tile_non_white_sum(&root_image, tile_index))
+                        .collect::<Vec<_>>();
+
+                    eprintln!(
+                        "issue10 failing command iteration root missing non-white {:?}",
+                        missing_non_white
+                    );
+
+                    assert!(missing_non_white.iter().any(|&value| value > 0));
+                    return;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue10_failing_output_frame_arrives_on_followup_non_input_iteration() {
+        let snapshots = capture_issue10_loop_snapshots();
+        let expected_updated = issue10_updated_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+
+        let failing_index = snapshots
+            .iter()
+            .position(|snapshot| {
+                snapshot.updated_tiles_in_accepted_commands == expected_updated
+                    && snapshot.drawn_tiles_in_accepted_commands == expected_drawn
+            })
+            .expect("issue10 failing accepted-command snapshot");
+        let failing_snapshot = &snapshots[failing_index];
+
+        eprintln!(
+            "issue10 failing snapshot accepted_gpu_command_count={} pending_engine_gpu_command_count_after={}",
+            failing_snapshot.accepted_gpu_command_count,
+            failing_snapshot.pending_engine_gpu_command_count_after
+        );
+
+        assert!(failing_index > 0);
+        assert!(!failing_snapshot.source_was_input_frame);
+        assert!(failing_snapshot.accepted_gpu_command_count > 0);
+        assert_eq!(failing_snapshot.pending_engine_gpu_command_count_after, 0);
+        assert!(snapshots[failing_index - 1].source_was_input_frame);
+    }
+
+    #[test]
+    fn issue10_failing_output_frame_matches_leftover_engine_command_batch() {
+        let snapshots = capture_issue10_loop_snapshots();
+        let expected_updated = issue10_updated_tile_indices();
+        let expected_drawn = issue10_non_missing_updated_tile_indices();
+
+        let failing_index = snapshots
+            .iter()
+            .position(|snapshot| {
+                snapshot.updated_tiles_in_accepted_commands == expected_updated
+                    && snapshot.drawn_tiles_in_accepted_commands == expected_drawn
+            })
+            .expect("issue10 failing accepted-command snapshot");
+        let failing_snapshot = &snapshots[failing_index];
+        let previous_snapshot = &snapshots[failing_index - 1];
+
+        eprintln!(
+            "issue10 leftover previous_pending={} failing_accepted={}",
+            previous_snapshot.pending_engine_gpu_command_count_after,
+            failing_snapshot.accepted_gpu_command_count
+        );
+
+        assert!(previous_snapshot.source_was_input_frame);
+        assert!(previous_snapshot.pending_engine_gpu_command_count_after > 0);
+        assert_eq!(
+            previous_snapshot.pending_engine_gpu_command_count_after,
+            failing_snapshot.accepted_gpu_command_count
+        );
+    }
+
+    #[test]
+    fn move_metadata_updates_to_end_can_push_tile_updates_into_later_chunk() {
+        let dst_tiles = (0..7)
+            .map(|index| TileKey::from_parts(0, 0, index + 1))
+            .collect::<Vec<_>>();
+        let buffer_tiles = (0..7)
+            .map(|index| TileKey::from_parts(2, 0, index + 11))
+            .collect::<Vec<_>>();
+        let mut commands = Vec::new();
+
+        for (group_index, (&dst_tile, &buffer_tile)) in dst_tiles.iter().zip(&buffer_tiles).enumerate() {
+            commands.push(GpuCmdMsg::DrawOp(DrawOp {
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
+                    blend_mode: BlendMode::Additive,
+                    frame_merge: DrawFrameMergePolicy::None,
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
+                tile_index: group_index,
+                tile_key: buffer_tile,
+                origin_tile: TileKey::EMPTY,
+                ref_image: None,
+                input: vec![group_index as f32],
+                stroke_id: StrokeId(5),
+            }));
+            commands.push(GpuCmdMsg::WriteOp(WriteOp {
+                src_tile_key: buffer_tile,
+                node_id: NodeId(1),
+                tile_index: group_index,
+                dst_tile_key: dst_tile,
+                blend_mode: BlendMode::Normal,
+                kind: WriteKind::Paint,
+                opacity: 1.0,
+                rgb: Some([1.0, 0.0, 0.0]),
+                frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
+            }));
+            commands.push(GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {
+                updates: vec![(NodeId(1), group_index, dst_tile)],
+            }));
+        }
+
+        AppThreadIntegration::move_mergeable_writes_to_end(&mut commands);
+        AppThreadIntegration::move_metadata_updates_to_end(&mut commands);
+
+        let split_at = 14usize;
+        let first_chunk = &commands[..split_at];
+        let second_chunk = &commands[split_at..];
+        let first_chunk_update_count = first_chunk
+            .iter()
+            .filter(|command| matches!(command, GpuCmdMsg::TileSlotKeyUpdate(_)))
+            .count();
+        let second_chunk_update_count = second_chunk
+            .iter()
+            .filter(|command| matches!(command, GpuCmdMsg::TileSlotKeyUpdate(_)))
+            .count();
+
+        assert_eq!(first_chunk_update_count, 0);
+        assert!(second_chunk_update_count > 0);
+    }
+
+    fn max_updated_group_count_per_trace_frame(output: &TraceOutputFile) -> usize {
+        output
+            .frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .commands
+                    .iter()
+                    .filter(|command| {
+                        matches!(command, crate::trace::TraceGpuCmd::TileSlotKeyUpdate(_))
+                    })
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn max_draw_group_count_per_trace_frame(output: &TraceOutputFile) -> usize {
+        output
+            .frames
+            .iter()
+            .map(|frame| {
+                let mut tiles = frame
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        crate::trace::TraceGpuCmd::DrawOp(draw_op) => Some(draw_op.tile_index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                tiles.sort_unstable();
+                tiles.dedup();
+                tiles.len() / 4
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn issue10_full_replay_exceeds_four_update_groups_but_early_prefixes_do_not() {
+        let full_output = run_issue10_headless_replay();
+        let prefix_8 = run_issue10_headless_replay_prefix(8);
+        let prefix_16 = run_issue10_headless_replay_prefix(16);
+
+        let full_max_updates = max_updated_group_count_per_trace_frame(&full_output);
+        let prefix_8_max_updates = max_updated_group_count_per_trace_frame(&prefix_8);
+        let prefix_16_max_updates = max_updated_group_count_per_trace_frame(&prefix_16);
+        let full_max_draw_groups = max_draw_group_count_per_trace_frame(&full_output);
+
+        eprintln!(
+            "issue10 group caps full_updates={} prefix8_updates={} prefix16_updates={} full_draw_groups={}",
+            full_max_updates,
+            prefix_8_max_updates,
+            prefix_16_max_updates,
+            full_max_draw_groups
+        );
+
+        assert!(full_max_updates > 4);
+        assert!(prefix_8_max_updates <= 4);
+        assert!(prefix_16_max_updates <= 4);
+        assert!(full_max_draw_groups > 4);
+    }
+
+    #[test]
+    fn issue10_only_failing_frame_stops_at_four_draw_groups() {
+        let output = run_issue10_headless_replay();
+        let expected_missing = issue10_missing_tile_indices();
+
+        let failing_frame = output
+            .frames
+            .iter()
+            .find(|frame| {
+                frame.tile_timeline.as_ref().is_some_and(|timeline| {
+                    timeline.missing_updated_tile_indices == expected_missing
+                })
+            })
+            .expect("issue10 failing trace frame");
+        let mut drawn_tiles = failing_frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::trace::TraceGpuCmd::DrawOp(draw_op) => Some(draw_op.tile_index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        drawn_tiles.sort_unstable();
+        drawn_tiles.dedup();
+
+        assert_eq!(drawn_tiles.len() / 4, 4);
         assert!(output.frames.iter().any(|frame| {
-            frame
-                .tile_timeline
-                .as_ref()
-                .is_some_and(|timeline| timeline.missing_updated_tile_indices == expected_missing)
+            let mut tiles = frame
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    crate::trace::TraceGpuCmd::DrawOp(draw_op) => Some(draw_op.tile_index),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            tiles.sort_unstable();
+            tiles.dedup();
+            tiles.len() / 4 > 4
         }));
     }
 
     #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
     fn issue10_pending_updates_render_all_tiles_once_flushed() {
         let output = run_issue10_headless_replay();
         let expected_tiles = issue10_updated_tile_indices();
@@ -2534,6 +3626,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
     fn issue10_missing_draw_frame_is_followed_by_runtime_only_recovery_frame() {
         let output = run_issue10_headless_replay();
         let expected_missing = issue10_missing_tile_indices();
@@ -2572,6 +3665,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
     fn issue10_render_skip_happens_while_full_update_batch_is_still_pending() {
         let snapshots = capture_issue10_loop_snapshots();
         let expected_updated = issue10_updated_tile_indices();
@@ -2613,5 +3707,377 @@ mod tests {
             })
             .expect("runtime recovery pass after stalled render not found");
         assert!(recovery.dirty_tiles_before_render.is_empty());
+    }
+
+    #[test]
+    fn issue10_headless_root_image_contains_ink_on_frontend_missing_tiles() {
+        let (root_image, non_root_images) = run_issue10_headless_replay_and_export_images();
+        let missing_tiles = issue10_missing_tile_indices();
+        let drawn_tiles = vec![62usize, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116];
+        let root_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&root_image, tile_index))
+            .collect::<Vec<_>>();
+        let root_drawn_non_white = drawn_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&root_image, tile_index))
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "issue10 root missing-tile alpha {:?}",
+            missing_tiles
+                .iter()
+                .map(|&tile_index| stored_image_tile_alpha_sum(&root_image, tile_index))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "issue10 root missing-tile non-white {:?}",
+            root_missing_non_white
+        );
+        eprintln!(
+            "issue10 root drawn-tile non-white {:?}",
+            root_drawn_non_white
+        );
+
+        for tile_index in missing_tiles {
+            assert!(stored_image_tile_alpha_sum(&root_image, tile_index) > 0);
+        }
+
+        for (node_id, image) in &non_root_images {
+            eprintln!(
+                "issue10 non-root node {:?} missing-tile alpha {:?}",
+                node_id,
+                issue10_missing_tile_indices()
+                    .iter()
+                    .map(|&tile_index| stored_image_tile_alpha_sum(image, tile_index))
+                    .collect::<Vec<_>>()
+            );
+            eprintln!(
+                "issue10 non-root node {:?} missing-tile non-white {:?}",
+                node_id,
+                issue10_missing_tile_indices()
+                    .iter()
+                    .map(|&tile_index| stored_image_tile_non_white_sum(image, tile_index))
+                    .collect::<Vec<_>>()
+            );
+            eprintln!(
+                "issue10 non-root node {:?} drawn-tile non-white {:?}",
+                node_id,
+                drawn_tiles
+                    .iter()
+                    .map(|&tile_index| stored_image_tile_non_white_sum(image, tile_index))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        assert!(root_missing_non_white.iter().any(|&value| value > 0));
+        assert!(root_drawn_non_white.iter().all(|&value| value == 0));
+        assert!(non_root_images.iter().any(|(_, image)| {
+            issue10_missing_tile_indices()
+                .iter()
+                .any(|&tile_index| stored_image_tile_non_white_sum(image, tile_index) > 0)
+        }));
+    }
+
+    #[test]
+    fn issue10_frontend_readback_matches_root_export_after_replay() {
+        let (root_image, frontend_image) = run_issue10_headless_replay_and_capture_frontend_image();
+        let missing_tiles = issue10_missing_tile_indices();
+        let drawn_tiles = vec![62usize, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116];
+        let root_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&root_image, tile_index))
+            .collect::<Vec<_>>();
+        let frontend_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&frontend_image, tile_index))
+            .collect::<Vec<_>>();
+        let frontend_drawn_non_white = drawn_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&frontend_image, tile_index))
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "issue10 root missing-tile non-white {:?}",
+            root_missing_non_white
+        );
+        eprintln!(
+            "issue10 frontend missing-tile non-white {:?}",
+            frontend_missing_non_white
+        );
+        eprintln!(
+            "issue10 frontend drawn-tile non-white {:?}",
+            frontend_drawn_non_white
+        );
+
+        assert_eq!(frontend_missing_non_white, root_missing_non_white);
+        assert!(frontend_drawn_non_white.iter().any(|&value| value > 0));
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_stalled_render_frame_keeps_root_image_stale_until_runtime_recovery() {
+        let (stalled_root, recovered_root) = capture_issue10_stalled_and_recovered_root_images();
+        let missing_tiles = issue10_missing_tile_indices();
+        let stalled_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&stalled_root, tile_index))
+            .collect::<Vec<_>>();
+        let recovered_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&recovered_root, tile_index))
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "issue10 stalled root missing-tile non-white {:?}",
+            stalled_missing_non_white
+        );
+        eprintln!(
+            "issue10 recovered root missing-tile non-white {:?}",
+            recovered_missing_non_white
+        );
+
+        assert!(stalled_missing_non_white.iter().all(|&value| value == 0));
+        assert!(recovered_missing_non_white.iter().any(|&value| value > 0));
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_flushing_stalled_pending_updates_marks_all_expected_tiles_dirty() {
+        let mut app = capture_issue10_stalled_app();
+        let expected_updated = issue10_updated_tile_indices();
+
+        assert_eq!(
+            app.main_state.test_pending_visible_tile_update_batches(),
+            vec![expected_updated.clone()]
+        );
+        assert!(app.main_state.test_dirty_tile_indices().is_empty());
+
+        app.main_state.flush_visible_tile_updates();
+
+        assert!(!app.has_pending_visible_tile_updates());
+        assert_eq!(app.main_state.test_dirty_tile_indices(), expected_updated);
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_stalled_pending_batch_contains_both_missing_and_visible_tiles() {
+        let app = capture_issue10_stalled_app();
+        let pending_batches = app.main_state.test_pending_visible_tile_update_batches();
+        let missing_tiles = issue10_missing_tile_indices();
+        let visible_tiles = issue10_non_missing_updated_tile_indices();
+
+        assert_eq!(pending_batches.len(), 1);
+        let batch = &pending_batches[0];
+        assert!(missing_tiles.iter().all(|tile| batch.contains(tile)));
+        assert!(visible_tiles.iter().all(|tile| batch.contains(tile)));
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_flushing_stalled_pending_batch_applies_both_missing_and_visible_tiles_together() {
+        let mut app = capture_issue10_stalled_app();
+        let missing_tiles = issue10_missing_tile_indices();
+        let visible_tiles = issue10_non_missing_updated_tile_indices();
+
+        app.main_state.flush_visible_tile_updates();
+        let runtime_tile_events = app.main_state.take_tile_runtime_events();
+        let apply_event = runtime_tile_events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event.stage,
+                    crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                )
+            })
+            .expect("apply visible updates event after flush");
+
+        assert!(missing_tiles
+            .iter()
+            .all(|tile| apply_event.tile_indices.contains(tile)));
+        assert!(visible_tiles
+            .iter()
+            .all(|tile| apply_event.tile_indices.contains(tile)));
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_flushed_dirty_state_builds_render_cmds_for_all_expected_tiles() {
+        let mut app = capture_issue10_stalled_app();
+        let expected_updated = issue10_updated_tile_indices();
+
+        app.main_state.flush_visible_tile_updates();
+
+        assert_eq!(app.main_state.test_dirty_tile_indices(), expected_updated);
+        assert_eq!(app.main_state.test_render_cmd_tile_indices(), expected_updated);
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_flushed_render_cmds_keep_missing_and_visible_tiles_in_same_render_set() {
+        let mut app = capture_issue10_stalled_app();
+        let missing_tiles = issue10_missing_tile_indices();
+        let visible_tiles = issue10_non_missing_updated_tile_indices();
+
+        app.main_state.flush_visible_tile_updates();
+        let render_tiles = app.main_state.test_render_cmd_tile_indices();
+
+        assert!(missing_tiles.iter().all(|tile| render_tiles.contains(tile)));
+        assert!(visible_tiles.iter().all(|tile| render_tiles.contains(tile)));
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_stalled_process_main_render_preserves_full_pending_batch() {
+        let mut app = capture_issue10_stalled_app();
+        let expected_updated = issue10_updated_tile_indices();
+
+        assert_eq!(
+            app.main_state.test_pending_visible_tile_update_batches(),
+            vec![expected_updated.clone()]
+        );
+        assert!(app.main_state.test_dirty_tile_indices().is_empty());
+
+        app.main_state.take_tile_runtime_events();
+        let render_ran = app.process_main_render();
+        let runtime_tile_events = app.main_state.take_tile_runtime_events();
+
+        assert!(!render_ran);
+        assert_eq!(
+            app.main_state.test_pending_visible_tile_update_batches(),
+            vec![expected_updated]
+        );
+        assert!(app.main_state.test_dirty_tile_indices().is_empty());
+        assert!(runtime_tile_events.is_empty());
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_repeated_process_main_render_never_partially_promotes_stalled_batch() {
+        let mut app = capture_issue10_stalled_app();
+        let expected_updated = issue10_updated_tile_indices();
+        for _ in 0..32 {
+            app.main_state.take_tile_runtime_events();
+            let render_ran = app.process_main_render();
+            let runtime_tile_events = app.main_state.take_tile_runtime_events();
+            let apply_event = runtime_tile_events.iter().find(|event| {
+                matches!(
+                    event.stage,
+                    crate::main_thread::TileRuntimeStage::ApplyVisibleUpdates
+                )
+            });
+
+            if let Some(apply_event) = apply_event {
+                assert_eq!(apply_event.tile_indices, expected_updated);
+                assert!(render_ran);
+                assert!(!app.has_pending_visible_tile_updates());
+                assert!(app.main_state.test_dirty_tile_indices().is_empty());
+                return;
+            }
+
+            assert_eq!(
+                app.main_state.test_pending_visible_tile_update_batches(),
+                vec![expected_updated.clone()]
+            );
+            assert!(app.main_state.test_dirty_tile_indices().is_empty());
+            assert!(!render_ran);
+            assert!(runtime_tile_events.is_empty());
+        }
+
+        app.main_state.flush_visible_tile_updates();
+        assert!(!app.has_pending_visible_tile_updates());
+        assert_eq!(app.main_state.test_dirty_tile_indices(), expected_updated.clone());
+
+        app.main_state.take_tile_runtime_events();
+        let render_ran = app.process_main_render();
+        let runtime_tile_events = app.main_state.take_tile_runtime_events();
+        let composite_event = runtime_tile_events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.stage,
+                    crate::main_thread::TileRuntimeStage::ProcessRenderComposite
+                )
+            })
+            .expect("composite event after explicit flush");
+
+        assert_eq!(composite_event.tile_indices, expected_updated);
+        assert!(render_ran);
+        assert!(!app.has_pending_visible_tile_updates());
+        assert!(app.main_state.test_dirty_tile_indices().is_empty());
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_process_render_after_flush_composites_full_updated_tile_set() {
+        let mut app = capture_issue10_stalled_app();
+        let expected_updated = issue10_updated_tile_indices();
+
+        app.main_state.flush_visible_tile_updates();
+        app.main_state.take_tile_runtime_events();
+        let render_ran = app.main_state.process_render();
+        let runtime_tile_events = app.main_state.take_tile_runtime_events();
+        let composite_event = runtime_tile_events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event.stage,
+                    crate::main_thread::TileRuntimeStage::ProcessRenderComposite
+                )
+            })
+            .expect("composite event after process_render");
+
+        assert!(render_ran);
+        assert_eq!(composite_event.tile_indices, expected_updated);
+        assert!(app.main_state.test_dirty_tile_indices().is_empty());
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_process_render_after_flush_restores_missing_tiles_in_root_image() {
+        let mut app = capture_issue10_stalled_app();
+        let missing_tiles = issue10_missing_tile_indices();
+
+        let stalled_root = export_current_root_image(&mut app);
+        let stalled_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&stalled_root, tile_index))
+            .collect::<Vec<_>>();
+
+        app.main_state.flush_visible_tile_updates();
+        let render_ran = app.main_state.process_render();
+        let recovered_root = export_current_root_image(&mut app);
+        let recovered_missing_non_white = missing_tiles
+            .iter()
+            .map(|&tile_index| stored_image_tile_non_white_sum(&recovered_root, tile_index))
+            .collect::<Vec<_>>();
+
+        assert!(render_ran);
+        assert!(stalled_missing_non_white.iter().all(|&value| value == 0));
+        assert!(recovered_missing_non_white.iter().any(|&value| value > 0));
+    }
+
+    #[test]
+    #[ignore = "historical pending-update timing diagnostic before immediate visible apply"]
+    fn issue10_stalled_frame_keeps_intermediate_cache_unmaterialized_before_recovery() {
+        let (stalled_keys, recovered_keys) = capture_issue10_stalled_and_recovered_tree_tile_keys();
+        eprintln!("issue10 stalled tile keys {:?}", stalled_keys);
+        eprintln!("issue10 recovered tile keys {:?}", recovered_keys);
+
+        let stalled_root = stalled_keys.first().expect("root render image snapshot");
+        let recovered_root = recovered_keys.first().expect("recovered root render image snapshot");
+
+        assert!(stalled_keys.len() > 1);
+        assert!(stalled_keys[1..]
+            .iter()
+            .any(|(_, tile_keys)| tile_keys != &stalled_root.1));
+        assert_eq!(stalled_root.1, recovered_root.1);
+        assert!(recovered_keys[1..]
+            .iter()
+            .zip(&stalled_keys[1..])
+            .any(|((_, recovered_tile_keys), (_, stalled_tile_keys))| {
+                stalled_tile_keys.iter().all(|key| *key == TileKey::EMPTY)
+                    && recovered_tile_keys.iter().any(|key| *key != TileKey::EMPTY)
+            }));
     }
 }

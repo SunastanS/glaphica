@@ -902,26 +902,16 @@ impl MainThreadState {
             image_dirty_tracker: &mut self.image_dirty_tracker,
             tile_dirty_tracker: &mut self.tile_dirty_tracker,
         };
-        let submission_index = match frame_batch.finish(&mut context) {
-            Ok((submission_index, frame_batch_perf)) => {
+        match frame_batch.finish(&mut context) {
+            Ok((_submission_index, frame_batch_perf)) => {
                 submit_perf.frame_batch = frame_batch_perf;
-                submission_index
             }
             Err(error) => {
                 eprintln!("GPU command processing failed during frame finalize: {error:?}");
-                None
             }
         };
 
-        if let Some(submission_index) = submission_index {
-            if !deferred_visible_tile_updates.is_empty() {
-                self.pending_visible_tile_updates
-                    .push_back(PendingVisibleTileUpdateBatch {
-                        submission_index,
-                        updates: deferred_visible_tile_updates,
-                    });
-            }
-        } else if !deferred_visible_tile_updates.is_empty() {
+        if !deferred_visible_tile_updates.is_empty() {
             self.apply_visible_tile_updates(&deferred_visible_tile_updates);
         }
         self.brush_runtime
@@ -959,7 +949,11 @@ impl MainThreadState {
         op: &TileSlotKeyUpdateMsg,
         deferred_updates: &mut Vec<(NodeId, usize, TileKey)>,
     ) {
-        deferred_updates.extend(op.updates.iter().copied());
+        for (node_id, tile_index, tile_key) in &op.updates {
+            self.image_dirty_tracker.mark(*node_id, *tile_index);
+            self.tile_dirty_tracker.mark(*tile_key);
+            deferred_updates.push((*node_id, *tile_index, *tile_key));
+        }
     }
 
     fn promote_completed_tile_updates(&mut self) {
@@ -1007,6 +1001,27 @@ impl MainThreadState {
     pub(crate) fn test_dirty_tile_indices(&self) -> Vec<usize> {
         collect_sorted_unique_tile_indices(
             self.image_dirty_tracker.iter().map(|key| key.tile_index),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_read_final_image_rgba8(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<images::StoredImage, ExportImageError> {
+        let pixels = self.read_final_image_rgba8(width, height)?;
+        images::StoredImage::new_rgba8(width, height, pixels)
+            .map_err(|_| ExportImageError::InvalidSize)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_render_cmd_tile_indices(&self) -> Vec<usize> {
+        let tree = self.shared_tree.read();
+        collect_sorted_unique_tile_indices(
+            tree.build_render_cmds(&self.image_dirty_tracker)
+                .into_iter()
+                .flat_map(|cmd| cmd.tile_indices),
         )
     }
 

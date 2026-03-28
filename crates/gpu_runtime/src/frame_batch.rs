@@ -8,12 +8,12 @@ use document::SharedRenderTree;
 use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
 use thread_protocol::{DrawOp, GpuCmdMsg, WriteOp};
 
-use crate::RenderExecutor;
 use crate::atlas_runtime::AtlasStorageRuntime;
 use crate::brush_runtime::{BrushGpuDispatchError, BrushGpuRuntime};
 use crate::context::GpuContext;
 use crate::render_executor::RenderContext;
 use crate::wgpu_brush_executor::WgpuBrushContext;
+use crate::RenderExecutor;
 
 pub struct FrameBatch {
     encoder: wgpu::CommandEncoder,
@@ -139,6 +139,8 @@ impl FrameBatch {
                     .write_tile_with_encoder(&mut self.encoder, &mut render_ctx, write_op)
                     .map_err(FrameBatchError::RenderError)?;
 
+                ctx.image_dirty_tracker
+                    .mark(write_op.node_id, write_op.tile_index);
                 ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
                 self.has_commands = true;
             }
@@ -251,6 +253,8 @@ impl FrameBatch {
             .map_err(FrameBatchError::RenderError)?;
 
         for write_op in write_ops {
+            ctx.image_dirty_tracker
+                .mark(write_op.node_id, write_op.tile_index);
             ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
         }
         self.has_commands = true;

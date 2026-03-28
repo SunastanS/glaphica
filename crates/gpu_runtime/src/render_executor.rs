@@ -2674,6 +2674,8 @@ mod tests {
             &mut context,
             &WriteOp {
                 src_tile_key: mask_tile,
+                node_id: glaphica_core::NodeId(0),
+                tile_index: 0,
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Erase {

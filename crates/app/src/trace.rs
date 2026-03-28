@@ -278,6 +278,10 @@ pub struct TraceCopyOp {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TraceWriteOp {
     pub src_tile_key: TraceTileKey,
+    #[serde(default)]
+    pub node_id: u64,
+    #[serde(default)]
+    pub tile_index: usize,
     pub dst_tile_key: TraceTileKey,
     #[serde(default = "trace_gpu_cmd_frame_merge_none")]
     pub frame_merge: TraceGpuCmdFrameMergeTag,
@@ -784,6 +788,8 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
             }),
             GpuCmdMsg::WriteOp(write_op) => Self::WriteOp(TraceWriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
+                node_id: write_op.node_id.0,
+                tile_index: write_op.tile_index,
                 dst_tile_key: write_op.dst_tile_key.into(),
                 frame_merge: match write_op.frame_merge {
                     GpuCmdFrameMergeTag::None => TraceGpuCmdFrameMergeTag::None,
@@ -915,6 +921,8 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
             }),
             TraceGpuCmd::WriteOp(write_op) => Self::WriteOp(WriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
+                node_id: NodeId(write_op.node_id),
+                tile_index: write_op.tile_index,
                 dst_tile_key: write_op.dst_tile_key.into(),
                 frame_merge: match write_op.frame_merge {
                     TraceGpuCmdFrameMergeTag::None => GpuCmdFrameMergeTag::None,
