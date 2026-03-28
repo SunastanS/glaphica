@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use brushes::{BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
+use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
+use brushes::{BrushConfigValue, BrushResamplerDistance, BrushResamplerDistancePolicy, BrushSpec};
 use document::{
     Document, DocumentStorageError, DocumentStorageManifest, FlatRenderTree, LayerMoveTarget,
     NewLayerKind, SharedRenderTree, UiBlendMode, UiLayerTreeItem,
@@ -24,7 +25,7 @@ use thread_protocol::{
 };
 use threads::{EngineThreadChannels, MainThreadChannels, create_thread_channels};
 
-use crate::trace::{TraceInputFrame, TraceIoError, TraceRecorder};
+use crate::trace::{TraceAppControl, TraceInputFrame, TraceIoError, TraceRecorder};
 use crate::{
     BrushRegisterError, EngineThreadState, ExportImageError, LayerImageExportError,
     LayerPreviewBitmap, MainThreadState, config,
@@ -155,12 +156,26 @@ pub enum AppControl {
         node_id: NodeId,
         blend_mode: UiBlendMode,
     },
+    SetActiveBrush {
+        brush_id: BrushId,
+    },
+    SetActiveBrushColorRgb {
+        rgb: [f32; 3],
+    },
+    SetActiveBrushErase {
+        erase: bool,
+    },
+    UpdateBrushConfig {
+        brush_id: BrushId,
+        values: Vec<BrushConfigValue>,
+    },
     MoveActiveNodeUp,
     MoveActiveNodeDown,
 }
 
 impl InputControlOp for AppControl {
     type Target = Option<NodeId>;
+    type Serialized = TraceAppControl;
 
     fn apply(&self, target: &mut Self::Target) {
         if let Self::StrokeBoundary { node_id, begin } = self {
@@ -180,6 +195,14 @@ impl InputControlOp for AppControl {
                 *target = Some(*node_id);
             }
         }
+    }
+
+    fn to_serialized(&self) -> Option<Self::Serialized> {
+        Some(TraceAppControl::from(self.clone()))
+    }
+
+    fn from_serialized(value: Self::Serialized) -> Option<Self> {
+        Some(Self::from(value))
     }
 }
 
@@ -849,7 +872,7 @@ impl AppThreadIntegration {
         Ok(())
     }
 
-    pub fn set_active_brush(&mut self, brush_id: BrushId) {
+    fn set_active_brush_state(&mut self, brush_id: BrushId) {
         self.current_brush_id = Some(brush_id);
         let Some(brush_index) = usize::try_from(brush_id.0).ok() else {
             return;
@@ -858,6 +881,18 @@ impl AppThreadIntegration {
             return;
         };
         self.engine_state.set_resampler_distance(distance);
+    }
+
+    pub fn set_active_brush(&mut self, brush_id: BrushId) {
+        if self.current_brush_id == Some(brush_id) {
+            return;
+        }
+        self.set_active_brush_state(brush_id);
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::SetActiveBrush {
+                brush_id,
+            }));
     }
 
     pub fn active_brush_id(&self) -> Option<BrushId> {
@@ -873,11 +908,60 @@ impl AppThreadIntegration {
     }
 
     pub fn set_active_brush_color_rgb(&mut self, rgb: [f32; 3]) {
+        if self.current_brush_color_rgb == rgb {
+            return;
+        }
         self.current_brush_color_rgb = rgb;
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(
+                AppControl::SetActiveBrushColorRgb { rgb },
+            ));
     }
 
     pub fn set_active_brush_erase(&mut self, erase: bool) {
+        if self.current_brush_erase == erase {
+            return;
+        }
         self.current_brush_erase = erase;
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(
+                AppControl::SetActiveBrushErase { erase },
+            ));
+    }
+
+    pub fn update_brush_from_config_values(
+        &mut self,
+        brush_id: BrushId,
+        values: &[BrushConfigValue],
+    ) -> Result<(), String> {
+        if let Ok(round_brush) = RoundBrush::from_config_values(values) {
+            return self
+                .update_brush(brush_id, round_brush)
+                .map_err(|error| format!("{error:?}"));
+        }
+        if let Ok(pixel_rect_brush) = PixelRectBrush::from_config_values(values) {
+            return self
+                .update_brush(brush_id, pixel_rect_brush)
+                .map_err(|error| format!("{error:?}"));
+        }
+        Err("unsupported brush config values for registered brush types".to_string())
+    }
+
+    pub fn update_brush_from_config_values_and_record(
+        &mut self,
+        brush_id: BrushId,
+        values: Vec<BrushConfigValue>,
+    ) -> Result<(), String> {
+        self.update_brush_from_config_values(brush_id, &values)?;
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::UpdateBrushConfig {
+                brush_id,
+                values,
+            }));
+        Ok(())
     }
 
     pub fn end_stroke(&mut self) {
@@ -971,11 +1055,15 @@ impl AppThreadIntegration {
                     let stroke_id = StrokeId(self.next_stroke_id);
                     self.next_stroke_id += 1;
                     self.active_stroke_node = Some(*node_id);
+                    self.active_stroke_brush_id = self.current_brush_id;
+                    self.active_stroke_color_rgb = self.current_brush_color_rgb;
+                    self.active_stroke_erase = self.current_brush_erase;
                     self.main_state.begin_preview_stroke(*node_id);
                     self.engine_state.begin_stroke(stroke_id);
                 } else {
                     self.streaming_compact_stroke_id = None;
                     self.active_stroke_node = None;
+                    self.active_stroke_brush_id = None;
                     self.engine_state.end_stroke();
                     self.main_state.end_preview_stroke(*node_id);
                 }
@@ -1046,6 +1134,20 @@ impl AppThreadIntegration {
                 {
                     Ok(()) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("set node blend mode control failed: {error:?}"),
+                }
+            }
+            AppControl::SetActiveBrush { brush_id } => {
+                self.set_active_brush_state(*brush_id);
+            }
+            AppControl::SetActiveBrushColorRgb { rgb } => {
+                self.current_brush_color_rgb = *rgb;
+            }
+            AppControl::SetActiveBrushErase { erase } => {
+                self.current_brush_erase = *erase;
+            }
+            AppControl::UpdateBrushConfig { brush_id, values } => {
+                if let Err(error) = self.update_brush_from_config_values(*brush_id, values) {
+                    eprintln!("update brush config control failed: {error}");
                 }
             }
             AppControl::MoveActiveNodeUp => {

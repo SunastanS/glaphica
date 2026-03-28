@@ -352,44 +352,16 @@ impl DesktopApp {
         brush_kind: BrushKind,
         values: &[brushes::BrushConfigValue],
     ) -> Result<ApplyActionsEffect, AppActionError> {
-        match brush_kind {
-            BrushKind::Round => match RoundBrush::from_config_values(values) {
-                Ok(updated_brush) => {
-                    let Some(integration) = self.integration.as_mut() else {
-                        return Ok(ApplyActionsEffect::default());
-                    };
-                    integration
-                        .update_brush(brush_kind.brush_id(), updated_brush)
-                        .map_err(|e| AppActionError::BrushUpdate(format!("{:?}", e)))?;
-                    Ok(ApplyActionsEffect {
-                        advance_epoch: true,
-                        request_redraw: true,
-                    })
-                }
-                Err(error) => Err(AppActionError::BrushBuild(format!(
-                    "round brush: {}",
-                    error
-                ))),
-            },
-            BrushKind::PixelRect => match PixelRectBrush::from_config_values(values) {
-                Ok(updated_brush) => {
-                    let Some(integration) = self.integration.as_mut() else {
-                        return Ok(ApplyActionsEffect::default());
-                    };
-                    integration
-                        .update_brush(brush_kind.brush_id(), updated_brush)
-                        .map_err(|e| AppActionError::BrushUpdate(format!("{:?}", e)))?;
-                    Ok(ApplyActionsEffect {
-                        advance_epoch: true,
-                        request_redraw: true,
-                    })
-                }
-                Err(error) => Err(AppActionError::BrushBuild(format!(
-                    "pixel rect brush: {}",
-                    error
-                ))),
-            },
-        }
+        let Some(integration) = self.integration.as_mut() else {
+            return Ok(ApplyActionsEffect::default());
+        };
+        integration
+            .update_brush_from_config_values_and_record(brush_kind.brush_id(), values.to_vec())
+            .map_err(AppActionError::BrushBuild)?;
+        Ok(ApplyActionsEffect {
+            advance_epoch: true,
+            request_redraw: true,
+        })
     }
 
     fn apply_layer_select(
@@ -701,6 +673,10 @@ impl DesktopApp {
     pub fn perform_shutdown(&mut self, event_loop: &ActiveEventLoop) {
         self.shutdown_requested = true;
         self.finalize_outputs();
+        // Drop GPU/surface-dependent state before leaving the event loop.
+        // This avoids backend teardown ordering issues during process exit.
+        self.overlay = None;
+        self.integration = None;
         event_loop.exit();
     }
 }

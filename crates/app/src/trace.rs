@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
+use brushes::{BrushConfigValue, UnitIntervalPoint};
 use document::{LayerMoveTarget, NewLayerKind, UiBlendMode};
 use glaphica_core::{
     BlendMode, BrushId, CanvasVec2, EpochId, InputDeviceKind, MappedCursor, NodeId, RadianVec2,
@@ -11,7 +12,7 @@ use glaphica_core::{
 use serde::{Deserialize, Serialize};
 use thread_protocol::{
     ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
-    GpuCmdMsg, InputControlEvent, InputRingSample, RefImage, RenderTreeUpdatedMsg,
+    GpuCmdMsg, InputControlEvent, InputControlOp, InputRingSample, RefImage, RenderTreeUpdatedMsg,
     TileSlotKeyUpdateMsg, WriteKind, WriteOp,
 };
 
@@ -75,7 +76,7 @@ pub struct TraceOutputFrame {
     pub commands: Vec<TraceGpuCmd>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TraceAppControl {
     StrokeBoundary {
         node_id: u64,
@@ -105,11 +106,36 @@ pub enum TraceAppControl {
         node_id: u64,
         blend_mode: TraceUiBlendMode,
     },
+    SetActiveBrush {
+        brush_id: u64,
+    },
+    SetActiveBrushColorRgb {
+        rgb: [f32; 3],
+    },
+    SetActiveBrushErase {
+        erase: bool,
+    },
+    UpdateBrushConfig {
+        brush_id: u64,
+        values: Vec<TraceBrushConfigValue>,
+    },
     MoveActiveNodeUp,
     MoveActiveNodeDown,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TraceBrushConfigValue {
+    ScalarF32(f32),
+    UnitIntervalCurve(Vec<TraceUnitIntervalPoint>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TraceUnitIntervalPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum TraceUiBlendMode {
     Normal,
     Multiply,
@@ -280,7 +306,11 @@ impl TraceRecorder {
         let mut trace_controls = Vec::with_capacity(controls.len());
         for control in controls {
             let InputControlEvent::Control(control) = control;
-            trace_controls.push(TraceAppControl::from(control.clone()));
+            if let Some(serialized) = control.to_serialized() {
+                trace_controls.push(serialized);
+            } else {
+                eprintln!("trace record skipped an unsupported control event");
+            }
         }
 
         let mut trace_samples = Vec::with_capacity(samples.len());
@@ -342,9 +372,11 @@ impl TraceInputFrame {
     pub fn to_runtime(&self) -> (Vec<InputControlEvent<AppControl>>, Vec<InputRingSample>) {
         let mut controls = Vec::with_capacity(self.controls.len());
         for control in &self.controls {
-            controls.push(InputControlEvent::Control(AppControl::from(
-                control.clone(),
-            )));
+            if let Some(runtime_control) = AppControl::from_serialized(control.clone()) {
+                controls.push(InputControlEvent::Control(runtime_control));
+            } else {
+                eprintln!("trace replay skipped an unsupported serialized control event");
+            }
         }
 
         let mut samples = Vec::with_capacity(self.samples.len());
@@ -404,6 +436,46 @@ fn trace_write_rgb_red() -> Option<[f32; 3]> {
     Some(trace_rgb_red())
 }
 
+impl From<UnitIntervalPoint> for TraceUnitIntervalPoint {
+    fn from(value: UnitIntervalPoint) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+        }
+    }
+}
+
+impl From<TraceUnitIntervalPoint> for UnitIntervalPoint {
+    fn from(value: TraceUnitIntervalPoint) -> Self {
+        Self::new(value.x, value.y)
+    }
+}
+
+impl From<BrushConfigValue> for TraceBrushConfigValue {
+    fn from(value: BrushConfigValue) -> Self {
+        match value {
+            BrushConfigValue::ScalarF32(v) => Self::ScalarF32(v),
+            BrushConfigValue::UnitIntervalCurve(points) => Self::UnitIntervalCurve(
+                points
+                    .into_iter()
+                    .map(TraceUnitIntervalPoint::from)
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<TraceBrushConfigValue> for BrushConfigValue {
+    fn from(value: TraceBrushConfigValue) -> Self {
+        match value {
+            TraceBrushConfigValue::ScalarF32(v) => Self::ScalarF32(v),
+            TraceBrushConfigValue::UnitIntervalCurve(points) => {
+                Self::UnitIntervalCurve(points.into_iter().map(UnitIntervalPoint::from).collect())
+            }
+        }
+    }
+}
+
 impl From<AppControl> for TraceAppControl {
     fn from(value: AppControl) -> Self {
         match value {
@@ -442,6 +514,18 @@ impl From<AppControl> for TraceAppControl {
                     UiBlendMode::Multiply => TraceUiBlendMode::Multiply,
                     UiBlendMode::Penetrate => TraceUiBlendMode::Penetrate,
                 },
+            },
+            AppControl::SetActiveBrush { brush_id } => Self::SetActiveBrush {
+                brush_id: brush_id.0,
+            },
+            AppControl::SetActiveBrushColorRgb { rgb } => Self::SetActiveBrushColorRgb { rgb },
+            AppControl::SetActiveBrushErase { erase } => Self::SetActiveBrushErase { erase },
+            AppControl::UpdateBrushConfig { brush_id, values } => Self::UpdateBrushConfig {
+                brush_id: brush_id.0,
+                values: values
+                    .into_iter()
+                    .map(TraceBrushConfigValue::from)
+                    .collect(),
             },
             AppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
             AppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
@@ -497,6 +581,15 @@ impl From<TraceAppControl> for AppControl {
                     TraceUiBlendMode::Multiply => UiBlendMode::Multiply,
                     TraceUiBlendMode::Penetrate => UiBlendMode::Penetrate,
                 },
+            },
+            TraceAppControl::SetActiveBrush { brush_id } => Self::SetActiveBrush {
+                brush_id: BrushId(brush_id),
+            },
+            TraceAppControl::SetActiveBrushColorRgb { rgb } => Self::SetActiveBrushColorRgb { rgb },
+            TraceAppControl::SetActiveBrushErase { erase } => Self::SetActiveBrushErase { erase },
+            TraceAppControl::UpdateBrushConfig { brush_id, values } => Self::UpdateBrushConfig {
+                brush_id: BrushId(brush_id),
+                values: values.into_iter().map(BrushConfigValue::from).collect(),
             },
             TraceAppControl::MoveActiveNodeUp => Self::MoveActiveNodeUp,
             TraceAppControl::MoveActiveNodeDown => Self::MoveActiveNodeDown,
@@ -796,5 +889,48 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TraceAppControl, TraceBrushConfigValue};
+    use crate::AppControl;
+    use brushes::{BrushConfigValue, UnitIntervalPoint};
+    use glaphica_core::BrushId;
+
+    #[test]
+    fn brush_config_control_roundtrip() {
+        let control = AppControl::UpdateBrushConfig {
+            brush_id: BrushId(7),
+            values: vec![
+                BrushConfigValue::ScalarF32(0.42),
+                BrushConfigValue::UnitIntervalCurve(vec![
+                    UnitIntervalPoint::new(0.0, 0.1),
+                    UnitIntervalPoint::new(1.0, 0.9),
+                ]),
+            ],
+        };
+        let trace = TraceAppControl::from(control.clone());
+        let replay = AppControl::from(trace);
+        assert_eq!(replay, control);
+    }
+
+    #[test]
+    fn active_brush_control_roundtrip() {
+        let trace = TraceAppControl::SetActiveBrushColorRgb {
+            rgb: [0.2, 0.3, 0.4],
+        };
+        let control = AppControl::from(trace.clone());
+        let back = TraceAppControl::from(control);
+        assert_eq!(back, trace);
+
+        let trace = TraceAppControl::UpdateBrushConfig {
+            brush_id: 3,
+            values: vec![TraceBrushConfigValue::ScalarF32(1.0)],
+        };
+        let control = AppControl::from(trace.clone());
+        let back = TraceAppControl::from(control);
+        assert_eq!(back, trace);
     }
 }

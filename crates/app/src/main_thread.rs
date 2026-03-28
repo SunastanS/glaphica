@@ -247,7 +247,10 @@ impl StrokeCtxRingBuffer {
     fn with_capacity(capacity: usize) -> Self {
         let mut slots = Vec::with_capacity(capacity);
         slots.resize_with(capacity, || None);
-        Self { slots, next_slot: 0 }
+        Self {
+            slots,
+            next_slot: 0,
+        }
     }
 
     fn capacity(&self) -> usize {
@@ -1011,6 +1014,11 @@ impl MainThreadState {
         let pixels = self
             .read_final_image_rgba8(width, height)
             .map_err(map_export_image_error_to_screenshot)?;
+        if let Some(parent_dir) = output_path.parent()
+            && !parent_dir.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent_dir).map_err(ScreenshotError::Io)?;
+        }
         let file = std::fs::File::create(output_path).map_err(ScreenshotError::Io)?;
         let mut encoder = png::Encoder::new(file, width, height);
         encoder.set_color(png::ColorType::Rgba);
@@ -1240,10 +1248,7 @@ fn resolve_cached_stroke_draw_ctx(
                         "[BUG][stroke_ctx] stroke {:?} draw context changed in-flight: cached={:?} incoming={:?}",
                         draw_op.stroke_id, existing, incoming
                     );
-                    debug_assert_eq!(
-                        existing, incoming,
-                        "stroke draw context must stay stable"
-                    );
+                    debug_assert_eq!(existing, incoming, "stroke draw context must stay stable");
                 }
             }
             Some(incoming_ctx)
@@ -1533,12 +1538,12 @@ fn save_jpeg_rgba8(path: &Path, image: &images::StoredImage) -> Result<(), Expor
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_round_draws, resolve_cached_stroke_draw_ctx, CachedStrokeDrawCtx,
-        StrokeCtxRingBuffer,
+        CachedStrokeDrawCtx, StrokeCtxRingBuffer, compact_round_draws,
+        resolve_cached_stroke_draw_ctx,
     };
-    use std::collections::HashMap;
     use brushes::builtin_brushes::round::ROUND_DRAW_LAYOUT;
     use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use std::collections::HashMap;
     use thread_protocol::{BlendMode, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdMsg};
 
     #[test]
@@ -1614,6 +1619,9 @@ mod tests {
 
         let stroke17_follow = make_draw(17, None);
         let resolved = resolve_cached_stroke_draw_ctx(&mut cache, &mut ring, &stroke17_follow);
-        assert!(resolved.is_some(), "stroke 17 ctx should still be recoverable");
+        assert!(
+            resolved.is_some(),
+            "stroke 17 ctx should still be recoverable"
+        );
     }
 }

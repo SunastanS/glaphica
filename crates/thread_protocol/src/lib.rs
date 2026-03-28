@@ -24,9 +24,29 @@ pub struct InputRingSample {
 
 pub trait InputControlOp {
     type Target;
+    type Serialized: Clone + PartialEq;
 
     fn apply(&self, target: &mut Self::Target);
     fn undo(&self, target: &mut Self::Target);
+
+    fn to_serialized(&self) -> Option<Self::Serialized> {
+        eprintln!(
+            "InputControlOp serialization skipped: control type {} does not implement serialization",
+            std::any::type_name::<Self>()
+        );
+        None
+    }
+
+    fn from_serialized(_value: Self::Serialized) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        eprintln!(
+            "InputControlOp deserialization skipped: control type {} does not implement serialization",
+            std::any::type_name::<Self>()
+        );
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +275,7 @@ mod tests {
 
     impl InputControlOp for TestControlOp {
         type Target = u8;
+        type Serialized = ();
 
         fn apply(&self, target: &mut Self::Target) {
             *target = target.saturating_add(self.0);
