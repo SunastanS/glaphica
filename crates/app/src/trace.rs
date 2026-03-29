@@ -131,6 +131,9 @@ pub enum TraceAppControl {
         kind: TraceNewLayerKind,
     },
     CreateGroupAboveActive,
+    DeleteNode {
+        node_id: u64,
+    },
     MoveNode {
         node_id: u64,
         target_parent_id: u64,
@@ -579,6 +582,7 @@ impl From<AppControl> for TraceAppControl {
                 },
             },
             AppControl::CreateGroupAboveActive => Self::CreateGroupAboveActive,
+            AppControl::DeleteNode { node_id } => Self::DeleteNode { node_id: node_id.0 },
             AppControl::MoveNode { node_id, target } => Self::MoveNode {
                 node_id: node_id.0,
                 target_parent_id: target.parent_id.0,
@@ -640,6 +644,9 @@ impl From<TraceAppControl> for AppControl {
                 },
             },
             TraceAppControl::CreateGroupAboveActive => Self::CreateGroupAboveActive,
+            TraceAppControl::DeleteNode { node_id } => Self::DeleteNode {
+                node_id: NodeId(node_id),
+            },
             TraceAppControl::MoveNode {
                 node_id,
                 target_parent_id,
@@ -989,7 +996,7 @@ mod tests {
     use super::{TraceAppControl, TraceBrushConfigValue};
     use crate::AppControl;
     use brushes::{BrushConfigValue, UnitIntervalPoint};
-    use glaphica_core::BrushId;
+    use glaphica_core::{BrushId, NodeId};
 
     #[test]
     fn brush_config_control_roundtrip() {
@@ -1024,5 +1031,15 @@ mod tests {
         let control = AppControl::from(trace.clone());
         let back = TraceAppControl::from(control);
         assert_eq!(back, trace);
+    }
+
+    #[test]
+    fn delete_node_control_roundtrip() {
+        let control = AppControl::DeleteNode {
+            node_id: NodeId(11),
+        };
+        let trace = TraceAppControl::from(control.clone());
+        let replay = AppControl::from(trace);
+        assert_eq!(replay, control);
     }
 }

@@ -46,6 +46,7 @@ pub enum AppActionError {
     LayerSelectFailed(NodeId),
     LayerCreate(String),
     GroupCreate(String),
+    LayerDelete(NodeId, String),
     LayerMove(NodeId, String),
     LayerVisibility(NodeId, String),
     LayerOpacity(NodeId, String),
@@ -63,6 +64,9 @@ impl std::fmt::Display for AppActionError {
             AppActionError::LayerSelectFailed(id) => write!(f, "layer select failed: {}", id.0),
             AppActionError::LayerCreate(e) => write!(f, "layer create failed: {}", e),
             AppActionError::GroupCreate(e) => write!(f, "group create failed: {}", e),
+            AppActionError::LayerDelete(id, e) => {
+                write!(f, "layer delete failed ({}): {}", id.0, e)
+            }
             AppActionError::LayerMove(id, e) => write!(f, "layer move failed ({}): {}", id.0, e),
             AppActionError::LayerVisibility(id, e) => {
                 write!(f, "layer visibility failed ({}): {}", id.0, e)
@@ -329,6 +333,7 @@ impl DesktopApp {
             UiCommand::LayerSelected(node_id) => self.apply_layer_select(node_id),
             UiCommand::LayerCreated(kind) => self.apply_layer_create(kind),
             UiCommand::GroupCreated => self.apply_group_create(),
+            UiCommand::LayerDeleted(node_id) => self.apply_layer_delete(node_id),
             UiCommand::LayerMoved(node_id, target) => self.apply_layer_move(node_id, target),
             UiCommand::LayerVisibilityChanged(node_id, visible) => {
                 self.apply_layer_visibility(node_id, visible)
@@ -417,6 +422,27 @@ impl DesktopApp {
                 request_redraw: true,
             })
             .map_err(|e| AppActionError::GroupCreate(format!("{:?}", e)))
+    }
+
+    fn apply_layer_delete(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<ApplyActionsEffect, AppActionError> {
+        let Some(integration) = self.integration.as_mut() else {
+            return Ok(ApplyActionsEffect::default());
+        };
+        integration
+            .delete_document_node(node_id)
+            .inspect(|_| {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.mark_document_dirty();
+                }
+            })
+            .map(|()| ApplyActionsEffect {
+                advance_epoch: true,
+                request_redraw: true,
+            })
+            .map_err(|e| AppActionError::LayerDelete(node_id, format!("{:?}", e)))
     }
 
     fn apply_layer_move(

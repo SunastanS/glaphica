@@ -68,6 +68,16 @@ impl<'a> Sidebar<'a> {
                             if ui.button("<").clicked() {
                                 output.toggle_collapse = true;
                             }
+                            let delete_enabled = self.selected_node.is_some();
+                            if ui
+                                .add_enabled(
+                                    delete_enabled,
+                                    Button::new("Delete").fill(theme.input_bg_color),
+                                )
+                                .clicked()
+                            {
+                                output.delete_layer = self.selected_node;
+                            }
                             ui.menu_button(
                                 RichText::new("+").size(16.0).color(theme.text_color),
                                 |ui| {
@@ -221,6 +231,7 @@ pub struct SidebarOutput {
     pub create_layer: Option<NewLayerKind>,
     pub create_group: bool,
     pub select_layer: Option<NodeId>,
+    pub delete_layer: Option<NodeId>,
     pub move_layer: Option<LayerTreeMove>,
     pub set_layer_visibility: Option<(NodeId, bool)>,
     pub set_layer_opacity: Option<(NodeId, f32)>,

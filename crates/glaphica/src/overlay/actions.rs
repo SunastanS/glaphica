@@ -25,6 +25,7 @@ pub enum UiCommand {
     LayerSelected(NodeId),
     LayerCreated(NewLayerKind),
     GroupCreated,
+    LayerDeleted(NodeId),
     LayerMoved(NodeId, LayerMoveTarget),
     LayerVisibilityChanged(NodeId, bool),
     LayerOpacityChanged(NodeId, f32),

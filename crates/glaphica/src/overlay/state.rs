@@ -309,6 +309,9 @@ impl EguiOverlay {
             if let Some(node_id) = sidebar_output.select_layer {
                 pending_actions.push(UiCommand::LayerSelected(node_id));
             }
+            if let Some(node_id) = sidebar_output.delete_layer {
+                pending_actions.push(UiCommand::LayerDeleted(node_id));
+            }
             if let Some(layer_move) = sidebar_output.move_layer {
                 pending_actions.push(UiCommand::LayerMoved(layer_move.node_id, layer_move.target));
             }

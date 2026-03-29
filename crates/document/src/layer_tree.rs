@@ -113,6 +113,29 @@ impl UiLayerTree {
         insert_node_at_parent(&mut self.root, target.parent_id, adjusted_index, moved_node)
     }
 
+    pub fn delete_node(&mut self, node_id: NodeId) -> Result<Option<NodeId>, LayerEditError> {
+        if node_id == self.root_id() {
+            return Err(LayerEditError::RootSelectionNotAllowed);
+        }
+        let selectable_before = selectable_node_ids_from_node(&self.root, self.root_id());
+        if !selectable_before.contains(&node_id) {
+            return Err(LayerEditError::InvalidNode);
+        }
+        let removed_index = selectable_before
+            .iter()
+            .position(|id| *id == node_id)
+            .ok_or(LayerEditError::InvalidNode)?;
+        let (removed_node, parent_id, child_index) =
+            remove_node_from_branch(&mut self.root, node_id).ok_or(LayerEditError::InvalidNode)?;
+        let selectable_after = selectable_node_ids_from_node(&self.root, self.root_id());
+        if selectable_after.is_empty() {
+            insert_node_at_parent(&mut self.root, parent_id, child_index, removed_node)?;
+            return Err(LayerEditError::CannotDeleteLastSelectableNode);
+        }
+        let next_active_index = removed_index.min(selectable_after.len() - 1);
+        Ok(selectable_after.get(next_active_index).copied())
+    }
+
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {
         get_leaf_image_from_node(&self.root, node_id)
     }
@@ -197,6 +220,30 @@ fn build_layer_tree_item(node: &UiLayerNode) -> UiLayerTreeItem {
             },
             children: Vec::new(),
         },
+    }
+}
+
+fn selectable_node_ids_from_node(node: &UiLayerNode, root_id: NodeId) -> Vec<NodeId> {
+    let mut ids = Vec::new();
+    collect_selectable_node_ids_from_node(node, root_id, &mut ids);
+    ids
+}
+
+fn collect_selectable_node_ids_from_node(
+    node: &UiLayerNode,
+    root_id: NodeId,
+    output: &mut Vec<NodeId>,
+) {
+    match node {
+        UiLayerNode::Branch(branch) => {
+            if branch.meta.id != root_id {
+                output.push(branch.meta.id);
+            }
+            for child in &branch.children {
+                collect_selectable_node_ids_from_node(child, root_id, output);
+            }
+        }
+        UiLayerNode::Leaf(leaf) => output.push(leaf.meta.id),
     }
 }
 

@@ -143,6 +143,9 @@ pub enum AppControl {
         kind: NewLayerKind,
     },
     CreateGroupAboveActive,
+    DeleteNode {
+        node_id: NodeId,
+    },
     MoveNode {
         node_id: NodeId,
         target: LayerMoveTarget,
@@ -805,6 +808,26 @@ impl AppThreadIntegration {
         Ok(())
     }
 
+    pub fn delete_document_node(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<(), document::LayerEditError> {
+        if !self
+            .engine_state
+            .document()
+            .layer_tree()
+            .contains_node(node_id)
+        {
+            return Err(document::LayerEditError::InvalidNode);
+        }
+        self.main_channels
+            .input_control_queue
+            .blocking_push(InputControlEvent::Control(AppControl::DeleteNode {
+                node_id,
+            }));
+        Ok(())
+    }
+
     pub fn set_document_node_visibility(
         &mut self,
         node_id: NodeId,
@@ -1106,6 +1129,22 @@ impl AppThreadIntegration {
                 match self.engine_state.document_mut().create_group_above_active() {
                     Ok(_) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("create group control failed: {error:?}"),
+                }
+            }
+            AppControl::DeleteNode { node_id } => {
+                self.engine_state.invalidate_redo_strokes();
+                if self.engine_state.document().active_node() != Some(*node_id)
+                    && !self.engine_state.document_mut().set_active_node(*node_id)
+                {
+                    eprintln!(
+                        "delete node control failed: {:?}",
+                        document::LayerEditError::InvalidNode
+                    );
+                    return;
+                }
+                match self.engine_state.document_mut().delete_active_node() {
+                    Ok(()) => self.enqueue_render_tree_update(),
+                    Err(error) => eprintln!("delete node control failed: {error:?}"),
                 }
             }
             AppControl::MoveNode { node_id, target } => {
@@ -1943,7 +1982,9 @@ mod tests {
     }
 
     fn issue10_non_missing_updated_tile_indices() -> Vec<usize> {
-        vec![62, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116]
+        vec![
+            62, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116,
+        ]
     }
 
     fn register_default_test_brushes(app: &mut AppThreadIntegration) {
@@ -2017,7 +2058,8 @@ mod tests {
         output
     }
 
-    fn run_issue10_headless_replay_and_export_images() -> (StoredImage, Vec<(NodeId, StoredImage)>) {
+    fn run_issue10_headless_replay_and_export_images() -> (StoredImage, Vec<(NodeId, StoredImage)>)
+    {
         let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
             "repro".to_string(),
             ImageLayout::new(1024, 1024),
@@ -2084,10 +2126,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         entries.sort_by_key(|(node_id, _)| {
-            (
-                if Some(*node_id) == root_id { 0u8 } else { 1u8 },
-                node_id.0,
-            )
+            (if Some(*node_id) == root_id { 0u8 } else { 1u8 }, node_id.0)
         });
         entries
     }
@@ -2123,7 +2162,11 @@ mod tests {
         })
     }
 
-    fn stored_image_tile_metric<F>(image: &StoredImage, tile_index: usize, mut pixel_metric: F) -> u64
+    fn stored_image_tile_metric<F>(
+        image: &StoredImage,
+        tile_index: usize,
+        mut pixel_metric: F,
+    ) -> u64
     where
         F: FnMut([u8; 4]) -> u64,
     {
@@ -2574,7 +2617,8 @@ mod tests {
             .frames
             .iter()
             .find(|frame| {
-                frame.tile_timeline
+                frame
+                    .tile_timeline
                     .as_ref()
                     .is_some_and(|timeline| timeline.updated_tile_indices == expected_updated)
             })
@@ -2653,9 +2697,9 @@ mod tests {
                     .gpu_commands
                     .iter()
                     .filter_map(|cmd| match cmd {
-                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
-                            update.updates.iter().map(|(_, tile_index, _)| *tile_index),
-                        ),
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => {
+                            Some(update.updates.iter().map(|(_, tile_index, _)| *tile_index))
+                        }
                         _ => None,
                     })
                     .flatten()
@@ -2741,9 +2785,9 @@ mod tests {
                     .gpu_commands
                     .iter()
                     .filter_map(|cmd| match cmd {
-                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
-                            update.updates.iter().map(|(_, tile_index, _)| *tile_index),
-                        ),
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => {
+                            Some(update.updates.iter().map(|(_, tile_index, _)| *tile_index))
+                        }
                         _ => None,
                     })
                     .flatten()
@@ -2789,7 +2833,9 @@ mod tests {
             .collect::<Vec<_>>();
         let mut commands = Vec::new();
 
-        for (group_index, (&dst_tile, &buffer_tile)) in dst_tiles.iter().zip(&buffer_tiles).enumerate() {
+        for (group_index, (&dst_tile, &buffer_tile)) in
+            dst_tiles.iter().zip(&buffer_tiles).enumerate()
+        {
             commands.push(GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
                     node_id: NodeId(1),
@@ -2816,9 +2862,11 @@ mod tests {
                 rgb: Some([1.0, 0.0, 0.0]),
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             }));
-            commands.push(GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {
-                updates: vec![(NodeId(1), group_index, dst_tile)],
-            }));
+            commands.push(GpuCmdMsg::TileSlotKeyUpdate(
+                thread_protocol::TileSlotKeyUpdateMsg {
+                    updates: vec![(NodeId(1), group_index, dst_tile)],
+                },
+            ));
         }
 
         AppThreadIntegration::move_mergeable_writes_to_end(&mut commands);
@@ -2865,7 +2913,9 @@ mod tests {
     fn issue10_frontend_readback_matches_root_export_after_replay() {
         let (root_image, frontend_image) = run_issue10_headless_replay_and_capture_frontend_image();
         let missing_tiles = issue10_missing_tile_indices();
-        let drawn_tiles = vec![62usize, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116];
+        let drawn_tiles = vec![
+            62usize, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116,
+        ];
         let root_missing_non_white = missing_tiles
             .iter()
             .map(|&tile_index| stored_image_tile_non_white_sum(&root_image, tile_index))
@@ -2882,5 +2932,4 @@ mod tests {
         assert_eq!(frontend_missing_non_white, root_missing_non_white);
         assert!(frontend_drawn_non_white.iter().any(|&value| value > 0));
     }
-
-    }
+}

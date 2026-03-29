@@ -49,6 +49,7 @@ pub enum LayerEditError {
     InvalidBlendModeForLeaf(UiBlendMode),
     RootSelectionNotAllowed,
     MoveOutOfBounds,
+    CannotDeleteLastSelectableNode,
     ImageCreate(ImageCreateError),
 }
 
@@ -331,6 +332,13 @@ impl Document {
     ) -> Result<(), LayerEditError> {
         self.layer_tree.move_node_to(node_id, target)?;
         self.active_node = Some(node_id);
+        Ok(())
+    }
+
+    pub fn delete_active_node(&mut self) -> Result<(), LayerEditError> {
+        let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
+        let next_active = self.layer_tree.delete_node(active_id)?;
+        self.active_node = next_active;
         Ok(())
     }
 
@@ -1048,6 +1056,51 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(LayerEditError::InvalidNode)));
+    }
+
+    #[test]
+    fn test_delete_active_node_selects_next_available_node() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+
+        doc.delete_active_node().unwrap();
+
+        let root = match doc.layer_tree().get_node(doc.layer_tree().root_id()) {
+            Some(UiLayerNode::Branch(branch)) => branch,
+            Some(UiLayerNode::Leaf(_)) | None => panic!("expected branch root"),
+        };
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].id(), NodeId(0));
+        assert_eq!(doc.active_node(), Some(NodeId(0)));
+    }
+
+    #[test]
+    fn test_delete_active_node_rejects_last_selectable_node() {
+        let layout = ImageLayout::new(64, 64);
+        let mut doc = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(1),
+            BackendId::new(2),
+        )
+        .unwrap();
+        doc.delete_active_node().unwrap();
+        assert!(doc.set_active_node(NodeId(0)));
+
+        let result = doc.delete_active_node();
+
+        assert!(matches!(
+            result,
+            Err(LayerEditError::CannotDeleteLastSelectableNode)
+        ));
+        assert_eq!(doc.active_node(), Some(NodeId(0)));
+        assert!(doc.layer_tree().contains_node(NodeId(0)));
     }
 
     #[test]
