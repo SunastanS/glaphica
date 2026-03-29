@@ -983,10 +983,10 @@ impl BrushEngineRuntime {
 #[cfg(test)]
 mod tests {
     use glaphica_core::{
-        BrushId, BrushInput, BrushInputFlags, CanvasVec2, MappedCursor, NodeId, RadianVec2,
-        StrokeId, TileKey, IMAGE_TILE_SIZE,
+        BrushId, BrushInput, BrushInputFlags, CanvasVec2, IMAGE_TILE_SIZE, MappedCursor, NodeId,
+        RadianVec2, StrokeId, TileKey,
     };
-    use images::{layout::ImageLayout, Image};
+    use images::{Image, layout::ImageLayout};
 
     use super::{
         BrushEngineRuntime, EngineBrushDispatchError, EngineBrushPipeline, TileSlotAllocator,
@@ -1091,17 +1091,23 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(image
-            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
-            .is_ok());
-        assert!(image
-            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
-            .is_ok());
+        assert!(
+            image
+                .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+                .is_ok()
+        );
+        assert!(
+            image
+                .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+                .is_ok()
+        );
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
 
         let brush_input = build_test_brush_input(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 10.0));
         let mut draw_ops = Vec::new();
@@ -1131,28 +1137,38 @@ mod tests {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(write_image
-            .set_tile_key(0, TileKey::from_parts(1, 1, 100))
-            .is_ok());
-        assert!(write_image
-            .set_tile_key(1, TileKey::from_parts(1, 1, 101))
-            .is_ok());
+        assert!(
+            write_image
+                .set_tile_key(0, TileKey::from_parts(1, 1, 100))
+                .is_ok()
+        );
+        assert!(
+            write_image
+                .set_tile_key(1, TileKey::from_parts(1, 1, 101))
+                .is_ok()
+        );
 
         let mut read_image = match Image::new(layout, glaphica_core::BackendId::new(2)) {
             Ok(image) => image,
             Err(_) => return,
         };
-        assert!(read_image
-            .set_tile_key(0, TileKey::from_parts(2, 3, 200))
-            .is_ok());
-        assert!(read_image
-            .set_tile_key(1, TileKey::from_parts(2, 3, 201))
-            .is_ok());
+        assert!(
+            read_image
+                .set_tile_key(0, TileKey::from_parts(2, 3, 200))
+                .is_ok()
+        );
+        assert!(
+            read_image
+                .set_tile_key(1, TileKey::from_parts(2, 3, 201))
+                .is_ok()
+        );
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
 
         let brush_input = build_test_brush_input(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 10.0));
         let mut draw_ops = Vec::new();
@@ -1191,9 +1207,11 @@ mod tests {
         assert!(image.set_tile_key(0, existing_key).is_ok());
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
 
         let mut allocator = TestAllocator {
             regular_alloc: None,
@@ -1246,9 +1264,11 @@ mod tests {
         assert!(image.set_tile_key(0, existing_key).is_ok());
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline(BrushId(2), 0, TestEnginePipeline)
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline(BrushId(2), 0, TestEnginePipeline)
+                .is_ok()
+        );
 
         let mut first_allocator = TestAllocator {
             regular_alloc: None,
@@ -1313,14 +1333,16 @@ mod tests {
         };
 
         let mut runtime = BrushEngineRuntime::new(4);
-        assert!(runtime
-            .register_pipeline_with_stroke_buffer_backend(
-                BrushId(3),
-                0,
-                Some(glaphica_core::BackendId::new(2)),
-                TestStrokeBufferPipeline,
-            )
-            .is_ok());
+        assert!(
+            runtime
+                .register_pipeline_with_stroke_buffer_backend(
+                    BrushId(3),
+                    0,
+                    Some(glaphica_core::BackendId::new(2)),
+                    TestStrokeBufferPipeline,
+                )
+                .is_ok()
+        );
         let mut allocator = TestAllocator::default();
         runtime.begin_stroke(&mut allocator);
 

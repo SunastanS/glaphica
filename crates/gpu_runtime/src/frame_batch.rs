@@ -8,12 +8,12 @@ use document::SharedRenderTree;
 use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
 use thread_protocol::{DrawOp, GpuCmdMsg, WriteOp};
 
+use crate::RenderExecutor;
 use crate::atlas_runtime::AtlasStorageRuntime;
 use crate::brush_runtime::{BrushGpuDispatchError, BrushGpuRuntime};
 use crate::context::GpuContext;
 use crate::render_executor::RenderContext;
 use crate::wgpu_brush_executor::WgpuBrushContext;
-use crate::RenderExecutor;
 
 pub struct FrameBatch {
     encoder: wgpu::CommandEncoder,
