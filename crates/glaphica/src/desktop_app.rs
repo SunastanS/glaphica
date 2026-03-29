@@ -983,7 +983,7 @@ impl ApplicationHandler for DesktopApp {
                                 && value.eq_ignore_ascii_case("z") =>
                         {
                             if let Some(integration) = &mut self.integration {
-                                if integration.redo_stroke()
+                                if integration.redo_action()
                                     && let Some(window) = &self.window
                                 {
                                     if let Some(overlay) = self.overlay.as_mut() {
@@ -997,7 +997,7 @@ impl ApplicationHandler for DesktopApp {
                             if self.ctrl_pressed && value.eq_ignore_ascii_case("z") =>
                         {
                             if let Some(integration) = &mut self.integration {
-                                if integration.undo_stroke()
+                                if integration.undo_action()
                                     && let Some(window) = &self.window
                                 {
                                     if let Some(overlay) = self.overlay.as_mut() {

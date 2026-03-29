@@ -347,7 +347,7 @@ pub struct AppThreadIntegration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppStats {
     pub backend_tiles: Vec<atlas::BackendTileStats>,
-    pub undo_stroke_count: usize,
+    pub undo_action_count: usize,
 }
 
 impl AppThreadIntegration {
@@ -945,7 +945,7 @@ impl AppThreadIntegration {
         let engine_stats = self.engine_state.stats();
         AppStats {
             backend_tiles: engine_stats.backend_tiles,
-            undo_stroke_count: engine_stats.undo_stroke_count,
+            undo_action_count: engine_stats.undo_action_count,
         }
     }
 
@@ -1021,27 +1021,39 @@ impl AppThreadIntegration {
         self.streaming_compact_stroke_id = None;
     }
 
-    pub fn undo_stroke(&mut self) -> bool {
+    pub fn undo_action(&mut self) -> bool {
         if self.active_stroke_node.is_some() {
             return false;
         }
-        let Some(update) = self.engine_state.undo_stroke() else {
+        let Some(output) = self.engine_state.undo_action() else {
             return false;
         };
-        self.pending_send_gpu_commands
-            .push_back(GpuCmdMsg::TileSlotKeyUpdate(update));
+        if let Some(update) = output.tile_updates {
+            self.pending_send_gpu_commands
+                .push_back(GpuCmdMsg::TileSlotKeyUpdate(update));
+        }
+        if let Some(update) = output.render_tree_update {
+            self.pending_send_gpu_commands
+                .push_back(GpuCmdMsg::RenderTreeUpdated(update));
+        }
         true
     }
 
-    pub fn redo_stroke(&mut self) -> bool {
+    pub fn redo_action(&mut self) -> bool {
         if self.active_stroke_node.is_some() {
             return false;
         }
-        let Some(update) = self.engine_state.redo_stroke() else {
+        let Some(output) = self.engine_state.redo_action() else {
             return false;
         };
-        self.pending_send_gpu_commands
-            .push_back(GpuCmdMsg::TileSlotKeyUpdate(update));
+        if let Some(update) = output.tile_updates {
+            self.pending_send_gpu_commands
+                .push_back(GpuCmdMsg::TileSlotKeyUpdate(update));
+        }
+        if let Some(update) = output.render_tree_update {
+            self.pending_send_gpu_commands
+                .push_back(GpuCmdMsg::RenderTreeUpdated(update));
+        }
         true
     }
 
@@ -1093,7 +1105,7 @@ impl AppThreadIntegration {
             AppControl::StrokeBoundary { node_id, begin } => {
                 if *begin {
                     self.streaming_compact_stroke_id = None;
-                    self.engine_state.invalidate_redo_strokes();
+                    self.engine_state.invalidate_redo_actions();
                     let stroke_id = StrokeId(self.next_stroke_id);
                     self.next_stroke_id += 1;
                     self.active_stroke_node = Some(*node_id);
@@ -1114,7 +1126,7 @@ impl AppThreadIntegration {
                 let _ = self.engine_state.document_mut().set_active_node(*node_id);
             }
             AppControl::CreateLayerAboveActive { kind } => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self
                     .engine_state
                     .document_mut()
@@ -1125,30 +1137,23 @@ impl AppThreadIntegration {
                 }
             }
             AppControl::CreateGroupAboveActive => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self.engine_state.document_mut().create_group_above_active() {
                     Ok(_) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("create group control failed: {error:?}"),
                 }
             }
             AppControl::DeleteNode { node_id } => {
-                self.engine_state.invalidate_redo_strokes();
-                if self.engine_state.document().active_node() != Some(*node_id)
-                    && !self.engine_state.document_mut().set_active_node(*node_id)
-                {
-                    eprintln!(
-                        "delete node control failed: {:?}",
-                        document::LayerEditError::InvalidNode
-                    );
-                    return;
-                }
-                match self.engine_state.document_mut().delete_active_node() {
-                    Ok(()) => self.enqueue_render_tree_update(),
+                self.engine_state.invalidate_redo_actions();
+                match self.engine_state.delete_node(*node_id) {
+                    Ok(update) => self
+                        .pending_send_gpu_commands
+                        .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(update)),
                     Err(error) => eprintln!("delete node control failed: {error:?}"),
                 }
             }
             AppControl::MoveNode { node_id, target } => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self
                     .engine_state
                     .document_mut()
@@ -1159,7 +1164,7 @@ impl AppThreadIntegration {
                 }
             }
             AppControl::SetNodeVisibility { node_id, visible } => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self
                     .engine_state
                     .document_mut()
@@ -1170,7 +1175,7 @@ impl AppThreadIntegration {
                 }
             }
             AppControl::SetNodeOpacity { node_id, opacity } => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self
                     .engine_state
                     .document_mut()
@@ -1184,7 +1189,7 @@ impl AppThreadIntegration {
                 node_id,
                 blend_mode,
             } => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self
                     .engine_state
                     .document_mut()
@@ -1209,14 +1214,14 @@ impl AppThreadIntegration {
                 }
             }
             AppControl::MoveActiveNodeUp => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self.engine_state.document_mut().move_active_node_up() {
                     Ok(()) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("move layer up control failed: {error:?}"),
                 }
             }
             AppControl::MoveActiveNodeDown => {
-                self.engine_state.invalidate_redo_strokes();
+                self.engine_state.invalidate_redo_actions();
                 match self.engine_state.document_mut().move_active_node_down() {
                     Ok(()) => self.enqueue_render_tree_update(),
                     Err(error) => eprintln!("move layer down control failed: {error:?}"),

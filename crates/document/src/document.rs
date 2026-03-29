@@ -32,6 +32,14 @@ pub struct CanvasResizeResult {
     pub removed_tile_keys: Vec<TileKey>,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct DeletedLayerRecord {
+    parent_id: NodeId,
+    child_index: usize,
+    next_active: Option<NodeId>,
+    node: UiLayerNode,
+}
+
 impl Metadata {
     pub fn new(name: String) -> Self {
         Self { name }
@@ -39,6 +47,22 @@ impl Metadata {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+impl DeletedLayerRecord {
+    pub fn node_id(&self) -> NodeId {
+        self.node.id()
+    }
+
+    pub fn next_active(&self) -> Option<NodeId> {
+        self.next_active
+    }
+
+    pub fn raster_tile_keys(&self) -> Vec<TileKey> {
+        let mut keys = Vec::new();
+        collect_raster_tile_keys_from_node(&self.node, &mut keys);
+        keys
     }
 }
 
@@ -336,9 +360,31 @@ impl Document {
     }
 
     pub fn delete_active_node(&mut self) -> Result<(), LayerEditError> {
+        self.delete_active_node_with_record().map(|_| ())
+    }
+
+    pub fn delete_active_node_with_record(&mut self) -> Result<DeletedLayerRecord, LayerEditError> {
         let active_id = self.active_node.ok_or(LayerEditError::NoActiveNode)?;
-        let next_active = self.layer_tree.delete_node(active_id)?;
-        self.active_node = next_active;
+        let deleted = self.layer_tree.delete_node(active_id)?;
+        self.active_node = deleted.next_active;
+        Ok(DeletedLayerRecord {
+            parent_id: deleted.parent_id,
+            child_index: deleted.child_index,
+            next_active: deleted.next_active,
+            node: deleted.node,
+        })
+    }
+
+    pub fn restore_deleted_layer(
+        &mut self,
+        deleted: &DeletedLayerRecord,
+    ) -> Result<(), LayerEditError> {
+        self.layer_tree.restore_deleted_node(
+            deleted.parent_id,
+            deleted.child_index,
+            deleted.node.clone(),
+        )?;
+        self.active_node = Some(deleted.node.id());
         Ok(())
     }
 

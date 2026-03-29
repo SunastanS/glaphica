@@ -1,6 +1,6 @@
 use atlas::{BackendManager, EditSession, TileKeySwap};
 use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
-use document::{Document, FlatRenderTree, SharedRenderTree};
+use document::{DeletedLayerRecord, Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{
     BackendId, BrushId, BrushInput, NodeId, RenderTreeGeneration, StrokeId, TileKey,
 };
@@ -24,6 +24,17 @@ struct StrokeTileUndoRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StrokeUndoRecord {
     tiles: Vec<StrokeTileUndoRecord>,
+}
+
+#[derive(Clone, PartialEq)]
+struct DeleteLayerUndoRecord {
+    deleted: DeletedLayerRecord,
+}
+
+#[derive(Clone, PartialEq)]
+enum UndoActionRecord {
+    Stroke(StrokeUndoRecord),
+    DeleteLayer(DeleteLayerUndoRecord),
 }
 
 impl EngineBackendManager {
@@ -183,14 +194,19 @@ pub struct EngineThreadState {
     input_processor: StrokeInputProcessor,
     active_stroke_id: Option<StrokeId>,
     pending_stroke_undo_tiles: Vec<StrokeTileUndoRecord>,
-    undo_strokes: Vec<StrokeUndoRecord>,
-    redo_strokes: Vec<StrokeUndoRecord>,
+    undo_actions: Vec<UndoActionRecord>,
+    redo_actions: Vec<UndoActionRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineStats {
     pub backend_tiles: Vec<atlas::BackendTileStats>,
-    pub undo_stroke_count: usize,
+    pub undo_action_count: usize,
+}
+
+pub struct UndoActionOutput {
+    pub tile_updates: Option<thread_protocol::TileSlotKeyUpdateMsg>,
+    pub render_tree_update: Option<thread_protocol::RenderTreeUpdatedMsg>,
 }
 
 const RESAMPLER_MIN_TIME_S: f32 = 0.008;
@@ -224,8 +240,8 @@ impl EngineThreadState {
             input_processor,
             active_stroke_id: None,
             pending_stroke_undo_tiles: Vec::new(),
-            undo_strokes: Vec::new(),
-            redo_strokes: Vec::new(),
+            undo_actions: Vec::new(),
+            redo_actions: Vec::new(),
         }
     }
 
@@ -276,8 +292,8 @@ impl EngineThreadState {
 
     fn reset_stroke_state(&mut self) {
         self.pending_stroke_undo_tiles.clear();
-        self.undo_strokes.clear();
-        self.redo_strokes.clear();
+        self.undo_actions.clear();
+        self.redo_actions.clear();
         self.active_stroke_id = None;
         self.input_processor.end_stroke();
     }
@@ -285,7 +301,7 @@ impl EngineThreadState {
     pub fn stats(&self) -> EngineStats {
         EngineStats {
             backend_tiles: self.backend_manager.inner().backend_tile_stats(),
-            undo_stroke_count: self.undo_strokes.len(),
+            undo_action_count: self.undo_actions.len(),
         }
     }
 
@@ -304,31 +320,83 @@ impl EngineThreadState {
         self.input_processor.end_stroke();
         self.brush_runtime.end_stroke(&mut self.backend_manager);
         if !self.pending_stroke_undo_tiles.is_empty() {
-            self.undo_strokes.push(StrokeUndoRecord {
-                tiles: std::mem::take(&mut self.pending_stroke_undo_tiles),
-            });
+            self.undo_actions
+                .push(UndoActionRecord::Stroke(StrokeUndoRecord {
+                    tiles: std::mem::take(&mut self.pending_stroke_undo_tiles),
+                }));
         }
         self.active_stroke_id = None;
     }
 
-    pub fn undo_stroke(&mut self) -> Option<thread_protocol::TileSlotKeyUpdateMsg> {
-        let record = self.undo_strokes.pop()?;
-        self.apply_stroke_undo_record(&record)?;
-        self.redo_strokes.push(record.clone());
-        Some(Self::tile_update_msg_from_record(&record, true))
+    pub fn delete_node(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<thread_protocol::RenderTreeUpdatedMsg, document::LayerEditError> {
+        if self.document.active_node() != Some(node_id) && !self.document.set_active_node(node_id) {
+            return Err(document::LayerEditError::InvalidNode);
+        }
+        let deleted = self.document.delete_active_node_with_record()?;
+        self.backend_manager
+            .retire_tiles(deleted.raster_tile_keys());
+        self.undo_actions
+            .push(UndoActionRecord::DeleteLayer(DeleteLayerUndoRecord {
+                deleted,
+            }));
+        Ok(self.rebuild_render_tree()?)
     }
 
-    pub fn redo_stroke(&mut self) -> Option<thread_protocol::TileSlotKeyUpdateMsg> {
-        let record = self.redo_strokes.pop()?;
-        self.apply_stroke_redo_record(&record)?;
-        self.undo_strokes.push(record.clone());
-        Some(Self::tile_update_msg_from_record(&record, false))
+    pub fn undo_action(&mut self) -> Option<UndoActionOutput> {
+        let record = self.undo_actions.pop()?;
+        let output = match &record {
+            UndoActionRecord::Stroke(record) => {
+                self.apply_stroke_undo_record(record)?;
+                UndoActionOutput {
+                    tile_updates: Some(Self::tile_update_msg_from_record(record, true)),
+                    render_tree_update: None,
+                }
+            }
+            UndoActionRecord::DeleteLayer(record) => {
+                self.apply_delete_layer_undo_record(record)?;
+                UndoActionOutput {
+                    tile_updates: None,
+                    render_tree_update: Some(self.rebuild_render_tree().ok()?),
+                }
+            }
+        };
+        self.redo_actions.push(record);
+        Some(output)
     }
 
-    pub fn invalidate_redo_strokes(&mut self) {
+    pub fn redo_action(&mut self) -> Option<UndoActionOutput> {
+        let record = self.redo_actions.pop()?;
+        let output = match &record {
+            UndoActionRecord::Stroke(record) => {
+                self.apply_stroke_redo_record(record)?;
+                UndoActionOutput {
+                    tile_updates: Some(Self::tile_update_msg_from_record(record, false)),
+                    render_tree_update: None,
+                }
+            }
+            UndoActionRecord::DeleteLayer(record) => {
+                self.apply_delete_layer_redo_record(record)?;
+                UndoActionOutput {
+                    tile_updates: None,
+                    render_tree_update: Some(self.rebuild_render_tree().ok()?),
+                }
+            }
+        };
+        self.undo_actions.push(record);
+        Some(output)
+    }
+
+    pub fn invalidate_redo_actions(&mut self) {
         let mut keys = self
-            .redo_strokes
+            .redo_actions
             .iter()
+            .filter_map(|record| match record {
+                UndoActionRecord::Stroke(record) => Some(record),
+                UndoActionRecord::DeleteLayer(_) => None,
+            })
             .flat_map(|record| record.tiles.iter().map(|tile| tile.new_tile_key))
             .filter(|key| *key != TileKey::EMPTY)
             .collect::<Vec<_>>();
@@ -341,7 +409,7 @@ impl EngineThreadState {
         });
         keys.dedup();
         self.backend_manager.drop_tiles(keys);
-        self.redo_strokes.clear();
+        self.redo_actions.clear();
     }
 
     pub fn process_raw_input(
@@ -548,6 +616,48 @@ impl EngineThreadState {
         Some(())
     }
 
+    fn apply_delete_layer_undo_record(&mut self, record: &DeleteLayerUndoRecord) -> Option<()> {
+        let tile_keys = record.deleted.raster_tile_keys();
+        let mut swaps_by_backend: HashMap<u8, Vec<TileKeySwap>> = HashMap::new();
+        for tile_key in tile_keys {
+            if tile_key == TileKey::EMPTY {
+                continue;
+            }
+            swaps_by_backend
+                .entry(tile_key.backend_index())
+                .or_default()
+                .push(TileKeySwap {
+                    restore_key: tile_key,
+                    retire_key: TileKey::EMPTY,
+                });
+        }
+
+        for (backend, swaps) in &swaps_by_backend {
+            let backend = self
+                .backend_manager
+                .inner_mut()
+                .backend_mut(BackendId::new(*backend))?;
+            if backend.restore_cached_keys(swaps).is_err() {
+                return None;
+            }
+        }
+
+        self.document.restore_deleted_layer(&record.deleted).ok()?;
+        Some(())
+    }
+
+    fn apply_delete_layer_redo_record(&mut self, record: &DeleteLayerUndoRecord) -> Option<()> {
+        if self.document.active_node() != Some(record.deleted.node_id())
+            && !self.document.set_active_node(record.deleted.node_id())
+        {
+            return None;
+        }
+        let deleted = self.document.delete_active_node_with_record().ok()?;
+        self.backend_manager
+            .retire_tiles(deleted.raster_tile_keys());
+        Some(())
+    }
+
     fn tile_update_msg_from_record(
         record: &StrokeUndoRecord,
         use_old_tile_key: bool,
@@ -680,9 +790,11 @@ fn cache_node_parity(
 
 #[cfg(test)]
 mod tests {
+    use atlas::TileKeySwap;
+
     use super::{
-        EngineBackendManager, EngineThreadState, collect_render_cache_tile_keys,
-        retire_stale_render_cache_tiles,
+        DeleteLayerUndoRecord, EngineBackendManager, EngineThreadState, UndoActionRecord,
+        collect_render_cache_tile_keys, retire_stale_render_cache_tiles,
     };
     use document::{
         Document, FlatNodeKind, FlatRenderNode, FlatRenderTree, LeafBlendMode, NodeConfig,
@@ -861,5 +973,131 @@ mod tests {
         assert_eq!(new_root.tile_key(1), Some(old_keys[1]));
         assert_eq!(new_root.tile_key(3), Some(old_keys[2]));
         assert_eq!(new_root.tile_key(4), Some(old_keys[3]));
+    }
+
+    #[test]
+    fn delete_layer_undo_restores_deleted_node_and_tile_keys() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let document = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(0),
+            BackendId::new(1),
+        )
+        .unwrap();
+        let shared_tree = Arc::new(SharedRenderTree::new(FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::new()),
+            root_id: None,
+        }));
+        let mut engine = EngineThreadState::new(document, shared_tree, 8);
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        let tile_key = engine.allocate_leaf_tile(BackendId::new(0)).unwrap();
+        engine
+            .document_mut()
+            .get_leaf_image_mut(NodeId(1))
+            .unwrap()
+            .set_tile_key(0, tile_key)
+            .unwrap();
+
+        engine.delete_node(NodeId(1)).unwrap();
+
+        assert!(!engine.document().layer_tree().contains_node(NodeId(1)));
+        let backend = engine.backend_manager().backend(BackendId::new(0)).unwrap();
+        assert_eq!(
+            backend.tile_state(tile_key).unwrap(),
+            atlas::TileState::Cached
+        );
+
+        let output = engine.undo_action().expect("delete undo should succeed");
+
+        assert!(output.tile_updates.is_none());
+        assert!(output.render_tree_update.is_some());
+        assert!(engine.document().layer_tree().contains_node(NodeId(1)));
+        assert_eq!(engine.document().active_node(), Some(NodeId(1)));
+        let backend = engine.backend_manager().backend(BackendId::new(0)).unwrap();
+        assert_eq!(
+            backend.tile_state(tile_key).unwrap(),
+            atlas::TileState::Active
+        );
+        let restored_tile = engine
+            .document()
+            .get_leaf_image(NodeId(1))
+            .and_then(|image| image.tile_key(0));
+        assert_eq!(restored_tile, Some(tile_key));
+    }
+
+    #[test]
+    fn delete_layer_undo_fails_when_tile_generation_is_invalid() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let document = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(0),
+            BackendId::new(1),
+        )
+        .unwrap();
+        let shared_tree = Arc::new(SharedRenderTree::new(FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::new()),
+            root_id: None,
+        }));
+        let mut engine = EngineThreadState::new(document, shared_tree, 8);
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+        let tile_key = engine.allocate_leaf_tile(BackendId::new(0)).unwrap();
+        engine
+            .document_mut()
+            .get_leaf_image_mut(NodeId(1))
+            .unwrap()
+            .set_tile_key(0, tile_key)
+            .unwrap();
+
+        engine.delete_node(NodeId(1)).unwrap();
+
+        let deleted_keys = match engine.undo_actions.last() {
+            Some(UndoActionRecord::DeleteLayer(DeleteLayerUndoRecord { deleted })) => {
+                deleted.raster_tile_keys()
+            }
+            _ => panic!("expected delete layer undo record"),
+        };
+        let backend = engine
+            .backend_manager
+            .inner_mut()
+            .backend_mut(BackendId::new(0))
+            .unwrap();
+        backend
+            .restore_cached_keys(&[TileKeySwap {
+                restore_key: deleted_keys[0],
+                retire_key: TileKey::EMPTY,
+            }])
+            .unwrap();
+        let mut drop_session = backend.begin_edit();
+        backend
+            .drop_key(&mut drop_session, deleted_keys[0])
+            .unwrap();
+        backend.finish_drop(drop_session).unwrap();
+        loop {
+            let reused = backend.alloc_active().unwrap().key();
+            if reused.slot().raw() == deleted_keys[0].slot().raw() {
+                break;
+            }
+        }
+
+        assert!(engine.undo_action().is_none());
+        assert!(!engine.document().layer_tree().contains_node(NodeId(1)));
     }
 }

@@ -12,6 +12,13 @@ pub struct UiLayerTree {
     pub(crate) root: UiLayerNode,
 }
 
+pub struct DeletedNodeRecord {
+    pub(crate) parent_id: NodeId,
+    pub(crate) child_index: usize,
+    pub(crate) next_active: Option<NodeId>,
+    pub(crate) node: UiLayerNode,
+}
+
 impl UiLayerTree {
     pub fn new(root: UiLayerNode) -> Self {
         Self { root }
@@ -113,7 +120,7 @@ impl UiLayerTree {
         insert_node_at_parent(&mut self.root, target.parent_id, adjusted_index, moved_node)
     }
 
-    pub fn delete_node(&mut self, node_id: NodeId) -> Result<Option<NodeId>, LayerEditError> {
+    pub fn delete_node(&mut self, node_id: NodeId) -> Result<DeletedNodeRecord, LayerEditError> {
         if node_id == self.root_id() {
             return Err(LayerEditError::RootSelectionNotAllowed);
         }
@@ -133,7 +140,21 @@ impl UiLayerTree {
             return Err(LayerEditError::CannotDeleteLastSelectableNode);
         }
         let next_active_index = removed_index.min(selectable_after.len() - 1);
-        Ok(selectable_after.get(next_active_index).copied())
+        Ok(DeletedNodeRecord {
+            parent_id,
+            child_index,
+            next_active: selectable_after.get(next_active_index).copied(),
+            node: removed_node,
+        })
+    }
+
+    pub fn restore_deleted_node(
+        &mut self,
+        parent_id: NodeId,
+        child_index: usize,
+        node: UiLayerNode,
+    ) -> Result<(), LayerEditError> {
+        insert_node_at_parent(&mut self.root, parent_id, child_index, node)
     }
 
     pub fn get_leaf_image(&self, node_id: NodeId) -> Option<&Image> {

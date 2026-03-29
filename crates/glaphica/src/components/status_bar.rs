@@ -12,7 +12,7 @@ impl StatusBar {
             .show(ctx, |ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let undo_text = stats
-                        .map(|stats| format!("Undo {}", stats.undo_stroke_count))
+                        .map(|stats| format!("Undo {}", stats.undo_action_count))
                         .unwrap_or_else(|| "Undo -".to_owned());
                     ui.label(
                         RichText::new(undo_text)
