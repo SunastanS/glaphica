@@ -222,6 +222,7 @@ pub struct TraceInputSample {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TraceGpuCmd {
+    ExpandAtlasBackend(TraceExpandAtlasBackendMsg),
     DrawOp(TraceDrawOp),
     CopyOp(TraceCopyOp),
     WriteOp(TraceWriteOp),
@@ -229,6 +230,47 @@ pub enum TraceGpuCmd {
     ClearOp(TraceClearOp),
     RenderTreeUpdated(TraceRenderTreeUpdatedMsg),
     TileSlotKeyUpdate(TraceTileSlotKeyUpdateMsg),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TraceExpandAtlasBackendMsg {
+    pub src_backend_id: u8,
+    pub dst_backend_id: u8,
+    pub src_layout: TraceAtlasLayout,
+    pub dst_layout: TraceAtlasLayout,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TraceAtlasLayout {
+    Tiny8,
+    Small11,
+    Medium14,
+    Large17,
+    Huge20,
+}
+
+impl From<glaphica_core::AtlasLayout> for TraceAtlasLayout {
+    fn from(value: glaphica_core::AtlasLayout) -> Self {
+        match value {
+            glaphica_core::AtlasLayout::Tiny8 => Self::Tiny8,
+            glaphica_core::AtlasLayout::Small11 => Self::Small11,
+            glaphica_core::AtlasLayout::Medium14 => Self::Medium14,
+            glaphica_core::AtlasLayout::Large17 => Self::Large17,
+            glaphica_core::AtlasLayout::Huge20 => Self::Huge20,
+        }
+    }
+}
+
+impl From<TraceAtlasLayout> for glaphica_core::AtlasLayout {
+    fn from(value: TraceAtlasLayout) -> Self {
+        match value {
+            TraceAtlasLayout::Tiny8 => Self::Tiny8,
+            TraceAtlasLayout::Small11 => Self::Small11,
+            TraceAtlasLayout::Medium14 => Self::Medium14,
+            TraceAtlasLayout::Large17 => Self::Large17,
+            TraceAtlasLayout::Huge20 => Self::Huge20,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -753,6 +795,12 @@ impl From<TraceInputSample> for InputRingSample {
 impl From<GpuCmdMsg> for TraceGpuCmd {
     fn from(value: GpuCmdMsg) -> Self {
         match value {
+            GpuCmdMsg::ExpandAtlasBackend(msg) => Self::ExpandAtlasBackend(TraceExpandAtlasBackendMsg {
+                src_backend_id: msg.src_backend_id,
+                dst_backend_id: msg.dst_backend_id,
+                src_layout: msg.src_layout.into(),
+                dst_layout: msg.dst_layout.into(),
+            }),
             GpuCmdMsg::DrawOp(draw_op) => Self::DrawOp(TraceDrawOp {
                 node_id: draw_op.stroke_ctx.map(|ctx| ctx.node_id.0),
                 stroke_id: draw_op.stroke_id.0,
@@ -865,6 +913,14 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
 impl From<TraceGpuCmd> for GpuCmdMsg {
     fn from(value: TraceGpuCmd) -> Self {
         match value {
+            TraceGpuCmd::ExpandAtlasBackend(msg) => {
+                Self::ExpandAtlasBackend(thread_protocol::ExpandAtlasBackendMsg {
+                    src_backend_id: msg.src_backend_id,
+                    dst_backend_id: msg.dst_backend_id,
+                    src_layout: msg.src_layout.into(),
+                    dst_layout: msg.dst_layout.into(),
+                })
+            }
             TraceGpuCmd::DrawOp(draw_op) => Self::DrawOp(DrawOp {
                 stroke_id: StrokeId(draw_op.stroke_id),
                 stroke_ctx: match (

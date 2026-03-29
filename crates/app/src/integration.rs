@@ -1028,6 +1028,8 @@ impl AppThreadIntegration {
         let Some(output) = self.engine_state.undo_action() else {
             return false;
         };
+        self.pending_send_gpu_commands
+            .extend(self.engine_state.take_pending_gpu_commands());
         if let Some(update) = output.tile_updates {
             self.pending_send_gpu_commands
                 .push_back(GpuCmdMsg::TileSlotKeyUpdate(update));
@@ -1046,6 +1048,8 @@ impl AppThreadIntegration {
         let Some(output) = self.engine_state.redo_action() else {
             return false;
         };
+        self.pending_send_gpu_commands
+            .extend(self.engine_state.take_pending_gpu_commands());
         if let Some(update) = output.tile_updates {
             self.pending_send_gpu_commands
                 .push_back(GpuCmdMsg::TileSlotKeyUpdate(update));
@@ -1232,9 +1236,12 @@ impl AppThreadIntegration {
 
     fn enqueue_render_tree_update(&mut self) {
         match self.engine_state.rebuild_render_tree() {
-            Ok(msg) => self
-                .pending_send_gpu_commands
-                .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)),
+            Ok(msg) => {
+                self.pending_send_gpu_commands
+                    .extend(self.engine_state.take_pending_gpu_commands());
+                self.pending_send_gpu_commands
+                    .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg));
+            }
             Err(error) => eprintln!("render tree rebuild failed after control event: {error}"),
         }
     }
@@ -1588,9 +1595,9 @@ impl AppThreadIntegration {
 
     pub fn rebuild_render_tree(&mut self) -> Result<(), document::ImageCreateError> {
         let msg = self.engine_state.rebuild_render_tree()?;
-        let _ = self
-            .main_state
-            .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
+        let mut commands = self.engine_state.take_pending_gpu_commands();
+        commands.push(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg));
+        let _ = self.main_state.process_gpu_commands(&commands);
         Ok(())
     }
 
@@ -1602,9 +1609,9 @@ impl AppThreadIntegration {
             .engine_state
             .resize_document_canvas_anchored_top_left(layout)?;
         self.document_layout = layout;
-        let _ = self
-            .main_state
-            .process_gpu_commands(&[thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg)]);
+        let mut commands = self.engine_state.take_pending_gpu_commands();
+        commands.push(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg));
+        let _ = self.main_state.process_gpu_commands(&commands);
         Ok(())
     }
 
