@@ -1150,9 +1150,7 @@ impl AppThreadIntegration {
             AppControl::DeleteNode { node_id } => {
                 self.engine_state.invalidate_redo_actions();
                 match self.engine_state.delete_node(*node_id) {
-                    Ok(update) => self
-                        .pending_send_gpu_commands
-                        .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(update)),
+                    Ok(update) => self.enqueue_render_tree_msg(update),
                     Err(error) => eprintln!("delete node control failed: {error:?}"),
                 }
             }
@@ -1236,14 +1234,16 @@ impl AppThreadIntegration {
 
     fn enqueue_render_tree_update(&mut self) {
         match self.engine_state.rebuild_render_tree() {
-            Ok(msg) => {
-                self.pending_send_gpu_commands
-                    .extend(self.engine_state.take_pending_gpu_commands());
-                self.pending_send_gpu_commands
-                    .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg));
-            }
+            Ok(msg) => self.enqueue_render_tree_msg(msg),
             Err(error) => eprintln!("render tree rebuild failed after control event: {error}"),
         }
+    }
+
+    fn enqueue_render_tree_msg(&mut self, msg: thread_protocol::RenderTreeUpdatedMsg) {
+        self.pending_send_gpu_commands
+            .extend(self.engine_state.take_pending_gpu_commands());
+        self.pending_send_gpu_commands
+            .push_back(thread_protocol::GpuCmdMsg::RenderTreeUpdated(msg));
     }
 
     fn process_engine_frame_from_samples(

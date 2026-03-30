@@ -405,13 +405,15 @@ impl MainThreadState {
             return Ok(());
         };
         let src_kind = src_backend.kind;
+        let mut texture_config = gpu_runtime::atlas_runtime::AtlasTextureConfig::default();
+        texture_config.format = src_backend.format;
         self.atlas_storage
             .create_backend(
                 &self.gpu_context.device,
                 msg.dst_backend_id,
                 src_kind,
                 msg.dst_layout,
-                Default::default(),
+                texture_config,
             )
             .map_err(|_| ())?;
         let Some(src_backend) = self.atlas_storage.backend_resource(msg.src_backend_id) else {
