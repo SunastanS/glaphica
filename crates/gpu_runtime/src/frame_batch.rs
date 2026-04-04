@@ -172,7 +172,9 @@ impl FrameBatch {
                 self.has_commands = true;
             }
 
-            GpuCmdMsg::RenderTreeUpdated(_) | GpuCmdMsg::TileSlotKeyUpdate(_) => {}
+            GpuCmdMsg::ExpandAtlasBackend(_)
+            | GpuCmdMsg::RenderTreeUpdated(_)
+            | GpuCmdMsg::TileSlotKeyUpdate(_) => {}
         }
         Ok(())
     }

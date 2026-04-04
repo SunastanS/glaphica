@@ -10,8 +10,8 @@ use brushes::{
 };
 use document::{FlatRenderTree, SharedRenderTree, View};
 use glaphica_core::{
-    AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId, RenderTreeGeneration,
-    StrokeId, TextureFormat, TileDirtyTracker, TileKey,
+    ATLAS_TILE_SIZE, AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId,
+    RenderTreeGeneration, StrokeId, TextureFormat, TileDirtyTracker, TileKey,
 };
 use gpu_runtime::{
     FrameBatch, FrameBatchContext, FrameBatchPerfStats, GpuContext, GpuContextInitDescriptor,
@@ -21,7 +21,7 @@ use gpu_runtime::{
     surface_runtime::{SurfaceError, SurfaceRuntime},
     wgpu_brush_executor::WgpuBrushExecutorError,
 };
-use thread_protocol::{GpuCmdMsg, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg};
+use thread_protocol::{ExpandAtlasBackendMsg, GpuCmdMsg, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg};
 
 use crate::{
     config,
@@ -397,6 +397,93 @@ pub struct MainThreadState {
 }
 
 impl MainThreadState {
+    fn apply_expand_atlas_backend(
+        &mut self,
+        msg: &ExpandAtlasBackendMsg,
+    ) -> Result<(), ()> {
+        let Some(src_backend) = self.atlas_storage.backend_resource(msg.src_backend_id) else {
+            return Ok(());
+        };
+        let src_kind = src_backend.kind;
+        let mut texture_config = gpu_runtime::atlas_runtime::AtlasTextureConfig::default();
+        texture_config.format = src_backend.format;
+        self.atlas_storage
+            .create_backend(
+                &self.gpu_context.device,
+                msg.dst_backend_id,
+                src_kind,
+                msg.dst_layout,
+                texture_config,
+            )
+            .map_err(|_| ())?;
+        let Some(src_backend) = self.atlas_storage.backend_resource(msg.src_backend_id) else {
+            return Ok(());
+        };
+        let Some(dst_backend) = self.atlas_storage.backend_resource(msg.dst_backend_id) else {
+            return Ok(());
+        };
+
+        let old_tiles_per_edge = msg.src_layout.tiles_per_edge();
+        let old_parity_layers = msg.src_layout.layers().div_ceil(2);
+        let row_texels = old_tiles_per_edge * ATLAS_TILE_SIZE;
+        let mut encoder =
+            self.gpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("glaphica-expand-atlas-backend"),
+                });
+
+        for parity in 0..2u32 {
+            if parity == 1 && msg.src_layout.layers() < 2 {
+                continue;
+            }
+            for src_layer_in_group in 0..old_parity_layers {
+                let src_layer = parity + 2 * src_layer_in_group;
+                if src_layer >= msg.src_layout.layers() {
+                    continue;
+                }
+                for src_row in 0..old_tiles_per_edge {
+                    let flattened_row = src_layer_in_group * old_tiles_per_edge + src_row;
+                    let dst_row = flattened_row / 2;
+                    let dst_col = (flattened_row % 2) * old_tiles_per_edge;
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: src_backend.texture2d_array,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: src_row * ATLAS_TILE_SIZE,
+                                z: src_layer,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: dst_backend.texture2d_array,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: dst_col * ATLAS_TILE_SIZE,
+                                y: dst_row * ATLAS_TILE_SIZE,
+                                z: parity,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d {
+                            width: row_texels,
+                            height: ATLAS_TILE_SIZE,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+        }
+
+        self.gpu_context.queue.submit(Some(encoder.finish()));
+        let _ = self
+            .atlas_storage
+            .alias_backend(msg.src_backend_id, msg.dst_backend_id);
+        Ok(())
+    }
+
     pub async fn init() -> Result<Self, InitError> {
         let gpu_context = Arc::new(
             GpuContext::init(&GpuContextInitDescriptor::default())
@@ -794,6 +881,12 @@ impl MainThreadState {
         while index < commands.len() {
             let cmd = &commands[index];
             match cmd {
+                GpuCmdMsg::ExpandAtlasBackend(msg) => {
+                    if let Err(error) = self.apply_expand_atlas_backend(msg) {
+                        eprintln!("GPU atlas expansion failed: {error:?}");
+                    }
+                    index += 1;
+                }
                 GpuCmdMsg::RenderTreeUpdated(msg) => {
                     self.apply_render_tree_updated(msg);
                     index += 1;
@@ -1563,6 +1656,12 @@ fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
     eprintln!("[PERF][gpu_cmd_trace] frame_cmd_count={}", commands.len());
     for (index, cmd) in commands.iter().take(max_commands).enumerate() {
         match cmd {
+            GpuCmdMsg::ExpandAtlasBackend(op) => {
+                eprintln!(
+                    "[PERF][gpu_cmd_trace][{}] ExpandAtlasBackend src={} dst={} {:?}->{:?}",
+                    index, op.src_backend_id, op.dst_backend_id, op.src_layout, op.dst_layout
+                );
+            }
             GpuCmdMsg::DrawOp(op) => {
                 let node_id = op.stroke_ctx.map(|ctx| ctx.node_id.0);
                 eprintln!(

@@ -57,8 +57,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Test
-        run: cargo test --workspace --locked
+      - name: Test workspace except app
+        run: cargo test --workspace --exclude app --locked
+
+      - name: Test app serially
+        run: cargo test -p app --locked -- --test-threads=1
 
       - name: Build
         run: cargo build --release --locked -p $BIN_NAME

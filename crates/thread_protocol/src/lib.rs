@@ -76,8 +76,9 @@ where
 
 mod gpu_command;
 pub use gpu_command::{
-    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
-    GpuCmdMsg, RefImage, RenderTreeUpdatedMsg, TileSlotKeyUpdateMsg, WriteKind, WriteOp,
+    ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx,
+    ExpandAtlasBackendMsg, GpuCmdFrameMergeTag, GpuCmdMsg, RefImage, RenderTreeUpdatedMsg,
+    TileSlotKeyUpdateMsg, WriteKind, WriteOp,
 };
 
 mod gpu_feedback;
@@ -337,7 +338,8 @@ mod tests {
                 assert_eq!(stroke_ctx.brush_id, BrushId(7));
                 assert_eq!(draw_op.stroke_id, StrokeId(17));
             }
-            GpuCmdMsg::CopyOp(_)
+            GpuCmdMsg::ExpandAtlasBackend(_)
+            | GpuCmdMsg::CopyOp(_)
             | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::CompositeOp(_)
             | GpuCmdMsg::ClearOp(_)
@@ -360,7 +362,8 @@ mod tests {
                 assert_eq!(copy_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
                 assert_eq!(copy_op.frame_merge, GpuCmdFrameMergeTag::None);
             }
-            GpuCmdMsg::DrawOp(_)
+            GpuCmdMsg::ExpandAtlasBackend(_)
+            | GpuCmdMsg::DrawOp(_)
             | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::CompositeOp(_)
             | GpuCmdMsg::ClearOp(_)
@@ -395,7 +398,8 @@ mod tests {
                 assert_eq!(write_op.rgb, Some([1.0, 0.0, 0.0]));
                 assert_eq!(write_op.frame_merge, GpuCmdFrameMergeTag::None);
             }
-            GpuCmdMsg::DrawOp(_)
+            GpuCmdMsg::ExpandAtlasBackend(_)
+            | GpuCmdMsg::DrawOp(_)
             | GpuCmdMsg::CopyOp(_)
             | GpuCmdMsg::CompositeOp(_)
             | GpuCmdMsg::ClearOp(_)
@@ -422,7 +426,8 @@ mod tests {
                 assert_eq!(composite_op.blend_mode, BlendMode::Multiply);
                 assert_eq!(composite_op.opacity, 0.6);
             }
-            GpuCmdMsg::DrawOp(_)
+            GpuCmdMsg::ExpandAtlasBackend(_)
+            | GpuCmdMsg::DrawOp(_)
             | GpuCmdMsg::CopyOp(_)
             | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::ClearOp(_)
@@ -441,7 +446,8 @@ mod tests {
             GpuCmdMsg::ClearOp(clear_op) => {
                 assert_eq!(clear_op.tile_key, TileKey::from_parts(9, 8, 7));
             }
-            GpuCmdMsg::DrawOp(_)
+            GpuCmdMsg::ExpandAtlasBackend(_)
+            | GpuCmdMsg::DrawOp(_)
             | GpuCmdMsg::CopyOp(_)
             | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::CompositeOp(_)
