@@ -1951,6 +1951,7 @@ fn current_time_ns() -> u64 {
 mod tests {
     use std::fs::File;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use brushes::builtin_brushes::{pixel_rect::PixelRectBrush, round::RoundBrush};
@@ -1997,6 +1998,13 @@ mod tests {
         vec![
             62, 63, 64, 65, 79, 80, 81, 82, 96, 97, 98, 99, 113, 114, 115, 116,
         ]
+    }
+
+    fn issue10_gpu_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("issue10 GPU test lock poisoned")
     }
 
     fn register_default_test_brushes(app: &mut AppThreadIntegration) {
@@ -2622,6 +2630,7 @@ mod tests {
 
     #[test]
     fn issue10_replay_preserves_full_updated_tile_metadata_without_present() {
+        let _guard = issue10_gpu_test_guard();
         let output = run_issue10_headless_replay();
 
         let expected_updated = issue10_updated_tile_indices();
@@ -2664,6 +2673,7 @@ mod tests {
 
     #[test]
     fn issue10_replay_should_not_drop_any_updated_tiles() {
+        let _guard = issue10_gpu_test_guard();
         let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
             "repro".to_string(),
             ImageLayout::new(1024, 1024),
@@ -2752,6 +2762,7 @@ mod tests {
 
     #[test]
     fn issue10_updated_tiles_are_visible_in_root_image_during_failing_command_iteration() {
+        let _guard = issue10_gpu_test_guard();
         let Ok(mut app) = pollster::block_on(AppThreadIntegration::new(
             "repro".to_string(),
             ImageLayout::new(1024, 1024),
@@ -2902,6 +2913,7 @@ mod tests {
 
     #[test]
     fn issue10_headless_root_image_contains_ink_on_updated_tiles() {
+        let _guard = issue10_gpu_test_guard();
         let (root_image, non_root_images) = run_issue10_headless_replay_and_export_images();
         let expected_updated = issue10_updated_tile_indices();
         let root_updated_non_white = expected_updated
@@ -2923,6 +2935,7 @@ mod tests {
 
     #[test]
     fn issue10_frontend_readback_matches_root_export_after_replay() {
+        let _guard = issue10_gpu_test_guard();
         let (root_image, frontend_image) = run_issue10_headless_replay_and_capture_frontend_image();
         let missing_tiles = issue10_missing_tile_indices();
         let drawn_tiles = vec![
