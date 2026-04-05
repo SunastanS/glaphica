@@ -1,4 +1,4 @@
-use atlas::{BackendManager, EditSession, TileKeySwap};
+use atlas::{BackendExpansion, BackendManager, EditSession, TileKeySwap};
 use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
 use document::{DeletedLayerRecord, Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{
@@ -12,6 +12,7 @@ use stroke_input::{InputProcessingConfig, StrokeInputProcessor};
 pub struct EngineBackendManager {
     manager: BackendManager,
     stroke_edits: HashMap<u8, EditSession>,
+    pending_gpu_commands: Vec<thread_protocol::GpuCmdMsg>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,7 @@ impl EngineBackendManager {
         Self {
             manager: BackendManager::new(),
             stroke_edits: HashMap::new(),
+            pending_gpu_commands: Vec::new(),
         }
     }
 
@@ -76,7 +78,9 @@ impl EngineBackendManager {
             if key == TileKey::EMPTY {
                 continue;
             }
-            let backend = key.backend();
+            let Some(backend) = self.manager.resolve_backend_id(key.backend()) else {
+                continue;
+            };
             let Some(backend_ref) = self.manager.backend_mut(backend) else {
                 continue;
             };
@@ -108,27 +112,62 @@ impl EngineBackendManager {
     }
 
     fn ensure_stroke_edit_session(&mut self, backend: BackendId) -> Option<&mut EditSession> {
+        let backend = self.manager.resolve_backend_id(backend)?;
         if !self.stroke_edits.contains_key(&backend.raw()) {
             let session = self.manager.backend(backend)?.begin_edit();
             self.stroke_edits.insert(backend.raw(), session);
         }
         self.stroke_edits.get_mut(&backend.raw())
     }
+
+    fn queue_backend_expansion(&mut self, expansion: BackendExpansion) {
+        self.pending_gpu_commands.push(
+            thread_protocol::GpuCmdMsg::ExpandAtlasBackend(thread_protocol::ExpandAtlasBackendMsg {
+                src_backend_id: expansion.src_backend_id.raw(),
+                dst_backend_id: expansion.dst_backend_id.raw(),
+                src_layout: expansion.src_layout,
+                dst_layout: expansion.dst_layout,
+            }),
+        );
+    }
+
+    fn alloc_active_internal(&mut self, backend: BackendId, parity: Option<bool>) -> Option<TileKey> {
+        let resolved = self.manager.resolve_backend_id(backend)?;
+        let try_alloc = |manager: &mut BackendManager| {
+            let backend = manager.backend_mut(resolved)?;
+            let tile = match parity {
+                Some(parity) => backend.alloc_active_with_parity(parity).ok()?,
+                None => backend.alloc_active().ok()?,
+            };
+            Some(tile.key())
+        };
+        if let Some(tile_key) = try_alloc(&mut self.manager) {
+            return Some(tile_key);
+        }
+
+        let expansion = self.manager.expand_backend(backend).ok()?;
+        self.queue_backend_expansion(expansion);
+        let resolved = self.manager.resolve_backend_id(backend)?;
+        let backend = self.manager.backend_mut(resolved)?;
+        let tile = match parity {
+            Some(parity) => backend.alloc_active_with_parity(parity).ok()?,
+            None => backend.alloc_active().ok()?,
+        };
+        Some(tile.key())
+    }
+
+    fn take_pending_gpu_commands(&mut self) -> Vec<thread_protocol::GpuCmdMsg> {
+        std::mem::take(&mut self.pending_gpu_commands)
+    }
 }
 
 impl TileSlotAllocator for EngineBackendManager {
     fn alloc_active(&mut self, backend: BackendId) -> Option<TileKey> {
-        self.manager
-            .backend_mut(backend)
-            .and_then(|b| b.alloc_active().ok().map(|tile| tile.key()))
+        self.alloc_active_internal(backend, None)
     }
 
     fn alloc_active_with_parity(&mut self, backend: BackendId, parity: bool) -> Option<TileKey> {
-        self.manager.backend_mut(backend).and_then(|b| {
-            b.alloc_active_with_parity(parity)
-                .ok()
-                .map(|tile| tile.key())
-        })
+        self.alloc_active_internal(backend, Some(parity))
     }
 
     fn begin_stroke(&mut self) {
@@ -147,7 +186,9 @@ impl TileSlotAllocator for EngineBackendManager {
     }
 
     fn replace(&mut self, old: TileKey, new: TileKey) {
-        let backend = old.backend();
+        let Some(backend) = self.manager.resolve_backend_id(old.backend()) else {
+            return;
+        };
         let backend_key = backend.raw();
         if self.ensure_stroke_edit_session(backend).is_none() {
             return;
@@ -166,7 +207,9 @@ impl TileSlotAllocator for EngineBackendManager {
     }
 
     fn release(&mut self, tile: TileKey) {
-        let backend = tile.backend();
+        let Some(backend) = self.manager.resolve_backend_id(tile.backend()) else {
+            return;
+        };
         let backend_key = backend.raw();
         if self.ensure_stroke_edit_session(backend).is_none() {
             return;
@@ -271,6 +314,10 @@ impl EngineThreadState {
 
     pub fn allocate_leaf_tile(&mut self, backend: BackendId) -> Option<TileKey> {
         self.backend_manager.alloc_active(backend)
+    }
+
+    pub fn take_pending_gpu_commands(&mut self) -> Vec<thread_protocol::GpuCmdMsg> {
+        self.backend_manager.take_pending_gpu_commands()
     }
 
     pub fn replace_document(&mut self, document: Document) {
@@ -512,7 +559,8 @@ impl EngineThreadState {
             }
         }
 
-        let mut gpu_cmds = Vec::with_capacity(
+        let mut gpu_cmds = self.take_pending_gpu_commands();
+        gpu_cmds.reserve(
             clear_ops.len()
                 + copy_ops.len()
                 + draw_ops.len()
@@ -550,9 +598,13 @@ impl EngineThreadState {
         let mut swaps_by_backend: HashMap<u8, Vec<TileKeySwap>> = HashMap::new();
         for tile in &record.tiles {
             let backend = if tile.old_tile_key != TileKey::EMPTY {
-                tile.old_tile_key.backend()
+                self.backend_manager
+                    .inner()
+                    .resolve_backend_id(tile.old_tile_key.backend())?
             } else if tile.new_tile_key != TileKey::EMPTY {
-                tile.new_tile_key.backend()
+                self.backend_manager
+                    .inner()
+                    .resolve_backend_id(tile.new_tile_key.backend())?
             } else {
                 continue;
             };
@@ -615,8 +667,12 @@ impl EngineThreadState {
             if tile_key == TileKey::EMPTY {
                 continue;
             }
+            let backend = self
+                .backend_manager
+                .inner()
+                .resolve_backend_id(tile_key.backend())?;
             swaps_by_backend
-                .entry(tile_key.backend_index())
+                .entry(backend.raw())
                 .or_default()
                 .push(TileKeySwap {
                     restore_key: tile_key,
@@ -908,6 +964,48 @@ mod tests {
             engine.document().layout(),
             ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE)
         );
+    }
+
+    #[test]
+    fn allocate_leaf_tile_expands_backend_and_emits_gpu_command() {
+        let layout = ImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
+        let document = Document::new(
+            "default".to_string(),
+            layout,
+            BackendId::new(0),
+            BackendId::new(1),
+        )
+        .unwrap();
+        let shared_tree = Arc::new(SharedRenderTree::new(FlatRenderTree {
+            generation: RenderTreeGeneration(0),
+            nodes: Arc::new(HashMap::new()),
+            root_id: None,
+        }));
+        let mut engine = EngineThreadState::new(document, shared_tree, 8);
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Tiny8)
+            .unwrap();
+        engine
+            .backend_manager_mut()
+            .add_backend(AtlasLayout::Small11)
+            .unwrap();
+
+        let mut last_key = TileKey::EMPTY;
+        for _ in 0..257 {
+            last_key = engine.allocate_leaf_tile(BackendId::new(0)).unwrap();
+        }
+
+        assert_eq!(last_key.backend_index(), 2);
+        let commands = engine.take_pending_gpu_commands();
+        assert_eq!(commands.len(), 1);
+        let thread_protocol::GpuCmdMsg::ExpandAtlasBackend(msg) = commands[0].clone() else {
+            panic!("expected atlas expansion command");
+        };
+        assert_eq!(msg.src_backend_id, 0);
+        assert_eq!(msg.dst_backend_id, 2);
+        assert_eq!(msg.src_layout, AtlasLayout::Tiny8);
+        assert_eq!(msg.dst_layout, AtlasLayout::Small11);
     }
 
     #[test]

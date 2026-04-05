@@ -223,6 +223,7 @@ impl<Executor> BrushGpuRuntime<Executor> {
             | GpuCmdMsg::WriteOp(_)
             | GpuCmdMsg::CompositeOp(_)
             | GpuCmdMsg::ClearOp(_)
+            | GpuCmdMsg::ExpandAtlasBackend(_)
             | GpuCmdMsg::RenderTreeUpdated(_)
             | GpuCmdMsg::TileSlotKeyUpdate(_) => Ok(BrushGpuApplyOutcome::IgnoredNonDraw),
         }

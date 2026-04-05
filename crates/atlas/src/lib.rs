@@ -14,6 +14,7 @@ pub enum AtlasBackendError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtlasBackendManagerError {
     TooManyBackends,
+    LayoutExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,7 @@ enum SlotOwner {
 
 pub struct Backend {
     backend_id: BackendId,
+    accepted_backend_ids: Vec<BackendId>,
     layout: AtlasLayout,
     total_slots: u32,
     even_pool: ParityPool,
@@ -94,6 +96,7 @@ impl Backend {
 
         Self {
             backend_id,
+            accepted_backend_ids: vec![backend_id],
             layout,
             total_slots,
             even_pool: ParityPool::new(even_slots),
@@ -353,6 +356,14 @@ impl Backend {
         self.backend_id
     }
 
+    pub fn accepts_backend_id(&self, backend_id: BackendId) -> bool {
+        self.accepted_backend_ids.contains(&backend_id)
+    }
+
+    pub fn accepted_backend_ids(&self) -> &[BackendId] {
+        &self.accepted_backend_ids
+    }
+
     pub fn tile_stats(&self) -> BackendTileStats {
         let mut active = 0u32;
         let mut cached = 0u32;
@@ -542,7 +553,7 @@ impl Backend {
     }
 
     fn validate_key(&self, key: TileKey) -> Result<u32, AtlasBackendError> {
-        if key.backend() != self.backend_id {
+        if !self.accepts_backend_id(key.backend()) {
             return Err(AtlasBackendError::WrongBackend);
         }
         let raw_slot = self.decode_raw_slot(key.slot_parity(), key.slot_index_within_parity());
@@ -599,6 +610,24 @@ impl Backend {
         self.groups
             .get_mut(group.0 as usize)
             .ok_or(AtlasBackendError::InvalidGroup)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendExpansion {
+    pub src_backend_id: BackendId,
+    pub dst_backend_id: BackendId,
+    pub src_layout: AtlasLayout,
+    pub dst_layout: AtlasLayout,
+}
+
+fn next_larger_layout(layout: AtlasLayout) -> Option<AtlasLayout> {
+    match layout {
+        AtlasLayout::Tiny8 => Some(AtlasLayout::Small11),
+        AtlasLayout::Small11 => Some(AtlasLayout::Medium14),
+        AtlasLayout::Medium14 => Some(AtlasLayout::Large17),
+        AtlasLayout::Large17 => Some(AtlasLayout::Huge20),
+        AtlasLayout::Huge20 => None,
     }
 }
 
@@ -688,6 +717,7 @@ fn raw_slot_to_parity_index(layout: AtlasLayout, raw_slot: u32) -> u32 {
 #[derive(Default)]
 pub struct BackendManager {
     backends: Vec<Backend>,
+    backend_aliases: Vec<BackendId>,
 }
 
 impl BackendManager {
@@ -703,15 +733,18 @@ impl BackendManager {
             .map_err(|_| AtlasBackendManagerError::TooManyBackends)?;
         let backend_id = BackendId::new(raw_id);
         self.backends.push(Backend::new(layout, backend_id));
+        self.backend_aliases.push(backend_id);
         Ok(backend_id)
     }
 
     pub fn backend(&self, backend_id: BackendId) -> Option<&Backend> {
-        self.backends.get(backend_id.raw() as usize)
+        let resolved = self.resolve_backend_id(backend_id)?;
+        self.backends.get(resolved.raw() as usize)
     }
 
     pub fn backend_mut(&mut self, backend_id: BackendId) -> Option<&mut Backend> {
-        self.backends.get_mut(backend_id.raw() as usize)
+        let resolved = self.resolve_backend_id(backend_id)?;
+        self.backends.get_mut(resolved.raw() as usize)
     }
 
     pub fn backend_for_key(&self, key: TileKey) -> Option<&Backend> {
@@ -723,7 +756,111 @@ impl BackendManager {
     }
 
     pub fn backend_tile_stats(&self) -> Vec<BackendTileStats> {
-        self.backends.iter().map(Backend::tile_stats).collect()
+        let mut seen = vec![false; self.backends.len()];
+        let mut stats = Vec::new();
+        for logical in 0..self.backend_aliases.len() {
+            let resolved = self.resolve_backend_id(BackendId::new(logical as u8));
+            let Some(resolved) = resolved else {
+                continue;
+            };
+            let index = resolved.raw() as usize;
+            if seen.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            seen[index] = true;
+            if let Some(backend) = self.backends.get(index) {
+                stats.push(backend.tile_stats());
+            }
+        }
+        stats
+    }
+
+    pub fn resolve_backend_id(&self, backend_id: BackendId) -> Option<BackendId> {
+        let mut current = *self.backend_aliases.get(backend_id.raw() as usize)?;
+        let mut hops = 0usize;
+        while hops < self.backend_aliases.len() {
+            let next = *self.backend_aliases.get(current.raw() as usize)?;
+            if next == current {
+                return Some(current);
+            }
+            current = next;
+            hops += 1;
+        }
+        None
+    }
+
+    pub fn alias_backend(
+        &mut self,
+        logical_backend_id: BackendId,
+        physical_backend_id: BackendId,
+    ) -> Option<()> {
+        let resolved = self.resolve_backend_id(physical_backend_id)?;
+        let alias_slot = self.backend_aliases.get_mut(logical_backend_id.raw() as usize)?;
+        *alias_slot = resolved;
+        let backend = self.backends.get_mut(resolved.raw() as usize)?;
+        if !backend.accepted_backend_ids.contains(&logical_backend_id) {
+            backend.accepted_backend_ids.push(logical_backend_id);
+        }
+        Some(())
+    }
+
+    pub fn expand_backend(
+        &mut self,
+        backend_id: BackendId,
+    ) -> Result<BackendExpansion, AtlasBackendManagerError> {
+        let src_backend_id = self
+            .resolve_backend_id(backend_id)
+            .ok_or(AtlasBackendManagerError::TooManyBackends)?;
+        let src_index = src_backend_id.raw() as usize;
+        let src = self
+            .backends
+            .get(src_index)
+            .ok_or(AtlasBackendManagerError::TooManyBackends)?;
+        let src_layout = src.layout();
+        let dst_layout =
+            next_larger_layout(src_layout).ok_or(AtlasBackendManagerError::LayoutExhausted)?;
+        let accepted_backend_ids = src.accepted_backend_ids.clone();
+        let generations = src.generations.clone();
+        let slot_owners = src.slot_owners.clone();
+        let groups = src.groups.clone();
+        let cached_groups = src.cached_groups.clone();
+        let next_group_id = src.next_group_id;
+        let even_pool_next_index = src.even_pool.next_index;
+        let even_pool_freelist = src.even_pool.freelist.clone();
+        let odd_pool_next_index = src.odd_pool.next_index;
+        let odd_pool_freelist = src.odd_pool.freelist.clone();
+        let dst_backend_id = BackendId::new(
+            u8::try_from(self.backends.len()).map_err(|_| AtlasBackendManagerError::TooManyBackends)?,
+        );
+
+        let mut dst = Backend::new(dst_layout, dst_backend_id);
+        dst.accepted_backend_ids = accepted_backend_ids;
+        dst.accepted_backend_ids.push(dst_backend_id);
+        dst.generations[..generations.len()].copy_from_slice(&generations);
+        dst.slot_owners[..slot_owners.len()].copy_from_slice(&slot_owners);
+        dst.groups = groups;
+        dst.cached_groups = cached_groups;
+        dst.next_group_id = next_group_id;
+        dst.even_pool.next_index = even_pool_next_index;
+        dst.even_pool.freelist = even_pool_freelist;
+        dst.odd_pool.next_index = odd_pool_next_index;
+        dst.odd_pool.freelist = odd_pool_freelist;
+
+        self.backends.push(dst);
+        self.backend_aliases.push(dst_backend_id);
+        let logical_ids = self.backends[dst_backend_id.raw() as usize]
+            .accepted_backend_ids
+            .clone();
+        for logical_id in logical_ids {
+            self.backend_aliases[logical_id.raw() as usize] = dst_backend_id;
+        }
+
+        Ok(BackendExpansion {
+            src_backend_id,
+            dst_backend_id,
+            src_layout,
+            dst_layout,
+        })
     }
 }
 
@@ -1119,6 +1256,32 @@ mod tests {
 
         let backend = manager.backend_for_key(key).unwrap();
         assert_eq!(backend.backend_id().raw(), backend0.raw());
+    }
+
+    #[test]
+    fn manager_aliases_old_backend_id_to_expanded_backend() {
+        let mut manager = BackendManager::new();
+        let backend0 = manager.add_backend(AtlasLayout::Tiny8).unwrap();
+        let key = manager
+            .backend_mut(backend0)
+            .unwrap()
+            .alloc_active()
+            .unwrap()
+            .key();
+
+        let expansion = manager.expand_backend(backend0).unwrap();
+
+        assert_eq!(expansion.src_backend_id, backend0);
+        assert_eq!(expansion.dst_layout, AtlasLayout::Small11);
+        assert_eq!(
+            manager.resolve_backend_id(backend0),
+            Some(expansion.dst_backend_id)
+        );
+
+        let backend = manager.backend(backend0).unwrap();
+        assert_eq!(backend.backend_id(), expansion.dst_backend_id);
+        assert!(backend.accepts_backend_id(backend0));
+        assert_eq!(backend.tile_state(key).unwrap(), TileState::Active);
     }
 
     #[test]

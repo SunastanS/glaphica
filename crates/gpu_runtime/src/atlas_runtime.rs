@@ -18,6 +18,7 @@ pub struct AtlasResolvedAddress<'a> {
 pub struct AtlasBackendResource<'a> {
     pub texture2d_array: &'a wgpu::Texture,
     pub format: wgpu::TextureFormat,
+    pub layout: AtlasLayout,
     pub layers: u32,
     pub kind: BackendKind,
 }
@@ -39,6 +40,7 @@ struct BackendBinding {
 #[derive(Debug)]
 pub struct AtlasStorageRuntime {
     backends: Vec<BackendBinding>,
+    backend_aliases: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +62,8 @@ fn default_usage_for_kind(kind: BackendKind) -> wgpu::TextureUsages {
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
         }
         BackendKind::BranchCache => {
-            wgpu::TextureUsages::COPY_SRC
+            wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
         }
@@ -83,6 +86,7 @@ impl Default for AtlasStorageRuntime {
     fn default() -> Self {
         Self {
             backends: Vec::new(),
+            backend_aliases: Vec::new(),
         }
     }
 }
@@ -95,6 +99,7 @@ impl AtlasStorageRuntime {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             backends: Vec::with_capacity(capacity),
+            backend_aliases: Vec::with_capacity(capacity),
         }
     }
 
@@ -134,11 +139,12 @@ impl AtlasStorageRuntime {
             format: config.format,
             texture2d_array,
         });
+        self.backend_aliases.push(backend_id);
         Ok(())
     }
 
     pub fn resolve(&self, key: TileKey) -> Option<AtlasResolvedAddress<'_>> {
-        let backend_index = key.backend_index() as usize;
+        let backend_index = self.resolve_backend_id(key.backend_index())? as usize;
         let backend = self.backends.get(backend_index)?;
         let address = build_address(backend.layout, key.slot_index());
         Some(AtlasResolvedAddress {
@@ -149,13 +155,36 @@ impl AtlasStorageRuntime {
     }
 
     pub fn backend_resource(&self, backend_id: u8) -> Option<AtlasBackendResource<'_>> {
+        let backend_id = self.resolve_backend_id(backend_id)?;
         let backend = self.backends.get(backend_id as usize)?;
         Some(AtlasBackendResource {
             texture2d_array: &backend.texture2d_array,
             format: backend.format,
+            layout: backend.layout,
             layers: backend.layout.layers(),
             kind: backend.kind,
         })
+    }
+
+    pub fn alias_backend(&mut self, logical_backend_id: u8, physical_backend_id: u8) -> Option<()> {
+        let physical_backend_id = self.resolve_backend_id(physical_backend_id)?;
+        let alias = self.backend_aliases.get_mut(logical_backend_id as usize)?;
+        *alias = physical_backend_id;
+        Some(())
+    }
+
+    pub fn resolve_backend_id(&self, backend_id: u8) -> Option<u8> {
+        let mut current = *self.backend_aliases.get(backend_id as usize)?;
+        let mut hops = 0usize;
+        while hops < self.backend_aliases.len() {
+            let next = *self.backend_aliases.get(current as usize)?;
+            if next == current {
+                return Some(current);
+            }
+            current = next;
+            hops += 1;
+        }
+        None
     }
 
     fn validate_backend_id(&self, backend_id: u8) -> Result<(), AtlasStorageRuntimeRegisterError> {
@@ -214,6 +243,12 @@ mod tests {
             })
         );
         assert!(runtime.validate_backend_id(0).is_ok());
+    }
+
+    #[test]
+    fn branch_cache_default_usage_supports_copy_dst() {
+        let usage = super::default_usage_for_kind(glaphica_core::BackendKind::BranchCache);
+        assert!(usage.contains(wgpu::TextureUsages::COPY_DST));
     }
 
     #[test]
@@ -280,5 +315,14 @@ mod tests {
         let runtime = AtlasStorageRuntime::new();
         let key = TileKey::from_parts(0, 0, 0);
         assert!(runtime.resolve(key).is_none());
+    }
+
+    #[test]
+    fn alias_backend_resolves_legacy_backend_id() {
+        let mut runtime = AtlasStorageRuntime::default();
+        runtime.backend_aliases = vec![1, 1];
+
+        assert_eq!(runtime.resolve_backend_id(0), Some(1));
+        assert_eq!(runtime.resolve_backend_id(1), Some(1));
     }
 }

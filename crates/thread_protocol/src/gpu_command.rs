@@ -1,6 +1,6 @@
 use glaphica_core::{
-    BlendMode, BrushId, ImageTileBinding, ImageTileKey, NodeId, RenderTreeGeneration, StrokeId,
-    TileKey,
+    AtlasLayout, BlendMode, BrushId, ImageTileBinding, ImageTileKey, NodeId,
+    RenderTreeGeneration, StrokeId, TileKey,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,8 +151,19 @@ pub struct TileSlotKeyUpdateMsg {
     pub updates: Vec<ImageTileBinding>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpandAtlasBackendMsg {
+    pub src_backend_id: u8,
+    pub dst_backend_id: u8,
+    pub src_layout: AtlasLayout,
+    pub dst_layout: AtlasLayout,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GpuCmdMsg {
+    /// Create a larger atlas backend, migrate the old backend content into it, then alias
+    /// the source backend id to the destination backend id for future tile-key resolution.
+    ExpandAtlasBackend(ExpandAtlasBackendMsg),
     /// Brush pipeline draw into one destination tile.
     DrawOp(DrawOp),
     /// Full-tile replacement: `src` overwrites `dst`.
