@@ -3,7 +3,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use glaphica_core::{
-    BackendId, BlendMode, BrushId, BrushInput, CanvasVec2, ImageTileKey, NodeId, TileKey,
+    BackendId, BlendMode, BrushId, BrushInput, CanvasVec2, ImageTileBinding, ImageTileKey, NodeId,
+    TileKey,
 };
 use images::Image;
 use thread_protocol::{
@@ -30,27 +31,19 @@ pub trait TileSlotAllocator {
     fn release(&mut self, _tile: TileKey) {}
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StrokeTileKey {
-    pub node_id: NodeId,
-    pub tile_index: usize,
-}
-
 pub struct StrokeDrawOutput {
     pub clear_op: Option<ClearOp>,
     pub draw_op: Option<DrawOp>,
     pub copy_op: Option<CopyOp>,
     pub write_op: Option<WriteOp>,
     pub composite_op: Option<CompositeOp>,
-    pub tile_key_update: Option<StrokeTileKeyUpdate>,
+    pub tile_key_update: Option<StrokeTileBindingUpdate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StrokeTileKeyUpdate {
-    pub node_id: NodeId,
-    pub tile_index: usize,
+pub struct StrokeTileBindingUpdate {
+    pub binding: ImageTileBinding,
     pub old_tile_key: TileKey,
-    pub new_tile_key: TileKey,
 }
 
 pub trait EngineBrushPipeline: Send {
@@ -169,9 +162,9 @@ struct AffectedTile {
 pub struct BrushEngineRuntime {
     pipelines: BrushRegistry<EngineBrushRegistration>,
     scratch_affected_tiles: Vec<AffectedTile>,
-    stroke_tiles: HashMap<StrokeTileKey, TileKey>,
-    stroke_restore_tiles: HashMap<StrokeTileKey, TileKey>,
-    stroke_buffer_tiles: HashMap<StrokeTileKey, TileKey>,
+    stroke_tiles: HashMap<ImageTileKey, TileKey>,
+    stroke_restore_tiles: HashMap<ImageTileKey, TileKey>,
+    stroke_buffer_tiles: HashMap<ImageTileKey, TileKey>,
 }
 
 impl BrushEngineRuntime {
@@ -550,6 +543,7 @@ impl BrushEngineRuntime {
         let affected_tiles: Vec<AffectedTile> = self.scratch_affected_tiles.clone();
 
         let mut prepared_tiles: Vec<(
+            ImageTileKey,
             usize,
             TileKey,
             TileKey,
@@ -559,7 +553,7 @@ impl BrushEngineRuntime {
             Option<ClearOp>,
             Option<TileKey>,
             TileKey,
-            Option<StrokeTileKeyUpdate>,
+            Option<StrokeTileBindingUpdate>,
         )> = Vec::new();
         let stroke_buffer_backend = self.pipelines.get(brush_id)?.stroke_buffer_backend;
         let uses_stroke_buffer = stroke_buffer_backend.is_some();
@@ -581,10 +575,7 @@ impl BrushEngineRuntime {
             };
 
         for affected_tile in affected_tiles {
-            let stroke_key = StrokeTileKey {
-                node_id,
-                tile_index: affected_tile.tile_index,
-            };
+            let image_tile = ImageTileKey::from_node_tile(node_id, affected_tile.tile_index);
 
             let (
                 final_tile_key,
@@ -594,10 +585,9 @@ impl BrushEngineRuntime {
                 erase_origin_tile_key,
                 tile_key_update,
             ) = self.prepare_tile_for_stroke(
-                stroke_key,
+                image_tile,
                 affected_tile.tile_key,
                 affected_tile.tile_index,
-                node_id,
                 image,
                 allocator,
                 restore_origin_before_each_dab,
@@ -605,13 +595,14 @@ impl BrushEngineRuntime {
 
             let (buffer_tile_key, clear_op) = if let Some(buffer_backend) = stroke_buffer_backend {
                 let (buffer_tile_key, clear_op) =
-                    self.prepare_stroke_buffer_tile(stroke_key, buffer_backend, allocator);
+                    self.prepare_stroke_buffer_tile(image_tile, buffer_backend, allocator);
                 (Some(buffer_tile_key), clear_op)
             } else {
                 (None, None)
             };
 
             prepared_tiles.push((
+                image_tile,
                 affected_tile.tile_index,
                 final_tile_key,
                 origin_tile,
@@ -626,6 +617,7 @@ impl BrushEngineRuntime {
         }
 
         for (
+            image_tile,
             tile_index,
             final_tile_key,
             origin_tile,
@@ -689,7 +681,7 @@ impl BrushEngineRuntime {
                             rgb,
                             brush_id,
                         }),
-                        image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
+                        image_tile,
                         tile_key: buffer_tile_key,
                         origin_tile: TileKey::EMPTY,
                         ref_image: None,
@@ -717,7 +709,7 @@ impl BrushEngineRuntime {
                     copy_op: None,
                     write_op: Some(WriteOp {
                         src_tile_key: buffer_tile_key,
-                        image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
+                        image_tile,
                         dst_tile_key: write_dst_tile_key,
                         blend_mode: BlendMode::Normal,
                         kind: if erase {
@@ -737,10 +729,7 @@ impl BrushEngineRuntime {
             } else {
                 let draw_tile_key = if erase {
                     let (erase_mask_tile_key, _) = self.prepare_stroke_buffer_tile(
-                        StrokeTileKey {
-                            node_id,
-                            tile_index,
-                        },
+                        image_tile,
                         final_tile_key.backend(),
                         allocator,
                     );
@@ -801,7 +790,7 @@ impl BrushEngineRuntime {
                             rgb,
                             brush_id,
                         }),
-                        image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
+                        image_tile,
                         tile_key: draw_tile_key,
                         origin_tile,
                         ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
@@ -812,7 +801,7 @@ impl BrushEngineRuntime {
                     write_op: if erase {
                         Some(WriteOp {
                             src_tile_key: draw_tile_key,
-                            image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
+                            image_tile,
                             dst_tile_key: copy_op
                                 .map(|copy_op| copy_op.dst_tile_key)
                                 .unwrap_or(final_tile_key),
@@ -837,29 +826,28 @@ impl BrushEngineRuntime {
 
     fn prepare_stroke_buffer_tile<A>(
         &mut self,
-        stroke_key: StrokeTileKey,
+        image_tile: ImageTileKey,
         buffer_backend: BackendId,
         allocator: &mut A,
     ) -> (TileKey, Option<ClearOp>)
     where
         A: TileSlotAllocator,
     {
-        if let Some(tile_key) = self.stroke_buffer_tiles.get(&stroke_key).copied() {
+        if let Some(tile_key) = self.stroke_buffer_tiles.get(&image_tile).copied() {
             return (tile_key, None);
         }
         let Some(tile_key) = allocator.alloc_active(buffer_backend) else {
             return (TileKey::EMPTY, None);
         };
-        self.stroke_buffer_tiles.insert(stroke_key, tile_key);
+        self.stroke_buffer_tiles.insert(image_tile, tile_key);
         (tile_key, Some(ClearOp { tile_key }))
     }
 
     fn prepare_tile_for_stroke<A>(
         &mut self,
-        stroke_key: StrokeTileKey,
+        image_tile: ImageTileKey,
         current_tile_key: TileKey,
         tile_index: usize,
-        node_id: NodeId,
         image: &mut Image,
         allocator: &mut A,
         restore_each_dab: bool,
@@ -869,15 +857,15 @@ impl BrushEngineRuntime {
         Option<CopyOp>,
         Option<ClearOp>,
         TileKey,
-        Option<StrokeTileKeyUpdate>,
+        Option<StrokeTileBindingUpdate>,
     )
     where
         A: TileSlotAllocator,
     {
-        if let Some(origin_tile) = self.stroke_tiles.get(&stroke_key).copied() {
+        if let Some(origin_tile) = self.stroke_tiles.get(&image_tile).copied() {
             let restore_tile = self
                 .stroke_restore_tiles
-                .get(&stroke_key)
+                .get(&image_tile)
                 .copied()
                 .unwrap_or(origin_tile);
             if !restore_each_dab {
@@ -958,8 +946,8 @@ impl BrushEngineRuntime {
                 None,
             );
         }
-        self.stroke_tiles.insert(stroke_key, origin_tile);
-        self.stroke_restore_tiles.insert(stroke_key, restore_tile);
+        self.stroke_tiles.insert(image_tile, origin_tile);
+        self.stroke_restore_tiles.insert(image_tile, restore_tile);
         if current_tile_key != TileKey::EMPTY {
             allocator.replace(current_tile_key, new_tile_key);
         }
@@ -970,11 +958,12 @@ impl BrushEngineRuntime {
             copy_op,
             origin_init_clear_op,
             restore_tile,
-            Some(StrokeTileKeyUpdate {
-                node_id,
-                tile_index,
+            Some(StrokeTileBindingUpdate {
+                binding: ImageTileBinding {
+                    image_tile,
+                    tile_key: new_tile_key,
+                },
                 old_tile_key: current_tile_key,
-                new_tile_key,
             }),
         )
     }

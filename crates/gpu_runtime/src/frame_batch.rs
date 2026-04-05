@@ -109,8 +109,7 @@ impl FrameBatch {
                     debug_assert!(false, "frame batch draw requires resolved stroke ctx");
                     return Ok(());
                 };
-                ctx.image_dirty_tracker
-                    .mark(draw_op.image_tile);
+                ctx.image_dirty_tracker.mark(draw_op.image_tile);
                 ctx.tile_dirty_tracker.mark(draw_op.tile_key);
                 self.has_commands = true;
             }
@@ -139,8 +138,7 @@ impl FrameBatch {
                     .write_tile_with_encoder(&mut self.encoder, &mut render_ctx, write_op)
                     .map_err(FrameBatchError::RenderError)?;
 
-                ctx.image_dirty_tracker
-                    .mark(write_op.image_tile);
+                ctx.image_dirty_tracker.mark(write_op.image_tile);
                 ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
                 self.has_commands = true;
             }
@@ -227,8 +225,7 @@ impl FrameBatch {
                 debug_assert!(false, "draw batch requires resolved stroke ctx");
                 continue;
             };
-            ctx.image_dirty_tracker
-                .mark(draw_op.image_tile);
+            ctx.image_dirty_tracker.mark(draw_op.image_tile);
             ctx.tile_dirty_tracker.mark(draw_op.tile_key);
         }
         self.has_commands = true;
@@ -253,8 +250,7 @@ impl FrameBatch {
             .map_err(FrameBatchError::RenderError)?;
 
         for write_op in write_ops {
-            ctx.image_dirty_tracker
-                .mark(write_op.image_tile);
+            ctx.image_dirty_tracker.mark(write_op.image_tile);
             ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
         }
         self.has_commands = true;

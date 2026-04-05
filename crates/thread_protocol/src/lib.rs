@@ -323,7 +323,10 @@ mod tests {
                     .stroke_ctx
                     .expect("test draw op must carry stroke ctx");
                 assert_eq!(stroke_ctx.node_id, NodeId(1));
-                assert_eq!(draw_op.image_tile, ImageTileKey::from_node_tile(NodeId(1), 0));
+                assert_eq!(
+                    draw_op.image_tile,
+                    ImageTileKey::from_node_tile(NodeId(1), 0)
+                );
                 assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
                 assert_eq!(draw_op.origin_tile, TileKey::from_parts(11, 12, 13));
                 assert_eq!(

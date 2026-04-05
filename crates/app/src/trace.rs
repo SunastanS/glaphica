@@ -801,7 +801,12 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
             GpuCmdMsg::WriteOp(write_op) => Self::WriteOp(TraceWriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
                 image_id: write_op.image_tile.image_id.0,
-                node_id: write_op.image_tile.image_id.node_id().map(|id| id.0).unwrap_or(0),
+                node_id: write_op
+                    .image_tile
+                    .image_id
+                    .node_id()
+                    .map(|id| id.0)
+                    .unwrap_or(0),
                 tile_index: write_op.image_tile.tile_index,
                 dst_tile_key: write_op.dst_tile_key.into(),
                 frame_merge: match write_op.frame_merge {
@@ -915,7 +920,10 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                         None
                     }
                 },
-                image_tile: ImageTileKey::new(glaphica_core::ImageId(draw_op.image_id), draw_op.tile_index),
+                image_tile: ImageTileKey::new(
+                    glaphica_core::ImageId(draw_op.image_id),
+                    draw_op.tile_index,
+                ),
                 tile_key: draw_op.tile_key.into(),
                 origin_tile: draw_op.origin_tile_key.into(),
                 ref_image: draw_op.ref_image_tile_key.map(|tile_key| RefImage {
@@ -938,7 +946,10 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
             }),
             TraceGpuCmd::WriteOp(write_op) => Self::WriteOp(WriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
-                image_tile: ImageTileKey::new(glaphica_core::ImageId(write_op.image_id), write_op.tile_index),
+                image_tile: ImageTileKey::new(
+                    glaphica_core::ImageId(write_op.image_id),
+                    write_op.tile_index,
+                ),
                 dst_tile_key: write_op.dst_tile_key.into(),
                 frame_merge: match write_op.frame_merge {
                     TraceGpuCmdFrameMergeTag::None => GpuCmdFrameMergeTag::None,

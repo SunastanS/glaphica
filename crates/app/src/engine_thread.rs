@@ -2,7 +2,8 @@ use atlas::{BackendManager, EditSession, TileKeySwap};
 use brushes::{BrushEngineRuntime, BrushResamplerDistance, StrokeDrawOutput, TileSlotAllocator};
 use document::{DeletedLayerRecord, Document, FlatRenderTree, SharedRenderTree};
 use glaphica_core::{
-    BackendId, BrushId, BrushInput, NodeId, RenderTreeGeneration, StrokeId, TileKey,
+    BackendId, BrushId, BrushInput, ImageTileBinding, ImageTileKey, NodeId, RenderTreeGeneration,
+    StrokeId, TileKey,
 };
 use images::Image;
 use std::{collections::HashMap, sync::Arc};
@@ -15,8 +16,7 @@ pub struct EngineBackendManager {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StrokeTileUndoRecord {
-    node_id: NodeId,
-    tile_index: usize,
+    image_tile: ImageTileKey,
     old_tile_key: TileKey,
     new_tile_key: TileKey,
 }
@@ -479,7 +479,7 @@ impl EngineThreadState {
         let mut draw_ops = Vec::new();
         let mut composite_ops = Vec::new();
         let mut write_ops = Vec::new();
-        let mut tile_updates: Vec<(NodeId, usize)> = Vec::new();
+        let mut tile_updates: Vec<ImageTileBinding> = Vec::new();
 
         for output in &self.stroke_outputs {
             if let Some(clear_op) = output.clear_op {
@@ -503,12 +503,11 @@ impl EngineThreadState {
             }
 
             if let Some(tile_update) = output.tile_key_update {
-                tile_updates.push((tile_update.node_id, tile_update.tile_index));
+                tile_updates.push(tile_update.binding);
                 self.pending_stroke_undo_tiles.push(StrokeTileUndoRecord {
-                    node_id: tile_update.node_id,
-                    tile_index: tile_update.tile_index,
+                    image_tile: tile_update.binding.image_tile,
                     old_tile_key: tile_update.old_tile_key,
-                    new_tile_key: tile_update.new_tile_key,
+                    new_tile_key: tile_update.binding.tile_key,
                 });
             }
         }
@@ -538,23 +537,10 @@ impl EngineThreadState {
         }
 
         if !tile_updates.is_empty() {
-            let tile_keys: Vec<_> = tile_updates
-                .iter()
-                .filter_map(|(node_id, tile_index)| {
-                    let image = self.document.get_leaf_image(*node_id)?;
-                    let tile_key = image.tile_key(*tile_index)?;
-                    Some(glaphica_core::ImageTileBinding {
-                        image_tile: glaphica_core::ImageTileKey::from_node_tile(
-                            *node_id,
-                            *tile_index,
-                        ),
-                        tile_key,
-                    })
-                })
-                .collect();
-
             gpu_cmds.push(thread_protocol::GpuCmdMsg::TileSlotKeyUpdate(
-                thread_protocol::TileSlotKeyUpdateMsg { updates: tile_keys },
+                thread_protocol::TileSlotKeyUpdateMsg {
+                    updates: tile_updates,
+                },
             ));
         }
         Ok(gpu_cmds)
@@ -590,9 +576,11 @@ impl EngineThreadState {
         }
 
         for tile in &record.tiles {
-            let image = self.document.get_leaf_image_mut(tile.node_id)?;
+            let image = self
+                .document
+                .get_leaf_image_mut(tile.image_tile.image_id.node_id()?)?;
             if image
-                .set_tile_key(tile.tile_index, tile.old_tile_key)
+                .set_tile_key(tile.image_tile.tile_index, tile.old_tile_key)
                 .is_err()
             {
                 return None;
@@ -611,9 +599,11 @@ impl EngineThreadState {
         self.backend_manager.retire_tiles(keys);
 
         for tile in &record.tiles {
-            let image = self.document.get_leaf_image_mut(tile.node_id)?;
+            let image = self
+                .document
+                .get_leaf_image_mut(tile.image_tile.image_id.node_id()?)?;
             if image
-                .set_tile_key(tile.tile_index, tile.new_tile_key)
+                .set_tile_key(tile.image_tile.tile_index, tile.new_tile_key)
                 .is_err()
             {
                 return None;
@@ -673,10 +663,7 @@ impl EngineThreadState {
                 .tiles
                 .iter()
                 .map(|tile| glaphica_core::ImageTileBinding {
-                    image_tile: glaphica_core::ImageTileKey::from_node_tile(
-                        tile.node_id,
-                        tile.tile_index,
-                    ),
+                    image_tile: tile.image_tile,
                     tile_key: if use_old_tile_key {
                         tile.old_tile_key
                     } else {

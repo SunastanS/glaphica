@@ -21,7 +21,7 @@ pub use config::{
 pub use draw_layout::{BrushDrawInputLayout, BrushDrawInputShape, BrushDrawKind};
 pub use engine_runtime::{
     BrushEngineRuntime, EngineBrushDispatchError, EngineBrushPipeline, StrokeDrawOutput,
-    StrokeTileKey, TileSlotAllocator,
+    TileSlotAllocator,
 };
 pub use gpu_pipeline_registry::BrushGpuPipelineRegistry;
 pub use gpu_pipeline_spec::BrushGpuPipelineSpec;

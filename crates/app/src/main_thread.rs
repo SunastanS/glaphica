@@ -932,7 +932,8 @@ impl MainThreadState {
                     continue;
                 };
                 for tile_index in 0..render_cache.tile_count() {
-                    self.image_dirty_tracker.mark_node_tile(*node_id, tile_index);
+                    self.image_dirty_tracker
+                        .mark_node_tile(*node_id, tile_index);
                 }
             }
         }
@@ -988,7 +989,10 @@ impl MainThreadState {
             .iter()
             .map(|batch| {
                 collect_sorted_unique_tile_indices(
-                    batch.updates.iter().map(|binding| binding.image_tile.tile_index),
+                    batch
+                        .updates
+                        .iter()
+                        .map(|binding| binding.image_tile.tile_index),
                 )
             })
             .collect()

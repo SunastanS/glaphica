@@ -2205,14 +2205,14 @@ mod tests {
             frame_merge: GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile,
         });
         let draw = |value| {
-                GpuCmdMsg::DrawOp(DrawOp {
-                    stroke_ctx: Some(DrawStrokeCtx {
-                        node_id: NodeId(1),
+            GpuCmdMsg::DrawOp(DrawOp {
+                stroke_ctx: Some(DrawStrokeCtx {
+                    node_id: NodeId(1),
                     blend_mode: BlendMode::Alpha,
                     frame_merge: DrawFrameMergePolicy::None,
-                        rgb: [1.0, 0.0, 0.0],
-                        brush_id: BrushId(2),
-                    }),
+                    rgb: [1.0, 0.0, 0.0],
+                    brush_id: BrushId(2),
+                }),
                 image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 tile_key: buffer_tile,
                 origin_tile: TileKey::EMPTY,
@@ -2701,9 +2701,12 @@ mod tests {
                     .gpu_commands
                     .iter()
                     .filter_map(|cmd| match cmd {
-                        GpuCmdMsg::TileSlotKeyUpdate(update) => {
-                            Some(update.updates.iter().map(|binding| binding.image_tile.tile_index))
-                        }
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
+                            update
+                                .updates
+                                .iter()
+                                .map(|binding| binding.image_tile.tile_index),
+                        ),
                         _ => None,
                     })
                     .flatten()
@@ -2789,9 +2792,12 @@ mod tests {
                     .gpu_commands
                     .iter()
                     .filter_map(|cmd| match cmd {
-                        GpuCmdMsg::TileSlotKeyUpdate(update) => {
-                            Some(update.updates.iter().map(|binding| binding.image_tile.tile_index))
-                        }
+                        GpuCmdMsg::TileSlotKeyUpdate(update) => Some(
+                            update
+                                .updates
+                                .iter()
+                                .map(|binding| binding.image_tile.tile_index),
+                        ),
                         _ => None,
                     })
                     .flatten()
