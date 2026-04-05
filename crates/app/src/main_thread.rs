@@ -914,12 +914,11 @@ impl MainThreadState {
         self.brush_runtime
             .executor_mut()
             .clear_transient_draw_resources();
-        let dirty_node_ids = self
-            .image_dirty_tracker
-            .iter()
-            .filter_map(|key| key.image_id.node_id())
-            .collect::<Vec<_>>();
         let tree = self.shared_tree.read();
+        let mut dirty_node_ids = Vec::new();
+        tree.for_each_node_backed_dirty_tile(&self.image_dirty_tracker, |node_id, _, _| {
+            dirty_node_ids.push(node_id);
+        });
         self.enqueue_dirty_preview_nodes(&tree, &dirty_node_ids);
         submit_perf
     }
@@ -933,7 +932,7 @@ impl MainThreadState {
                 };
                 for tile_index in 0..render_cache.tile_count() {
                     self.image_dirty_tracker
-                        .mark_node_tile(*node_id, tile_index);
+                        .mark(ImageTileKey::from_node_tile(*node_id, tile_index));
                 }
             }
         }
@@ -1078,7 +1077,7 @@ impl MainThreadState {
         let mut new_nodes = (*tree.nodes).clone();
 
         for binding in updates {
-            let Some(node_id) = binding.image_tile.image_id.node_id() else {
+            let Some((node_id, _)) = tree.resolve_node_image_tile(binding.image_tile) else {
                 continue;
             };
             let tile_index = binding.image_tile.tile_index;
@@ -1087,7 +1086,8 @@ impl MainThreadState {
                     continue;
                 };
                 if image.set_tile_key(tile_index, binding.tile_key).is_ok() {
-                    self.image_dirty_tracker.mark_node_tile(node_id, tile_index);
+                    self.image_dirty_tracker
+                        .mark(ImageTileKey::from_node_tile(node_id, tile_index));
                     self.tile_dirty_tracker.mark(binding.tile_key);
                 }
             }
@@ -1101,7 +1101,8 @@ impl MainThreadState {
 
         let updated_tree = self.shared_tree.read();
         for binding in updates {
-            let Some(node_id) = binding.image_tile.image_id.node_id() else {
+            let Some((node_id, _)) = updated_tree.resolve_node_image_tile(binding.image_tile)
+            else {
                 continue;
             };
             let mut current = Some(node_id);
@@ -1511,19 +1512,13 @@ fn summarize_dirty_tracker(
     let mut by_node = HashMap::<NodeId, DirtyNodeBounds>::new();
     let mut dirty_tile_count = 0usize;
 
-    for key in dirty.iter() {
-        let Some(node_id) = key.image_id.node_id() else {
-            continue;
-        };
-        let Some(node) = tree.nodes.get(&node_id) else {
-            continue;
-        };
+    tree.for_each_node_backed_dirty_tile(dirty, |node_id, node, tile_index| {
         let Some(image) = node.kind.render_image() else {
-            continue;
+            return;
         };
         let layout = image.layout();
         let tile_x = layout.tile_x();
-        let tile_index = key.tile_index as u32;
+        let tile_index = tile_index as u32;
         let tile_coord_x = tile_index % tile_x;
         let tile_coord_y = tile_index / tile_x;
         let entry = by_node.entry(node_id).or_default();
@@ -1540,7 +1535,7 @@ fn summarize_dirty_tracker(
             entry.has_any = true;
         }
         dirty_tile_count += 1;
-    }
+    });
 
     let dirty_rect_count = by_node.len();
     let dirty_bbox_tile_area = by_node

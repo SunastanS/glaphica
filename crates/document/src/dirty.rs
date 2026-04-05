@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use glaphica_core::{ImageTileKey, NodeId};
+use glaphica_core::ImageTileKey;
 
 #[derive(Debug, Default)]
 pub struct ImageDirtyTracker {
@@ -10,10 +10,6 @@ pub struct ImageDirtyTracker {
 impl ImageDirtyTracker {
     pub fn mark(&mut self, image_tile: ImageTileKey) {
         self.dirty.insert(image_tile);
-    }
-
-    pub fn mark_node_tile(&mut self, node_id: NodeId, tile_index: usize) {
-        self.mark(ImageTileKey::from_node_tile(node_id, tile_index));
     }
 
     pub fn clear(&mut self) {

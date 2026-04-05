@@ -1,4 +1,4 @@
-use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
+use glaphica_core::{BackendId, ImageTileKey, NodeId, RenderTreeGeneration, TileKey};
 use images::Image;
 use images::ImageCreateError;
 use images::layout::ImageLayout;
@@ -420,7 +420,7 @@ impl Document {
 
         let mut dirty = ImageDirtyTracker::default();
         for tile_index in 0..self.layout.total_tiles() as usize {
-            dirty.mark_node_tile(node_id, tile_index);
+            dirty.mark(ImageTileKey::from_node_tile(node_id, tile_index));
         }
         Some(dirty)
     }
@@ -434,7 +434,7 @@ impl Document {
 
         let mut dirty = ImageDirtyTracker::default();
         for tile_index in 0..self.layout.total_tiles() as usize {
-            dirty.mark_node_tile(node_id, tile_index);
+            dirty.mark(ImageTileKey::from_node_tile(node_id, tile_index));
         }
         Ok(dirty)
     }
