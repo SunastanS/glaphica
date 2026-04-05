@@ -110,21 +110,29 @@ impl Display for DocumentPackageError {
             }
             Self::TileAlloc { image_tile } => write!(
                 f,
-                "document package tile allocation failed for node {} tile {}",
-                image_tile.image_id.node_id().map(|id| id.0).unwrap_or(0),
-                image_tile.tile_index
+                "document package tile allocation failed for {}",
+                format_image_tile_context(*image_tile)
             ),
             Self::TileUpload { image_tile } => write!(
                 f,
-                "document package tile upload failed for node {} tile {}",
-                image_tile.image_id.node_id().map(|id| id.0).unwrap_or(0),
-                image_tile.tile_index
+                "document package tile upload failed for {}",
+                format_image_tile_context(*image_tile)
             ),
         }
     }
 }
 
 impl Error for DocumentPackageError {}
+
+fn format_image_tile_context(image_tile: ImageTileKey) -> String {
+    match image_tile.image_id.node_id() {
+        Some(node_id) => format!("node {} tile {}", node_id.0, image_tile.tile_index),
+        None => format!(
+            "image {} tile {}",
+            image_tile.image_id.0, image_tile.tile_index
+        ),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppControl {
