@@ -235,10 +235,9 @@ pub enum TraceGpuCmd {
 pub struct TraceDrawOp {
     pub node_id: Option<u64>,
     #[serde(default)]
-    pub image_id: u64,
+    pub image_tile: TraceImageTileKey,
     #[serde(default)]
     pub stroke_id: u64,
-    pub tile_index: usize,
     pub tile_key: TraceTileKey,
     pub blend_mode: Option<TraceDrawBlendMode>,
     pub frame_merge: Option<TraceDrawFrameMergePolicy>,
@@ -284,11 +283,9 @@ pub struct TraceCopyOp {
 pub struct TraceWriteOp {
     pub src_tile_key: TraceTileKey,
     #[serde(default)]
-    pub image_id: u64,
-    #[serde(default)]
     pub node_id: u64,
     #[serde(default)]
-    pub tile_index: usize,
+    pub image_tile: TraceImageTileKey,
     pub dst_tile_key: TraceTileKey,
     #[serde(default = "trace_gpu_cmd_frame_merge_none")]
     pub frame_merge: TraceGpuCmdFrameMergeTag,
@@ -338,7 +335,21 @@ pub struct TraceRenderTreeUpdatedMsg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceTileSlotKeyUpdateMsg {
-    pub updates: Vec<(u64, usize, TraceTileKey)>,
+    pub updates: Vec<TraceImageTileBinding>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct TraceImageTileKey {
+    #[serde(default)]
+    pub image_id: u64,
+    #[serde(default)]
+    pub tile_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TraceImageTileBinding {
+    pub image_tile: TraceImageTileKey,
+    pub tile_key: TraceTileKey,
 }
 
 #[derive(Debug, Default)]
@@ -759,9 +770,8 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
         match value {
             GpuCmdMsg::DrawOp(draw_op) => Self::DrawOp(TraceDrawOp {
                 node_id: draw_op.stroke_ctx.map(|ctx| ctx.node_id.0),
-                image_id: draw_op.image_tile.image_id.0,
+                image_tile: draw_op.image_tile.into(),
                 stroke_id: draw_op.stroke_id.0,
-                tile_index: draw_op.image_tile.tile_index,
                 tile_key: draw_op.tile_key.into(),
                 origin_tile_key: draw_op.origin_tile.into(),
                 ref_image_tile_key: draw_op.ref_image.map(|ref_image| ref_image.tile_key.into()),
@@ -800,14 +810,13 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
             }),
             GpuCmdMsg::WriteOp(write_op) => Self::WriteOp(TraceWriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
-                image_id: write_op.image_tile.image_id.0,
                 node_id: write_op
                     .image_tile
                     .image_id
                     .node_id()
                     .map(|id| id.0)
                     .unwrap_or(0),
-                tile_index: write_op.image_tile.tile_index,
+                image_tile: write_op.image_tile.into(),
                 dst_tile_key: write_op.dst_tile_key.into(),
                 frame_merge: match write_op.frame_merge {
                     GpuCmdFrameMergeTag::None => TraceGpuCmdFrameMergeTag::None,
@@ -863,12 +872,9 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
                     updates: message
                         .updates
                         .into_iter()
-                        .map(|binding| {
-                            (
-                                binding.image_tile.image_id.0,
-                                binding.image_tile.tile_index,
-                                binding.tile_key.into(),
-                            )
+                        .map(|binding| TraceImageTileBinding {
+                            image_tile: binding.image_tile.into(),
+                            tile_key: binding.tile_key.into(),
                         })
                         .collect(),
                 })
@@ -920,10 +926,7 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                         None
                     }
                 },
-                image_tile: ImageTileKey::new(
-                    glaphica_core::ImageId(draw_op.image_id),
-                    draw_op.tile_index,
-                ),
+                image_tile: draw_op.image_tile.into(),
                 tile_key: draw_op.tile_key.into(),
                 origin_tile: draw_op.origin_tile_key.into(),
                 ref_image: draw_op.ref_image_tile_key.map(|tile_key| RefImage {
@@ -946,10 +949,7 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
             }),
             TraceGpuCmd::WriteOp(write_op) => Self::WriteOp(WriteOp {
                 src_tile_key: write_op.src_tile_key.into(),
-                image_tile: ImageTileKey::new(
-                    glaphica_core::ImageId(write_op.image_id),
-                    write_op.tile_index,
-                ),
+                image_tile: write_op.image_tile.into(),
                 dst_tile_key: write_op.dst_tile_key.into(),
                 frame_merge: match write_op.frame_merge {
                     TraceGpuCmdFrameMergeTag::None => GpuCmdFrameMergeTag::None,
@@ -1001,17 +1001,29 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                     updates: message
                         .updates
                         .into_iter()
-                        .map(|(image_id, tile_index, tile_key)| ImageTileBinding {
-                            image_tile: ImageTileKey::new(
-                                glaphica_core::ImageId(image_id),
-                                tile_index,
-                            ),
-                            tile_key: TileKey::from(tile_key),
+                        .map(|binding| ImageTileBinding {
+                            image_tile: binding.image_tile.into(),
+                            tile_key: TileKey::from(binding.tile_key),
                         })
                         .collect(),
                 })
             }
         }
+    }
+}
+
+impl From<ImageTileKey> for TraceImageTileKey {
+    fn from(value: ImageTileKey) -> Self {
+        Self {
+            image_id: value.image_id.0,
+            tile_index: value.tile_index,
+        }
+    }
+}
+
+impl From<TraceImageTileKey> for ImageTileKey {
+    fn from(value: TraceImageTileKey) -> Self {
+        ImageTileKey::new(glaphica_core::ImageId(value.image_id), value.tile_index)
     }
 }
 

@@ -14,7 +14,7 @@ use document::{
     NewLayerKind, SharedRenderTree, UiBlendMode, UiLayerTreeItem,
 };
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use glaphica_core::{AtlasLayout, BrushId, NodeId, StrokeId};
+use glaphica_core::{AtlasLayout, BrushId, ImageTileKey, NodeId, StrokeId};
 use gpu_runtime::surface_runtime::SurfaceRuntime;
 use images::StoredImage;
 use images::layout::ImageLayout;
@@ -43,8 +43,8 @@ pub enum DocumentPackageError {
     Storage(DocumentStorageError),
     LayerExport(LayerImageExportError),
     MissingRasterNode { node_id: NodeId },
-    TileAlloc { node_id: NodeId, tile_index: usize },
-    TileUpload { node_id: NodeId, tile_index: usize },
+    TileAlloc { image_tile: ImageTileKey },
+    TileUpload { image_tile: ImageTileKey },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,21 +108,17 @@ impl Display for DocumentPackageError {
             Self::MissingRasterNode { node_id } => {
                 write!(f, "document package missing raster node {}", node_id.0)
             }
-            Self::TileAlloc {
-                node_id,
-                tile_index,
-            } => write!(
+            Self::TileAlloc { image_tile } => write!(
                 f,
                 "document package tile allocation failed for node {} tile {}",
-                node_id.0, tile_index
+                image_tile.image_id.node_id().map(|id| id.0).unwrap_or(0),
+                image_tile.tile_index
             ),
-            Self::TileUpload {
-                node_id,
-                tile_index,
-            } => write!(
+            Self::TileUpload { image_tile } => write!(
                 f,
                 "document package tile upload failed for node {} tile {}",
-                node_id.0, tile_index
+                image_tile.image_id.node_id().map(|id| id.0).unwrap_or(0),
+                image_tile.tile_index
             ),
         }
     }
@@ -1711,30 +1707,19 @@ impl AppThreadIntegration {
             };
             let mut tile_pixels = Vec::new();
             for tile_index in tile_indices {
+                let image_tile = ImageTileKey::from_node_tile(node_id, tile_index);
                 let tile_key = self
                     .engine_state
                     .allocate_leaf_tile(layer.backend())
-                    .ok_or(DocumentPackageError::TileAlloc {
-                        node_id,
-                        tile_index,
-                    })?;
-                layer.set_tile_key(tile_index, tile_key).map_err(|_| {
-                    DocumentPackageError::TileAlloc {
-                        node_id,
-                        tile_index,
-                    }
-                })?;
+                    .ok_or(DocumentPackageError::TileAlloc { image_tile })?;
+                layer
+                    .set_tile_key(tile_index, tile_key)
+                    .map_err(|_| DocumentPackageError::TileAlloc { image_tile })?;
                 image
                     .copy_tile_rgba8(tile_index, &mut tile_pixels)
-                    .map_err(|_| DocumentPackageError::TileUpload {
-                        node_id,
-                        tile_index,
-                    })?;
+                    .map_err(|_| DocumentPackageError::TileUpload { image_tile })?;
                 if !self.main_state.upload_tile_rgba8(tile_key, &tile_pixels) {
-                    return Err(DocumentPackageError::TileUpload {
-                        node_id,
-                        tile_index,
-                    });
+                    return Err(DocumentPackageError::TileUpload { image_tile });
                 }
             }
         }
@@ -2636,7 +2621,7 @@ mod tests {
                     update
                         .updates
                         .iter()
-                        .map(|(_, tile_index, _)| *tile_index)
+                        .map(|binding| binding.image_tile.tile_index)
                         .collect::<Vec<_>>(),
                 ),
                 _ => None,
