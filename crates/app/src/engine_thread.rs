@@ -576,9 +576,7 @@ impl EngineThreadState {
         }
 
         for tile in &record.tiles {
-            let image = self
-                .document
-                .get_leaf_image_mut(tile.image_tile.image_id.node_id()?)?;
+            let image = self.document.get_node_backed_image_mut(tile.image_tile)?;
             if image
                 .set_tile_key(tile.image_tile.tile_index, tile.old_tile_key)
                 .is_err()
@@ -599,9 +597,7 @@ impl EngineThreadState {
         self.backend_manager.retire_tiles(keys);
 
         for tile in &record.tiles {
-            let image = self
-                .document
-                .get_leaf_image_mut(tile.image_tile.image_id.node_id()?)?;
+            let image = self.document.get_node_backed_image_mut(tile.image_tile)?;
             if image
                 .set_tile_key(tile.image_tile.tile_index, tile.new_tile_key)
                 .is_err()

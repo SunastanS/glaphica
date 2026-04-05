@@ -393,8 +393,18 @@ impl Document {
         self.layer_tree.get_leaf_image(node_id)
     }
 
+    pub fn get_node_backed_image(&self, image_tile: ImageTileKey) -> Option<&Image> {
+        self.layer_tree
+            .get_leaf_image(image_tile.image_id.node_id()?)
+    }
+
     pub fn get_leaf_image_mut(&mut self, node_id: NodeId) -> Option<&mut Image> {
         self.layer_tree.get_leaf_image_mut(node_id)
+    }
+
+    pub fn get_node_backed_image_mut(&mut self, image_tile: ImageTileKey) -> Option<&mut Image> {
+        self.layer_tree
+            .get_leaf_image_mut(image_tile.image_id.node_id()?)
     }
 
     pub fn get_solid_color(&self, node_id: NodeId) -> Option<[f32; 4]> {
