@@ -308,7 +308,6 @@ mod tests {
 
         let draw_op = DrawOp {
             stroke_ctx: Some(DrawStrokeCtx {
-                node_id: NodeId(0),
                 blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 rgb: [1.0, 0.0, 0.0],
@@ -341,7 +340,6 @@ mod tests {
 
         let draw_op = DrawOp {
             stroke_ctx: Some(DrawStrokeCtx {
-                node_id: NodeId(0),
                 blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 rgb: [1.0, 0.0, 0.0],

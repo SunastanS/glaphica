@@ -769,7 +769,7 @@ impl From<GpuCmdMsg> for TraceGpuCmd {
     fn from(value: GpuCmdMsg) -> Self {
         match value {
             GpuCmdMsg::DrawOp(draw_op) => Self::DrawOp(TraceDrawOp {
-                node_id: draw_op.stroke_ctx.map(|ctx| ctx.node_id.0),
+                node_id: draw_op.image_tile.image_id.node_id().map(|id| id.0),
                 image_tile: draw_op.image_tile.into(),
                 stroke_id: draw_op.stroke_id.0,
                 tile_key: draw_op.tile_key.into(),
@@ -896,13 +896,12 @@ impl From<TraceGpuCmd> for GpuCmdMsg {
                     draw_op.brush_id,
                 ) {
                     (
-                        Some(node_id),
+                        Some(_node_id),
                         Some(blend_mode),
                         Some(frame_merge),
                         Some(rgb),
                         Some(brush_id),
                     ) => Some(DrawStrokeCtx {
-                        node_id: NodeId(node_id),
                         blend_mode: match blend_mode {
                             TraceDrawBlendMode::Alpha => BlendMode::Alpha,
                             TraceDrawBlendMode::Additive => BlendMode::Additive,

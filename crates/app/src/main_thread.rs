@@ -266,7 +266,6 @@ struct MergeableRoundDrawKey {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CachedStrokeDrawCtx {
-    node_id: NodeId,
     brush_id: BrushId,
     rgb: [f32; 3],
     blend_mode: thread_protocol::BlendMode,
@@ -1427,7 +1426,6 @@ fn resolve_cached_stroke_draw_ctx(
     match draw_op.stroke_ctx {
         Some(incoming_ctx) => {
             let incoming = CachedStrokeDrawCtx {
-                node_id: incoming_ctx.node_id,
                 brush_id: incoming_ctx.brush_id,
                 rgb: incoming_ctx.rgb,
                 blend_mode: incoming_ctx.blend_mode,
@@ -1465,7 +1463,6 @@ fn resolve_cached_stroke_draw_ctx(
                 return None;
             };
             Some(thread_protocol::DrawStrokeCtx {
-                node_id: cached_ctx.node_id,
                 brush_id: cached_ctx.brush_id,
                 rgb: cached_ctx.rgb,
                 blend_mode: cached_ctx.blend_mode,
@@ -1570,7 +1567,7 @@ fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
     for (index, cmd) in commands.iter().take(max_commands).enumerate() {
         match cmd {
             GpuCmdMsg::DrawOp(op) => {
-                let node_id = op.stroke_ctx.map(|ctx| ctx.node_id.0);
+                let node_id = op.image_tile.image_id.node_id().map(|node_id| node_id.0);
                 eprintln!(
                     "[PERF][gpu_cmd_trace][{}] DrawOp stroke={:?} node={:?} has_ctx={} tile_index={} tile_key={:?} origin_tile={:?} ref_tile={:?} input_len={}",
                     index,
@@ -1754,7 +1751,6 @@ mod tests {
         let draw = |input: Vec<f32>| {
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
                     blend_mode: BlendMode::Additive,
                     frame_merge: DrawFrameMergePolicy::None,
                     rgb: [1.0, 0.0, 0.0],
@@ -1797,7 +1793,6 @@ mod tests {
             stroke_id: StrokeId(stroke_id),
         };
         let make_ctx = |stroke_id: u64| DrawStrokeCtx {
-            node_id: NodeId(1),
             brush_id: BrushId(2),
             rgb: [1.0, 0.0, 0.0],
             blend_mode: if stroke_id == 17 {

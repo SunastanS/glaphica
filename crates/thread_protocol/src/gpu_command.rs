@@ -23,8 +23,6 @@ pub struct RefImage {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawStrokeCtx {
-    /// Image node that owns `tile_index`.
-    pub node_id: NodeId,
     pub blend_mode: BlendMode,
     /// In-frame merge hint used by frame scheduler/runtime.
     pub frame_merge: DrawFrameMergePolicy,

@@ -2200,7 +2200,6 @@ mod tests {
         let draw = |value| {
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
                     blend_mode: BlendMode::Alpha,
                     frame_merge: DrawFrameMergePolicy::None,
                     rgb: [1.0, 0.0, 0.0],
@@ -2252,7 +2251,6 @@ mod tests {
             }),
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
                     blend_mode: BlendMode::Alpha,
                     frame_merge: DrawFrameMergePolicy::None,
                     rgb: [1.0, 0.0, 0.0],
@@ -2273,7 +2271,6 @@ mod tests {
             }),
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(2),
                     blend_mode: BlendMode::Alpha,
                     frame_merge: DrawFrameMergePolicy::None,
                     rgb: [1.0, 0.0, 0.0],
@@ -2315,7 +2312,6 @@ mod tests {
         let mut commands = vec![
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
                     blend_mode: BlendMode::Alpha,
                     frame_merge: DrawFrameMergePolicy::None,
                     rgb: [1.0, 0.0, 0.0],
@@ -2372,7 +2368,6 @@ mod tests {
         let draw = |tile_key: TileKey, value: f32| {
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
                     blend_mode: BlendMode::Additive,
                     frame_merge: DrawFrameMergePolicy::KeepLastInFrameByNodeTileBrush,
                     rgb: [1.0, 0.0, 0.0],
@@ -2841,7 +2836,6 @@ mod tests {
         {
             commands.push(GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
                     blend_mode: BlendMode::Additive,
                     frame_merge: DrawFrameMergePolicy::None,
                     rgb: [1.0, 0.0, 0.0],

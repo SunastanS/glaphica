@@ -809,7 +809,6 @@ impl WgpuBrushExecutor {
             }));
         };
         let brush_id = stroke_ctx.brush_id;
-        let node_id = stroke_ctx.node_id;
         let blend_mode = stroke_ctx.blend_mode;
         let rgb = stroke_ctx.rgb;
         let brush_index = Self::brush_index(brush_id)?;
@@ -856,9 +855,13 @@ impl WgpuBrushExecutor {
             },
         )?;
         if should_trace_gpu_draw_exec_event() {
+            let image_context = match draw_op.image_tile.image_id.node_id() {
+                Some(node_id) => format!("node={}", node_id.0),
+                None => format!("image={}", draw_op.image_tile.image_id.0),
+            };
             eprintln!(
-                "[PERF][gpu_exec_trace][draw] node={} tile_index={} dst={:?}@({}, {}, l{}) src={:?}@({}, {}, l{}) origin={:?} ref={:?}",
-                node_id.0,
+                "[PERF][gpu_exec_trace][draw] {} tile_index={} dst={:?}@({}, {}, l{}) src={:?}@({}, {}, l{}) origin={:?} ref={:?}",
+                image_context,
                 draw_op.image_tile.tile_index,
                 draw_op.tile_key,
                 resolved.address.texel_offset.0,

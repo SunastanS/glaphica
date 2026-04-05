@@ -315,7 +315,6 @@ impl BrushEngineRuntime {
             .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
         Ok(DrawOp {
             stroke_ctx: Some(DrawStrokeCtx {
-                node_id,
                 blend_mode: if erase {
                     BlendMode::Replace
                 } else {
@@ -486,7 +485,6 @@ impl BrushEngineRuntime {
                 .map_err(|source| EngineBrushDispatchError::Pipeline { brush_id, source })?;
             emit(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
-                    node_id,
                     blend_mode: if erase {
                         BlendMode::Replace
                     } else {
@@ -675,7 +673,6 @@ impl BrushEngineRuntime {
                     clear_op,
                     draw_op: Some(DrawOp {
                         stroke_ctx: Some(DrawStrokeCtx {
-                            node_id,
                             blend_mode: BlendMode::Additive,
                             frame_merge: DrawFrameMergePolicy::None,
                             rgb,
@@ -780,7 +777,6 @@ impl BrushEngineRuntime {
                     clear_op: None,
                     draw_op: Some(DrawOp {
                         stroke_ctx: Some(DrawStrokeCtx {
-                            node_id,
                             blend_mode: if erase {
                                 BlendMode::Replace
                             } else {

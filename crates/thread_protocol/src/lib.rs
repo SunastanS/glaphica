@@ -301,7 +301,6 @@ mod tests {
         use glaphica_core::{NodeId, StrokeId};
         let cmd = GpuCmdMsg::DrawOp(DrawOp {
             stroke_ctx: Some(DrawStrokeCtx {
-                node_id: NodeId(1),
                 blend_mode: BlendMode::Alpha,
                 frame_merge: DrawFrameMergePolicy::None,
                 rgb: [1.0, 0.0, 0.0],
@@ -322,7 +321,6 @@ mod tests {
                 let stroke_ctx = draw_op
                     .stroke_ctx
                     .expect("test draw op must carry stroke ctx");
-                assert_eq!(stroke_ctx.node_id, NodeId(1));
                 assert_eq!(
                     draw_op.image_tile,
                     ImageTileKey::from_node_tile(NodeId(1), 0)
