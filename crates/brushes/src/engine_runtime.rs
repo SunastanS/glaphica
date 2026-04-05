@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use glaphica_core::{BackendId, BlendMode, BrushId, BrushInput, CanvasVec2, NodeId, TileKey};
+use glaphica_core::{
+    BackendId, BlendMode, BrushId, BrushInput, CanvasVec2, ImageTileKey, NodeId, TileKey,
+};
 use images::Image;
 use thread_protocol::{
     ClearOp, CompositeOp, CopyOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdFrameMergeTag,
@@ -330,7 +332,7 @@ impl BrushEngineRuntime {
                 rgb,
                 brush_id,
             }),
-            tile_index,
+            image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
             tile_key,
             origin_tile: TileKey::EMPTY,
             ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
@@ -501,7 +503,7 @@ impl BrushEngineRuntime {
                     rgb,
                     brush_id,
                 }),
-                tile_index: affected_tile.tile_index,
+                image_tile: ImageTileKey::from_node_tile(node_id, affected_tile.tile_index),
                 tile_key: affected_tile.tile_key,
                 origin_tile: TileKey::EMPTY,
                 ref_image: affected_tile
@@ -687,7 +689,7 @@ impl BrushEngineRuntime {
                             rgb,
                             brush_id,
                         }),
-                        tile_index,
+                        image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
                         tile_key: buffer_tile_key,
                         origin_tile: TileKey::EMPTY,
                         ref_image: None,
@@ -715,8 +717,7 @@ impl BrushEngineRuntime {
                     copy_op: None,
                     write_op: Some(WriteOp {
                         src_tile_key: buffer_tile_key,
-                        node_id,
-                        tile_index,
+                        image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
                         dst_tile_key: write_dst_tile_key,
                         blend_mode: BlendMode::Normal,
                         kind: if erase {
@@ -800,7 +801,7 @@ impl BrushEngineRuntime {
                             rgb,
                             brush_id,
                         }),
-                        tile_index,
+                        image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
                         tile_key: draw_tile_key,
                         origin_tile,
                         ref_image: ref_tile_key.map(|tile_key| RefImage { tile_key }),
@@ -811,8 +812,7 @@ impl BrushEngineRuntime {
                     write_op: if erase {
                         Some(WriteOp {
                             src_tile_key: draw_tile_key,
-                            node_id,
-                            tile_index,
+                            image_tile: ImageTileKey::from_node_tile(node_id, tile_index),
                             dst_tile_key: copy_op
                                 .map(|copy_op| copy_op.dst_tile_key)
                                 .unwrap_or(final_tile_key),

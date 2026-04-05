@@ -1,8 +1,9 @@
-use glaphica_core::{BackendId, ImageDirtyTracker, NodeId, RenderTreeGeneration, TileKey};
+use glaphica_core::{BackendId, NodeId, RenderTreeGeneration, TileKey};
 use images::Image;
 use images::ImageCreateError;
 use images::layout::ImageLayout;
 
+use crate::dirty::ImageDirtyTracker;
 use crate::layer_tree::{UiLayerTree, collect_raster_tile_keys_from_node};
 use crate::node::{
     BranchBlendMode, BranchConfig, LayerMoveTarget, LeafBlendMode, LeafConfig, NewLayerKind,
@@ -419,7 +420,7 @@ impl Document {
 
         let mut dirty = ImageDirtyTracker::default();
         for tile_index in 0..self.layout.total_tiles() as usize {
-            dirty.mark(node_id, tile_index);
+            dirty.mark_node_tile(node_id, tile_index);
         }
         Some(dirty)
     }
@@ -433,7 +434,7 @@ impl Document {
 
         let mut dirty = ImageDirtyTracker::default();
         for tile_index in 0..self.layout.total_tiles() as usize {
-            dirty.mark(node_id, tile_index);
+            dirty.mark_node_tile(node_id, tile_index);
         }
         Ok(dirty)
     }
@@ -795,7 +796,7 @@ mod tests {
 
         assert_eq!(doc.get_solid_color(NodeId(0)), Some([0.7, 0.6, 0.5, 1.0]));
         assert_eq!(keys.len(), layout.total_tiles() as usize);
-        assert_eq!(keys[0].node_id, NodeId(0));
+        assert_eq!(keys[0].image_id.node_id(), Some(NodeId(0)));
         assert_eq!(keys[0].tile_index, 0);
         assert_eq!(keys[1].tile_index, 1);
     }

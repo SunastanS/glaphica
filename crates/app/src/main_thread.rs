@@ -8,14 +8,14 @@ use brushes::{
     BrushDrawInputLayout, BrushDrawKind, BrushGpuPipelineRegistry, BrushLayoutRegistry,
     BrushRegistryError, BrushSpec,
 };
-use document::{FlatRenderTree, SharedRenderTree, View};
+use document::{FlatRenderTree, ImageDirtyTracker, SharedRenderTree, View};
 use glaphica_core::{
-    AtlasLayout, BackendId, BackendKind, BrushId, ImageDirtyTracker, NodeId, RenderTreeGeneration,
-    StrokeId, TextureFormat, TileDirtyTracker, TileKey,
+    AtlasLayout, BackendId, BackendKind, BrushId, ImageTileBinding, ImageTileKey, NodeId,
+    RenderTreeGeneration, StrokeId, TextureFormat, TileKey,
 };
 use gpu_runtime::{
     FrameBatch, FrameBatchContext, FrameBatchPerfStats, GpuContext, GpuContextInitDescriptor,
-    RenderContext, RenderExecutor,
+    RenderContext, RenderExecutor, TileDirtyTracker,
     atlas_runtime::AtlasStorageRuntime,
     brush_runtime::{BrushGpuRuntime, validate_draw_op_layout},
     surface_runtime::{SurfaceError, SurfaceRuntime},
@@ -108,8 +108,7 @@ fn tile_index_span(indices: &[usize]) -> (usize, usize) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DrawLaneKey {
-    node_id: NodeId,
-    tile_index: usize,
+    image_tile: ImageTileKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,9 +130,9 @@ fn draw_lane_key(cmd: &GpuCmdMsg) -> Option<DrawLaneKey> {
                 debug_assert!(false, "draw lane key requires resolved stroke ctx");
                 return None;
             };
+            let _ = stroke_ctx;
             Some(DrawLaneKey {
-                node_id: stroke_ctx.node_id,
-                tile_index: draw_op.tile_index,
+                image_tile: draw_op.image_tile,
             })
         }
         _ => None,
@@ -151,9 +150,9 @@ fn validate_draw_lane_contract(commands: &[GpuCmdMsg]) {
             debug_assert!(false, "draw lane validation requires resolved stroke ctx");
             continue;
         };
+        let _ = stroke_ctx;
         let lane = DrawLaneKey {
-            node_id: stroke_ctx.node_id,
-            tile_index: draw_op.tile_index,
+            image_tile: draw_op.image_tile,
         };
         match lane_to_tile_key.get(&lane).copied() {
             Some(existing) if existing != draw_op.tile_key => {
@@ -259,8 +258,7 @@ fn prevalidate_draw_layouts_parallel(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MergeableRoundDrawKey {
-    node_id: NodeId,
-    tile_index: usize,
+    image_tile: ImageTileKey,
     tile_key: TileKey,
     brush_id: BrushId,
     stroke_id: glaphica_core::StrokeId,
@@ -308,7 +306,7 @@ impl StrokeCtxRingBuffer {
 #[derive(Debug)]
 struct PendingVisibleTileUpdateBatch {
     submission_index: wgpu::SubmissionIndex,
-    updates: Vec<(NodeId, usize, TileKey)>,
+    updates: Vec<ImageTileBinding>,
 }
 
 fn compact_round_draws(
@@ -337,8 +335,7 @@ fn compact_round_draws(
                 // Within one frame that makes same-tile dabs mergeable as a single packed draw:
                 // no origin/ref sampling is involved and the final write happens later.
                 Some(MergeableRoundDrawKey {
-                    node_id: stroke_ctx.node_id,
-                    tile_index: draw_op.tile_index,
+                    image_tile: draw_op.image_tile,
                     tile_key: draw_op.tile_key,
                     brush_id: stroke_ctx.brush_id,
                     stroke_id: draw_op.stroke_id,
@@ -920,7 +917,7 @@ impl MainThreadState {
         let dirty_node_ids = self
             .image_dirty_tracker
             .iter()
-            .map(|key| key.node_id)
+            .filter_map(|key| key.image_id.node_id())
             .collect::<Vec<_>>();
         let tree = self.shared_tree.read();
         self.enqueue_dirty_preview_nodes(&tree, &dirty_node_ids);
@@ -935,7 +932,7 @@ impl MainThreadState {
                     continue;
                 };
                 for tile_index in 0..render_cache.tile_count() {
-                    self.image_dirty_tracker.mark(*node_id, tile_index);
+                    self.image_dirty_tracker.mark_node_tile(*node_id, tile_index);
                 }
             }
         }
@@ -947,12 +944,12 @@ impl MainThreadState {
     fn defer_tile_slot_key_update(
         &mut self,
         op: &TileSlotKeyUpdateMsg,
-        deferred_updates: &mut Vec<(NodeId, usize, TileKey)>,
+        deferred_updates: &mut Vec<ImageTileBinding>,
     ) {
-        for (node_id, tile_index, tile_key) in &op.updates {
-            self.image_dirty_tracker.mark(*node_id, *tile_index);
-            self.tile_dirty_tracker.mark(*tile_key);
-            deferred_updates.push((*node_id, *tile_index, *tile_key));
+        for binding in &op.updates {
+            self.image_dirty_tracker.mark(binding.image_tile);
+            self.tile_dirty_tracker.mark(binding.tile_key);
+            deferred_updates.push(*binding);
         }
     }
 
@@ -991,7 +988,7 @@ impl MainThreadState {
             .iter()
             .map(|batch| {
                 collect_sorted_unique_tile_indices(
-                    batch.updates.iter().map(|(_, tile_index, _)| *tile_index),
+                    batch.updates.iter().map(|binding| binding.image_tile.tile_index),
                 )
             })
             .collect()
@@ -1046,13 +1043,13 @@ impl MainThreadState {
         }
     }
 
-    fn apply_visible_tile_updates(&mut self, updates: &[(NodeId, usize, TileKey)]) {
+    fn apply_visible_tile_updates(&mut self, updates: &[ImageTileBinding]) {
         if updates.is_empty() {
             return;
         }
         if tile_timeline_trace_enabled() {
             let tile_indices = collect_sorted_unique_tile_indices(
-                updates.iter().map(|(_, tile_index, _)| *tile_index),
+                updates.iter().map(|binding| binding.image_tile.tile_index),
             );
             let (min_tile, max_tile) = tile_index_span(&tile_indices);
             eprintln!(
@@ -1064,7 +1061,7 @@ impl MainThreadState {
             );
         }
         let updated_tile_indices = collect_sorted_unique_tile_indices(
-            updates.iter().map(|(_, tile_index, _)| *tile_index),
+            updates.iter().map(|binding| binding.image_tile.tile_index),
         );
         if !updated_tile_indices.is_empty() {
             self.tile_runtime_events.push(TileRuntimeEvent {
@@ -1076,14 +1073,18 @@ impl MainThreadState {
         let tree = self.shared_tree.read();
         let mut new_nodes = (*tree.nodes).clone();
 
-        for (node_id, tile_index, tile_key) in updates {
-            if let Some(node) = new_nodes.get_mut(node_id) {
+        for binding in updates {
+            let Some(node_id) = binding.image_tile.image_id.node_id() else {
+                continue;
+            };
+            let tile_index = binding.image_tile.tile_index;
+            if let Some(node) = new_nodes.get_mut(&node_id) {
                 let Some(image) = node.kind.render_image_mut() else {
                     continue;
                 };
-                if image.set_tile_key(*tile_index, *tile_key).is_ok() {
-                    self.image_dirty_tracker.mark(*node_id, *tile_index);
-                    self.tile_dirty_tracker.mark(*tile_key);
+                if image.set_tile_key(tile_index, binding.tile_key).is_ok() {
+                    self.image_dirty_tracker.mark_node_tile(node_id, tile_index);
+                    self.tile_dirty_tracker.mark(binding.tile_key);
                 }
             }
         }
@@ -1095,8 +1096,11 @@ impl MainThreadState {
         });
 
         let updated_tree = self.shared_tree.read();
-        for (node_id, _, _) in updates {
-            let mut current = Some(*node_id);
+        for binding in updates {
+            let Some(node_id) = binding.image_tile.image_id.node_id() else {
+                continue;
+            };
+            let mut current = Some(node_id);
             while let Some(ancestor_id) = current {
                 if preview_source_image(&updated_tree, ancestor_id).is_some() {
                     self.enqueue_preview_node(ancestor_id);
@@ -1504,7 +1508,10 @@ fn summarize_dirty_tracker(
     let mut dirty_tile_count = 0usize;
 
     for key in dirty.iter() {
-        let Some(node) = tree.nodes.get(&key.node_id) else {
+        let Some(node_id) = key.image_id.node_id() else {
+            continue;
+        };
+        let Some(node) = tree.nodes.get(&node_id) else {
             continue;
         };
         let Some(image) = node.kind.render_image() else {
@@ -1515,7 +1522,7 @@ fn summarize_dirty_tracker(
         let tile_index = key.tile_index as u32;
         let tile_coord_x = tile_index % tile_x;
         let tile_coord_y = tile_index / tile_x;
-        let entry = by_node.entry(key.node_id).or_default();
+        let entry = by_node.entry(node_id).or_default();
         if entry.has_any {
             entry.min_x = entry.min_x.min(tile_coord_x);
             entry.min_y = entry.min_y.min(tile_coord_y);
@@ -1571,7 +1578,7 @@ fn trace_gpu_commands(commands: &[GpuCmdMsg], max_commands: usize) {
                     op.stroke_id,
                     node_id,
                     op.stroke_ctx.is_some(),
-                    op.tile_index,
+                    op.image_tile.tile_index,
                     op.tile_key,
                     op.origin_tile,
                     op.ref_image.map(|ref_image| ref_image.tile_key),
@@ -1738,7 +1745,7 @@ mod tests {
         resolve_cached_stroke_draw_ctx,
     };
     use brushes::builtin_brushes::round::ROUND_DRAW_LAYOUT;
-    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use glaphica_core::{BrushId, ImageTileKey, NodeId, StrokeId, TileKey};
     use std::collections::HashMap;
     use thread_protocol::{BlendMode, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdMsg};
 
@@ -1754,7 +1761,7 @@ mod tests {
                     rgb: [1.0, 0.0, 0.0],
                     brush_id: BrushId(2),
                 }),
-                tile_index: 3,
+                image_tile: ImageTileKey::from_node_tile(NodeId(1), 3),
                 tile_key,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -1783,7 +1790,7 @@ mod tests {
         let mut ring = StrokeCtxRingBuffer::with_capacity(16);
         let make_draw = |stroke_id: u64, stroke_ctx: Option<DrawStrokeCtx>| DrawOp {
             stroke_ctx,
-            tile_index: 0,
+            image_tile: ImageTileKey::from_node_tile(NodeId(0), 0),
             tile_key: TileKey::from_parts(0, 0, 0),
             origin_tile: TileKey::EMPTY,
             ref_image: None,

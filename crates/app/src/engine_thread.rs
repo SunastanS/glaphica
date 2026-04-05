@@ -543,7 +543,13 @@ impl EngineThreadState {
                 .filter_map(|(node_id, tile_index)| {
                     let image = self.document.get_leaf_image(*node_id)?;
                     let tile_key = image.tile_key(*tile_index)?;
-                    Some((*node_id, *tile_index, tile_key))
+                    Some(glaphica_core::ImageTileBinding {
+                        image_tile: glaphica_core::ImageTileKey::from_node_tile(
+                            *node_id,
+                            *tile_index,
+                        ),
+                        tile_key,
+                    })
                 })
                 .collect();
 
@@ -666,16 +672,16 @@ impl EngineThreadState {
             updates: record
                 .tiles
                 .iter()
-                .map(|tile| {
-                    (
+                .map(|tile| glaphica_core::ImageTileBinding {
+                    image_tile: glaphica_core::ImageTileKey::from_node_tile(
                         tile.node_id,
                         tile.tile_index,
-                        if use_old_tile_key {
-                            tile.old_tile_key
-                        } else {
-                            tile.new_tile_key
-                        },
-                    )
+                    ),
+                    tile_key: if use_old_tile_key {
+                        tile.old_tile_key
+                    } else {
+                        tile.new_tile_key
+                    },
                 })
                 .collect(),
         }

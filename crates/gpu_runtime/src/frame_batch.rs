@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use brushes::BrushDrawInputLayout;
 use brushes::BrushLayoutRegistry;
-use document::SharedRenderTree;
-use glaphica_core::{ImageDirtyTracker, TileDirtyTracker};
+use document::{ImageDirtyTracker, SharedRenderTree};
 use thread_protocol::{DrawOp, GpuCmdMsg, WriteOp};
 
 use crate::RenderExecutor;
 use crate::atlas_runtime::AtlasStorageRuntime;
 use crate::brush_runtime::{BrushGpuDispatchError, BrushGpuRuntime};
 use crate::context::GpuContext;
+use crate::dirty::TileDirtyTracker;
 use crate::render_executor::RenderContext;
 use crate::wgpu_brush_executor::WgpuBrushContext;
 
@@ -101,7 +101,7 @@ impl FrameBatch {
                     }
                 }
 
-                let Some(stroke_ctx) = draw_op.stroke_ctx else {
+                let Some(_stroke_ctx) = draw_op.stroke_ctx else {
                     eprintln!(
                         "[BUG][stroke_ctx] frame batch draw missing stroke ctx for stroke {:?}",
                         draw_op.stroke_id
@@ -110,7 +110,7 @@ impl FrameBatch {
                     return Ok(());
                 };
                 ctx.image_dirty_tracker
-                    .mark(stroke_ctx.node_id, draw_op.tile_index);
+                    .mark(draw_op.image_tile);
                 ctx.tile_dirty_tracker.mark(draw_op.tile_key);
                 self.has_commands = true;
             }
@@ -140,7 +140,7 @@ impl FrameBatch {
                     .map_err(FrameBatchError::RenderError)?;
 
                 ctx.image_dirty_tracker
-                    .mark(write_op.node_id, write_op.tile_index);
+                    .mark(write_op.image_tile);
                 ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
                 self.has_commands = true;
             }
@@ -219,7 +219,7 @@ impl FrameBatch {
             .map_err(FrameBatchError::BrushError)?;
 
         for draw_op in draw_ops {
-            let Some(stroke_ctx) = draw_op.stroke_ctx else {
+            let Some(_stroke_ctx) = draw_op.stroke_ctx else {
                 eprintln!(
                     "[BUG][stroke_ctx] draw batch missing stroke ctx for stroke {:?}",
                     draw_op.stroke_id
@@ -228,7 +228,7 @@ impl FrameBatch {
                 continue;
             };
             ctx.image_dirty_tracker
-                .mark(stroke_ctx.node_id, draw_op.tile_index);
+                .mark(draw_op.image_tile);
             ctx.tile_dirty_tracker.mark(draw_op.tile_key);
         }
         self.has_commands = true;
@@ -254,7 +254,7 @@ impl FrameBatch {
 
         for write_op in write_ops {
             ctx.image_dirty_tracker
-                .mark(write_op.node_id, write_op.tile_index);
+                .mark(write_op.image_tile);
             ctx.tile_dirty_tracker.mark(write_op.dst_tile_key);
         }
         self.has_commands = true;

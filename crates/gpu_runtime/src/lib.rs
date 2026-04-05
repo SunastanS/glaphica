@@ -1,9 +1,11 @@
 mod context;
+mod dirty;
 mod frame_batch;
 mod render_executor;
 pub mod surface_runtime;
 
 pub use context::{AdapterSelection, GpuContext, GpuContextInitDescriptor, GpuContextInitError};
+pub use dirty::TileDirtyTracker;
 pub use frame_batch::{FrameBatch, FrameBatchContext, FrameBatchError, FrameBatchPerfStats};
 pub use render_executor::{RenderContext, RenderExecutor, RenderExecutorError};
 pub use surface_runtime::{SurfaceError, SurfaceFrame, SurfaceRuntime};

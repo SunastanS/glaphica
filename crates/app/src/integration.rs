@@ -355,7 +355,7 @@ impl AppThreadIntegration {
         let mut indices = commands
             .iter()
             .filter_map(|cmd| match cmd {
-                GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.image_tile.tile_index),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -381,8 +381,7 @@ impl AppThreadIntegration {
     fn compact_frame_mergeable_draws(commands: &mut Vec<GpuCmdMsg>) {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         struct CompositeKey {
-            node_id: NodeId,
-            tile_index: usize,
+            image_tile: glaphica_core::ImageTileKey,
             tile_key: TileKey,
             brush_id: BrushId,
         }
@@ -401,8 +400,7 @@ impl AppThreadIntegration {
             };
             latest_composite_indices.insert(
                 CompositeKey {
-                    node_id: ctx.node_id,
-                    tile_index: draw_op.tile_index,
+                    image_tile: draw_op.image_tile,
                     tile_key: draw_op.tile_key,
                     brush_id: ctx.brush_id,
                 },
@@ -422,8 +420,7 @@ impl AppThreadIntegration {
                         Some(ctx) => {
                             latest_composite_indices
                                 .get(&CompositeKey {
-                                    node_id: ctx.node_id,
-                                    tile_index: draw_op.tile_index,
+                                    image_tile: draw_op.image_tile,
                                     tile_key: draw_op.tile_key,
                                     brush_id: ctx.brush_id,
                                 })
@@ -2208,15 +2205,15 @@ mod tests {
             frame_merge: GpuCmdFrameMergeTag::KeepFirstInFrameByDstTile,
         });
         let draw = |value| {
-            GpuCmdMsg::DrawOp(DrawOp {
-                stroke_ctx: Some(DrawStrokeCtx {
-                    node_id: NodeId(1),
+                GpuCmdMsg::DrawOp(DrawOp {
+                    stroke_ctx: Some(DrawStrokeCtx {
+                        node_id: NodeId(1),
                     blend_mode: BlendMode::Alpha,
                     frame_merge: DrawFrameMergePolicy::None,
-                    rgb: [1.0, 0.0, 0.0],
-                    brush_id: BrushId(2),
-                }),
-                tile_index: 3,
+                        rgb: [1.0, 0.0, 0.0],
+                        brush_id: BrushId(2),
+                    }),
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 tile_key: buffer_tile,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -2227,8 +2224,7 @@ mod tests {
         let write = |opacity| {
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
-                node_id: NodeId(1),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2269,7 +2265,7 @@ mod tests {
                     rgb: [1.0, 0.0, 0.0],
                     brush_id: BrushId(2),
                 }),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 tile_key: buffer_tile,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -2277,7 +2273,10 @@ mod tests {
                 stroke_id: StrokeId(4),
             }),
             GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {
-                updates: vec![(NodeId(1), 3, dst_tile)],
+                updates: vec![glaphica_core::ImageTileBinding {
+                    image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
+                    tile_key: dst_tile,
+                }],
             }),
             GpuCmdMsg::DrawOp(DrawOp {
                 stroke_ctx: Some(DrawStrokeCtx {
@@ -2287,7 +2286,7 @@ mod tests {
                     rgb: [1.0, 0.0, 0.0],
                     brush_id: BrushId(2),
                 }),
-                tile_index: 4,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(2), 4),
                 tile_key: buffer_tile,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -2296,8 +2295,7 @@ mod tests {
             }),
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
-                node_id: NodeId(1),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2330,7 +2328,7 @@ mod tests {
                     rgb: [1.0, 0.0, 0.0],
                     brush_id: BrushId(2),
                 }),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 tile_key: buffer_tile,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -2347,8 +2345,7 @@ mod tests {
             }),
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
-                node_id: NodeId(1),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2357,7 +2354,10 @@ mod tests {
                 frame_merge: GpuCmdFrameMergeTag::KeepLastInFrameByDstTile,
             }),
             GpuCmdMsg::TileSlotKeyUpdate(thread_protocol::TileSlotKeyUpdateMsg {
-                updates: vec![(NodeId(1), 3, dst_tile)],
+                updates: vec![glaphica_core::ImageTileBinding {
+                    image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
+                    tile_key: dst_tile,
+                }],
             }),
         ];
 
@@ -2385,7 +2385,7 @@ mod tests {
                     rgb: [1.0, 0.0, 0.0],
                     brush_id: BrushId(2),
                 }),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 tile_key,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -2396,8 +2396,7 @@ mod tests {
         let write = |src: TileKey, dst: TileKey| {
             GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: src,
-                node_id: NodeId(1),
-                tile_index: 3,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), 3),
                 dst_tile_key: dst,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2703,7 +2702,7 @@ mod tests {
                     .iter()
                     .filter_map(|cmd| match cmd {
                         GpuCmdMsg::TileSlotKeyUpdate(update) => {
-                            Some(update.updates.iter().map(|(_, tile_index, _)| *tile_index))
+                            Some(update.updates.iter().map(|binding| binding.image_tile.tile_index))
                         }
                         _ => None,
                     })
@@ -2715,7 +2714,7 @@ mod tests {
                     .gpu_commands
                     .iter()
                     .filter_map(|cmd| match cmd {
-                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.image_tile.tile_index),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -2791,7 +2790,7 @@ mod tests {
                     .iter()
                     .filter_map(|cmd| match cmd {
                         GpuCmdMsg::TileSlotKeyUpdate(update) => {
-                            Some(update.updates.iter().map(|(_, tile_index, _)| *tile_index))
+                            Some(update.updates.iter().map(|binding| binding.image_tile.tile_index))
                         }
                         _ => None,
                     })
@@ -2803,7 +2802,7 @@ mod tests {
                     .gpu_commands
                     .iter()
                     .filter_map(|cmd| match cmd {
-                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.tile_index),
+                        GpuCmdMsg::DrawOp(draw_op) => Some(draw_op.image_tile.tile_index),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -2849,7 +2848,7 @@ mod tests {
                     rgb: [1.0, 0.0, 0.0],
                     brush_id: BrushId(2),
                 }),
-                tile_index: group_index,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), group_index),
                 tile_key: buffer_tile,
                 origin_tile: TileKey::EMPTY,
                 ref_image: None,
@@ -2858,8 +2857,7 @@ mod tests {
             }));
             commands.push(GpuCmdMsg::WriteOp(WriteOp {
                 src_tile_key: buffer_tile,
-                node_id: NodeId(1),
-                tile_index: group_index,
+                image_tile: glaphica_core::ImageTileKey::from_node_tile(NodeId(1), group_index),
                 dst_tile_key: dst_tile,
                 blend_mode: BlendMode::Normal,
                 kind: WriteKind::Paint,
@@ -2869,7 +2867,13 @@ mod tests {
             }));
             commands.push(GpuCmdMsg::TileSlotKeyUpdate(
                 thread_protocol::TileSlotKeyUpdateMsg {
-                    updates: vec![(NodeId(1), group_index, dst_tile)],
+                    updates: vec![glaphica_core::ImageTileBinding {
+                        image_tile: glaphica_core::ImageTileKey::from_node_tile(
+                            NodeId(1),
+                            group_index,
+                        ),
+                        tile_key: dst_tile,
+                    }],
                 },
             ));
         }

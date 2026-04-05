@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use glaphica_core::{CanvasVec2, ImageDirtyTracker, NodeId, RenderTreeGeneration, TileKey};
+use glaphica_core::{CanvasVec2, NodeId, RenderTreeGeneration, TileKey};
 use images::Image;
 
+use crate::dirty::ImageDirtyTracker;
 use crate::node::LeafBlendMode;
 
 pub enum RenderSource {
@@ -52,12 +53,15 @@ impl FlatRenderTree {
         let mut groups: HashMap<NodeId, Vec<usize>> = HashMap::new();
 
         for key in dirty.iter() {
-            let Some(node) = self.nodes.get(&key.node_id) else {
+            let Some(node_id) = key.image_id.node_id() else {
+                continue;
+            };
+            let Some(node) = self.nodes.get(&node_id) else {
                 continue;
             };
 
             if matches!(node.kind, FlatNodeKind::Branch { .. }) {
-                groups.entry(key.node_id).or_default().push(key.tile_index);
+                groups.entry(node_id).or_default().push(key.tile_index);
             }
 
             let mut current_parent_id = node.parent_id;
@@ -478,9 +482,7 @@ impl SharedRenderTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glaphica_core::{
-        BackendId, IMAGE_TILE_SIZE, ImageDirtyTracker, RenderTreeGeneration, TileKey,
-    };
+    use glaphica_core::{BackendId, IMAGE_TILE_SIZE, RenderTreeGeneration, TileKey};
     use images::layout::ImageLayout;
 
     #[test]
@@ -574,7 +576,7 @@ mod tests {
 
         // Test 1: Only tile 0 is dirty
         let mut dirty_tracker = ImageDirtyTracker::default();
-        dirty_tracker.mark(NodeId(1), 0); // Only child1 tile 0
+        dirty_tracker.mark_node_tile(NodeId(1), 0); // Only child1 tile 0
 
         let cmds = tree.build_render_cmds(&dirty_tracker);
 
@@ -592,8 +594,8 @@ mod tests {
 
         // Test 2: Both tiles are dirty
         let mut dirty_tracker = ImageDirtyTracker::default();
-        dirty_tracker.mark(NodeId(1), 0);
-        dirty_tracker.mark(NodeId(1), 1);
+        dirty_tracker.mark_node_tile(NodeId(1), 0);
+        dirty_tracker.mark_node_tile(NodeId(1), 1);
 
         let cmds = tree.build_render_cmds(&dirty_tracker);
 
@@ -704,8 +706,8 @@ mod tests {
         };
 
         let mut dirty_tracker = ImageDirtyTracker::default();
-        dirty_tracker.mark(NodeId(2), 0);
-        dirty_tracker.mark(NodeId(2), 1);
+        dirty_tracker.mark_node_tile(NodeId(2), 0);
+        dirty_tracker.mark_node_tile(NodeId(2), 1);
 
         let parametric_cmds = tree.build_parametric_cmds(&dirty_tracker);
         let render_cmds = tree.build_render_cmds(&dirty_tracker);
@@ -809,7 +811,7 @@ mod tests {
         };
 
         let mut dirty_tracker = ImageDirtyTracker::default();
-        dirty_tracker.mark(NodeId(10), 0);
+        dirty_tracker.mark_node_tile(NodeId(10), 0);
 
         let render_cmds = tree.build_render_cmds(&dirty_tracker);
 
@@ -873,7 +875,7 @@ mod tests {
         };
         let mut dirty = ImageDirtyTracker::default();
         for &tile_index in &dirty_indices {
-            dirty.mark(NodeId(1), tile_index);
+            dirty.mark_node_tile(NodeId(1), tile_index);
         }
 
         let cmds = tree.build_render_cmds(&dirty);

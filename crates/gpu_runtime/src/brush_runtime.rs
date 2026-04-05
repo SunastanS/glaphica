@@ -237,7 +237,7 @@ mod tests {
         BrushGpuPipelineRegistry, BrushGpuPipelineSpec, BrushLayoutRegistry, BrushSpec,
     };
     use glaphica_core::BlendMode;
-    use glaphica_core::{BrushId, NodeId, StrokeId, TileKey};
+    use glaphica_core::{BrushId, ImageTileKey, NodeId, StrokeId, TileKey};
     use thread_protocol::{ClearOp, DrawFrameMergePolicy, DrawOp, DrawStrokeCtx, GpuCmdMsg};
 
     use super::{BrushDrawExecutor, BrushGpuApplyOutcome, BrushGpuDispatchError, BrushGpuRuntime};
@@ -314,7 +314,7 @@ mod tests {
                 rgb: [1.0, 0.0, 0.0],
                 brush_id: BrushId(2),
             }),
-            tile_index: 0,
+            image_tile: ImageTileKey::from_node_tile(NodeId(0), 0),
             tile_key: TileKey::from_parts(0, 0, 0),
             origin_tile: TileKey::EMPTY,
             ref_image: None,
@@ -347,7 +347,7 @@ mod tests {
                 rgb: [1.0, 0.0, 0.0],
                 brush_id: BrushId(1),
             }),
-            tile_index: 0,
+            image_tile: ImageTileKey::from_node_tile(NodeId(0), 0),
             tile_key: TileKey::from_parts(0, 0, 0),
             origin_tile: TileKey::EMPTY,
             ref_image: None,

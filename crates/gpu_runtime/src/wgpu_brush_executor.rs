@@ -859,7 +859,7 @@ impl WgpuBrushExecutor {
             eprintln!(
                 "[PERF][gpu_exec_trace][draw] node={} tile_index={} dst={:?}@({}, {}, l{}) src={:?}@({}, {}, l{}) origin={:?} ref={:?}",
                 node_id.0,
-                draw_op.tile_index,
+                draw_op.image_tile.tile_index,
                 draw_op.tile_key,
                 resolved.address.texel_offset.0,
                 resolved.address.texel_offset.1,

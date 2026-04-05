@@ -1,4 +1,7 @@
-use glaphica_core::{BlendMode, BrushId, NodeId, RenderTreeGeneration, StrokeId, TileKey};
+use glaphica_core::{
+    BlendMode, BrushId, ImageTileBinding, ImageTileKey, NodeId, RenderTreeGeneration, StrokeId,
+    TileKey,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawFrameMergePolicy {
@@ -34,8 +37,8 @@ pub struct DrawStrokeCtx {
 pub struct DrawOp {
     /// Optional stroke-level context. `None` means receiver should resolve from cached stroke ctx.
     pub stroke_ctx: Option<DrawStrokeCtx>,
-    /// Tile index in image-space tile grid (without gutter).
-    pub tile_index: usize,
+    /// Logical tile position in image-space tile grid (without gutter).
+    pub image_tile: ImageTileKey,
     /// Destination atlas tile key.
     pub tile_key: TileKey,
     /// Optional "origin snapshot" tile key used by brush pipelines that need read/restore.
@@ -76,10 +79,8 @@ pub struct CopyOp {
 pub struct WriteOp {
     /// Source tile in atlas space.
     pub src_tile_key: TileKey,
-    /// Image node that owns `tile_index`.
-    pub node_id: NodeId,
-    /// Tile index in image-space tile grid (without gutter).
-    pub tile_index: usize,
+    /// Logical tile position in image-space tile grid (without gutter).
+    pub image_tile: ImageTileKey,
     /// Destination tile in atlas space.
     ///
     /// Semantics preserve destination and apply `blend_mode` on top.
@@ -149,7 +150,7 @@ pub struct RenderTreeUpdatedMsg {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileSlotKeyUpdateMsg {
-    pub updates: Vec<(NodeId, usize, TileKey)>,
+    pub updates: Vec<ImageTileBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -95,7 +95,7 @@ mod tests {
         RefImage, SubmitWaterline, TileKey, WriteKind, WriteOp,
     };
 
-    use glaphica_core::PresentFrameId;
+    use glaphica_core::{ImageTileKey, PresentFrameId};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestReceipt {
@@ -307,7 +307,7 @@ mod tests {
                 rgb: [1.0, 0.0, 0.0],
                 brush_id: BrushId(7),
             }),
-            tile_index: 0,
+            image_tile: ImageTileKey::from_node_tile(NodeId(1), 0),
             tile_key: TileKey::from_parts(2, 3, 4),
             origin_tile: TileKey::from_parts(11, 12, 13),
             ref_image: Some(RefImage {
@@ -323,7 +323,7 @@ mod tests {
                     .stroke_ctx
                     .expect("test draw op must carry stroke ctx");
                 assert_eq!(stroke_ctx.node_id, NodeId(1));
-                assert_eq!(draw_op.tile_index, 0);
+                assert_eq!(draw_op.image_tile, ImageTileKey::from_node_tile(NodeId(1), 0));
                 assert_eq!(draw_op.tile_key, TileKey::from_parts(2, 3, 4));
                 assert_eq!(draw_op.origin_tile, TileKey::from_parts(11, 12, 13));
                 assert_eq!(
@@ -373,8 +373,7 @@ mod tests {
     fn gpu_cmd_write_op_carries_source_destination_and_blend_mode() {
         let cmd = GpuCmdMsg::WriteOp(WriteOp {
             src_tile_key: TileKey::from_parts(1, 2, 3),
-            node_id: glaphica_core::NodeId(7),
-            tile_index: 8,
+            image_tile: ImageTileKey::from_node_tile(glaphica_core::NodeId(7), 8),
             dst_tile_key: TileKey::from_parts(4, 5, 6),
             blend_mode: BlendMode::Normal,
             kind: WriteKind::Paint,
@@ -386,8 +385,10 @@ mod tests {
         match cmd {
             GpuCmdMsg::WriteOp(write_op) => {
                 assert_eq!(write_op.src_tile_key, TileKey::from_parts(1, 2, 3));
-                assert_eq!(write_op.node_id, glaphica_core::NodeId(7));
-                assert_eq!(write_op.tile_index, 8);
+                assert_eq!(
+                    write_op.image_tile,
+                    ImageTileKey::from_node_tile(glaphica_core::NodeId(7), 8)
+                );
                 assert_eq!(write_op.dst_tile_key, TileKey::from_parts(4, 5, 6));
                 assert_eq!(write_op.blend_mode, BlendMode::Normal);
                 assert_eq!(write_op.kind, WriteKind::Paint);
