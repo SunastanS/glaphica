@@ -1,15 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct TileKey(u64);
-
-impl TileKey {
-    pub const EMPTY: Self = Self(u64::MAX);
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-}
+use atlas::TileKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ImageId(pub u64);
@@ -37,7 +26,9 @@ pub struct ImageTileBinding {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageId, ImageTileBinding, ImageTileSlot, TileKey};
+    use atlas::TileKey;
+
+    use crate::{ImageId, ImageTileBinding, ImageTileSlot};
 
     #[test]
     fn image_tile_slot_keeps_image_and_tile_index() {
@@ -51,23 +42,11 @@ mod tests {
     fn image_tile_binding_keeps_slot_and_tile_key_together() {
         let binding = ImageTileBinding {
             image_tile: ImageTileSlot::new(ImageId(3), 9),
-            tile_key: TileKey::new(0x1234_5678_9ABC_DEF0),
+            tile_key: TileKey::EMPTY,
         };
 
         assert_eq!(binding.image_tile.image_id, ImageId(3));
         assert_eq!(binding.image_tile.tile_index, 9);
-        assert_eq!(binding.tile_key, TileKey::new(0x1234_5678_9ABC_DEF0));
-    }
-
-    #[test]
-    fn crate_can_construct_tile_key() {
-        let key = TileKey::new(0x1234_5678_9ABC_DEF0);
-
-        assert_eq!(key, TileKey(0x1234_5678_9ABC_DEF0));
-    }
-
-    #[test]
-    fn empty_is_all_ones() {
-        assert_eq!(TileKey::EMPTY, TileKey(u64::MAX));
+        assert_eq!(binding.tile_key, TileKey::EMPTY);
     }
 }

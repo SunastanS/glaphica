@@ -1,4 +1,4 @@
 [workspace]
-members = ["crates/core", "crates/renderer"]
+members = ["crates/atlas", "crates/core", "crates/image", "crates/renderer"]
 
 resolver = "3"
