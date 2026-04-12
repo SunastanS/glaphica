@@ -103,16 +103,14 @@ impl GpuContext {
         compatible_surface: Option<&'surface wgpu::Surface<'window>>,
     ) -> Result<Self, GpuContextInitError> {
         let adapter = match desc.adapter_selection {
-            AdapterSelection::Request => {
-                instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: desc.power_preference,
-                        force_fallback_adapter: desc.force_fallback_adapter,
-                        compatible_surface,
-                    })
-                    .await
-                    .map_err(GpuContextInitError::AdapterRequest)?
-            }
+            AdapterSelection::Request => instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: desc.power_preference,
+                    force_fallback_adapter: desc.force_fallback_adapter,
+                    compatible_surface,
+                })
+                .await
+                .map_err(GpuContextInitError::AdapterRequest)?,
             AdapterSelection::EnvOrDefault => {
                 wgpu::util::initialize_adapter_from_env_or_default(&instance, compatible_surface)
                     .await
@@ -185,6 +183,9 @@ mod tests {
         assert_eq!(desc.adapter_selection, AdapterSelection::EnvOrDefault);
         assert_eq!(desc.required_features, wgpu::Features::empty());
         assert!(!desc.force_fallback_adapter);
-        assert_eq!(desc.device_label.as_deref(), Some("glaphica-renderer-device"));
+        assert_eq!(
+            desc.device_label.as_deref(),
+            Some("glaphica-renderer-device")
+        );
     }
 }

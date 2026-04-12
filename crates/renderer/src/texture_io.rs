@@ -138,7 +138,11 @@ impl TextureColorRuntime {
             wgpu::TexelCopyTextureInfo {
                 texture: &texture.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -350,9 +354,15 @@ pub struct TextureReadback {
 
 #[derive(Debug)]
 pub enum TextureIoError {
-    InvalidExtent { width: u32, height: u32 },
+    InvalidExtent {
+        width: u32,
+        height: u32,
+    },
     InvalidLayerCount(u32),
-    LayerOutOfBounds { layer: u32, layers: u32 },
+    LayerOutOfBounds {
+        layer: u32,
+        layers: u32,
+    },
     ExtentMismatch {
         expected_width: u32,
         expected_height: u32,
@@ -379,7 +389,10 @@ impl Display for TextureIoError {
                 write!(f, "invalid texture layer count {layers}")
             }
             Self::LayerOutOfBounds { layer, layers } => {
-                write!(f, "texture layer {layer} is out of bounds for {layers} layers")
+                write!(
+                    f,
+                    "texture layer {layer} is out of bounds for {layers} layers"
+                )
             }
             Self::ExtentMismatch {
                 expected_width,
@@ -455,7 +468,11 @@ mod tests {
     fn prepare_upload_applies_import_transform() {
         let runtime = TextureColorRuntime::new(ColorManagement::new(ColorProfile::linear_srgb()));
         let prepared = runtime
-            .prepare_upload_rgba8(&[128, 128, 128, 255], ColorProfile::srgb(), AlphaMode::Straight)
+            .prepare_upload_rgba8(
+                &[128, 128, 128, 255],
+                ColorProfile::srgb(),
+                AlphaMode::Straight,
+            )
             .unwrap();
         assert!(prepared[0] < 80);
         assert_eq!(prepared[3], 255);
@@ -468,7 +485,15 @@ mod tests {
         assert_eq!(descriptor.layers, 7);
         assert!(descriptor.usage.contains(wgpu::TextureUsages::COPY_DST));
         assert!(descriptor.usage.contains(wgpu::TextureUsages::COPY_SRC));
-        assert!(descriptor.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
-        assert!(descriptor.usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
+        assert!(
+            descriptor
+                .usage
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+        );
+        assert!(
+            descriptor
+                .usage
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        );
     }
 }

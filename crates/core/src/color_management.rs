@@ -236,7 +236,10 @@ impl ColorProfile {
     pub fn icc_bytes(&self) -> Result<Vec<u8>, ColorManagementError> {
         match self {
             Self::Icc { bytes, .. } => Ok(bytes.to_vec()),
-            _ => self.to_lcms_profile()?.icc().map_err(ColorManagementError::from),
+            _ => self
+                .to_lcms_profile()?
+                .icc()
+                .map_err(ColorManagementError::from),
         }
     }
 
@@ -565,14 +568,15 @@ impl fmt::Display for ColorManagementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyIccProfile => write!(f, "ICC profile bytes are empty"),
-            Self::InvalidChromaticity(value) => write!(
-                f,
-                "invalid chromaticity x={} y={}",
-                value.x, value.y
-            ),
+            Self::InvalidChromaticity(value) => {
+                write!(f, "invalid chromaticity x={} y={}", value.x, value.y)
+            }
             Self::InvalidGamma(gamma) => write!(f, "invalid gamma value {gamma}"),
             Self::GpuTransformUnavailable => {
-                write!(f, "profile cannot be represented as a GPU-side matrix/curve transform")
+                write!(
+                    f,
+                    "profile cannot be represented as a GPU-side matrix/curve transform"
+                )
             }
             Self::MismatchedPixelBufferLengths {
                 source,
@@ -582,7 +586,10 @@ impl fmt::Display for ColorManagementError {
                 "source and destination pixel buffer lengths differ: {source} vs {destination}"
             ),
             Self::NonRgba8PixelBuffer { len } => {
-                write!(f, "pixel buffer length {len} is not a multiple of 4 RGBA8 bytes")
+                write!(
+                    f,
+                    "pixel buffer length {len} is not a multiple of 4 RGBA8 bytes"
+                )
             }
             Self::NonInvertibleMatrix => write!(f, "RGB color space matrix is non-invertible"),
             Self::Lcms(error) => write!(f, "littleCMS error: {error}"),
@@ -733,7 +740,10 @@ mod tests {
         let cms = ColorManagement::new(ColorProfile::linear_srgb());
         let transform = cms.display_transform(&ColorProfile::srgb()).unwrap();
         let uniform = transform.uniform();
-        assert_eq!(uniform.source_transfer_kind, GpuTransferCurve::Linear.kind_code());
+        assert_eq!(
+            uniform.source_transfer_kind,
+            GpuTransferCurve::Linear.kind_code()
+        );
         assert_eq!(
             uniform.destination_transfer_kind,
             GpuTransferCurve::Srgb.kind_code()

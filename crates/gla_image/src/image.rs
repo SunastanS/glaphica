@@ -24,7 +24,10 @@ impl Error for GlaImageCreateError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlaImageTileAccessError {
     OutOfBounds,
-    WrongBackend { expected: BackendId, actual: BackendId },
+    WrongBackend {
+        expected: BackendId,
+        actual: BackendId,
+    },
 }
 
 impl Display for GlaImageTileAccessError {
@@ -51,9 +54,10 @@ pub struct GlaImageNonEmptyTileBounds {
     pub max_tile_y: u32,
 }
 
+#[derive(Debug)]
 pub struct GlaImage {
     layout: GlaImageLayout,
-    tile_owners: Box<[Option<TileOwner>]>,
+    tile_owners: Box<[TileOwner]>,
     backend: BackendId,
 }
 
@@ -61,7 +65,7 @@ impl GlaImage {
     pub fn new(layout: GlaImageLayout, backend: BackendId) -> Result<Self, GlaImageCreateError> {
         let total_tiles =
             usize::try_from(layout.total_tiles()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
-        let tile_owners = std::iter::repeat_with(|| None)
+        let tile_owners = std::iter::repeat_with(TileOwner::empty)
             .take(total_tiles)
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -85,15 +89,11 @@ impl GlaImage {
     }
 
     pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        let tile_owner = self.tile_owners.get(tile_index)?;
-        Some(match tile_owner.as_ref() {
-            Some(tile_owner) => tile_owner.tile_key(),
-            None => TileKey::EMPTY,
-        })
+        Some(self.tile_owners.get(tile_index)?.tile_key())
     }
 
     pub fn tile_owner(&self, tile_index: usize) -> Option<&TileOwner> {
-        self.tile_owners.get(tile_index)?.as_ref()
+        self.tile_owners.get(tile_index)
     }
 
     pub fn tile_canvas_origin(&self, tile_index: usize) -> Option<CanvasVec2> {
@@ -104,7 +104,7 @@ impl GlaImage {
         &mut self,
         tile_index: usize,
         tile_owner: TileOwner,
-    ) -> Result<Option<TileOwner>, GlaImageTileAccessError> {
+    ) -> Result<TileOwner, GlaImageTileAccessError> {
         let actual_backend = tile_owner.backend_id();
         if actual_backend != self.backend {
             return Err(GlaImageTileAccessError::WrongBackend {
@@ -117,14 +117,17 @@ impl GlaImage {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
 
-        Ok(slot.replace(tile_owner))
+        Ok(std::mem::replace(slot, tile_owner))
     }
 
-    pub fn clear_tile(&mut self, tile_index: usize) -> Result<Option<TileOwner>, GlaImageTileAccessError> {
+    pub fn clear_tile(
+        &mut self,
+        tile_index: usize,
+    ) -> Result<TileOwner, GlaImageTileAccessError> {
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
-        Ok(slot.take())
+        Ok(std::mem::replace(slot, TileOwner::empty()))
     }
 
     pub fn resize_anchored_top_left(
@@ -136,11 +139,11 @@ impl GlaImage {
         }
 
         let old_layout = self.layout;
-        let new_total_tiles =
-            usize::try_from(new_layout.total_tiles()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
+        let new_total_tiles = usize::try_from(new_layout.total_tiles())
+            .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let mut old_tile_owners = std::mem::replace(
             &mut self.tile_owners,
-            std::iter::repeat_with(|| None)
+            std::iter::repeat_with(TileOwner::empty)
                 .take(new_total_tiles)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -158,7 +161,8 @@ impl GlaImage {
             }
 
             let new_index = tile_y * new_stride + tile_x;
-            self.tile_owners[new_index] = old_tile_owners[tile_index].take();
+            self.tile_owners[new_index] =
+                std::mem::replace(&mut old_tile_owners[tile_index], TileOwner::empty());
         }
 
         self.layout = new_layout;
@@ -170,7 +174,7 @@ impl GlaImage {
         let mut bounds: Option<GlaImageNonEmptyTileBounds> = None;
 
         for (tile_index, tile_owner) in self.tile_owners.iter().enumerate() {
-            if tile_owner.is_none() {
+            if tile_owner.tile_key() == TileKey::EMPTY {
                 continue;
             }
 
@@ -210,7 +214,7 @@ impl GlaImage {
                 let tile_key = self
                     .tile_owners
                     .get(index)
-                    .and_then(|slot| slot.as_ref().map(TileOwner::tile_key))
+                    .map(TileOwner::tile_key)
                     .unwrap_or(TileKey::EMPTY);
                 visit(index, tile_key);
             });
@@ -261,7 +265,7 @@ mod tests {
         let key = tile_owner.tile_key();
 
         let replaced = image.replace_tile_owner(0, tile_owner);
-        assert!(matches!(replaced, Ok(None)));
+        assert!(matches!(replaced, Ok(previous) if previous.tile_key() == TileKey::EMPTY));
         assert_eq!(image.tile_key(0), Some(key));
     }
 
@@ -327,7 +331,10 @@ mod tests {
 
         assert_eq!(
             slots,
-            vec![ImageTileSlot::new(ImageId(9), 0), ImageTileSlot::new(ImageId(9), 1)]
+            vec![
+                ImageTileSlot::new(ImageId(9), 0),
+                ImageTileSlot::new(ImageId(9), 1)
+            ]
         );
     }
 
@@ -336,8 +343,16 @@ mod tests {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
         let mut image = GlaImage::new(layout, BackendId::new(1)).unwrap();
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
-        assert!(image.replace_tile_owner(1, backend.alloc_active().unwrap()).is_ok());
-        assert!(image.replace_tile_owner(5, backend.alloc_active().unwrap()).is_ok());
+        assert!(
+            image
+                .replace_tile_owner(1, backend.alloc_active().unwrap())
+                .is_ok()
+        );
+        assert!(
+            image
+                .replace_tile_owner(5, backend.alloc_active().unwrap())
+                .is_ok()
+        );
 
         assert_eq!(
             image.non_empty_tile_bounds(),
@@ -377,7 +392,10 @@ mod tests {
 
         assert_eq!(image.tile_key(0), Some(kept_top_left_key));
         assert_eq!(image.tile_key(1), Some(kept_bottom_left_key));
-        assert_eq!(backend.tile_state(removed_top_right_key), Err(atlas::AtlasError::GenerationMismatch));
+        assert_eq!(
+            backend.tile_state(removed_top_right_key),
+            Err(atlas::AtlasError::GenerationMismatch)
+        );
         assert_eq!(
             backend.tile_state(removed_bottom_right_key),
             Err(atlas::AtlasError::GenerationMismatch)
@@ -387,8 +405,11 @@ mod tests {
     #[test]
     fn clear_tile_releases_owner_when_dropped() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
-        let mut image = GlaImage::new(GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE), BackendId::new(1))
-            .unwrap();
+        let mut image = GlaImage::new(
+            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
+            BackendId::new(1),
+        )
+        .unwrap();
         let tile_owner = backend.alloc_active().unwrap();
         let key = tile_owner.tile_key();
         assert!(image.replace_tile_owner(0, tile_owner).is_ok());
@@ -397,6 +418,9 @@ mod tests {
         assert!(removed.is_ok());
         drop(removed.unwrap());
 
-        assert_eq!(backend.tile_state(key), Err(atlas::AtlasError::GenerationMismatch));
+        assert_eq!(
+            backend.tile_state(key),
+            Err(atlas::AtlasError::GenerationMismatch)
+        );
     }
 }

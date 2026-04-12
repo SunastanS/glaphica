@@ -51,6 +51,13 @@ pub struct TileOwner {
 }
 
 impl TileOwner {
+    pub fn empty() -> Self {
+        Self {
+            recycle: BackendRecycleHandle::new(),
+            key: TileKey::EMPTY,
+        }
+    }
+
     pub const fn tile_key(&self) -> TileKey {
         self.key
     }
@@ -633,7 +640,8 @@ impl BackendManager {
     }
 
     pub fn add_backend(&mut self, layout: AtlasLayout) -> Result<BackendId, AtlasManagerError> {
-        let raw = u8::try_from(self.backends.len()).map_err(|_| AtlasManagerError::TooManyBackends)?;
+        let raw =
+            u8::try_from(self.backends.len()).map_err(|_| AtlasManagerError::TooManyBackends)?;
         let backend_id = BackendId::new(raw);
         self.backends.push(Backend::new(layout, backend_id));
         Ok(backend_id)
@@ -702,7 +710,10 @@ mod tests {
             Err(_) => return,
         };
 
-        assert_eq!(decode_tile_key(first.tile_key()).backend_id, BackendId::new(2));
+        assert_eq!(
+            decode_tile_key(first.tile_key()).backend_id,
+            BackendId::new(2)
+        );
         assert_eq!(decode_tile_key(first.tile_key()).slot_index, 0);
         assert_eq!(decode_tile_key(second.tile_key()).slot_index, 1);
     }
@@ -771,7 +782,10 @@ mod tests {
             Ok(owner) => owner,
             Err(_) => return,
         };
-        assert_eq!(decode_tile_key(replacement.tile_key()).slot_index, active_slot);
+        assert_eq!(
+            decode_tile_key(replacement.tile_key()).slot_index,
+            active_slot
+        );
     }
 
     #[test]
@@ -830,7 +844,9 @@ mod tests {
     fn manager_resolves_backend_from_tile_key() {
         let mut manager = BackendManager::new();
         let backend_id = manager.add_backend(AtlasLayout::Tiny8).unwrap();
-        let tile = manager.backend_mut(backend_id).and_then(|backend| backend.alloc_active().ok());
+        let tile = manager
+            .backend_mut(backend_id)
+            .and_then(|backend| backend.alloc_active().ok());
         assert!(tile.is_some());
         let tile = match tile {
             Some(owner) => owner.tile_key(),
