@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 atlas = { path = "../atlas" }
+glaphica_core = { package = "core", path = "../core" }
+serde = { version = "1", features = ["derive"] }

@@ -1,4 +1,14 @@
+mod image;
+mod layout;
+mod stored_image;
+
 use atlas::TileKey;
+
+pub use crate::image::{
+    GlaImage, GlaImageCreateError, GlaImageNonEmptyTileBounds, GlaImageTileAccessError,
+};
+pub use crate::layout::{GlaImageLayout, GlaImageLayoutError};
+pub use crate::stored_image::{GlaStoredImage, GlaStoredImageError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ImageId(pub u64);
@@ -28,7 +38,7 @@ pub struct ImageTileBinding {
 mod tests {
     use atlas::TileKey;
 
-    use crate::{ImageId, ImageTileBinding, ImageTileSlot};
+    use crate::{GlaImageLayout, ImageId, ImageTileBinding, ImageTileSlot};
 
     #[test]
     fn image_tile_slot_keeps_image_and_tile_index() {
@@ -48,5 +58,14 @@ mod tests {
         assert_eq!(binding.image_tile.image_id, ImageId(3));
         assert_eq!(binding.image_tile.tile_index, 9);
         assert_eq!(binding.tile_key, TileKey::EMPTY);
+    }
+
+    #[test]
+    fn gla_image_layout_reports_total_tiles() {
+        let layout = GlaImageLayout::new(63, 125);
+
+        assert_eq!(layout.tile_x(), 2);
+        assert_eq!(layout.tile_y(), 3);
+        assert_eq!(layout.total_tiles(), 6);
     }
 }
