@@ -2,9 +2,11 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::mpsc;
 
+use atlas::AtlasLayout;
+use gla_image::{GlaImage, GlaStoredImage, GlaStoredImageError};
 use glaphica_core::{
-    AlphaMode, ColorManagement, ColorManagementError, ColorProfile, CpuTransformOptions,
-    GpuColorTransformUniform,
+    ATLAS_TILE_SIZE, AlphaMode, ColorManagement, ColorManagementError, ColorProfile,
+    CpuTransformOptions, GUTTER_SIZE, GpuColorTransformUniform, IMAGE_TILE_SIZE,
 };
 
 pub struct TextureColorRuntime {
@@ -216,6 +218,67 @@ impl TextureColorRuntime {
             .map_err(TextureIoError::ColorManagement)?;
         Ok(readback)
     }
+
+    pub fn build_atlas_image_readback_request(
+        &self,
+        atlas_layout: AtlasLayout,
+        image: &GlaImage,
+    ) -> Result<AtlasImageReadbackRequest, TextureIoError> {
+        let mut tile_requests = Vec::new();
+        for tile_index in 0..image.tile_count() {
+            let Some(tile_key) = image.tile_key(tile_index) else {
+                continue;
+            };
+            if tile_key == atlas::TileKey::EMPTY {
+                continue;
+            }
+
+            let parts = tile_key.parts();
+            let slot_address = atlas_layout.slot_address(parts.slot_index).ok_or(
+                TextureIoError::AtlasSlotOutOfBounds {
+                    slot_index: parts.slot_index,
+                    total_slots: atlas_layout.total_slots(),
+                },
+            )?;
+            tile_requests.push(AtlasTileReadbackRequest {
+                atlas_layer: slot_address.layer,
+                atlas_origin_x: slot_address.tile_x * ATLAS_TILE_SIZE + GUTTER_SIZE,
+                atlas_origin_y: slot_address.tile_y * ATLAS_TILE_SIZE + GUTTER_SIZE,
+                destination_tile_index: tile_index,
+            });
+        }
+
+        Ok(AtlasImageReadbackRequest {
+            image_width: image.layout().size_x(),
+            image_height: image.layout().size_y(),
+            tile_requests,
+        })
+    }
+
+    pub fn export_gla_image_from_atlas(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas_layout: AtlasLayout,
+        atlas_texture: &RendererTexture,
+        image: &GlaImage,
+        destination_profile: ColorProfile,
+        alpha_mode: AlphaMode,
+    ) -> Result<GlaStoredImage, TextureIoError> {
+        let request = self.build_atlas_image_readback_request(atlas_layout, image)?;
+        let mut layer_readbacks = Vec::new();
+        for layer in 0..atlas_texture.layers {
+            layer_readbacks.push(self.export_texture_rgba8(
+                device,
+                queue,
+                atlas_texture,
+                layer,
+                destination_profile.clone(),
+                alpha_mode,
+            )?);
+        }
+        compose_stored_image_from_atlas_readbacks(&request, &layer_readbacks)
+    }
 }
 
 pub struct RendererTexture {
@@ -352,6 +415,21 @@ pub struct TextureReadback {
     pub pixels_rgba8: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AtlasTileReadbackRequest {
+    pub atlas_layer: u32,
+    pub atlas_origin_x: u32,
+    pub atlas_origin_y: u32,
+    pub destination_tile_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AtlasImageReadbackRequest {
+    pub image_width: u32,
+    pub image_height: u32,
+    pub tile_requests: Vec<AtlasTileReadbackRequest>,
+}
+
 #[derive(Debug)]
 pub enum TextureIoError {
     InvalidExtent {
@@ -372,6 +450,20 @@ pub enum TextureIoError {
     PixelBufferLengthMismatch {
         expected: usize,
         actual: usize,
+    },
+    AtlasSlotOutOfBounds {
+        slot_index: u32,
+        total_slots: u32,
+    },
+    AtlasLayerReadbackMissing {
+        layer: u32,
+        available_layers: usize,
+    },
+    AtlasReadbackExtentMismatch {
+        expected_width: u32,
+        expected_height: u32,
+        actual_width: u32,
+        actual_height: u32,
     },
     UnsupportedTextureFormat(wgpu::TextureFormat),
     BufferMap(wgpu::BufferAsyncError),
@@ -410,6 +502,30 @@ impl Display for TextureIoError {
                     "pixel buffer length mismatch: expected {expected} bytes, got {actual}"
                 )
             }
+            Self::AtlasSlotOutOfBounds {
+                slot_index,
+                total_slots,
+            } => write!(
+                f,
+                "atlas slot {slot_index} is out of bounds for layout with {total_slots} slots"
+            ),
+            Self::AtlasLayerReadbackMissing {
+                layer,
+                available_layers,
+            } => write!(
+                f,
+                "atlas layer {layer} is unavailable in readback set with {available_layers} layers"
+            ),
+            Self::AtlasReadbackExtentMismatch {
+                expected_width,
+                expected_height,
+                actual_width,
+                actual_height,
+            } => write!(
+                f,
+                "atlas readback extent mismatch: expected {}x{}, got {}x{}",
+                expected_width, expected_height, actual_width, actual_height
+            ),
             Self::UnsupportedTextureFormat(format) => {
                 write!(f, "unsupported texture format for RGBA8 IO: {format:?}")
             }
@@ -431,6 +547,9 @@ impl Error for TextureIoError {
             | Self::LayerOutOfBounds { .. }
             | Self::ExtentMismatch { .. }
             | Self::PixelBufferLengthMismatch { .. }
+            | Self::AtlasSlotOutOfBounds { .. }
+            | Self::AtlasLayerReadbackMissing { .. }
+            | Self::AtlasReadbackExtentMismatch { .. }
             | Self::UnsupportedTextureFormat(_) => None,
         }
     }
@@ -459,10 +578,80 @@ fn validate_rgba8_buffer(len: usize, width: u32, height: u32) -> Result<(), Text
     }
 }
 
+fn compose_stored_image_from_atlas_readbacks(
+    request: &AtlasImageReadbackRequest,
+    layer_readbacks: &[TextureReadback],
+) -> Result<GlaStoredImage, TextureIoError> {
+    let image_width = request.image_width as usize;
+    let image_height = request.image_height as usize;
+    let mut pixels_rgba8 = vec![0; image_width * image_height * 4];
+
+    for tile_request in &request.tile_requests {
+        let layer_readback = layer_readbacks
+            .get(tile_request.atlas_layer as usize)
+            .ok_or(TextureIoError::AtlasLayerReadbackMissing {
+                layer: tile_request.atlas_layer,
+                available_layers: layer_readbacks.len(),
+            })?;
+        if layer_readback.width == 0 || layer_readback.height == 0 {
+            return Err(TextureIoError::AtlasReadbackExtentMismatch {
+                expected_width: ATLAS_TILE_SIZE,
+                expected_height: ATLAS_TILE_SIZE,
+                actual_width: layer_readback.width,
+                actual_height: layer_readback.height,
+            });
+        }
+
+        let tile_origin_x = (tile_request.destination_tile_index % request_width_in_tiles(request))
+            * IMAGE_TILE_SIZE as usize;
+        let tile_origin_y = (tile_request.destination_tile_index / request_width_in_tiles(request))
+            * IMAGE_TILE_SIZE as usize;
+        let copy_width = image_width
+            .saturating_sub(tile_origin_x)
+            .min(IMAGE_TILE_SIZE as usize);
+        let copy_height = image_height
+            .saturating_sub(tile_origin_y)
+            .min(IMAGE_TILE_SIZE as usize);
+
+        for row in 0..copy_height {
+            let src_y = tile_request.atlas_origin_y as usize + row;
+            let src_start =
+                (src_y * layer_readback.width as usize + tile_request.atlas_origin_x as usize) * 4;
+            let src_end = src_start + copy_width * 4;
+            let dst_start = ((tile_origin_y + row) * image_width + tile_origin_x) * 4;
+            let dst_end = dst_start + copy_width * 4;
+            pixels_rgba8[dst_start..dst_end]
+                .copy_from_slice(&layer_readback.pixels_rgba8[src_start..src_end]);
+        }
+    }
+
+    GlaStoredImage::new_rgba8(request.image_width, request.image_height, pixels_rgba8).map_err(
+        |error| match error {
+            GlaStoredImageError::InvalidPixelCount { expected, actual } => {
+                TextureIoError::PixelBufferLengthMismatch { expected, actual }
+            }
+            GlaStoredImageError::TooLarge => TextureIoError::InvalidExtent {
+                width: request.image_width,
+                height: request.image_height,
+            },
+            GlaStoredImageError::TileOutOfBounds => TextureIoError::InvalidExtent {
+                width: request.image_width,
+                height: request.image_height,
+            },
+        },
+    )
+}
+
+fn request_width_in_tiles(request: &AtlasImageReadbackRequest) -> usize {
+    request.image_width.div_ceil(IMAGE_TILE_SIZE) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glaphica_core::ColorProfile;
+    use atlas::{AtlasLayout, Backend, BackendId};
+    use gla_image::{GlaImage, GlaImageLayout};
+    use glaphica_core::{ColorProfile, IMAGE_TILE_SIZE};
 
     #[test]
     fn prepare_upload_applies_import_transform() {
@@ -495,5 +684,119 @@ mod tests {
                 .usage
                 .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
         );
+    }
+
+    #[test]
+    fn atlas_readback_request_converts_tile_keys_into_offsets() {
+        let runtime = TextureColorRuntime::new(ColorManagement::new(ColorProfile::linear_srgb()));
+        let atlas_layout = AtlasLayout::Tiny8;
+        let backend = Backend::new(atlas_layout, BackendId::new(0));
+        let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
+        let mut image = GlaImage::new(layout, BackendId::new(0)).expect("image should build");
+        let first_owner = backend.alloc_active().expect("first tile should allocate");
+        let second_owner = backend.alloc_active().expect("second tile should allocate");
+        image
+            .replace_tile_owner(0, first_owner)
+            .expect("first tile should replace");
+        image
+            .replace_tile_owner(1, second_owner)
+            .expect("second tile should replace");
+
+        let request = runtime
+            .build_atlas_image_readback_request(atlas_layout, &image)
+            .expect("request should build");
+
+        assert_eq!(request.image_width, IMAGE_TILE_SIZE * 2);
+        assert_eq!(request.image_height, IMAGE_TILE_SIZE);
+        assert_eq!(request.tile_requests.len(), 2);
+        assert_eq!(
+            request.tile_requests[0],
+            AtlasTileReadbackRequest {
+                atlas_layer: 0,
+                atlas_origin_x: GUTTER_SIZE,
+                atlas_origin_y: GUTTER_SIZE,
+                destination_tile_index: 0,
+            }
+        );
+        assert_eq!(
+            request.tile_requests[1],
+            AtlasTileReadbackRequest {
+                atlas_layer: 0,
+                atlas_origin_x: ATLAS_TILE_SIZE + GUTTER_SIZE,
+                atlas_origin_y: GUTTER_SIZE,
+                destination_tile_index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn compose_stored_image_places_tiles_at_destination_offsets() {
+        let request = AtlasImageReadbackRequest {
+            image_width: IMAGE_TILE_SIZE + 1,
+            image_height: IMAGE_TILE_SIZE,
+            tile_requests: vec![
+                AtlasTileReadbackRequest {
+                    atlas_layer: 0,
+                    atlas_origin_x: GUTTER_SIZE,
+                    atlas_origin_y: GUTTER_SIZE,
+                    destination_tile_index: 0,
+                },
+                AtlasTileReadbackRequest {
+                    atlas_layer: 1,
+                    atlas_origin_x: GUTTER_SIZE,
+                    atlas_origin_y: GUTTER_SIZE,
+                    destination_tile_index: 1,
+                },
+            ],
+        };
+        let atlas_width = ATLAS_TILE_SIZE * 2;
+        let atlas_height = ATLAS_TILE_SIZE;
+        let mut first_layer = vec![0; (atlas_width * atlas_height * 4) as usize];
+        let mut second_layer = vec![0; (atlas_width * atlas_height * 4) as usize];
+        write_test_pixel(
+            &mut first_layer,
+            atlas_width,
+            GUTTER_SIZE,
+            GUTTER_SIZE,
+            [1, 2, 3, 4],
+        );
+        write_test_pixel(
+            &mut second_layer,
+            atlas_width,
+            GUTTER_SIZE,
+            GUTTER_SIZE,
+            [9, 8, 7, 6],
+        );
+
+        let composed = compose_stored_image_from_atlas_readbacks(
+            &request,
+            &[
+                TextureReadback {
+                    width: atlas_width,
+                    height: atlas_height,
+                    layer: 0,
+                    pixels_rgba8: first_layer,
+                },
+                TextureReadback {
+                    width: atlas_width,
+                    height: atlas_height,
+                    layer: 1,
+                    pixels_rgba8: second_layer,
+                },
+            ],
+        )
+        .expect("stored image should compose");
+
+        assert_eq!(&composed.pixels_rgba8()[..4], &[1, 2, 3, 4]);
+        let edge_offset = (IMAGE_TILE_SIZE as usize) * 4;
+        assert_eq!(
+            &composed.pixels_rgba8()[edge_offset..edge_offset + 4],
+            &[9, 8, 7, 6]
+        );
+    }
+
+    fn write_test_pixel(pixels: &mut [u8], width: u32, x: u32, y: u32, rgba: [u8; 4]) {
+        let offset = ((y * width + x) * 4) as usize;
+        pixels[offset..offset + 4].copy_from_slice(&rgba);
     }
 }

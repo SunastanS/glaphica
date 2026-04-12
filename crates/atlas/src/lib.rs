@@ -42,6 +42,24 @@ impl TileKey {
     const fn raw(self) -> u64 {
         self.0
     }
+
+    pub fn parts(self) -> TileKeyParts {
+        decode_tile_key(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileKeyParts {
+    pub backend_id: BackendId,
+    pub generation: u32,
+    pub slot_index: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtlasSlotAddress {
+    pub layer: u32,
+    pub tile_x: u32,
+    pub tile_y: u32,
 }
 
 #[derive(Debug)]
@@ -149,6 +167,22 @@ impl AtlasLayout {
             Self::Huge20 => 256,
         }
     }
+
+    pub fn slot_address(self, slot_index: u32) -> Option<AtlasSlotAddress> {
+        if slot_index >= self.total_slots() {
+            return None;
+        }
+
+        let tiles_per_edge = self.tiles_per_edge();
+        let slots_per_layer = tiles_per_edge.checked_mul(tiles_per_edge)?;
+        let layer = slot_index / slots_per_layer;
+        let layer_slot = slot_index % slots_per_layer;
+        Some(AtlasSlotAddress {
+            layer,
+            tile_x: layer_slot % tiles_per_edge,
+            tile_y: layer_slot / tiles_per_edge,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,13 +257,6 @@ enum SlotOwner {
 #[derive(Debug, Clone, Default)]
 struct CacheGroup {
     slots: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DecodedTileKey {
-    backend_id: BackendId,
-    generation: u32,
-    slot_index: u32,
 }
 
 #[derive(Debug, Default)]
@@ -677,9 +704,9 @@ fn encode_tile_key(backend_id: BackendId, generation: u32, slot_index: u32) -> T
     TileKey::from_raw(raw)
 }
 
-fn decode_tile_key(key: TileKey) -> DecodedTileKey {
+fn decode_tile_key(key: TileKey) -> TileKeyParts {
     let raw = key.raw();
-    DecodedTileKey {
+    TileKeyParts {
         backend_id: BackendId::new(((raw >> BACKEND_SHIFT) & BACKEND_MASK) as u8),
         generation: ((raw >> GENERATION_SHIFT) & GENERATION_MASK) as u32,
         slot_index: ((raw >> SLOT_SHIFT) & SLOT_MASK) as u32,
