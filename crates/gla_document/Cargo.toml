@@ -1,0 +1,13 @@
+[package]
+name = "gla_document"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+atlas = { path = "../atlas" }
+gla_image = { path = "../gla_image" }
+slotmap = "1"
+smallvec = "1.15.1"
+
+[dev-dependencies]
+glaphica_core = { package = "core", path = "../core" }
