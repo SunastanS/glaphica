@@ -2,116 +2,42 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use atlas::BackendId;
-use gla_image::{GlaImage, GlaImageLayout, GlaStoredImage, GlaStoredImageError};
-use slotmap::SecondaryMap;
-
+use atlas::{BackendId, TileKey};
+use gla_image::GlaImageLayout;
+use glaphica_core::IMAGE_TILE_SIZE;
 use crate::document::{GlaDoc, GlaDocError};
 use crate::node::{GlaBlendMode, GlaNodeId, GlaNodeKind};
 
 const DOCUMENT_FILE_NAME: &str = "document.bin";
-const THUMBNAIL_FILE_NAME: &str = "thumbnail.bin";
 const TILE_DIRECTORY_NAME: &str = "tiles";
 const DOCUMENT_MAGIC: [u8; 8] = *b"GLADOC01";
-const STORED_IMAGE_MAGIC: [u8; 8] = *b"GLAIMG01";
+const STORED_TILE_MAGIC: [u8; 8] = *b"GLATILE1";
 const DOCUMENT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlaDocImageAssetKind {
-    LeafSource { node_id: GlaNodeId },
-    Thumbnail,
-}
-
-pub struct GlaDocImageExportRequest {
-    asset_kind: GlaDocImageAssetKind,
-    source_node_id: GlaNodeId,
-    relative_path: PathBuf,
-}
-
-impl GlaDocImageExportRequest {
-    pub fn asset_kind(&self) -> GlaDocImageAssetKind {
-        self.asset_kind
-    }
-
-    pub fn source_node_id(&self) -> GlaNodeId {
-        self.source_node_id
-    }
-
-    pub fn relative_path(&self) -> &Path {
-        &self.relative_path
-    }
-}
-
-pub struct GlaDocDirectorySavePlan {
-    root_path: PathBuf,
-    document_bytes: Vec<u8>,
-    export_requests: Vec<GlaDocImageExportRequest>,
-}
-
-impl GlaDocDirectorySavePlan {
-    pub fn root_path(&self) -> &Path {
-        &self.root_path
-    }
-
-    pub fn export_requests(&self) -> &[GlaDocImageExportRequest] {
-        &self.export_requests
-    }
-
-    pub fn source_image<'a>(
-        &self,
-        doc: &'a GlaDoc,
-        request: &GlaDocImageExportRequest,
-    ) -> Result<&'a GlaImage, GlaDocStorageError> {
-        Ok(doc.node_image(request.source_node_id())?)
-    }
-
-    pub fn write_exported_images(
-        self,
-        exported_images: &[GlaStoredImage],
-    ) -> Result<(), GlaDocStorageError> {
-        if exported_images.len() != self.export_requests.len() {
-            return Err(GlaDocStorageError::ExportedImageCountMismatch {
-                expected: self.export_requests.len(),
-                actual: exported_images.len(),
-            });
-        }
-
-        fs::create_dir_all(&self.root_path)?;
-        let tile_directory = self.root_path.join(TILE_DIRECTORY_NAME);
-        if tile_directory.exists() {
-            fs::remove_dir_all(&tile_directory)?;
-        }
-        fs::create_dir_all(&tile_directory)?;
-
-        fs::write(self.root_path.join(DOCUMENT_FILE_NAME), self.document_bytes)?;
-
-        for (request, image) in self.export_requests.iter().zip(exported_images) {
-            let absolute_path = self.root_path.join(request.relative_path());
-            write_stored_image_file(&absolute_path, image)?;
-        }
-
-        Ok(())
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlaDocTileAsset {
+    pub image_tile_index: usize,
+    pub tile_key: TileKey,
+    pub pixels_rgba8: Vec<u8>,
 }
 
 pub struct GlaDocLeafSource {
     pub node_id: GlaNodeId,
-    pub image: GlaStoredImage,
+    pub tiles: Vec<GlaDocTileAsset>,
 }
 
 pub struct GlaDocLoadResult {
     pub doc: GlaDoc,
     pub leaf_sources: Vec<GlaDocLeafSource>,
-    pub thumbnail: GlaStoredImage,
+    pub thumbnail_tiles: Vec<GlaDocTileAsset>,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum GlaDocStorageError {
     Io(std::io::ErrorKind),
     Document(GlaDocError),
-    StoredImage(GlaStoredImageError),
     InvalidDocumentMagic,
-    InvalidStoredImageMagic,
+    InvalidStoredTileMagic,
     UnsupportedDocumentVersion(u32),
     InvalidNodeKind(u8),
     InvalidBlendMode(u8),
@@ -125,7 +51,7 @@ pub enum GlaDocStorageError {
     MissingThumbnailFile,
     NodeHasMultipleParents(u32),
     NodeIsUnreachable(u32),
-    ExportedImageCountMismatch { expected: usize, actual: usize },
+    InvalidTilePixelCount { expected: usize, actual: usize },
 }
 
 impl std::fmt::Display for GlaDocStorageError {
@@ -133,9 +59,8 @@ impl std::fmt::Display for GlaDocStorageError {
         match self {
             Self::Io(kind) => write!(f, "io error: {kind:?}"),
             Self::Document(err) => std::fmt::Display::fmt(err, f),
-            Self::StoredImage(err) => std::fmt::Display::fmt(err, f),
             Self::InvalidDocumentMagic => write!(f, "invalid gla document magic"),
-            Self::InvalidStoredImageMagic => write!(f, "invalid stored image magic"),
+            Self::InvalidStoredTileMagic => write!(f, "invalid stored tile magic"),
             Self::UnsupportedDocumentVersion(version) => {
                 write!(f, "unsupported gla document version {version}")
             }
@@ -161,9 +86,9 @@ impl std::fmt::Display for GlaDocStorageError {
             Self::NodeIsUnreachable(index) => {
                 write!(f, "serialized node {index} is unreachable from the root")
             }
-            Self::ExportedImageCountMismatch { expected, actual } => write!(
+            Self::InvalidTilePixelCount { expected, actual } => write!(
                 f,
-                "exported image count mismatch: expected {expected}, got {actual}"
+                "stored tile pixel count mismatch: expected {expected} bytes, got {actual}"
             ),
         }
     }
@@ -183,12 +108,6 @@ impl From<GlaDocError> for GlaDocStorageError {
     }
 }
 
-impl From<GlaStoredImageError> for GlaDocStorageError {
-    fn from(error: GlaStoredImageError) -> Self {
-        Self::StoredImage(error)
-    }
-}
-
 #[derive(Clone, Copy)]
 struct SerializedNode {
     kind: GlaNodeKind,
@@ -199,15 +118,11 @@ struct SerializedNode {
 }
 
 impl GlaDoc {
-    pub fn plan_directory_save(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> Result<GlaDocDirectorySavePlan, GlaDocStorageError> {
-        let root_path = path.as_ref().to_path_buf();
+    pub fn encode_binary(&self) -> Result<Vec<u8>, GlaDocStorageError> {
         let mut serialized_node_ids = Vec::new();
         self.collect_subtree_preorder(self.root_id(), &mut serialized_node_ids)?;
 
-        let mut node_indices = SecondaryMap::new();
+        let mut node_indices = slotmap::SecondaryMap::new();
         for (serialized_index, &node_id) in serialized_node_ids.iter().enumerate() {
             node_indices.insert(node_id, serialized_index);
         }
@@ -218,14 +133,16 @@ impl GlaDoc {
         write_u32(&mut document_bytes, self.layout().size_x());
         write_u32(&mut document_bytes, self.layout().size_y());
 
-        let active_layer_index = node_indices.get(self.active_layer_id()).copied().ok_or(
-            GlaDocStorageError::Document(GlaDocError::InvalidNodeId(self.active_layer_id())),
-        )?;
+        let active_layer_index = node_indices
+            .get(self.active_layer_id())
+            .copied()
+            .ok_or(GlaDocStorageError::Document(GlaDocError::InvalidNodeId(
+                self.active_layer_id(),
+            )))?;
         write_u32(&mut document_bytes, as_u32(active_layer_index)?);
         write_u32(&mut document_bytes, as_u32(serialized_node_ids.len())?);
 
-        let mut export_requests = Vec::new();
-        for (serialized_index, &node_id) in serialized_node_ids.iter().enumerate() {
+        for &node_id in &serialized_node_ids {
             let node = self.node(node_id)?;
             write_u8(&mut document_bytes, encode_node_kind(node.kind()));
             write_f32(&mut document_bytes, node.opacity());
@@ -234,36 +151,17 @@ impl GlaDoc {
             let children = node.children().unwrap_or(&[]);
             write_u32(&mut document_bytes, as_u32(children.len())?);
             for &child_id in children {
-                let child_index =
-                    node_indices
-                        .get(child_id)
-                        .copied()
-                        .ok_or(GlaDocStorageError::Document(GlaDocError::InvalidNodeId(
-                            child_id,
-                        )))?;
+                let child_index = node_indices
+                    .get(child_id)
+                    .copied()
+                    .ok_or(GlaDocStorageError::Document(GlaDocError::InvalidNodeId(
+                        child_id,
+                    )))?;
                 write_u32(&mut document_bytes, as_u32(child_index)?);
-            }
-
-            match node.kind() {
-                GlaNodeKind::Leaf => export_requests.push(GlaDocImageExportRequest {
-                    asset_kind: GlaDocImageAssetKind::LeafSource { node_id },
-                    source_node_id: node_id,
-                    relative_path: tile_relative_path(serialized_index),
-                }),
-                GlaNodeKind::Root => export_requests.push(GlaDocImageExportRequest {
-                    asset_kind: GlaDocImageAssetKind::Thumbnail,
-                    source_node_id: node_id,
-                    relative_path: PathBuf::from(THUMBNAIL_FILE_NAME),
-                }),
-                GlaNodeKind::Branch => {}
             }
         }
 
-        Ok(GlaDocDirectorySavePlan {
-            root_path,
-            document_bytes,
-            export_requests,
-        })
+        Ok(document_bytes)
     }
 
     pub fn load_directory(
@@ -324,31 +222,31 @@ impl GlaDoc {
                 continue;
             }
 
-            let image_path = root_path.join(tile_relative_path(serialized_index));
-            if !image_path.exists() {
-                return Err(GlaDocStorageError::MissingLeafSourceFile(as_u32(
-                    serialized_index,
-                )?));
-            }
-
             leaf_sources.push(GlaDocLeafSource {
                 node_id: live_node_ids[serialized_index],
-                image: read_stored_image_file(&image_path)?,
+                tiles: read_tile_assets_in_directory(&root_path.join(node_tile_directory(serialized_index)))?,
             });
         }
 
-        let thumbnail_path = root_path.join(THUMBNAIL_FILE_NAME);
-        if !thumbnail_path.exists() {
-            return Err(GlaDocStorageError::MissingThumbnailFile);
-        }
-        let thumbnail = read_stored_image_file(&thumbnail_path)?;
+        let thumbnail_tiles = read_tile_assets_in_directory(&root_path.join(node_tile_directory(0)))?;
 
         Ok(GlaDocLoadResult {
             doc,
             leaf_sources,
-            thumbnail,
+            thumbnail_tiles,
         })
     }
+}
+
+pub fn tile_asset_relative_path(serialized_index: usize, tile_key: TileKey) -> PathBuf {
+    node_tile_directory(serialized_index).join(format!("{}.bin", tile_key_file_stem(tile_key)))
+}
+
+pub fn write_tile_asset_file(
+    path: impl AsRef<Path>,
+    tile: &GlaDocTileAsset,
+) -> Result<(), GlaDocStorageError> {
+    write_stored_tile_file(path.as_ref(), tile)
 }
 
 fn validate_serialized_nodes(
@@ -446,36 +344,81 @@ fn parse_document_bytes(
     Ok((layout, active_layer_index, nodes, child_indices))
 }
 
-fn tile_relative_path(serialized_index: usize) -> PathBuf {
-    PathBuf::from(TILE_DIRECTORY_NAME).join(format!("{serialized_index}.bin"))
+pub(crate) fn node_tile_directory(serialized_index: usize) -> PathBuf {
+    PathBuf::from(TILE_DIRECTORY_NAME).join(serialized_index.to_string())
 }
 
-fn write_stored_image_file(path: &Path, image: &GlaStoredImage) -> Result<(), GlaDocStorageError> {
+fn write_stored_tile_file(path: &Path, tile: &GlaDocTileAsset) -> Result<(), GlaDocStorageError> {
+    validate_tile_pixels_rgba8_len(tile.pixels_rgba8.len())?;
+    let parent = path.parent().ok_or(GlaDocStorageError::Io(std::io::ErrorKind::InvalidInput))?;
+    fs::create_dir_all(parent)?;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&STORED_IMAGE_MAGIC);
-    write_u32(&mut bytes, image.width());
-    write_u32(&mut bytes, image.height());
-    write_u32(&mut bytes, as_u32(image.pixels_rgba8().len())?);
-    bytes.extend_from_slice(image.pixels_rgba8());
+    bytes.extend_from_slice(&STORED_TILE_MAGIC);
+    write_u32(&mut bytes, as_u32(tile.image_tile_index)?);
+    write_u64(&mut bytes, tile_key_to_u64(tile.tile_key));
+    write_u32(&mut bytes, as_u32(tile.pixels_rgba8.len())?);
+    bytes.extend_from_slice(&tile.pixels_rgba8);
     fs::write(path, bytes)?;
     Ok(())
 }
 
-fn read_stored_image_file(path: &Path) -> Result<GlaStoredImage, GlaDocStorageError> {
+fn read_stored_tile_file(path: &Path) -> Result<GlaDocTileAsset, GlaDocStorageError> {
     let bytes = fs::read(path)?;
     let mut cursor = std::io::Cursor::new(bytes);
     let mut magic = [0u8; 8];
     cursor.read_exact(&mut magic)?;
-    if magic != STORED_IMAGE_MAGIC {
-        return Err(GlaDocStorageError::InvalidStoredImageMagic);
+    if magic != STORED_TILE_MAGIC {
+        return Err(GlaDocStorageError::InvalidStoredTileMagic);
     }
 
-    let width = read_u32(&mut cursor)?;
-    let height = read_u32(&mut cursor)?;
+    let image_tile_index = usize_from_u32(read_u32(&mut cursor)?)?;
+    let tile_key = tile_key_from_u64(read_u64(&mut cursor)?);
     let pixel_len = usize_from_u32(read_u32(&mut cursor)?)?;
+    validate_tile_pixels_rgba8_len(pixel_len)?;
     let mut pixels_rgba8 = vec![0; pixel_len];
     cursor.read_exact(&mut pixels_rgba8)?;
-    GlaStoredImage::new_rgba8(width, height, pixels_rgba8).map_err(Into::into)
+    Ok(GlaDocTileAsset {
+        image_tile_index,
+        tile_key,
+        pixels_rgba8,
+    })
+}
+
+fn read_tile_assets_in_directory(path: &Path) -> Result<Vec<GlaDocTileAsset>, GlaDocStorageError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut file_paths = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        file_paths.push(entry.path());
+    }
+    file_paths.sort();
+
+    let mut tiles = Vec::with_capacity(file_paths.len());
+    for file_path in file_paths {
+        tiles.push(read_stored_tile_file(&file_path)?);
+    }
+    Ok(tiles)
+}
+
+fn validate_tile_pixels_rgba8_len(len: usize) -> Result<(), GlaDocStorageError> {
+    let expected = (IMAGE_TILE_SIZE as usize)
+        .checked_mul(IMAGE_TILE_SIZE as usize)
+        .and_then(|pixels: usize| pixels.checked_mul(4))
+        .ok_or(GlaDocStorageError::InvalidTilePixelCount {
+            expected: usize::MAX,
+            actual: len,
+        })?;
+    if len == expected {
+        Ok(())
+    } else {
+        Err(GlaDocStorageError::InvalidTilePixelCount {
+            expected,
+            actual: len,
+        })
+    }
 }
 
 fn encode_node_kind(kind: GlaNodeKind) -> u8 {
@@ -522,6 +465,10 @@ fn write_f32(output: &mut Vec<u8>, value: f32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
+fn write_u64(output: &mut Vec<u8>, value: u64) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
 fn read_u8(reader: &mut impl Read) -> Result<u8, GlaDocStorageError> {
     let mut bytes = [0u8; 1];
     reader.read_exact(&mut bytes)?;
@@ -540,7 +487,13 @@ fn read_f32(reader: &mut impl Read) -> Result<f32, GlaDocStorageError> {
     Ok(f32::from_le_bytes(bytes))
 }
 
-fn as_u32(value: usize) -> Result<u32, GlaDocStorageError> {
+fn read_u64(reader: &mut impl Read) -> Result<u64, GlaDocStorageError> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+pub(crate) fn as_u32(value: usize) -> Result<u32, GlaDocStorageError> {
     u32::try_from(value).map_err(|_| GlaDocStorageError::InvalidNodeIndex(u32::MAX))
 }
 
@@ -548,59 +501,41 @@ fn usize_from_u32(value: u32) -> Result<usize, GlaDocStorageError> {
     usize::try_from(value).map_err(|_| GlaDocStorageError::InvalidNodeIndex(value))
 }
 
+fn tile_key_file_stem(tile_key: TileKey) -> String {
+    let parts = tile_key.parts();
+    format!(
+        "{:02x}-{:06x}-{:08x}",
+        parts.backend_id.raw(),
+        parts.generation,
+        parts.slot_index
+    )
+}
+
+fn tile_key_to_u64(tile_key: TileKey) -> u64 {
+    unsafe { std::mem::transmute::<TileKey, u64>(tile_key) }
+}
+
+fn tile_key_from_u64(value: u64) -> TileKey {
+    unsafe { std::mem::transmute::<u64, TileKey>(value) }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use atlas::BackendId;
+    use atlas::{AtlasLayout, Backend, BackendId};
     use glaphica_core::IMAGE_TILE_SIZE;
 
     use crate::{GlaDoc, GlaImageLayout, GlaNodeKind};
 
-    use super::{GlaDocImageAssetKind, GlaDocStorageError};
-
-    #[test]
-    fn plan_directory_save_emits_leaf_sources_and_thumbnail_requests() {
-        let mut doc = new_doc(BackendId::new(3), BackendId::new(7));
-        let group_id = doc
-            .append_group(doc.root_id())
-            .expect("group should append");
-        let root_layer_id = doc
-            .append_layer(doc.root_id())
-            .expect("root layer should append");
-        let nested_layer_id = doc
-            .append_layer(group_id)
-            .expect("nested layer should append");
-
-        let plan = doc
-            .plan_directory_save(temp_directory("gla-doc-save-plan"))
-            .expect("save plan should build");
-
-        assert_eq!(plan.export_requests().len(), 3);
-        assert_eq!(
-            plan.export_requests()[0].asset_kind(),
-            GlaDocImageAssetKind::Thumbnail
-        );
-        assert_eq!(plan.export_requests()[1].source_node_id(), nested_layer_id);
-        assert_eq!(
-            plan.export_requests()[1].asset_kind(),
-            GlaDocImageAssetKind::LeafSource {
-                node_id: nested_layer_id
-            }
-        );
-        assert_eq!(plan.export_requests()[2].source_node_id(), root_layer_id);
-        assert_eq!(
-            plan.export_requests()[2].asset_kind(),
-            GlaDocImageAssetKind::LeafSource {
-                node_id: root_layer_id
-            }
-        );
-    }
+    use super::GlaDocTileAsset;
 
     #[test]
     fn plan_write_and_load_round_trip_preserves_tree_and_assets() {
         let mut doc = new_doc(BackendId::new(3), BackendId::new(7));
+        let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
+        let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         doc.set_opacity(doc.root_id(), 0.75)
             .expect("root opacity should update");
         doc.set_blend_mode(doc.root_id(), crate::GlaBlendMode::Multiply)
@@ -622,18 +557,17 @@ mod tests {
             .expect("nested layer blend should update");
         doc.set_active_layer(nested_layer_id)
             .expect("active layer should update");
+        let root_id = doc.root_id();
+        assign_tile(&mut doc, root_id, 0, &render_backend);
+        assign_tile(&mut doc, nested_layer_id, 0, &image_backend);
+        assign_tile(&mut doc, root_layer_id, 0, &image_backend);
 
         let temp_dir = temp_directory("gla-doc-round-trip");
-        let plan = doc
-            .plan_directory_save(&temp_dir)
-            .expect("save plan should build");
-        let exported_images = vec![
-            test_image(8, 6, 91),
-            test_image(IMAGE_TILE_SIZE + 3, IMAGE_TILE_SIZE + 1, 29),
-            test_image(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE, 11),
-        ];
-        plan.write_exported_images(&exported_images)
-            .expect("exported images should write");
+        let expected_root_tile_key = tile_key_for_node(&doc, doc.root_id(), 0);
+        let expected_nested_tile_key = tile_key_for_node(&doc, nested_layer_id, 0);
+        let expected_root_layer_tile_key = tile_key_for_node(&doc, root_layer_id, 0);
+        write_document_fixture(&doc, &temp_dir, &[91, 29, 11], &[(0, 0), (2, 0), (3, 0)])
+            .expect("fixture should write");
 
         let loaded = GlaDoc::load_directory(&temp_dir, BackendId::new(13), BackendId::new(17))
             .expect("document should load");
@@ -681,32 +615,13 @@ mod tests {
 
         assert_eq!(loaded.leaf_sources.len(), 2);
         assert_eq!(loaded.leaf_sources[0].node_id, preorder[2]);
-        assert_eq!(loaded.leaf_sources[0].image, exported_images[1]);
+        assert_eq!(loaded.leaf_sources[0].tiles, vec![test_tile(expected_nested_tile_key, 0, 29)]);
         assert_eq!(loaded.leaf_sources[1].node_id, preorder[3]);
-        assert_eq!(loaded.leaf_sources[1].image, exported_images[2]);
-        assert_eq!(loaded.thumbnail, exported_images[0]);
+        assert_eq!(loaded.leaf_sources[1].tiles, vec![test_tile(expected_root_layer_tile_key, 0, 11)]);
+        assert_eq!(loaded.thumbnail_tiles, vec![test_tile(expected_root_tile_key, 0, 91)]);
 
         std::fs::remove_dir_all(temp_dir).expect("temp directory should remove");
         assert_eq!(root_layer_id, root_layer_id);
-    }
-
-    #[test]
-    fn write_exported_images_requires_exact_request_count() {
-        let doc = new_doc(BackendId::new(3), BackendId::new(7));
-        let temp_dir = temp_directory("gla-doc-export-count");
-        let plan = doc
-            .plan_directory_save(&temp_dir)
-            .expect("save plan should build");
-
-        let result = plan.write_exported_images(&[]);
-
-        assert_eq!(
-            result.err(),
-            Some(GlaDocStorageError::ExportedImageCountMismatch {
-                expected: 1,
-                actual: 0,
-            })
-        );
     }
 
     fn new_doc(image_backend: BackendId, render_backend: BackendId) -> GlaDoc {
@@ -718,13 +633,95 @@ mod tests {
         .expect("document should build")
     }
 
-    fn test_image(width: u32, height: u32, seed: u8) -> gla_image::GlaStoredImage {
-        let mut pixels = vec![0; (width * height * 4) as usize];
+    fn test_tile(tile_key: atlas::TileKey, image_tile_index: usize, seed: u8) -> GlaDocTileAsset {
+        let mut pixels = vec![0; (IMAGE_TILE_SIZE * IMAGE_TILE_SIZE * 4) as usize];
         for (index, value) in pixels.iter_mut().enumerate() {
             *value = seed.wrapping_add(index as u8);
         }
-        gla_image::GlaStoredImage::new_rgba8(width, height, pixels)
-            .expect("stored image should build")
+        GlaDocTileAsset {
+            image_tile_index,
+            tile_key,
+            pixels_rgba8: pixels,
+        }
+    }
+
+    fn assign_tile(doc: &mut GlaDoc, node_id: crate::GlaNodeId, tile_index: usize, backend: &Backend) {
+        let owner = backend.alloc_active().expect("tile should allocate");
+        doc.node_image_mut(node_id)
+            .expect("node image should exist")
+            .replace_tile_owner(tile_index, owner)
+            .expect("tile owner should replace");
+    }
+
+    fn tile_key_for_node(doc: &GlaDoc, node_id: crate::GlaNodeId, tile_index: usize) -> atlas::TileKey {
+        doc.node_image(node_id)
+            .expect("node image should exist")
+            .tile_key(tile_index)
+            .expect("tile key should exist")
+    }
+
+    fn write_document_fixture(
+        doc: &GlaDoc,
+        root_path: &std::path::Path,
+        seeds: &[u8],
+        node_tiles: &[(usize, usize)],
+    ) -> Result<(), super::GlaDocStorageError> {
+        let mut serialized_node_ids = Vec::new();
+        doc.collect_subtree_preorder(doc.root_id(), &mut serialized_node_ids)?;
+
+        let mut node_indices = slotmap::SecondaryMap::new();
+        for (serialized_index, &node_id) in serialized_node_ids.iter().enumerate() {
+            node_indices.insert(node_id, serialized_index);
+        }
+
+        let mut document_bytes = Vec::new();
+        document_bytes.extend_from_slice(super::DOCUMENT_MAGIC.as_slice());
+        super::write_u32(&mut document_bytes, super::DOCUMENT_VERSION);
+        super::write_u32(&mut document_bytes, doc.layout().size_x());
+        super::write_u32(&mut document_bytes, doc.layout().size_y());
+        let active_layer_index = node_indices
+            .get(doc.active_layer_id())
+            .copied()
+            .ok_or(super::GlaDocStorageError::Document(crate::GlaDocError::InvalidNodeId(
+                doc.active_layer_id(),
+            )))?;
+        super::write_u32(&mut document_bytes, super::as_u32(active_layer_index)?);
+        super::write_u32(&mut document_bytes, super::as_u32(serialized_node_ids.len())?);
+
+        for &node_id in &serialized_node_ids {
+            let node = doc.node(node_id)?;
+            super::write_u8(&mut document_bytes, super::encode_node_kind(node.kind()));
+            super::write_f32(&mut document_bytes, node.opacity());
+            super::write_u8(&mut document_bytes, super::encode_blend_mode(node.blend_mode()));
+            let children = node.children().unwrap_or(&[]);
+            super::write_u32(&mut document_bytes, super::as_u32(children.len())?);
+            for &child_id in children {
+                super::write_u32(
+                    &mut document_bytes,
+                    super::as_u32(node_indices.get(child_id).copied().expect("child index"))?,
+                );
+            }
+        }
+
+        std::fs::create_dir_all(root_path)?;
+        let tile_directory = root_path.join(super::TILE_DIRECTORY_NAME);
+        if tile_directory.exists() {
+            std::fs::remove_dir_all(&tile_directory)?;
+        }
+        std::fs::create_dir_all(&tile_directory)?;
+        std::fs::write(root_path.join(super::DOCUMENT_FILE_NAME), document_bytes)?;
+
+        for ((serialized_index, image_tile_index), seed) in node_tiles.iter().copied().zip(seeds.iter().copied()) {
+            let node_id = serialized_node_ids[serialized_index];
+            let tile_key = tile_key_for_node(doc, node_id, image_tile_index);
+            let tile = test_tile(tile_key, image_tile_index, seed);
+            super::write_stored_tile_file(
+                &root_path.join(super::tile_asset_relative_path(serialized_index, tile_key)),
+                &tile,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn temp_directory(label: &str) -> PathBuf {

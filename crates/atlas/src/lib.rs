@@ -183,6 +183,13 @@ impl AtlasLayout {
             tile_y: layer_slot / tiles_per_edge,
         })
     }
+
+    pub fn tile_key_address(self, tile_key: TileKey) -> Option<AtlasSlotAddress> {
+        if tile_key == TileKey::EMPTY {
+            return None;
+        }
+        self.slot_address(tile_key.parts().slot_index)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

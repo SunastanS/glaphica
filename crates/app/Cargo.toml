@@ -1,11 +1,11 @@
 [package]
-name = "gla_document"
+name = "app"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 atlas = { path = "../atlas" }
-gla_image = { path = "../gla_image" }
+gla_document = { path = "../gla_document" }
 glaphica_core = { package = "core", path = "../core" }
+renderer = { path = "../renderer" }
 slotmap = "1"
-smallvec = "1.15.1"
