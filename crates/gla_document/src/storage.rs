@@ -2,11 +2,11 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::document::{GlaDoc, GlaDocError};
+use crate::node::{GlaBlendMode, GlaNodeId, GlaNodeKind};
 use atlas::{BackendId, TileKey};
 use gla_image::GlaImageLayout;
 use glaphica_core::IMAGE_TILE_SIZE;
-use crate::document::{GlaDoc, GlaDocError};
-use crate::node::{GlaBlendMode, GlaNodeId, GlaNodeKind};
 
 const DOCUMENT_FILE_NAME: &str = "document.bin";
 const TILE_DIRECTORY_NAME: &str = "tiles";
@@ -133,12 +133,9 @@ impl GlaDoc {
         write_u32(&mut document_bytes, self.layout().size_x());
         write_u32(&mut document_bytes, self.layout().size_y());
 
-        let active_layer_index = node_indices
-            .get(self.active_layer_id())
-            .copied()
-            .ok_or(GlaDocStorageError::Document(GlaDocError::InvalidNodeId(
-                self.active_layer_id(),
-            )))?;
+        let active_layer_index = node_indices.get(self.active_layer_id()).copied().ok_or(
+            GlaDocStorageError::Document(GlaDocError::InvalidNodeId(self.active_layer_id())),
+        )?;
         write_u32(&mut document_bytes, as_u32(active_layer_index)?);
         write_u32(&mut document_bytes, as_u32(serialized_node_ids.len())?);
 
@@ -151,12 +148,13 @@ impl GlaDoc {
             let children = node.children().unwrap_or(&[]);
             write_u32(&mut document_bytes, as_u32(children.len())?);
             for &child_id in children {
-                let child_index = node_indices
-                    .get(child_id)
-                    .copied()
-                    .ok_or(GlaDocStorageError::Document(GlaDocError::InvalidNodeId(
-                        child_id,
-                    )))?;
+                let child_index =
+                    node_indices
+                        .get(child_id)
+                        .copied()
+                        .ok_or(GlaDocStorageError::Document(GlaDocError::InvalidNodeId(
+                            child_id,
+                        )))?;
                 write_u32(&mut document_bytes, as_u32(child_index)?);
             }
         }
@@ -224,11 +222,14 @@ impl GlaDoc {
 
             leaf_sources.push(GlaDocLeafSource {
                 node_id: live_node_ids[serialized_index],
-                tiles: read_tile_assets_in_directory(&root_path.join(node_tile_directory(serialized_index)))?,
+                tiles: read_tile_assets_in_directory(
+                    &root_path.join(node_tile_directory(serialized_index)),
+                )?,
             });
         }
 
-        let thumbnail_tiles = read_tile_assets_in_directory(&root_path.join(node_tile_directory(0)))?;
+        let thumbnail_tiles =
+            read_tile_assets_in_directory(&root_path.join(node_tile_directory(0)))?;
 
         Ok(GlaDocLoadResult {
             doc,
@@ -350,7 +351,9 @@ pub(crate) fn node_tile_directory(serialized_index: usize) -> PathBuf {
 
 fn write_stored_tile_file(path: &Path, tile: &GlaDocTileAsset) -> Result<(), GlaDocStorageError> {
     validate_tile_pixels_rgba8_len(tile.pixels_rgba8.len())?;
-    let parent = path.parent().ok_or(GlaDocStorageError::Io(std::io::ErrorKind::InvalidInput))?;
+    let parent = path
+        .parent()
+        .ok_or(GlaDocStorageError::Io(std::io::ErrorKind::InvalidInput))?;
     fs::create_dir_all(parent)?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&STORED_TILE_MAGIC);
@@ -615,10 +618,19 @@ mod tests {
 
         assert_eq!(loaded.leaf_sources.len(), 2);
         assert_eq!(loaded.leaf_sources[0].node_id, preorder[2]);
-        assert_eq!(loaded.leaf_sources[0].tiles, vec![test_tile(expected_nested_tile_key, 0, 29)]);
+        assert_eq!(
+            loaded.leaf_sources[0].tiles,
+            vec![test_tile(expected_nested_tile_key, 0, 29)]
+        );
         assert_eq!(loaded.leaf_sources[1].node_id, preorder[3]);
-        assert_eq!(loaded.leaf_sources[1].tiles, vec![test_tile(expected_root_layer_tile_key, 0, 11)]);
-        assert_eq!(loaded.thumbnail_tiles, vec![test_tile(expected_root_tile_key, 0, 91)]);
+        assert_eq!(
+            loaded.leaf_sources[1].tiles,
+            vec![test_tile(expected_root_layer_tile_key, 0, 11)]
+        );
+        assert_eq!(
+            loaded.thumbnail_tiles,
+            vec![test_tile(expected_root_tile_key, 0, 91)]
+        );
 
         std::fs::remove_dir_all(temp_dir).expect("temp directory should remove");
         assert_eq!(root_layer_id, root_layer_id);
@@ -645,7 +657,12 @@ mod tests {
         }
     }
 
-    fn assign_tile(doc: &mut GlaDoc, node_id: crate::GlaNodeId, tile_index: usize, backend: &Backend) {
+    fn assign_tile(
+        doc: &mut GlaDoc,
+        node_id: crate::GlaNodeId,
+        tile_index: usize,
+        backend: &Backend,
+    ) {
         let owner = backend.alloc_active().expect("tile should allocate");
         doc.node_image_mut(node_id)
             .expect("node image should exist")
@@ -653,7 +670,11 @@ mod tests {
             .expect("tile owner should replace");
     }
 
-    fn tile_key_for_node(doc: &GlaDoc, node_id: crate::GlaNodeId, tile_index: usize) -> atlas::TileKey {
+    fn tile_key_for_node(
+        doc: &GlaDoc,
+        node_id: crate::GlaNodeId,
+        tile_index: usize,
+    ) -> atlas::TileKey {
         doc.node_image(node_id)
             .expect("node image should exist")
             .tile_key(tile_index)
@@ -679,20 +700,25 @@ mod tests {
         super::write_u32(&mut document_bytes, super::DOCUMENT_VERSION);
         super::write_u32(&mut document_bytes, doc.layout().size_x());
         super::write_u32(&mut document_bytes, doc.layout().size_y());
-        let active_layer_index = node_indices
-            .get(doc.active_layer_id())
-            .copied()
-            .ok_or(super::GlaDocStorageError::Document(crate::GlaDocError::InvalidNodeId(
+        let active_layer_index = node_indices.get(doc.active_layer_id()).copied().ok_or(
+            super::GlaDocStorageError::Document(crate::GlaDocError::InvalidNodeId(
                 doc.active_layer_id(),
-            )))?;
+            )),
+        )?;
         super::write_u32(&mut document_bytes, super::as_u32(active_layer_index)?);
-        super::write_u32(&mut document_bytes, super::as_u32(serialized_node_ids.len())?);
+        super::write_u32(
+            &mut document_bytes,
+            super::as_u32(serialized_node_ids.len())?,
+        );
 
         for &node_id in &serialized_node_ids {
             let node = doc.node(node_id)?;
             super::write_u8(&mut document_bytes, super::encode_node_kind(node.kind()));
             super::write_f32(&mut document_bytes, node.opacity());
-            super::write_u8(&mut document_bytes, super::encode_blend_mode(node.blend_mode()));
+            super::write_u8(
+                &mut document_bytes,
+                super::encode_blend_mode(node.blend_mode()),
+            );
             let children = node.children().unwrap_or(&[]);
             super::write_u32(&mut document_bytes, super::as_u32(children.len())?);
             for &child_id in children {
@@ -711,7 +737,9 @@ mod tests {
         std::fs::create_dir_all(&tile_directory)?;
         std::fs::write(root_path.join(super::DOCUMENT_FILE_NAME), document_bytes)?;
 
-        for ((serialized_index, image_tile_index), seed) in node_tiles.iter().copied().zip(seeds.iter().copied()) {
+        for ((serialized_index, image_tile_index), seed) in
+            node_tiles.iter().copied().zip(seeds.iter().copied())
+        {
             let node_id = serialized_node_ids[serialized_index];
             let tile_key = tile_key_for_node(doc, node_id, image_tile_index);
             let tile = test_tile(tile_key, image_tile_index, seed);

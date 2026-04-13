@@ -1,3 +1,3 @@
 mod export;
 
-pub use crate::export::{export_document_directory, AppExportError};
+pub use crate::export::{AppExportError, export_document_directory};

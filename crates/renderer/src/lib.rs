@@ -5,6 +5,7 @@ pub use crate::context::{
     AdapterSelection, GpuContext, GpuContextInitDescriptor, GpuContextInitError,
 };
 pub use crate::texture_io::{
-    AtlasTileReadback, AtlasTileRef, RendererTexture, RendererTextureDescriptor,
-    TextureColorRuntime, TextureIoError, TextureReadback, TextureUploadDescriptor,
+    ImageTileReadback, RendererTexture, RendererTextureDescriptor, TextureColorRuntime,
+    TextureIoError, TextureReadback, TextureUploadDescriptor, TileImageExportRequest,
+    TileImageExportTile,
 };

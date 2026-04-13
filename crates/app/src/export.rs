@@ -9,7 +9,7 @@ use gla_document::{
     write_tile_asset_file,
 };
 use glaphica_core::{AlphaMode, ColorProfile};
-use renderer::{AtlasTileRef, GpuContext, RendererTexture, TextureColorRuntime, TextureIoError};
+use renderer::{GpuContext, RendererTexture, TextureColorRuntime, TextureIoError};
 
 const DOCUMENT_FILE_NAME: &str = "document.bin";
 const TILE_DIRECTORY_NAME: &str = "tiles";
@@ -116,9 +116,8 @@ fn export_node_tiles(
     destination_profile: ColorProfile,
     alpha_mode: AlphaMode,
 ) -> Result<(), AppExportError> {
-    let mut atlas_tiles = Vec::new();
-    let mut tile_indices = Vec::new();
     let mut tile_keys = Vec::new();
+    let mut image_tiles = Vec::new();
 
     for tile_index in 0..image.tile_count() {
         let Some(tile_key) = image.tile_key(tile_index) else {
@@ -128,43 +127,35 @@ fn export_node_tiles(
             continue;
         }
 
-        let address = atlas_layout
-            .tile_key_address(tile_key)
-            .ok_or(TextureIoError::AtlasSlotOutOfBounds {
-                slot_index: tile_key.parts().slot_index,
-                total_slots: atlas_layout.total_slots(),
-            })?;
-        atlas_tiles.push(AtlasTileRef {
-            atlas_layer: address.layer,
-            atlas_tile_x: address.tile_x,
-            atlas_tile_y: address.tile_y,
-        });
-        tile_indices.push(tile_index);
         tile_keys.push(tile_key);
+        image_tiles.push((tile_index, tile_key));
     }
 
-    if atlas_tiles.is_empty() {
+    if image_tiles.is_empty() {
         return Ok(());
     }
 
-    let readbacks = runtime.readback_atlas_tiles_rgba8(
+    let request = runtime.build_tile_image_export_request(
+        atlas_layout,
+        image.layout().size_x(),
+        image.layout().size_y(),
+        &image_tiles,
+    )?;
+
+    let readbacks = runtime.readback_image_tiles_rgba8(
         &gpu_context.device,
         &gpu_context.queue,
         atlas_texture,
-        &atlas_tiles,
+        &request,
         destination_profile,
         alpha_mode,
     )?;
 
-    for ((tile_index, tile_key), readback) in tile_indices
-        .into_iter()
-        .zip(tile_keys)
-        .zip(readbacks)
-    {
+    for (tile_key, readback) in tile_keys.into_iter().zip(readbacks) {
         write_tile_asset_file(
             root_path.join(tile_asset_relative_path(serialized_index, tile_key)),
             &GlaDocTileAsset {
-                image_tile_index: tile_index,
+                image_tile_index: readback.image_tile_index,
                 tile_key,
                 pixels_rgba8: readback.pixels_rgba8,
             },
