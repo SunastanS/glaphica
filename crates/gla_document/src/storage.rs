@@ -3,10 +3,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::document::{GlaDoc, GlaDocError};
-use crate::node::{GlaBlendMode, GlaNodeId, GlaNodeKind};
 use atlas::{BackendId, TileKey};
 use gla_image::GlaImageLayout;
-use glaphica_core::IMAGE_TILE_SIZE;
+use glaphica_core::{BlendMode, IMAGE_TILE_SIZE};
+use crate::node::{GlaNodeId, GlaNodeKind};
 
 const DOCUMENT_FILE_NAME: &str = "document.bin";
 const TILE_DIRECTORY_NAME: &str = "tiles";
@@ -112,7 +112,7 @@ impl From<GlaDocError> for GlaDocStorageError {
 struct SerializedNode {
     kind: GlaNodeKind,
     opacity: f32,
-    blend_mode: GlaBlendMode,
+    blend_mode: BlendMode,
     child_range_start: usize,
     child_range_len: usize,
 }
@@ -441,17 +441,17 @@ fn decode_node_kind(value: u8) -> Result<GlaNodeKind, GlaDocStorageError> {
     }
 }
 
-fn encode_blend_mode(blend_mode: GlaBlendMode) -> u8 {
+fn encode_blend_mode(blend_mode: BlendMode) -> u8 {
     match blend_mode {
-        GlaBlendMode::Normal => 0,
-        GlaBlendMode::Multiply => 1,
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
     }
 }
 
-fn decode_blend_mode(value: u8) -> Result<GlaBlendMode, GlaDocStorageError> {
+fn decode_blend_mode(value: u8) -> Result<BlendMode, GlaDocStorageError> {
     match value {
-        0 => Ok(GlaBlendMode::Normal),
-        1 => Ok(GlaBlendMode::Multiply),
+        0 => Ok(BlendMode::Normal),
+        1 => Ok(BlendMode::Multiply),
         _ => Err(GlaDocStorageError::InvalidBlendMode(value)),
     }
 }
@@ -541,7 +541,7 @@ mod tests {
         let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         doc.set_opacity(doc.root_id(), 0.75)
             .expect("root opacity should update");
-        doc.set_blend_mode(doc.root_id(), crate::GlaBlendMode::Multiply)
+        doc.set_blend_mode(doc.root_id(), crate::BlendMode::Multiply)
             .expect("root blend should update");
 
         let group_id = doc
@@ -556,7 +556,7 @@ mod tests {
 
         doc.set_opacity(group_id, 0.5)
             .expect("group opacity should update");
-        doc.set_blend_mode(nested_layer_id, crate::GlaBlendMode::Multiply)
+        doc.set_blend_mode(nested_layer_id, crate::BlendMode::Multiply)
             .expect("nested layer blend should update");
         doc.set_active_layer(nested_layer_id)
             .expect("active layer should update");
@@ -600,13 +600,13 @@ mod tests {
 
         assert_eq!(loaded_root.kind(), GlaNodeKind::Root);
         assert_eq!(loaded_root.opacity(), 0.75);
-        assert_eq!(loaded_root.blend_mode(), crate::GlaBlendMode::Multiply);
+        assert_eq!(loaded_root.blend_mode(), crate::BlendMode::Multiply);
         assert_eq!(loaded_group.kind(), GlaNodeKind::Branch);
         assert_eq!(loaded_group.opacity(), 0.5);
         assert_eq!(loaded_nested_layer.kind(), GlaNodeKind::Leaf);
         assert_eq!(
             loaded_nested_layer.blend_mode(),
-            crate::GlaBlendMode::Multiply
+            crate::BlendMode::Multiply
         );
         assert_eq!(loaded_root_layer.kind(), GlaNodeKind::Leaf);
 

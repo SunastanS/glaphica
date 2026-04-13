@@ -9,6 +9,13 @@ pub enum AlphaMode {
     Premultiplied,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderingIntent {
     Perceptual,

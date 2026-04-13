@@ -1,16 +1,10 @@
 use gla_image::GlaImage;
+use glaphica_core::BlendMode;
 use slotmap::new_key_type;
 use smallvec::SmallVec;
 
 new_key_type! {
     pub struct GlaNodeId;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GlaBlendMode {
-    #[default]
-    Normal,
-    Multiply,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +17,7 @@ pub enum GlaNodeKind {
 struct GlaNodeShared {
     parent: Option<GlaNodeId>,
     opacity: f32,
-    blend_mode: GlaBlendMode,
+    blend_mode: BlendMode,
     image: GlaImage,
 }
 
@@ -47,7 +41,7 @@ impl GlaNodeShared {
         parent: Option<GlaNodeId>,
         image: GlaImage,
         opacity: f32,
-        blend_mode: GlaBlendMode,
+        blend_mode: BlendMode,
     ) -> Self {
         Self {
             parent,
@@ -63,7 +57,7 @@ impl GlaBranchNode {
         parent: Option<GlaNodeId>,
         image: GlaImage,
         opacity: f32,
-        blend_mode: GlaBlendMode,
+        blend_mode: BlendMode,
     ) -> Self {
         Self {
             shared: GlaNodeShared::new(parent, image, opacity, blend_mode),
@@ -77,7 +71,7 @@ impl GlaLeafNode {
         parent: Option<GlaNodeId>,
         image: GlaImage,
         opacity: f32,
-        blend_mode: GlaBlendMode,
+        blend_mode: BlendMode,
     ) -> Self {
         Self {
             shared: GlaNodeShared::new(parent, image, opacity, blend_mode),
@@ -86,7 +80,7 @@ impl GlaLeafNode {
 }
 
 impl GlaNode {
-    pub(crate) fn new_root(image: GlaImage, opacity: f32, blend_mode: GlaBlendMode) -> Self {
+    pub(crate) fn new_root(image: GlaImage, opacity: f32, blend_mode: BlendMode) -> Self {
         Self::Root(GlaBranchNode::new(None, image, opacity, blend_mode))
     }
 
@@ -94,7 +88,7 @@ impl GlaNode {
         parent: GlaNodeId,
         image: GlaImage,
         opacity: f32,
-        blend_mode: GlaBlendMode,
+        blend_mode: BlendMode,
     ) -> Self {
         Self::Branch(GlaBranchNode::new(Some(parent), image, opacity, blend_mode))
     }
@@ -103,7 +97,7 @@ impl GlaNode {
         parent: GlaNodeId,
         image: GlaImage,
         opacity: f32,
-        blend_mode: GlaBlendMode,
+        blend_mode: BlendMode,
     ) -> Self {
         Self::Leaf(GlaLeafNode::new(Some(parent), image, opacity, blend_mode))
     }
@@ -130,7 +124,7 @@ impl GlaNode {
         }
     }
 
-    pub fn blend_mode(&self) -> GlaBlendMode {
+    pub fn blend_mode(&self) -> BlendMode {
         match self {
             Self::Root(branch) | Self::Branch(branch) => branch.shared.blend_mode,
             Self::Leaf(leaf) => leaf.shared.blend_mode,
@@ -179,7 +173,7 @@ impl GlaNode {
         }
     }
 
-    pub(crate) fn set_blend_mode(&mut self, blend_mode: GlaBlendMode) {
+    pub(crate) fn set_blend_mode(&mut self, blend_mode: BlendMode) {
         match self {
             Self::Root(branch) | Self::Branch(branch) => branch.shared.blend_mode = blend_mode,
             Self::Leaf(leaf) => leaf.shared.blend_mode = blend_mode,

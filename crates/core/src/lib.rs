@@ -8,7 +8,7 @@ mod vec2;
 
 pub use crate::color::Color;
 pub use crate::color_management::{
-    AlphaMode, Chromaticity, ColorManagement, ColorManagementError, ColorProfile,
+    AlphaMode, BlendMode, Chromaticity, ColorManagement, ColorManagementError, ColorProfile,
     CpuColorTransform, CpuTransformOptions, CustomRgbProfile, GpuColorSpace, GpuColorTransform,
     GpuColorTransformUniform, GpuTransferCurve, RenderingIntent, RgbPrimaries, SimpleTransferCurve,
 };

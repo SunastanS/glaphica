@@ -3,10 +3,11 @@ use std::fmt::{Display, Formatter};
 
 use atlas::BackendId;
 use gla_image::{GlaImage, GlaImageCreateError, GlaImageLayout};
+use glaphica_core::BlendMode;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 
-use crate::node::{GlaBlendMode, GlaNode, GlaNodeId};
+use crate::node::{GlaNode, GlaNodeId};
 
 pub struct GlaDoc {
     layout: GlaImageLayout,
@@ -99,7 +100,7 @@ impl GlaDoc {
     ) -> Result<Self, GlaDocError> {
         let mut nodes = SlotMap::with_key();
         let root_image = GlaImage::new(layout, render_backend)?;
-        let root_id = nodes.insert(GlaNode::new_root(root_image, 1.0, GlaBlendMode::Normal));
+        let root_id = nodes.insert(GlaNode::new_root(root_image, 1.0, BlendMode::Normal));
         let mut active_layer_ancestor_chain = SmallVec::new();
         active_layer_ancestor_chain.push(root_id);
 
@@ -201,7 +202,7 @@ impl GlaDoc {
     pub fn set_blend_mode(
         &mut self,
         node_id: GlaNodeId,
-        blend_mode: GlaBlendMode,
+        blend_mode: BlendMode,
     ) -> Result<(), GlaDocError> {
         self.node_mut(node_id)?.set_blend_mode(blend_mode);
         Ok(())
@@ -375,9 +376,9 @@ impl GlaDoc {
         let image = GlaImage::new(self.layout, backend)?;
         let node = match node_kind {
             GlaNewNodeKind::Branch => {
-                GlaNode::new_branch(parent_id, image, 1.0, GlaBlendMode::Normal)
+                GlaNode::new_branch(parent_id, image, 1.0, BlendMode::Normal)
             }
-            GlaNewNodeKind::Leaf => GlaNode::new_leaf(parent_id, image, 1.0, GlaBlendMode::Normal),
+            GlaNewNodeKind::Leaf => GlaNode::new_leaf(parent_id, image, 1.0, BlendMode::Normal),
         };
         let node_id = self.nodes.insert(node);
 
@@ -508,7 +509,8 @@ mod tests {
     use atlas::BackendId;
     use glaphica_core::IMAGE_TILE_SIZE;
 
-    use crate::{GlaBlendMode, GlaDoc, GlaDocError, GlaImageLayout, GlaNodeKind};
+    use crate::{GlaDoc, GlaDocError, GlaImageLayout, GlaNodeKind};
+    use glaphica_core::BlendMode;
 
     fn new_doc() -> GlaDoc {
         match GlaDoc::new(
@@ -534,7 +536,7 @@ mod tests {
         assert_eq!(root.kind(), GlaNodeKind::Root);
         assert_eq!(root.image().backend(), BackendId::new(7));
         assert_eq!(root.opacity(), 1.0);
-        assert_eq!(root.blend_mode(), GlaBlendMode::Normal);
+        assert_eq!(root.blend_mode(), BlendMode::Normal);
     }
 
     #[test]
