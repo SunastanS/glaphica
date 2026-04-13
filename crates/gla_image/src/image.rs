@@ -47,7 +47,7 @@ impl Display for GlaImageTileAccessError {
 impl Error for GlaImageTileAccessError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GlaImageNonEmptyTileBounds {
+pub struct GlaImageTileRecBounds {
     pub min_tile_x: u32,
     pub min_tile_y: u32,
     pub max_tile_x: u32,
@@ -120,10 +120,7 @@ impl GlaImage {
         Ok(std::mem::replace(slot, tile_owner))
     }
 
-    pub fn clear_tile(
-        &mut self,
-        tile_index: usize,
-    ) -> Result<TileOwner, GlaImageTileAccessError> {
+    pub fn clear_tile(&mut self, tile_index: usize) -> Result<TileOwner, GlaImageTileAccessError> {
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
@@ -169,9 +166,9 @@ impl GlaImage {
         Ok(())
     }
 
-    pub fn non_empty_tile_bounds(&self) -> Option<GlaImageNonEmptyTileBounds> {
+    pub fn non_empty_tile_bounds(&self) -> Option<GlaImageTileRecBounds> {
         let tile_x = self.layout.tile_x() as usize;
-        let mut bounds: Option<GlaImageNonEmptyTileBounds> = None;
+        let mut bounds: Option<GlaImageTileRecBounds> = None;
 
         for (tile_index, tile_owner) in self.tile_owners.iter().enumerate() {
             if tile_owner.tile_key() == TileKey::EMPTY {
@@ -188,7 +185,7 @@ impl GlaImage {
                     bounds.max_tile_y = bounds.max_tile_y.max(tile_coord_y);
                 }
                 None => {
-                    bounds = Some(GlaImageNonEmptyTileBounds {
+                    bounds = Some(GlaImageTileRecBounds {
                         min_tile_x: tile_coord_x,
                         min_tile_y: tile_coord_y,
                         max_tile_x: tile_coord_x,
@@ -254,7 +251,7 @@ mod tests {
 
     use crate::{ImageId, ImageTileSlot, layout::GlaImageLayout};
 
-    use super::{GlaImage, GlaImageNonEmptyTileBounds, GlaImageTileAccessError};
+    use super::{GlaImage, GlaImageTileAccessError, GlaImageTileRecBounds};
 
     #[test]
     fn replace_and_get_tile_key_use_index_mapping() {
@@ -356,7 +353,7 @@ mod tests {
 
         assert_eq!(
             image.non_empty_tile_bounds(),
-            Some(GlaImageNonEmptyTileBounds {
+            Some(GlaImageTileRecBounds {
                 min_tile_x: 1,
                 min_tile_y: 0,
                 max_tile_x: 2,

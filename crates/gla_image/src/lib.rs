@@ -5,7 +5,7 @@ mod stored_image;
 use atlas::TileKey;
 
 pub use crate::image::{
-    GlaImage, GlaImageCreateError, GlaImageNonEmptyTileBounds, GlaImageTileAccessError,
+    GlaImage, GlaImageCreateError, GlaImageTileAccessError, GlaImageTileRecBounds,
 };
 pub use crate::layout::{GlaImageLayout, GlaImageLayoutError};
 pub use crate::stored_image::{GlaStoredImage, GlaStoredImageError};
