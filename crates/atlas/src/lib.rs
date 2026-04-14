@@ -368,6 +368,36 @@ impl BackendInner {
         })
     }
 
+    fn create_cached_group(&mut self) -> CachedTileGroup {
+        let group_id = self.acquire_vacant_group();
+        CachedTileGroup {
+            group_id: group_id.0,
+            keys: Vec::new(),
+        }
+    }
+
+    fn alloc_cached_in_group(
+        &mut self,
+        cached: &mut CachedTileGroup,
+    ) -> Result<TileKey, AtlasError> {
+        let group_id = CacheGroupId(cached.group_id);
+        if !self.cached_group_matches_handle(group_id, &cached.keys)? {
+            return Err(AtlasError::GenerationMismatch);
+        }
+
+        self.ensure_capacity(1)?;
+        let slot = self.alloc_slot()?;
+        self.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
+        self.group_mut(group_id)?.slots.push(slot);
+        if cached.keys.is_empty() {
+            self.cached_group_queue.push_back(group_id);
+        }
+
+        let key = encode_tile_key(self.backend_id, self.generations[slot as usize], slot);
+        cached.keys.push(key);
+        Ok(key)
+    }
+
     fn cache_active_tiles(&mut self, keys: &[TileKey]) -> Result<CachedTileGroup, AtlasError> {
         if keys.is_empty() {
             return Ok(CachedTileGroup {
@@ -396,28 +426,8 @@ impl BackendInner {
     }
 
     fn cached_group_alive(&self, cached: &CachedTileGroup) -> Result<bool, AtlasError> {
-        if cached.keys.is_empty() {
-            return Ok(true);
-        }
-
         let group_id = CacheGroupId(cached.group_id);
-        let Ok(group) = self.group(group_id) else {
-            return Ok(false);
-        };
-        if group.slots.len() != cached.keys.len() {
-            return Ok(false);
-        }
-
-        for &key in &cached.keys {
-            let Ok(slot) = self.validate_key(key) else {
-                return Ok(false);
-            };
-            if self.slot_owners[slot as usize] != SlotOwner::Cached(group_id) {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
+        self.cached_group_matches_handle(group_id, &cached.keys)
     }
 
     fn activate_cached_tile(&mut self, key: TileKey) -> Result<TileKey, AtlasError> {
@@ -616,6 +626,30 @@ impl BackendInner {
             .ok_or(AtlasError::InvalidState)
     }
 
+    fn cached_group_matches_handle(
+        &self,
+        group_id: CacheGroupId,
+        keys: &[TileKey],
+    ) -> Result<bool, AtlasError> {
+        let Ok(group) = self.group(group_id) else {
+            return Ok(false);
+        };
+        if group.slots.len() != keys.len() {
+            return Ok(false);
+        }
+
+        for &key in keys {
+            let Ok(slot) = self.validate_key(key) else {
+                return Ok(false);
+            };
+            if self.slot_owners[slot as usize] != SlotOwner::Cached(group_id) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
     fn detach_slot_from_group(
         &mut self,
         group_id: CacheGroupId,
@@ -663,6 +697,21 @@ impl Backend {
         let mut inner = self.lock_inner()?;
         self.drain_owned_reclaims(&mut inner)?;
         inner.alloc_cached(count)
+    }
+
+    pub fn create_cached_group(&self) -> Result<CachedTileGroup, AtlasError> {
+        let mut inner = self.lock_inner()?;
+        self.drain_owned_reclaims(&mut inner)?;
+        Ok(inner.create_cached_group())
+    }
+
+    pub fn alloc_cached_in_group(
+        &self,
+        cached: &mut CachedTileGroup,
+    ) -> Result<TileKey, AtlasError> {
+        let mut inner = self.lock_inner()?;
+        self.drain_owned_reclaims(&mut inner)?;
+        inner.alloc_cached_in_group(cached)
     }
 
     pub fn cache_active_tiles(&self, keys: &[TileKey]) -> Result<CachedTileGroup, AtlasError> {
@@ -963,6 +1012,62 @@ mod tests {
         assert_eq!(reactivated[1].tile_key(), cached.keys()[1]);
         assert_eq!(backend.tile_state(cached.keys()[0]), Ok(TileState::Active));
         assert_eq!(backend.tile_state(cached.keys()[1]), Ok(TileState::Active));
+    }
+
+    #[test]
+    fn create_cached_group_starts_empty_and_alive() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let cached = backend
+            .create_cached_group()
+            .expect("cached group should create");
+
+        assert!(cached.keys().is_empty());
+        assert_eq!(backend.cached_group_alive(&cached), Ok(true));
+    }
+
+    #[test]
+    fn alloc_cached_in_group_appends_keys_in_order() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let mut cached = backend
+            .create_cached_group()
+            .expect("cached group should create");
+
+        let first = backend
+            .alloc_cached_in_group(&mut cached)
+            .expect("first cached key should allocate");
+        let second = backend
+            .alloc_cached_in_group(&mut cached)
+            .expect("second cached key should allocate");
+
+        assert_eq!(cached.keys(), &[first, second]);
+        assert_eq!(backend.tile_state(first), Ok(TileState::Cached));
+        assert_eq!(backend.tile_state(second), Ok(TileState::Cached));
+    }
+
+    #[test]
+    fn alloc_cached_in_group_rejects_reclaimed_group_handle() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let total_slots = AtlasLayout::Tiny8.total_slots() as usize;
+        let mut oldest = backend
+            .create_cached_group()
+            .expect("cached group should create");
+        for _ in 0..(total_slots / 2) {
+            backend
+                .alloc_cached_in_group(&mut oldest)
+                .expect("cached key should allocate");
+        }
+        let newest = backend
+            .alloc_cached(total_slots / 2)
+            .expect("newest cached group should allocate");
+        let replacement = backend.alloc_active().expect("active tile should allocate");
+
+        assert_eq!(backend.cached_group_alive(&oldest), Ok(false));
+        assert_eq!(
+            backend.alloc_cached_in_group(&mut oldest),
+            Err(AtlasError::GenerationMismatch)
+        );
+        assert_eq!(backend.cached_group_alive(&newest), Ok(true));
+        assert_eq!(backend.tile_state(replacement.tile_key()), Ok(TileState::Active));
     }
 
     #[test]
