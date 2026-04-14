@@ -277,6 +277,7 @@ impl TextureColorRuntime {
     }
 }
 
+#[derive(Debug)]
 pub struct RendererTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
