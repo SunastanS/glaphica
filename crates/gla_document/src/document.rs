@@ -22,6 +22,10 @@ pub struct GlaDoc {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GlaDocError {
     InvalidNodeId(GlaNodeId),
+    InvalidTileIndex {
+        tile_index: usize,
+        tile_count: usize,
+    },
     CannotInsertIntoLeaf(GlaNodeId),
     ChildIndexOutOfBounds {
         parent_id: GlaNodeId,
@@ -46,6 +50,13 @@ impl Display for GlaDocError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidNodeId(node_id) => write!(f, "invalid node id {node_id:?}"),
+            Self::InvalidTileIndex {
+                tile_index,
+                tile_count,
+            } => write!(
+                f,
+                "tile index {tile_index} is out of bounds for image with {tile_count} tiles"
+            ),
             Self::CannotInsertIntoLeaf(node_id) => {
                 write!(f, "cannot insert children into leaf node {node_id:?}")
             }
@@ -468,7 +479,11 @@ impl GlaDoc {
             })
     }
 
-    fn is_ancestor(&self, ancestor_id: GlaNodeId, node_id: GlaNodeId) -> Result<bool, GlaDocError> {
+    pub(crate) fn is_ancestor(
+        &self,
+        ancestor_id: GlaNodeId,
+        node_id: GlaNodeId,
+    ) -> Result<bool, GlaDocError> {
         let mut current = Some(node_id);
         while let Some(candidate_id) = current {
             if candidate_id == ancestor_id {
