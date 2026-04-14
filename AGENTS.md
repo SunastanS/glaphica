@@ -26,6 +26,7 @@
 
 # Interface and crate boundary guidelines
 
+* **Stop and discuss** anytime you find there are multiple ways to implement a feature or design choices should be made. Never fall back to a compile-only standard.
 * Do not introduce `*Plan`, `*Request`, or similar intermediate data structures unless they are true domain objects with independent value. Do not split one linear feature into multiple staged APIs just to pass private structs around.
 * Crate-to-crate communication should prefer direct use of the callee crate's public atomic APIs. Do not create private orchestration structs as an ad hoc protocol between crates.
 * Keep public APIs at the level of one atomic responsibility. If a function is just a thin wrapper around another public API plus trivial field shuffling, it should usually not exist.
