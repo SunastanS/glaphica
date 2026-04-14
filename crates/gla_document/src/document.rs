@@ -20,12 +20,6 @@ pub struct GlaDoc {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum GlaNewNodeKind {
-    Branch,
-    Leaf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GlaDocError {
     InvalidNodeId(GlaNodeId),
     CannotInsertIntoLeaf(GlaNodeId),
@@ -223,7 +217,9 @@ impl GlaDoc {
         parent_id: GlaNodeId,
         index: usize,
     ) -> Result<GlaNodeId, GlaDocError> {
-        self.insert_node(parent_id, index, GlaNewNodeKind::Leaf)
+        let image = GlaImage::new(self.layout, self.image_backend)?;
+        let node = GlaNode::new_leaf(parent_id, image, 1.0, BlendMode::Normal);
+        self.insert_node(parent_id, index, node)
     }
 
     pub fn insert_group(
@@ -231,7 +227,9 @@ impl GlaDoc {
         parent_id: GlaNodeId,
         index: usize,
     ) -> Result<GlaNodeId, GlaDocError> {
-        self.insert_node(parent_id, index, GlaNewNodeKind::Branch)
+        let image = GlaImage::new(self.layout, self.render_backend)?;
+        let node = GlaNode::new_branch(parent_id, image, 1.0, BlendMode::Normal);
+        self.insert_node(parent_id, index, node)
     }
 
     pub fn move_node(
@@ -369,17 +367,9 @@ impl GlaDoc {
         &mut self,
         parent_id: GlaNodeId,
         index: usize,
-        node_kind: GlaNewNodeKind,
+        node: GlaNode,
     ) -> Result<GlaNodeId, GlaDocError> {
         self.validate_insert_target(parent_id, index)?;
-        let backend = self.backend_for_new_node_kind(node_kind);
-        let image = GlaImage::new(self.layout, backend)?;
-        let node = match node_kind {
-            GlaNewNodeKind::Branch => {
-                GlaNode::new_branch(parent_id, image, 1.0, BlendMode::Normal)
-            }
-            GlaNewNodeKind::Leaf => GlaNode::new_leaf(parent_id, image, 1.0, BlendMode::Normal),
-        };
         let node_id = self.nodes.insert(node);
 
         let parent = self.node_mut(parent_id)?;
@@ -407,13 +397,6 @@ impl GlaDoc {
             });
         }
         Ok(())
-    }
-
-    fn backend_for_new_node_kind(&self, node_kind: GlaNewNodeKind) -> BackendId {
-        match node_kind {
-            GlaNewNodeKind::Branch => self.render_backend,
-            GlaNewNodeKind::Leaf => self.image_backend,
-        }
     }
 
     fn node_mut(&mut self, node_id: GlaNodeId) -> Result<&mut GlaNode, GlaDocError> {
