@@ -1,0 +1,9 @@
+[package]
+name = "gla_doc_renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+atlas = { path = "../atlas" }
+gla_document = { path = "../gla_document" }
+gla_image = { path = "../gla_image" }

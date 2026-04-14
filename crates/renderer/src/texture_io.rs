@@ -587,12 +587,12 @@ fn extract_tile_readbacks_from_readbacks(
     let mut tiles = Vec::with_capacity(request.tiles.len());
 
     for tile in &request.tiles {
-        let layer_readback = layer_readbacks
-            .get(tile.atlas_layer as usize)
-            .ok_or(TextureIoError::AtlasLayerReadbackMissing {
+        let layer_readback = layer_readbacks.get(tile.atlas_layer as usize).ok_or(
+            TextureIoError::AtlasLayerReadbackMissing {
                 layer: tile.atlas_layer,
                 available_layers: layer_readbacks.len(),
-            })?;
+            },
+        )?;
         if layer_readback.width == 0 || layer_readback.height == 0 {
             return Err(TextureIoError::AtlasReadbackExtentMismatch {
                 expected_width: ATLAS_TILE_SIZE,
@@ -630,7 +630,8 @@ fn request_width_in_tiles(request: &TileImageExportRequest) -> usize {
 }
 
 fn tile_copy_width(request: &TileImageExportRequest, image_tile_index: usize) -> usize {
-    let tile_origin_x = (image_tile_index % request_width_in_tiles(request)) * IMAGE_TILE_SIZE as usize;
+    let tile_origin_x =
+        (image_tile_index % request_width_in_tiles(request)) * IMAGE_TILE_SIZE as usize;
     request
         .image_width
         .saturating_sub(tile_origin_x as u32)
@@ -638,7 +639,8 @@ fn tile_copy_width(request: &TileImageExportRequest, image_tile_index: usize) ->
 }
 
 fn tile_copy_height(request: &TileImageExportRequest, image_tile_index: usize) -> usize {
-    let tile_origin_y = (image_tile_index / request_width_in_tiles(request)) * IMAGE_TILE_SIZE as usize;
+    let tile_origin_y =
+        (image_tile_index / request_width_in_tiles(request)) * IMAGE_TILE_SIZE as usize;
     request
         .image_height
         .saturating_sub(tile_origin_y as u32)
@@ -691,7 +693,10 @@ mod tests {
         let backend = Backend::new(atlas_layout, BackendId::new(0));
         let first_owner = backend.alloc_active().expect("first tile should allocate");
         let second_owner = backend.alloc_active().expect("second tile should allocate");
-        let image_tiles = vec![(0usize, first_owner.tile_key()), (1usize, second_owner.tile_key())];
+        let image_tiles = vec![
+            (0usize, first_owner.tile_key()),
+            (1usize, second_owner.tile_key()),
+        ];
 
         let request = runtime
             .build_tile_image_export_request(

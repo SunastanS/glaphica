@@ -3,10 +3,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::document::{GlaDoc, GlaDocError};
+use crate::node::{GlaNodeId, GlaNodeKind};
 use atlas::{BackendId, TileKey};
 use gla_image::GlaImageLayout;
 use glaphica_core::{BlendMode, IMAGE_TILE_SIZE};
-use crate::node::{GlaNodeId, GlaNodeKind};
 
 const DOCUMENT_FILE_NAME: &str = "document.bin";
 const TILE_DIRECTORY_NAME: &str = "tiles";
@@ -604,10 +604,7 @@ mod tests {
         assert_eq!(loaded_group.kind(), GlaNodeKind::Branch);
         assert_eq!(loaded_group.opacity(), 0.5);
         assert_eq!(loaded_nested_layer.kind(), GlaNodeKind::Leaf);
-        assert_eq!(
-            loaded_nested_layer.blend_mode(),
-            crate::BlendMode::Multiply
-        );
+        assert_eq!(loaded_nested_layer.blend_mode(), crate::BlendMode::Multiply);
         assert_eq!(loaded_root_layer.kind(), GlaNodeKind::Leaf);
 
         assert_eq!(loaded_doc.active_layer_id(), preorder[2]);
