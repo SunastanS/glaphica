@@ -40,11 +40,11 @@ pub struct RoundBrushInputProcessor {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct RoundApplyPayload {
-    center_local: [f32; 2],
+    center_local_x: f32,
+    center_local_y: f32,
     radius_px: f32,
     hardness: f32,
     opacity: f32,
-    _pad1: [u32; 3],
 }
 
 #[repr(C)]
@@ -61,11 +61,11 @@ pub fn encode_round_apply_payload(
     opacity: f32,
 ) -> Vec<u8> {
     bytemuck::bytes_of(&RoundApplyPayload {
-        center_local,
+        center_local_x: center_local[0],
+        center_local_y: center_local[1],
         radius_px,
         hardness,
         opacity,
-        _pad1: [0; 3],
     })
     .to_vec()
 }
@@ -80,7 +80,7 @@ impl Default for RoundBrushInputProcessor {
             base_radius_px: 5.0,
             base_hardness: 0.7,
             base_opacity: 1.0,
-            tint: [0.0, 0.0, 0.0],
+            tint: [0.0, 0.0, 1.0],
         }
     }
 }

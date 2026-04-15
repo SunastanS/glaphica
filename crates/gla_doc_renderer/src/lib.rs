@@ -683,11 +683,20 @@ impl GlaDocRenderer {
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
             let tile_key = match input.source_kind {
-                RenderProgramSourceKind::Truth if input.node_id == active_layer_id => self
-                    .brush_preview_image
-                    .as_ref()
-                    .and_then(|preview_node| preview_node.tile_key(tile_index))
-                    .unwrap_or(atlas::TileKey::EMPTY),
+                RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
+                    let preview_tile_key = self
+                        .brush_preview_image
+                        .as_ref()
+                        .and_then(|preview_node| preview_node.tile_key(tile_index))
+                        .unwrap_or(atlas::TileKey::EMPTY);
+                    if preview_tile_key != atlas::TileKey::EMPTY {
+                        preview_tile_key
+                    } else {
+                        doc.node_image(input.node_id)?
+                            .tile_key(tile_index)
+                            .unwrap_or(atlas::TileKey::EMPTY)
+                    }
+                }
                 RenderProgramSourceKind::Truth => doc
                     .node_image(input.node_id)?
                     .tile_key(tile_index)
@@ -882,6 +891,7 @@ fn execute_prepare_steps(
 mod tests {
     use atlas::{AtlasLayout, Backend as AtlasBackend, TileKey};
     use gla_document::{BackendId, GlaDoc, GlaImageLayout};
+    use gla_image::GlaImage;
 
     use crate::{
         GlaDocRenderer, PrepareExecutionError, PrepareExecutor, RenderExecutionError,
@@ -995,6 +1005,49 @@ mod tests {
                 .and_then(|image| image.tile_key(0)),
             Some(preview_tile_key)
         );
+    }
+
+    #[test]
+    fn active_layer_truth_falls_back_when_preview_tile_is_empty() {
+        let image_backend = AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(3));
+        let mut doc = new_doc();
+        let layer_id = doc
+            .append_layer(doc.root_id())
+            .expect("layer should append");
+        doc.set_active_layer(layer_id)
+            .expect("active layer should update");
+
+        let active_tile = image_backend
+            .alloc_active()
+            .expect("active tile should allocate");
+        let active_tile_key = active_tile.tile_key();
+        doc.active_layer_image_mut()
+            .expect("layer image should exist")
+            .replace_tile_owner(0, active_tile)
+            .expect("tile owner should install");
+
+        let mut renderer = GlaDocRenderer::new(new_render_backend());
+        let inputs = vec![crate::RenderProgramInput {
+            node_id: layer_id,
+            source_kind: crate::RenderProgramSourceKind::Truth,
+            opacity: 1.0,
+            blend_mode: glaphica_core::BlendMode::Normal,
+        }];
+
+        let without_preview = renderer
+            .collect_tile_sources(&doc, &inputs, 0, layer_id)
+            .expect("source collection should succeed");
+        assert_eq!(without_preview.len(), 1);
+        assert_eq!(without_preview[0].tile_key, active_tile_key);
+
+        renderer.brush_preview_image = Some(
+            GlaImage::new(doc.layout(), doc.render_backend()).expect("preview image should build"),
+        );
+        let with_empty_preview = renderer
+            .collect_tile_sources(&doc, &inputs, 0, layer_id)
+            .expect("source collection should succeed");
+        assert_eq!(with_empty_preview.len(), 1);
+        assert_eq!(with_empty_preview[0].tile_key, active_tile_key);
     }
 
     #[test]

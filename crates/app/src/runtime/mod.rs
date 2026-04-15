@@ -7,15 +7,15 @@ use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
 
 use crate::{
-    ActiveTool, AppBrushRegistry, AppView, BrushInput, BrushThreadRuntime, BrushThreadRuntimeError,
-    EditorRenderUpdate, EditorSession, EditorSessionError, ToolSet,
+    ActiveTool, AppBrushRegistry, AppFrameScheduler, AppView, BrushThreadRuntime,
+    BrushThreadRuntimeError, EditorRenderUpdate, EditorSession, EditorSessionError, ToolSet,
 };
 
 pub struct AppRuntime {
     session: EditorSession,
     brush_thread: BrushThreadRuntime,
     view: AppView,
-    pending_brush_inputs: Vec<BrushInput>,
+    frame_scheduler: AppFrameScheduler,
 }
 
 #[derive(Debug)]
@@ -57,7 +57,7 @@ impl AppRuntime {
             session,
             brush_thread,
             view,
-            pending_brush_inputs: Vec::new(),
+            frame_scheduler: AppFrameScheduler::new(),
         }
     }
 
@@ -121,14 +121,30 @@ impl AppRuntime {
     }
 
     pub fn begin_active_tool_stroke(&mut self) -> Result<(), AppRuntimeError> {
+        self.discard_pending_brush_inputs();
         match self.brush_thread.active_tool() {
             ActiveTool::Brush(brush_id) => self.session.begin_stroke(brush_id)?,
         }
+        self.frame_scheduler.request_redraw();
         Ok(())
     }
 
     pub fn cancel_stroke(&mut self) {
         self.session.cancel_stroke();
+        self.frame_scheduler.request_redraw();
+    }
+
+    pub fn prepare_document_gpu(
+        &mut self,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<EditorRenderUpdate, AppRuntimeError> {
+        let update = self
+            .session
+            .prepare_document_gpu(tile_renderer, device, queue)?;
+        self.frame_scheduler.schedule_render_update(&update);
+        Ok(update)
     }
 
     pub fn push_canvas_input(&self, input: CanvasInput) {
@@ -159,30 +175,97 @@ impl AppRuntime {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         max_inputs: usize,
-    ) -> Result<Vec<EditorRenderUpdate>, AppRuntimeError> {
-        self.pending_brush_inputs.clear();
-        self.brush_thread.brush_input_consumer().drain_batch_with_wait(
-            &mut self.pending_brush_inputs,
+    ) -> Result<Option<EditorRenderUpdate>, AppRuntimeError> {
+        self.frame_scheduler.drain_brush_inputs(
+            self.brush_thread.brush_input_consumer(),
             max_inputs,
             Duration::ZERO,
         );
-
-        let mut updates = Vec::with_capacity(self.pending_brush_inputs.len());
-        for input in &self.pending_brush_inputs {
-            updates.push(self.session.process_brush_input_gpu(
-                image_backend,
-                tile_renderer,
-                device,
-                queue,
-                input,
-            )?);
+        if self.session.active_stroke().is_none() {
+            self.frame_scheduler.clear_pending_brush_inputs();
+            return Ok(None);
         }
-        self.pending_brush_inputs.clear();
-        Ok(updates)
+        let update = self.session.process_brush_inputs_gpu(
+            image_backend,
+            tile_renderer,
+            device,
+            queue,
+            self.frame_scheduler.pending_brush_inputs(),
+        )?;
+        if let Some(update) = update.as_ref() {
+            self.frame_scheduler.schedule_render_update(update);
+        }
+        self.frame_scheduler.finish_brush_inputs();
+        Ok(update)
+    }
+
+    pub fn end_active_tool_stroke_gpu(
+        &mut self,
+        image_backend: &Backend,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        max_pending_inputs: usize,
+    ) -> Result<Option<EditorRenderUpdate>, AppRuntimeError> {
+        self.process_pending_brush_input_gpu(
+            image_backend,
+            tile_renderer,
+            device,
+            queue,
+            max_pending_inputs,
+        )?;
+        let update = self
+            .session
+            .commit_active_stroke(image_backend, tile_renderer, device, queue)?;
+        if let Some(update) = update.as_ref() {
+            self.frame_scheduler.schedule_render_update(update);
+        }
+        Ok(update)
+    }
+
+    pub fn undo_last_stroke_gpu(
+        &mut self,
+        image_backend: &Backend,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<Option<EditorRenderUpdate>, AppRuntimeError> {
+        let update = self
+            .session
+            .undo_last_stroke(image_backend, tile_renderer, device, queue)?;
+        if let Some(update) = update.as_ref() {
+            self.frame_scheduler.schedule_render_update(update);
+        }
+        Ok(update)
+    }
+
+    pub fn frame_scheduler(&self) -> &AppFrameScheduler {
+        &self.frame_scheduler
+    }
+
+    pub fn frame_scheduler_mut(&mut self) -> &mut AppFrameScheduler {
+        &mut self.frame_scheduler
     }
 
     pub fn shutdown(self) -> Result<(), AppRuntimeError> {
         self.brush_thread.shutdown()?;
         Ok(())
+    }
+
+    fn discard_pending_brush_inputs(&mut self) {
+        const DISCARD_BATCH_SIZE: usize = 64;
+        self.frame_scheduler.clear_pending_brush_inputs();
+        loop {
+            self.frame_scheduler.drain_brush_inputs(
+                self.brush_thread.brush_input_consumer(),
+                DISCARD_BATCH_SIZE,
+                Duration::ZERO,
+            );
+            if self.frame_scheduler.pending_brush_inputs().is_empty() {
+                break;
+            }
+            self.frame_scheduler.clear_pending_brush_inputs();
+        }
+        self.frame_scheduler.clear_pending_brush_inputs();
     }
 }

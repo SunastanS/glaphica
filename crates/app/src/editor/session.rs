@@ -115,6 +115,17 @@ impl EditorRenderUpdate {
     pub fn rendered_active_tiles(&self) -> bool {
         self.rendered_active_tiles
     }
+
+    pub fn merge(&mut self, other: &EditorRenderUpdate) {
+        self.tile_indices.extend_from_slice(other.tile_indices());
+        self.prepared_active_plan |= other.prepared_active_plan();
+        self.rendered_active_tiles |= other.rendered_active_tiles();
+    }
+
+    pub fn normalize(&mut self) {
+        self.tile_indices.sort_unstable();
+        self.tile_indices.dedup();
+    }
 }
 
 impl EditorSession {
@@ -278,13 +289,35 @@ impl EditorSession {
         queue: &wgpu::Queue,
         input: &BrushInput,
     ) -> Result<EditorRenderUpdate, EditorSessionError> {
-        let max_affected_radius = self
-            .brushes
-            .max_affected_radius_px(input.brush_id)
-            .ok_or(EditorSessionError::BrushNotRegistered(input.brush_id))?;
-        let merge_payload = self.brushes.encode_merge_payload(input)?;
+        Ok(self.process_brush_inputs_gpu(
+            image_backend,
+            tile_renderer,
+            device,
+            queue,
+            std::slice::from_ref(input),
+        )?
+        .unwrap_or(EditorRenderUpdate {
+            tile_indices: Vec::new(),
+            prepared_active_plan: false,
+            rendered_active_tiles: false,
+        }))
+    }
+
+    pub fn process_brush_inputs_gpu(
+        &mut self,
+        image_backend: &Backend,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        inputs: &[BrushInput],
+    ) -> Result<Option<EditorRenderUpdate>, EditorSessionError> {
+        if inputs.is_empty() {
+            return Ok(None);
+        }
+
         let mut dirty_tile_indices = Vec::new();
         let mut commands = Vec::new();
+        let mut active_merge_payload = None;
 
         {
             let active_image = self.doc.active_layer_image()?;
@@ -293,38 +326,50 @@ impl EditorSession {
                 .as_mut()
                 .ok_or(EditorSessionError::MissingActiveStroke)?;
 
-            for (block_index, _) in input.blocks.blocks().iter().enumerate() {
-                let center = self.brushes.block_center(input, block_index)?;
-                let mut affected_tiles = Vec::new();
-                active_image.layout().collect_affected_tile_indices(
-                    center,
-                    max_affected_radius,
-                    &mut affected_tiles,
-                );
-                for tile_index in affected_tiles {
-                    let tile_origin = active_image
-                        .tile_canvas_origin(tile_index)
-                        .ok_or(EditorSessionError::Document(GlaDocError::InvalidTileIndex {
+            for input in inputs {
+                let max_affected_radius = self
+                    .brushes
+                    .max_affected_radius_px(input.brush_id)
+                    .ok_or(EditorSessionError::BrushNotRegistered(input.brush_id))?;
+                active_merge_payload = Some(self.brushes.encode_merge_payload(input)?);
+                for (block_index, _) in input.blocks.blocks().iter().enumerate() {
+                    let center = self.brushes.block_center(input, block_index)?;
+                    let mut affected_tiles = Vec::new();
+                    active_image.layout().collect_affected_tile_indices(
+                        center,
+                        max_affected_radius,
+                        &mut affected_tiles,
+                    );
+                    for tile_index in affected_tiles {
+                        let tile_origin =
+                            active_image.tile_canvas_origin(tile_index).ok_or(
+                                EditorSessionError::Document(GlaDocError::InvalidTileIndex {
+                                    tile_index,
+                                    tile_count: active_image.tile_count(),
+                                }),
+                            )?;
+                        let source_tile_key = stroke.intermediate().tile_key(tile_index);
+                        let apply_payload = self
+                            .brushes
+                            .encode_apply_dab_payload(input, block_index, tile_origin)?;
+                        stroke.push_apply_dab(
                             tile_index,
-                            tile_count: active_image.tile_count(),
-                        }))?;
-                    let source_tile_key = stroke.intermediate().tile_key(tile_index);
-                    let apply_payload = self
-                        .brushes
-                        .encode_apply_dab_payload(input, block_index, tile_origin)?;
-                    stroke.push_apply_dab(
-                        tile_index,
-                        source_tile_key,
-                        apply_payload,
-                        &mut commands,
-                    )?;
-                    dirty_tile_indices.push(tile_index);
+                            source_tile_key,
+                            apply_payload,
+                            &mut commands,
+                        )?;
+                        dirty_tile_indices.push(tile_index);
+                    }
                 }
             }
         }
 
+        if dirty_tile_indices.is_empty() {
+            return Ok(None);
+        }
         dirty_tile_indices.sort_unstable();
         dirty_tile_indices.dedup();
+        let merge_payload = active_merge_payload.ok_or(EditorSessionError::MissingActiveMergePayload)?;
         self.active_merge_payload = Some(merge_payload.clone());
         {
             let stroke = self
@@ -345,14 +390,14 @@ impl EditorSession {
             }
         }
 
-        self.execute_preview_commands_gpu(
+        Ok(Some(self.execute_preview_commands_gpu(
             image_backend,
             tile_renderer,
             device,
             queue,
             &dirty_tile_indices,
             &commands,
-        )
+        )?))
     }
 
     pub fn commit_active_stroke(
@@ -361,7 +406,6 @@ impl EditorSession {
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        tile_indices: &[usize],
     ) -> Result<Option<EditorRenderUpdate>, EditorSessionError> {
         let Some(mut stroke) = self.active_stroke.take() else {
             return Ok(None);
@@ -372,6 +416,15 @@ impl EditorSession {
             .ok_or(EditorSessionError::MissingActiveMergePayload)?;
 
         let brush_id = stroke.brush_id();
+        let tile_indices = stroke
+            .touched_tiles()
+            .iter()
+            .map(|record| record.tile_index)
+            .collect::<Vec<_>>();
+        if tile_indices.is_empty() {
+            self.doc_renderer.clear_brush_preview_image();
+            return Ok(None);
+        }
         let intermediate_backend = self
             .brushes
             .brush_backend(brush_id)
@@ -385,7 +438,7 @@ impl EditorSession {
                 image,
                 image_backend,
                 backup_store,
-                tile_indices,
+                &tile_indices,
                 merge_payload,
             )?
         };
@@ -431,7 +484,7 @@ impl EditorSession {
             tile_renderer,
             device,
             queue,
-            tile_indices,
+            &tile_indices,
         )?))
     }
 

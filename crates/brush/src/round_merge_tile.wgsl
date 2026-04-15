@@ -5,12 +5,17 @@ struct MergeUniforms {
     intermediate_origin: vec2u,
     intermediate_layer: u32,
     _pad1: u32,
-    tint: vec3f,
-    _pad2: f32,
 };
 
-@group(0) @binding(0) var atlas_texture: texture_2d_array<f32>;
-@group(0) @binding(1) var<uniform> uniforms: MergeUniforms;
+struct MergePayload {
+    tint: vec3f,
+    _pad2: f32,
+}
+
+@group(0) @binding(0) var origin_texture: texture_2d_array<f32>;
+@group(0) @binding(1) var intermediate_texture: texture_2d_array<f32>;
+@group(0) @binding(2) var<uniform> uniforms: MergeUniforms;
+@group(0) @binding(3) var<storage, read> payload: MergePayload;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -26,19 +31,19 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 fn fs_merge_tile(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let pixel = vec2u(pos.xy);
     let base = textureLoad(
-        atlas_texture,
+        origin_texture,
         vec2i(uniforms.origin_origin + pixel),
         i32(uniforms.origin_layer),
         0
     );
     let intermediate = textureLoad(
-        atlas_texture,
+        intermediate_texture,
         vec2i(uniforms.intermediate_origin + pixel),
         i32(uniforms.intermediate_layer),
         0
     );
     let effective_alpha = 1.0 - exp(-max(intermediate.a, 0.0));
     let out_alpha = base.a + (1.0 - base.a) * effective_alpha;
-    let out_rgb = mix(base.rgb, uniforms.tint, effective_alpha);
+    let out_rgb = mix(base.rgb, payload.tint, effective_alpha);
     return vec4f(out_rgb, out_alpha);
 }
