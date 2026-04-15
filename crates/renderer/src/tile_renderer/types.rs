@@ -4,6 +4,8 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasError, BackendId, TileKey};
 use glaphica_core::{BlendMode, BrushId};
 
+use super::atlas_texture_set::AtlasTextureStage;
+use super::brush_encode::BrushEncodeStage;
 use crate::TextureIoError;
 
 #[derive(Debug)]
@@ -154,7 +156,8 @@ pub trait BrushShaderProvider {
 pub trait BrushCommandExecutor {
     fn apply_dab(
         &mut self,
-        renderer: &mut super::TileRenderer,
+        atlas_texture_set: &AtlasTextureStage,
+        brush_encode: &mut BrushEncodeStage,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -163,7 +166,8 @@ pub trait BrushCommandExecutor {
 
     fn merge_tile(
         &mut self,
-        renderer: &mut super::TileRenderer,
+        atlas_texture_set: &AtlasTextureStage,
+        brush_encode: &mut BrushEncodeStage,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,

@@ -4,7 +4,8 @@ pub mod composite;
 pub mod present;
 pub mod types;
 
-pub use present::PresentUniforms;
+pub use atlas_texture_set::AtlasTextureStage;
+pub use brush_encode::BrushEncodeStage;
 pub use types::{
     ApplyDabCommand, BrushCommandExecutor, BrushShaderProvider, BrushShaderSource, BrushShaderSpec,
     BrushShaderStage, CompositeTileCommand, CopyTileCommand, MergeTileCommand, PresentTileCommand,
@@ -13,8 +14,6 @@ pub use types::{
 
 use atlas::TileKey;
 
-use atlas_texture_set::AtlasTextureStage;
-use brush_encode::BrushEncodeStage;
 use composite::CompositeStage;
 use present::PresentStage;
 
@@ -68,7 +67,8 @@ impl TileRenderer {
         impl BrushCommandExecutor for UnsupportedBrushExecutor {
             fn apply_dab(
                 &mut self,
-                _renderer: &mut TileRenderer,
+                _atlas_texture_set: &AtlasTextureStage,
+                _brush_encode: &mut BrushEncodeStage,
                 _device: &wgpu::Device,
                 _queue: &wgpu::Queue,
                 _encoder: &mut wgpu::CommandEncoder,
@@ -79,7 +79,8 @@ impl TileRenderer {
 
             fn merge_tile(
                 &mut self,
-                _renderer: &mut TileRenderer,
+                _atlas_texture_set: &AtlasTextureStage,
+                _brush_encode: &mut BrushEncodeStage,
                 _device: &wgpu::Device,
                 _queue: &wgpu::Queue,
                 _encoder: &mut wgpu::CommandEncoder,
@@ -128,12 +129,22 @@ impl TileRenderer {
                     command.source_tile_key,
                     command.destination_tile_key,
                 )?,
-                RenderCommand::ApplyDab(command) => {
-                    brush_executor.apply_dab(self, device, queue, &mut encoder, command)?
-                }
-                RenderCommand::MergeTile(command) => {
-                    brush_executor.merge_tile(self, device, queue, &mut encoder, command)?
-                }
+                RenderCommand::ApplyDab(command) => brush_executor.apply_dab(
+                    &self.atlas_texture_set,
+                    &mut self.brush_encode,
+                    device,
+                    queue,
+                    &mut encoder,
+                    command,
+                )?,
+                RenderCommand::MergeTile(command) => brush_executor.merge_tile(
+                    &self.atlas_texture_set,
+                    &mut self.brush_encode,
+                    device,
+                    queue,
+                    &mut encoder,
+                    command,
+                )?,
                 RenderCommand::CompositeTile(command) => self.composite.encode_composite_tile(
                     device,
                     queue,
@@ -268,42 +279,6 @@ impl TileRenderer {
         self.present
             .present_texture_2d(device, queue, source, target)
     }
-
-    pub(crate) fn encode_apply_dab(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        provider: &impl BrushShaderProvider,
-        command: &ApplyDabCommand,
-    ) -> Result<(), TileRendererError> {
-        self.brush_encode.encode_apply_dab(
-            device,
-            queue,
-            encoder,
-            &self.atlas_texture_set,
-            provider,
-            command,
-        )
-    }
-
-    pub(crate) fn encode_merge_tile(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        provider: &impl BrushShaderProvider,
-        command: &MergeTileCommand,
-    ) -> Result<(), TileRendererError> {
-        self.brush_encode.encode_merge_tile(
-            device,
-            queue,
-            encoder,
-            &self.atlas_texture_set,
-            provider,
-            command,
-        )
-    }
 }
 
 struct RegisteredBrushExecutor<'a, Provider> {
@@ -316,24 +291,40 @@ where
 {
     fn apply_dab(
         &mut self,
-        renderer: &mut TileRenderer,
+        atlas_texture_set: &AtlasTextureStage,
+        brush_encode: &mut BrushEncodeStage,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         command: &ApplyDabCommand,
     ) -> Result<(), TileRendererError> {
-        renderer.encode_apply_dab(device, queue, encoder, self.provider, command)
+        brush_encode.encode_apply_dab(
+            device,
+            queue,
+            encoder,
+            atlas_texture_set,
+            self.provider,
+            command,
+        )
     }
 
     fn merge_tile(
         &mut self,
-        renderer: &mut TileRenderer,
+        atlas_texture_set: &AtlasTextureStage,
+        brush_encode: &mut BrushEncodeStage,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         command: &MergeTileCommand,
     ) -> Result<(), TileRendererError> {
-        renderer.encode_merge_tile(device, queue, encoder, self.provider, command)
+        brush_encode.encode_merge_tile(
+            device,
+            queue,
+            encoder,
+            atlas_texture_set,
+            self.provider,
+            command,
+        )
     }
 }
 
@@ -342,7 +333,7 @@ mod tests {
     use atlas::TileKey;
     use bytemuck::bytes_of;
 
-    use super::{PresentTileParams, PresentUniforms, TileCompositeSource};
+    use super::{PresentTileParams, TileCompositeSource, present::PresentUniforms};
     use glaphica_core::BlendMode;
 
     #[test]

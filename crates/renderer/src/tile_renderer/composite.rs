@@ -80,7 +80,9 @@ struct CompositeUniforms {
     source_layer: u32,
     blend_mode: u32,
     opacity: f32,
-    padding: [u32; 7],
+    _pad0: [u32; 3],
+    _padding: [u32; 3],
+    _pad1: u32,
 }
 
 pub struct CompositeStage {
@@ -219,7 +221,9 @@ impl CompositeStage {
                 source_layer: source.layer,
                 blend_mode: encode_blend_mode(input.blend_mode),
                 opacity: input.opacity,
-                padding: [0; 7],
+                _pad0: [0; 3],
+                _padding: [0; 3],
+                _pad1: 0,
             };
             let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("glaphica-tile-composite-uniform"),
@@ -370,5 +374,50 @@ fn encode_blend_mode(blend_mode: glaphica_core::BlendMode) -> u32 {
     match blend_mode {
         glaphica_core::BlendMode::Normal => 0,
         glaphica_core::BlendMode::Multiply => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytemuck::bytes_of;
+
+    use super::CompositeUniforms;
+
+    #[test]
+    fn composite_uniforms_match_wgsl_uniform_layout() {
+        let uniform = CompositeUniforms {
+            source_origin: [11, 13],
+            source_layer: 17,
+            blend_mode: 19,
+            opacity: 0.5,
+            _pad0: [0; 3],
+            _padding: [23, 29, 31],
+            _pad1: 0,
+        };
+        let bytes = bytes_of(&uniform);
+
+        assert_eq!(bytes.len(), 48);
+
+        let opacity = match <[u8; 4]>::try_from(&bytes[16..20]) {
+            Ok(bytes) => f32::from_ne_bytes(bytes),
+            Err(_) => panic!("composite uniform opacity slice size mismatch"),
+        };
+        let padding_x = match <[u8; 4]>::try_from(&bytes[32..36]) {
+            Ok(bytes) => u32::from_ne_bytes(bytes),
+            Err(_) => panic!("composite uniform padding x slice size mismatch"),
+        };
+        let padding_y = match <[u8; 4]>::try_from(&bytes[36..40]) {
+            Ok(bytes) => u32::from_ne_bytes(bytes),
+            Err(_) => panic!("composite uniform padding y slice size mismatch"),
+        };
+        let padding_z = match <[u8; 4]>::try_from(&bytes[40..44]) {
+            Ok(bytes) => u32::from_ne_bytes(bytes),
+            Err(_) => panic!("composite uniform padding z slice size mismatch"),
+        };
+
+        assert_eq!(opacity, 0.5);
+        assert_eq!(padding_x, 23);
+        assert_eq!(padding_y, 29);
+        assert_eq!(padding_z, 31);
     }
 }

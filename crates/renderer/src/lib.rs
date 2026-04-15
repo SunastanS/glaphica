@@ -10,9 +10,10 @@ pub use crate::texture_io::{
     TextureIoError, TextureReadback, TextureUploadDescriptor, TileImageExportRequest,
     TileImageExportTile,
 };
+pub use crate::tile_renderer::present::PresentUniforms;
 pub use crate::tile_renderer::{
-    ApplyDabCommand, BrushCommandExecutor, BrushShaderProvider, BrushShaderSource, BrushShaderSpec,
-    BrushShaderStage, CompositeTileCommand, CopyTileCommand, MergeTileCommand, PresentTileCommand,
-    PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource, TileRenderer,
-    TileRendererError,
+    ApplyDabCommand, AtlasTextureStage, BrushCommandExecutor, BrushEncodeStage,
+    BrushShaderProvider, BrushShaderSource, BrushShaderSpec, BrushShaderStage,
+    CompositeTileCommand, CopyTileCommand, MergeTileCommand, PresentTileCommand, PresentTileParams,
+    RenderCommand, RenderTarget2d, TileCompositeSource, TileRenderer, TileRendererError,
 };

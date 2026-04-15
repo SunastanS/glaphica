@@ -24,7 +24,7 @@ pub struct ResolvedAtlasTile<'a> {
 }
 
 pub struct AtlasTextureStage {
-    pub atlas_textures: AtlasTextureSet,
+    atlas_textures: AtlasTextureSet,
 }
 
 impl AtlasTextureSet {

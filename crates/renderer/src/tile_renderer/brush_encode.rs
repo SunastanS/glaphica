@@ -1,5 +1,5 @@
 use atlas::TileKey;
-use glaphica_core::{BrushId, ATLAS_TILE_SIZE};
+use glaphica_core::{ATLAS_TILE_SIZE, BrushId};
 
 use super::atlas_texture_set::AtlasTextureStage;
 use super::types::{
