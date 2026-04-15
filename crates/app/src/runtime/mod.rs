@@ -48,11 +48,7 @@ impl From<BrushThreadRuntimeError> for AppRuntimeError {
 }
 
 impl AppRuntime {
-    pub fn new(
-        session: EditorSession,
-        brush_thread: BrushThreadRuntime,
-        view: AppView,
-    ) -> Self {
+    pub fn new(session: EditorSession, brush_thread: BrushThreadRuntime, view: AppView) -> Self {
         Self {
             session,
             brush_thread,
@@ -214,9 +210,9 @@ impl AppRuntime {
             queue,
             max_pending_inputs,
         )?;
-        let update = self
-            .session
-            .commit_active_stroke(image_backend, tile_renderer, device, queue)?;
+        let update =
+            self.session
+                .commit_active_stroke(image_backend, tile_renderer, device, queue)?;
         if let Some(update) = update.as_ref() {
             self.frame_scheduler.schedule_render_update(update);
         }

@@ -255,10 +255,9 @@ impl EditorSession {
             .active_stroke
             .as_ref()
             .ok_or(EditorSessionError::MissingActiveStroke)?;
-        let brush_backend = self
-            .brushes
-            .brush_backend(active_stroke.brush_id())
-            .ok_or(EditorSessionError::BrushNotRegistered(active_stroke.brush_id()))?;
+        let brush_backend = self.brushes.brush_backend(active_stroke.brush_id()).ok_or(
+            EditorSessionError::BrushNotRegistered(active_stroke.brush_id()),
+        )?;
         let intermediate_backend = brush_backend.intermediate_backend();
         let render_backend = self.doc_renderer.render_backend();
 
@@ -289,18 +288,19 @@ impl EditorSession {
         queue: &wgpu::Queue,
         input: &BrushInput,
     ) -> Result<EditorRenderUpdate, EditorSessionError> {
-        Ok(self.process_brush_inputs_gpu(
-            image_backend,
-            tile_renderer,
-            device,
-            queue,
-            std::slice::from_ref(input),
-        )?
-        .unwrap_or(EditorRenderUpdate {
-            tile_indices: Vec::new(),
-            prepared_active_plan: false,
-            rendered_active_tiles: false,
-        }))
+        Ok(self
+            .process_brush_inputs_gpu(
+                image_backend,
+                tile_renderer,
+                device,
+                queue,
+                std::slice::from_ref(input),
+            )?
+            .unwrap_or(EditorRenderUpdate {
+                tile_indices: Vec::new(),
+                prepared_active_plan: false,
+                rendered_active_tiles: false,
+            }))
     }
 
     pub fn process_brush_inputs_gpu(
@@ -341,17 +341,18 @@ impl EditorSession {
                         &mut affected_tiles,
                     );
                     for tile_index in affected_tiles {
-                        let tile_origin =
-                            active_image.tile_canvas_origin(tile_index).ok_or(
-                                EditorSessionError::Document(GlaDocError::InvalidTileIndex {
-                                    tile_index,
-                                    tile_count: active_image.tile_count(),
-                                }),
-                            )?;
+                        let tile_origin = active_image.tile_canvas_origin(tile_index).ok_or(
+                            EditorSessionError::Document(GlaDocError::InvalidTileIndex {
+                                tile_index,
+                                tile_count: active_image.tile_count(),
+                            }),
+                        )?;
                         let source_tile_key = stroke.intermediate().tile_key(tile_index);
-                        let apply_payload = self
-                            .brushes
-                            .encode_apply_dab_payload(input, block_index, tile_origin)?;
+                        let apply_payload = self.brushes.encode_apply_dab_payload(
+                            input,
+                            block_index,
+                            tile_origin,
+                        )?;
                         stroke.push_apply_dab(
                             tile_index,
                             source_tile_key,
@@ -369,7 +370,8 @@ impl EditorSession {
         }
         dirty_tile_indices.sort_unstable();
         dirty_tile_indices.dedup();
-        let merge_payload = active_merge_payload.ok_or(EditorSessionError::MissingActiveMergePayload)?;
+        let merge_payload =
+            active_merge_payload.ok_or(EditorSessionError::MissingActiveMergePayload)?;
         self.active_merge_payload = Some(merge_payload.clone());
         {
             let stroke = self
@@ -457,7 +459,12 @@ impl EditorSession {
         tile_renderer.execute_commands_with_shader_provider(
             device,
             queue,
-            &[image_backend, &intermediate_backend, render_backend, backup_backend],
+            &[
+                image_backend,
+                &intermediate_backend,
+                render_backend,
+                backup_backend,
+            ],
             &clear_batches,
             &batch.commands,
             None,
@@ -467,9 +474,12 @@ impl EditorSession {
         self.doc.push_undo_entry(
             active_layer_id,
             batch.backup_group,
-            batch.tile_records
+            batch
+                .tile_records
                 .into_iter()
-                .map(|record| DocumentUndoTileRecord::new(record.tile_index, record.backup_tile_key))
+                .map(|record| {
+                    DocumentUndoTileRecord::new(record.tile_index, record.backup_tile_key)
+                })
                 .collect(),
         )?;
 

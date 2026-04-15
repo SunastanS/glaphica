@@ -60,7 +60,10 @@ impl ScreenPresentCache {
         width: u32,
         height: u32,
     ) -> Result<(), ScreenPresentCacheError> {
-        if self.texture.width == width && self.texture.height == height && self.texture.format == format {
+        if self.texture.width == width
+            && self.texture.height == height
+            && self.texture.format == format
+        {
             return Ok(());
         }
         *self = Self::new(device, format, width, height)?;

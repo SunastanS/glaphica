@@ -1,7 +1,6 @@
 use atlas::Backend;
 use brush::{
-    BrushBackend, BrushId, BrushInput, BrushInputError, CanvasInput,
-    BrushRegistry,
+    BrushBackend, BrushId, BrushInput, BrushInputError, BrushRegistry, CanvasInput,
     round::{ROUND_SHADER_REGISTRATION, RoundBrushInputProcessor},
 };
 use renderer::{BrushShaderProvider, BrushShaderSpec};
@@ -30,12 +29,11 @@ impl AppBrushRegistry {
         &mut self,
         intermediate_backend: Backend,
     ) -> Result<(), brush::BrushStrokeError> {
-        self.brushes
-            .register(
-                ROUND_SHADER_REGISTRATION,
-                intermediate_backend,
-                Box::new(RoundBrushInputProcessor::default()),
-            )
+        self.brushes.register(
+            ROUND_SHADER_REGISTRATION,
+            intermediate_backend,
+            Box::new(RoundBrushInputProcessor::default()),
+        )
     }
 
     pub fn shader_spec(&self, brush_id: BrushId) -> Option<BrushShaderSpec> {

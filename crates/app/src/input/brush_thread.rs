@@ -5,12 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::AppBrushRegistry;
 use crate::input::{
     ActiveTool, BrushThreadBrushInputProducer, BrushThreadCanvasInputConsumer, BrushWorker,
     BrushWorkerError, MainBrushInputConsumer, MainCanvasInputProducer, ToolSet,
     create_brush_input_channels,
 };
-use crate::AppBrushRegistry;
 
 pub struct BrushThreadRuntime {
     tool_set: ToolSet,
@@ -36,7 +36,11 @@ impl Display for BrushThreadRuntimeError {
             Self::Worker(error) => Display::fmt(error, f),
             Self::ActiveToolUnavailable(active_tool) => match active_tool {
                 ActiveTool::Brush(brush_id) => {
-                    write!(f, "active tool brush {} is not in the tool set", brush_id.raw())
+                    write!(
+                        f,
+                        "active tool brush {} is not in the tool set",
+                        brush_id.raw()
+                    )
                 }
             },
             Self::SpawnThread(error) => Display::fmt(error, f),
@@ -70,8 +74,12 @@ impl BrushThreadRuntime {
             ActiveTool::Brush(brush_id) => brush_id,
         };
         let worker = BrushWorker::new(brushes, active_brush_id, worker_batch_capacity)?;
-        let (canvas_input_producer, canvas_input_consumer, brush_input_producer, brush_input_consumer) =
-            create_brush_input_channels(canvas_input_capacity, brush_input_capacity);
+        let (
+            canvas_input_producer,
+            canvas_input_consumer,
+            brush_input_producer,
+            brush_input_consumer,
+        ) = create_brush_input_channels(canvas_input_capacity, brush_input_capacity);
         let active_tool = Arc::new(Mutex::new(active_tool));
         let stop_requested = Arc::new(AtomicBool::new(false));
         let worker_error = Arc::new(Mutex::new(None));
