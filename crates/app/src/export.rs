@@ -9,7 +9,10 @@ use gla_document::{
     write_tile_asset_file,
 };
 use glaphica_core::{AlphaMode, ColorProfile};
-use renderer::{GpuContext, RendererTexture, TextureColorRuntime, TextureIoError};
+use renderer::{
+    GpuContext, RendererTexture, TextureColorRuntime, TextureIoError,
+    tile_image_export::{TileImageExportRequest, readback_image_tiles_rgba8},
+};
 
 const DOCUMENT_FILE_NAME: &str = "document.bin";
 const TILE_DIRECTORY_NAME: &str = "tiles";
@@ -135,14 +138,15 @@ fn export_node_tiles(
         return Ok(());
     }
 
-    let request = runtime.build_tile_image_export_request(
+    let request = TileImageExportRequest::from_image_tiles(
         atlas_layout,
         image.layout().size_x(),
         image.layout().size_y(),
         &image_tiles,
     )?;
 
-    let readbacks = runtime.readback_image_tiles_rgba8(
+    let readbacks = readback_image_tiles_rgba8(
+        runtime,
         &gpu_context.device,
         &gpu_context.queue,
         atlas_texture,

@@ -1,13 +1,10 @@
 mod context;
-mod tile_image_export;
+pub mod tile_image_export;
 mod texture_io;
 mod tile_renderer;
 
 pub use crate::context::{
     AdapterSelection, GpuContext, GpuContextInitDescriptor, GpuContextInitError,
-};
-pub use crate::tile_image_export::{
-    ImageTileReadback, TileImageExportRequest, TileImageExportTile,
 };
 pub use crate::texture_io::{
     RendererTexture, RendererTextureDescriptor, TextureColorRuntime, TextureIoError,
