@@ -5,7 +5,10 @@ use atlas::TileKey;
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
 use gla_document::{GlaDoc, GlaDocError};
 use glaphica_core::{CanvasVec2, IMAGE_TILE_SIZE};
-use renderer::{PresentTileParams, RenderTarget2d, TileRenderer, TileRendererError};
+use renderer::{
+    PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d, TileRenderer,
+    TileRendererError,
+};
 
 use crate::AppView;
 
@@ -60,6 +63,7 @@ pub fn present_root_tiles(
         .root_active_image()
         .ok_or(GlaDocRendererError::MissingActivePlan)?;
     let layout = doc.layout();
+    let mut commands = Vec::new();
 
     for &tile_index in tile_indices {
         let tile_key = root_image.tile_key(tile_index).unwrap_or(TileKey::EMPTY);
@@ -80,19 +84,18 @@ pub fn present_root_tiles(
             origin.x + source_size[0] as f32,
             origin.y + source_size[1] as f32,
         ));
-        tile_renderer.present_tile(
-            device,
-            queue,
-            tile_key,
-            PresentTileParams {
+        commands.push(RenderCommand::PresentTile(PresentTileCommand {
+            source_tile_key: tile_key,
+            params: PresentTileParams {
                 target_min_px: [target_min.x, target_min.y],
                 target_max_px: [target_max.x, target_max.y],
                 source_width: source_size[0],
                 source_height: source_size[1],
             },
-            render_target,
-        )?;
+        }));
     }
+
+    tile_renderer.execute_commands(device, queue, &[], &[], &commands, Some(render_target))?;
 
     Ok(())
 }

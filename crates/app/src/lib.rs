@@ -1,9 +1,11 @@
+mod brush_registry;
 mod export;
 mod present;
 mod preview;
 mod surface;
 mod view;
 
+pub use crate::brush_registry::AppBrushRegistry;
 pub use crate::export::{AppExportError, export_document_directory};
 pub use crate::present::{AppPresentError, present_root_tiles};
 pub use crate::preview::{AppPreviewError, run_preview_window};

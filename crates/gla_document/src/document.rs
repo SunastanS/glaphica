@@ -144,6 +144,14 @@ impl GlaDoc {
         self.node(self.active_layer_id)
     }
 
+    pub fn active_layer_image(&self) -> Result<&GlaImage, GlaDocError> {
+        self.node_image(self.active_layer_id)
+    }
+
+    pub fn active_layer_image_mut(&mut self) -> Result<&mut GlaImage, GlaDocError> {
+        self.node_image_mut(self.active_layer_id)
+    }
+
     pub fn active_layer_ancestor_chain(&self) -> &[GlaNodeId] {
         self.active_layer_ancestor_chain.as_slice()
     }
@@ -702,6 +710,26 @@ mod tests {
         assert_eq!(
             doc.active_layer_ancestor_chain(),
             &[layer, group, doc.root_id()]
+        );
+    }
+
+    #[test]
+    fn active_layer_image_helpers_follow_active_layer_selection() {
+        let mut doc = new_doc();
+        let layer = match doc.append_layer(doc.root_id()) {
+            Ok(node_id) => node_id,
+            Err(err) => panic!("failed to append layer: {err}"),
+        };
+
+        let selected_layer = doc.set_active_layer(layer);
+        assert_eq!(selected_layer, Ok(()));
+        assert_eq!(
+            doc.active_layer_image().map(|image| image.backend()),
+            Ok(doc.image_backend())
+        );
+        assert_eq!(
+            doc.active_layer_image_mut().map(|image| image.backend()),
+            Ok(doc.image_backend())
         );
     }
 

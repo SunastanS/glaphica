@@ -2,20 +2,22 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend as AtlasBackend};
-use brush::BrushPreview;
 use gla_document::{GlaDoc, GlaDocError, GlaNodeId, GlaNodeKind};
 use gla_image::{
     GlaCachedImage, GlaCachedImageCreateError, GlaImage, GlaImageCreateError,
     GlaImageTileAccessError,
 };
 use glaphica_core::BlendMode;
-use renderer::{TileCompositeSource, TileRenderer, TileRendererError};
+use renderer::{
+    CompositeTileCommand, RenderCommand, TileCompositeSource, TileRenderer, TileRendererError,
+};
 
 #[derive(Debug)]
 pub struct GlaDocRenderer {
     render_backend: AtlasBackend,
     node_resources: Vec<NodeRenderResource>,
     active_plan: Option<ActiveRenderPlan>,
+    brush_preview_image: Option<GlaImage>,
 }
 
 #[derive(Debug)]
@@ -110,11 +112,6 @@ pub enum GlaDocRendererError {
     TileRenderer(TileRendererError),
     PrepareExecution(PrepareExecutionError),
     RenderExecution(RenderExecutionError),
-    WrongPreviewBackend {
-        expected: atlas::BackendId,
-        actual: atlas::BackendId,
-    },
-    UnsupportedActiveLayerKind(GlaNodeKind),
     MissingActivePlan,
 }
 
@@ -129,15 +126,6 @@ impl Display for GlaDocRendererError {
             Self::TileRenderer(error) => Display::fmt(error, f),
             Self::PrepareExecution(error) => Display::fmt(error, f),
             Self::RenderExecution(error) => Display::fmt(error, f),
-            Self::WrongPreviewBackend { expected, actual } => write!(
-                f,
-                "brush preview targets backend {}, but render backend is {}",
-                actual.raw(),
-                expected.raw()
-            ),
-            Self::UnsupportedActiveLayerKind(kind) => {
-                write!(f, "active brush preview does not support active layer kind {kind:?}")
-            }
             Self::MissingActivePlan => f.write_str("missing active render plan"),
         }
     }
@@ -231,6 +219,7 @@ impl GlaDocRenderer {
             render_backend,
             node_resources: Vec::new(),
             active_plan: None,
+            brush_preview_image: None,
         }
     }
 
@@ -255,6 +244,42 @@ impl GlaDocRenderer {
                 RenderImageState::Active(image) => Some(image),
                 RenderImageState::Cached(_) | RenderImageState::Empty => None,
             })
+    }
+
+    pub fn brush_preview_image(&self) -> Option<&GlaImage> {
+        self.brush_preview_image.as_ref()
+    }
+
+    pub fn clear_brush_preview_image(&mut self) {
+        self.brush_preview_image = None;
+    }
+
+    pub fn ensure_brush_preview_tile(
+        &mut self,
+        doc: &GlaDoc,
+        tile_index: usize,
+    ) -> Result<atlas::TileKey, GlaDocRendererError> {
+        if self.brush_preview_image.is_none() {
+            self.brush_preview_image = Some(GlaImage::new(doc.layout(), doc.render_backend())?);
+        }
+        let preview_image = self
+            .brush_preview_image
+            .as_mut()
+            .ok_or(GlaDocRendererError::MissingActivePlan)?;
+        ensure_active_target_tile(preview_image, tile_index, &self.render_backend)
+    }
+
+    pub fn ensure_brush_preview_merge_target(
+        &mut self,
+        doc: &GlaDoc,
+        tile_index: usize,
+    ) -> Result<(atlas::TileKey, atlas::TileKey), GlaDocRendererError> {
+        let origin_tile_key = doc
+            .active_layer_image()?
+            .tile_key(tile_index)
+            .ok_or(GlaImageTileAccessError::OutOfBounds)?;
+        let preview_tile_key = self.ensure_brush_preview_tile(doc, tile_index)?;
+        Ok((origin_tile_key, preview_tile_key))
     }
 
     pub fn render_active_tiles(
@@ -385,20 +410,32 @@ impl GlaDocRenderer {
         let tile_count = usize::try_from(doc.layout().total_tiles())
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let tile_indices = (0..tile_count).collect::<Vec<_>>();
+        let active_layer_id = self
+            .active_plan
+            .as_ref()
+            .map(|plan| plan.active_layer_id())
+            .ok_or(GlaDocRendererError::MissingActivePlan)?;
+        let mut commands = Vec::new();
 
         for step in &prepare_steps {
-            self.compose_node_gpu(
+            self.compose_node_commands(
                 doc,
-                device,
-                queue,
-                tile_renderer,
                 step.node_id,
                 &tile_indices,
                 &step.inputs,
-                None,
+                active_layer_id,
+                &mut commands,
             )?;
         }
-        self.flush_render_backend_clears(device, queue, tile_renderer)?;
+        let clear_batches = self.render_backend.take_pending_clear_batches()?;
+        tile_renderer.execute_commands(
+            device,
+            queue,
+            &[&self.render_backend],
+            &clear_batches,
+            &commands,
+            None,
+        )?;
 
         self.active_plan
             .as_ref()
@@ -413,35 +450,7 @@ impl GlaDocRenderer {
         tile_renderer: &mut TileRenderer,
         tile_indices: &[usize],
     ) -> Result<(), GlaDocRendererError> {
-        self.render_active_tiles_gpu_with_preview(
-            doc,
-            device,
-            queue,
-            tile_renderer,
-            tile_indices,
-            None,
-        )
-    }
-
-    pub fn render_active_tiles_gpu_with_preview(
-        &mut self,
-        doc: &GlaDoc,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        tile_renderer: &mut TileRenderer,
-        tile_indices: &[usize],
-        brush_preview: Option<&BrushPreview>,
-    ) -> Result<(), GlaDocRendererError> {
         tile_renderer.ensure_backend(device, &self.render_backend)?;
-        if let Some(brush_preview) = brush_preview {
-            let render_backend_id = self.render_backend.backend_id()?;
-            if brush_preview.backend_id() != render_backend_id {
-                return Err(GlaDocRendererError::WrongPreviewBackend {
-                    expected: render_backend_id,
-                    actual: brush_preview.backend_id(),
-                });
-            }
-        }
         let passes = self
             .active_plan
             .as_ref()
@@ -452,52 +461,27 @@ impl GlaDocRenderer {
             .as_ref()
             .map(|plan| plan.active_layer_id())
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        let active_layer_preview = match brush_preview {
-            Some(brush_preview) => Some(self.compose_active_layer_preview_gpu(
-                doc,
-                device,
-                queue,
-                tile_renderer,
-                tile_indices,
-                active_layer_id,
-                brush_preview,
-            )?),
-            None => None,
-        };
+        let mut commands = Vec::new();
 
         for pass in &passes {
-            self.compose_node_gpu(
+            self.compose_node_commands(
                 doc,
-                device,
-                queue,
-                tile_renderer,
                 pass.node_id,
                 tile_indices,
                 &pass.inputs,
-                active_layer_preview.as_ref(),
+                active_layer_id,
+                &mut commands,
             )?;
         }
-        if passes.is_empty() {
-            if let Some(active_layer_preview) = active_layer_preview.as_ref() {
-                let synthetic_inputs = [RenderProgramInput {
-                    node_id: active_layer_id,
-                    source_kind: RenderProgramSourceKind::Truth,
-                    opacity: 1.0,
-                    blend_mode: BlendMode::Normal,
-                }];
-                self.compose_node_gpu(
-                    doc,
-                    device,
-                    queue,
-                    tile_renderer,
-                    active_layer_id,
-                    tile_indices,
-                    &synthetic_inputs,
-                    Some(active_layer_preview),
-                )?;
-            }
-        }
-        self.flush_render_backend_clears(device, queue, tile_renderer)?;
+        let clear_batches = self.render_backend.take_pending_clear_batches()?;
+        tile_renderer.execute_commands(
+            device,
+            queue,
+            &[&self.render_backend],
+            &clear_batches,
+            &commands,
+            None,
+        )?;
         Ok(())
     }
 
@@ -642,16 +626,14 @@ impl GlaDocRenderer {
         Ok(())
     }
 
-    fn compose_node_gpu(
+    fn compose_node_commands(
         &mut self,
         doc: &GlaDoc,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        tile_renderer: &mut TileRenderer,
         target_node_id: GlaNodeId,
         tile_indices: &[usize],
         inputs: &[RenderProgramInput],
-        active_layer_preview: Option<&ActiveLayerPreview>,
+        active_layer_id: GlaNodeId,
+        output: &mut Vec<RenderCommand>,
     ) -> Result<(), GlaDocRendererError> {
         let target_index = self
             .node_resources
@@ -660,8 +642,12 @@ impl GlaDocRenderer {
             .ok_or(GlaDocError::InvalidNodeId(target_node_id))?;
 
         for &tile_index in tile_indices {
-            let sources =
-                self.collect_tile_sources(doc, inputs, tile_index, active_layer_preview)?;
+            let sources = self.collect_tile_sources(
+                doc,
+                inputs,
+                tile_index,
+                active_layer_id,
+            )?;
             let target_state = &mut self.node_resources[target_index].state;
             let target_image = match target_state {
                 RenderImageState::Active(image) => image,
@@ -683,7 +669,10 @@ impl GlaDocRenderer {
 
             let target_key =
                 ensure_active_target_tile(target_image, tile_index, &self.render_backend)?;
-            tile_renderer.composite_tile(device, queue, target_key, &sources)?;
+            output.push(RenderCommand::CompositeTile(CompositeTileCommand {
+                target_tile_key: target_key,
+                inputs: sources,
+            }));
         }
 
         Ok(())
@@ -694,32 +683,31 @@ impl GlaDocRenderer {
         doc: &GlaDoc,
         inputs: &[RenderProgramInput],
         tile_index: usize,
-        active_layer_preview: Option<&ActiveLayerPreview>,
+        active_layer_id: GlaNodeId,
     ) -> Result<Vec<TileCompositeSource>, GlaDocRendererError> {
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let tile_key = if active_layer_preview.is_some_and(|preview| preview.node_id == input.node_id)
-            {
-                active_layer_preview
-                    .and_then(|preview| preview.image.tile_key(tile_index))
-                    .unwrap_or(atlas::TileKey::EMPTY)
-            } else {
-                match input.source_kind {
-                    RenderProgramSourceKind::Truth => doc
-                        .node_image(input.node_id)?
-                        .tile_key(tile_index)
-                        .unwrap_or(atlas::TileKey::EMPTY),
-                    RenderProgramSourceKind::Result => self
-                        .node_resources
-                        .iter()
-                        .find(|entry| entry.node_id == input.node_id)
-                        .and_then(|entry| match &entry.state {
-                            RenderImageState::Active(image) => image.tile_key(tile_index),
-                            RenderImageState::Cached(cached) => cached.tile_key(tile_index),
-                            RenderImageState::Empty => Some(atlas::TileKey::EMPTY),
-                        })
-                        .unwrap_or(atlas::TileKey::EMPTY),
+            let tile_key = match input.source_kind {
+                RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
+                    self.brush_preview_image
+                        .as_ref()
+                        .and_then(|preview_node| preview_node.tile_key(tile_index))
+                        .unwrap_or(atlas::TileKey::EMPTY)
                 }
+                RenderProgramSourceKind::Truth => doc
+                    .node_image(input.node_id)?
+                    .tile_key(tile_index)
+                    .unwrap_or(atlas::TileKey::EMPTY),
+                RenderProgramSourceKind::Result => self
+                    .node_resources
+                    .iter()
+                    .find(|entry| entry.node_id == input.node_id)
+                    .and_then(|entry| match &entry.state {
+                        RenderImageState::Active(image) => image.tile_key(tile_index),
+                        RenderImageState::Cached(cached) => cached.tile_key(tile_index),
+                        RenderImageState::Empty => Some(atlas::TileKey::EMPTY),
+                    })
+                    .unwrap_or(atlas::TileKey::EMPTY),
             };
             if tile_key == atlas::TileKey::EMPTY {
                 continue;
@@ -732,81 +720,6 @@ impl GlaDocRenderer {
         }
         Ok(sources)
     }
-
-    fn compose_active_layer_preview_gpu(
-        &self,
-        doc: &GlaDoc,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        tile_renderer: &mut TileRenderer,
-        tile_indices: &[usize],
-        active_layer_id: GlaNodeId,
-        brush_preview: &BrushPreview,
-    ) -> Result<ActiveLayerPreview, GlaDocRendererError> {
-        let active_layer_kind = doc.node(active_layer_id)?.kind();
-        if active_layer_kind != GlaNodeKind::Leaf {
-            return Err(GlaDocRendererError::UnsupportedActiveLayerKind(active_layer_kind));
-        }
-
-        let mut image = GlaImage::new(doc.layout(), doc.render_backend())?;
-        let base_image = doc.node_image(active_layer_id)?;
-        for &tile_index in tile_indices {
-            let mut sources = Vec::with_capacity(2);
-            let base_tile_key = base_image
-                .tile_key(tile_index)
-                .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-            if base_tile_key != atlas::TileKey::EMPTY {
-                sources.push(TileCompositeSource {
-                    tile_key: base_tile_key,
-                    opacity: 1.0,
-                    blend_mode: BlendMode::Normal,
-                });
-            }
-
-            if let Some(preview_tile_key) = brush_preview.tile_key(tile_index) {
-                if preview_tile_key != atlas::TileKey::EMPTY {
-                    sources.push(TileCompositeSource {
-                        tile_key: preview_tile_key,
-                        opacity: brush_preview.opacity(),
-                        blend_mode: brush_preview.blend_mode(),
-                    });
-                }
-            }
-
-            if sources.is_empty() {
-                continue;
-            }
-
-            let target_key = ensure_active_target_tile(&mut image, tile_index, &self.render_backend)?;
-            tile_renderer.composite_tile(device, queue, target_key, &sources)?;
-        }
-
-        Ok(ActiveLayerPreview {
-            node_id: active_layer_id,
-            image,
-        })
-    }
-
-    fn flush_render_backend_clears(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        tile_renderer: &mut TileRenderer,
-    ) -> Result<(), GlaDocRendererError> {
-        let clear_batches = self.render_backend.take_pending_clear_batches()?;
-        tile_renderer.apply_clear_batches(
-            device,
-            queue,
-            &[&self.render_backend],
-            &clear_batches,
-        )?;
-        Ok(())
-    }
-}
-
-struct ActiveLayerPreview {
-    node_id: GlaNodeId,
-    image: GlaImage,
 }
 
 fn restore_cached_image(
@@ -973,7 +886,7 @@ fn execute_prepare_steps(
 
 #[cfg(test)]
 mod tests {
-    use atlas::{AtlasLayout, Backend as AtlasBackend};
+    use atlas::{AtlasLayout, Backend as AtlasBackend, TileKey};
     use gla_document::{BackendId, GlaDoc, GlaImageLayout};
 
     use crate::{
@@ -1053,6 +966,38 @@ mod tests {
 
     fn new_render_backend() -> AtlasBackend {
         AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(7))
+    }
+
+    #[test]
+    fn ensure_brush_preview_merge_target_uses_active_layer_truth_and_render_cache() {
+        let image_backend = AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(3));
+        let mut doc = new_doc();
+        let layer_id = doc
+            .append_layer(doc.root_id())
+            .expect("layer should append");
+        doc.set_active_layer(layer_id)
+            .expect("active layer should update");
+
+        let active_tile = image_backend.alloc_active().expect("active tile should allocate");
+        let active_tile_key = active_tile.tile_key();
+        doc.active_layer_image_mut()
+            .expect("layer image should exist")
+            .replace_tile_owner(0, active_tile)
+            .expect("tile owner should install");
+
+        let mut renderer = GlaDocRenderer::new(new_render_backend());
+        let (origin_tile_key, preview_tile_key) = renderer
+            .ensure_brush_preview_merge_target(&doc, 0)
+            .expect("preview target should build");
+
+        assert_eq!(origin_tile_key, active_tile_key);
+        assert_ne!(preview_tile_key, TileKey::EMPTY);
+        assert_eq!(
+            renderer
+                .brush_preview_image()
+                .and_then(|image| image.tile_key(0)),
+            Some(preview_tile_key)
+        );
     }
 
     #[test]

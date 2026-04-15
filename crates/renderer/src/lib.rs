@@ -11,5 +11,8 @@ pub use crate::texture_io::{
     TileImageExportTile,
 };
 pub use crate::tile_renderer::{
-    PresentTileParams, RenderTarget2d, TileCompositeSource, TileRenderer, TileRendererError,
+    ApplyDabCommand, BrushCommandExecutor, BrushShaderProvider, BrushShaderSource,
+    BrushShaderSpec, BrushShaderStage, CompositeTileCommand, CopyTileCommand, MergeTileCommand,
+    PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource,
+    TileRenderer, TileRendererError,
 };

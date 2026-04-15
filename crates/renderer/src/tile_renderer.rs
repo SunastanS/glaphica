@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, AtlasLayout, Backend as AtlasBackend, BackendId, ClearBatch, TileKey};
-use glaphica_core::{ATLAS_TILE_SIZE, BlendMode, GUTTER_SIZE};
+use glaphica_core::{ATLAS_TILE_SIZE, BlendMode, BrushId, GUTTER_SIZE};
 
 use crate::{RendererTexture, RendererTextureDescriptor, TextureIoError};
 
@@ -132,6 +132,18 @@ pub enum TileRendererError {
     TextureIo(TextureIoError),
     MissingBackendTexture(BackendId),
     InvalidTileKey,
+    MissingPresentTarget,
+    UnsupportedCommand(&'static str),
+    MissingBrushShader {
+        brush_id: BrushId,
+        stage: BrushShaderStage,
+    },
+    InvalidBrushParameters {
+        brush_id: BrushId,
+        stage: BrushShaderStage,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 impl Display for TileRendererError {
@@ -147,6 +159,31 @@ impl Display for TileRendererError {
                 )
             }
             Self::InvalidTileKey => f.write_str("invalid tile key"),
+            Self::MissingPresentTarget => {
+                f.write_str("present command requires a render target")
+            }
+            Self::UnsupportedCommand(name) => {
+                write!(f, "renderer command {name} is not implemented")
+            }
+            Self::MissingBrushShader { brush_id, stage } => {
+                write!(
+                    f,
+                    "missing brush shader for brush {} stage {stage:?}",
+                    brush_id.raw()
+                )
+            }
+            Self::InvalidBrushParameters {
+                brush_id,
+                stage,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "invalid brush parameters for brush {} stage {stage:?}: expected {}, got {}",
+                brush_id.raw(),
+                expected,
+                actual
+            ),
         }
     }
 }
@@ -207,6 +244,91 @@ pub struct PresentTileParams {
     pub source_height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyTileCommand {
+    pub source_tile_key: TileKey,
+    pub destination_tile_key: TileKey,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApplyDabCommand {
+    pub brush_id: BrushId,
+    pub destination_tile_key: TileKey,
+    pub reference_tile_key: Option<TileKey>,
+    pub parameters: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeTileCommand {
+    pub brush_id: BrushId,
+    pub origin_tile_key: TileKey,
+    pub intermediate_tile_key: TileKey,
+    pub destination_tile_key: TileKey,
+    pub backup_tile_key: Option<TileKey>,
+    pub parameters: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompositeTileCommand {
+    pub target_tile_key: TileKey,
+    pub inputs: Vec<TileCompositeSource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresentTileCommand {
+    pub source_tile_key: TileKey,
+    pub params: PresentTileParams,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushShaderStage {
+    ApplyDab,
+    MergeTile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrushShaderSource {
+    pub wgsl: &'static str,
+    pub entry_point: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrushShaderSpec {
+    pub apply_dab: BrushShaderSource,
+    pub merge_tile: BrushShaderSource,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderCommand {
+    CopyTile(CopyTileCommand),
+    ApplyDab(ApplyDabCommand),
+    MergeTile(MergeTileCommand),
+    CompositeTile(CompositeTileCommand),
+    PresentTile(PresentTileCommand),
+}
+
+pub trait BrushShaderProvider {
+    fn shader_spec(&self, brush_id: BrushId) -> Option<BrushShaderSpec>;
+}
+
+pub trait BrushCommandExecutor {
+    fn apply_dab(
+        &mut self,
+        renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command: &ApplyDabCommand,
+    ) -> Result<(), TileRendererError>;
+
+    fn merge_tile(
+        &mut self,
+        renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command: &MergeTileCommand,
+    ) -> Result<(), TileRendererError>;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeUniforms {
@@ -228,12 +350,46 @@ struct PresentUniforms {
     padding: [u32; 7],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RoundApplyUniforms {
+    source_origin: [u32; 2],
+    source_layer: u32,
+    _pad0: u32,
+    center_local: [f32; 2],
+    radius_px: f32,
+    hardness: f32,
+    opacity: f32,
+    _pad1: [u32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RoundMergeUniforms {
+    origin_origin: [u32; 2],
+    origin_layer: u32,
+    _pad0: u32,
+    intermediate_origin: [u32; 2],
+    intermediate_layer: u32,
+    _pad1: u32,
+    tint: [f32; 3],
+    _pad2: f32,
+}
+
+#[derive(Debug, Default)]
+struct BrushPipelineSet {
+    apply_dab: Vec<Option<wgpu::RenderPipeline>>,
+    merge_tile: Vec<Option<wgpu::RenderPipeline>>,
+}
+
 pub struct TileRenderer {
     atlas_textures: AtlasTextureSet,
     compose_pipeline: wgpu::RenderPipeline,
     compose_bind_group_layout: wgpu::BindGroupLayout,
     present_bind_group_layout: wgpu::BindGroupLayout,
+    brush_bind_group_layout: wgpu::BindGroupLayout,
     present_pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
+    brush_pipelines: BrushPipelineSet,
     scratch_a: RendererTexture,
     scratch_b: RendererTexture,
 }
@@ -396,6 +552,32 @@ impl TileRenderer {
                     },
                 ],
             });
+        let brush_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("glaphica-brush-bind-group-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
         let scratch_descriptor = RendererTextureDescriptor {
             label: Some("glaphica-tile-scratch"),
             width: ATLAS_TILE_SIZE,
@@ -413,7 +595,9 @@ impl TileRenderer {
             compose_pipeline,
             compose_bind_group_layout,
             present_bind_group_layout,
+            brush_bind_group_layout,
             present_pipelines: Vec::new(),
+            brush_pipelines: BrushPipelineSet::default(),
             scratch_a: RendererTexture::new(device, &scratch_descriptor)?,
             scratch_b: RendererTexture::new(device, &scratch_descriptor)?,
         })
@@ -476,6 +660,120 @@ impl TileRenderer {
             }
         }
         Ok(())
+    }
+
+    pub fn execute_commands(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        backends: &[&AtlasBackend],
+        clear_batches: &[ClearBatch],
+        commands: &[RenderCommand],
+        present_target: Option<RenderTarget2d<'_>>,
+    ) -> Result<(), TileRendererError> {
+        struct UnsupportedBrushExecutor;
+
+        impl BrushCommandExecutor for UnsupportedBrushExecutor {
+            fn apply_dab(
+                &mut self,
+                _renderer: &mut TileRenderer,
+                _device: &wgpu::Device,
+                _queue: &wgpu::Queue,
+                _command: &ApplyDabCommand,
+            ) -> Result<(), TileRendererError> {
+                Err(TileRendererError::UnsupportedCommand("ApplyDab"))
+            }
+
+            fn merge_tile(
+                &mut self,
+                _renderer: &mut TileRenderer,
+                _device: &wgpu::Device,
+                _queue: &wgpu::Queue,
+                _command: &MergeTileCommand,
+            ) -> Result<(), TileRendererError> {
+                Err(TileRendererError::UnsupportedCommand("MergeTile"))
+            }
+        }
+
+        let mut brush_executor = UnsupportedBrushExecutor;
+        self.execute_commands_with_brush_executor(
+            device,
+            queue,
+            backends,
+            clear_batches,
+            commands,
+            present_target,
+            &mut brush_executor,
+        )
+    }
+
+    pub fn execute_commands_with_brush_executor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        backends: &[&AtlasBackend],
+        clear_batches: &[ClearBatch],
+        commands: &[RenderCommand],
+        present_target: Option<RenderTarget2d<'_>>,
+        brush_executor: &mut impl BrushCommandExecutor,
+    ) -> Result<(), TileRendererError> {
+        for backend in backends {
+            self.ensure_backend(device, backend)?;
+        }
+        self.apply_clear_batches(device, queue, backends, clear_batches)?;
+        for command in commands {
+            match command {
+                RenderCommand::CopyTile(command) => self.copy_tile(
+                    device,
+                    queue,
+                    command.source_tile_key,
+                    command.destination_tile_key,
+                )?,
+                RenderCommand::ApplyDab(command) => {
+                    brush_executor.apply_dab(self, device, queue, command)?
+                }
+                RenderCommand::MergeTile(command) => {
+                    brush_executor.merge_tile(self, device, queue, command)?
+                }
+                RenderCommand::CompositeTile(command) => {
+                    self.composite_tile(device, queue, command.target_tile_key, &command.inputs)?
+                }
+                RenderCommand::PresentTile(command) => {
+                    let target =
+                        present_target.ok_or(TileRendererError::MissingPresentTarget)?;
+                    self.present_tile(
+                        device,
+                        queue,
+                        command.source_tile_key,
+                        command.params,
+                        target,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn execute_commands_with_shader_provider(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        backends: &[&AtlasBackend],
+        clear_batches: &[ClearBatch],
+        commands: &[RenderCommand],
+        present_target: Option<RenderTarget2d<'_>>,
+        provider: &impl BrushShaderProvider,
+    ) -> Result<(), TileRendererError> {
+        let mut executor = RegisteredBrushExecutor { provider };
+        self.execute_commands_with_brush_executor(
+            device,
+            queue,
+            backends,
+            clear_batches,
+            commands,
+            present_target,
+            &mut executor,
+        )
     }
 
     pub fn upload_rgba8_tile(
@@ -677,6 +975,358 @@ impl TileRenderer {
         Ok(())
     }
 
+    fn round_apply_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        provider: &impl BrushShaderProvider,
+        brush_id: BrushId,
+    ) -> Result<wgpu::RenderPipeline, TileRendererError> {
+        self.ensure_brush_pipeline(device, provider, brush_id, BrushShaderStage::ApplyDab)?;
+        self.brush_pipelines
+            .apply_dab
+            .get(brush_id.raw() as usize)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(TileRendererError::MissingBrushShader {
+                brush_id,
+                stage: BrushShaderStage::ApplyDab,
+            })
+    }
+
+    fn round_merge_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        provider: &impl BrushShaderProvider,
+        brush_id: BrushId,
+    ) -> Result<wgpu::RenderPipeline, TileRendererError> {
+        self.ensure_brush_pipeline(device, provider, brush_id, BrushShaderStage::MergeTile)?;
+        self.brush_pipelines
+            .merge_tile
+            .get(brush_id.raw() as usize)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(TileRendererError::MissingBrushShader {
+                brush_id,
+                stage: BrushShaderStage::MergeTile,
+            })
+    }
+
+    fn ensure_brush_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        provider: &impl BrushShaderProvider,
+        brush_id: BrushId,
+        stage: BrushShaderStage,
+    ) -> Result<(), TileRendererError> {
+        let index = brush_id.raw() as usize;
+        let pipeline_slots = match stage {
+            BrushShaderStage::ApplyDab => &mut self.brush_pipelines.apply_dab,
+            BrushShaderStage::MergeTile => &mut self.brush_pipelines.merge_tile,
+        };
+        if pipeline_slots.len() <= index {
+            pipeline_slots.resize_with(index + 1, || None);
+        }
+        if pipeline_slots[index].is_some() {
+            return Ok(());
+        }
+
+        let shader_spec =
+            provider
+                .shader_spec(brush_id)
+                .ok_or(TileRendererError::MissingBrushShader { brush_id, stage })?;
+        let shader_source = match stage {
+            BrushShaderStage::ApplyDab => shader_spec.apply_dab,
+            BrushShaderStage::MergeTile => shader_spec.merge_tile,
+        };
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glaphica-brush-shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_source.wgsl.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glaphica-brush-pipeline-layout"),
+            bind_group_layouts: &[&self.brush_bind_group_layout],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glaphica-brush-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(shader_source.entry_point),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        pipeline_slots[index] = Some(pipeline);
+        Ok(())
+    }
+
+    fn execute_round_apply_dab(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        provider: &impl BrushShaderProvider,
+        command: &ApplyDabCommand,
+    ) -> Result<(), TileRendererError> {
+        if command.parameters.len() != 5 {
+            return Err(TileRendererError::InvalidBrushParameters {
+                brush_id: command.brush_id,
+                stage: BrushShaderStage::ApplyDab,
+                expected: 5,
+                actual: command.parameters.len(),
+            });
+        }
+        let pipeline = self.round_apply_pipeline(device, provider, command.brush_id)?;
+        let destination = self.atlas_textures.resolve_tile(command.destination_tile_key)?;
+        let uniforms = RoundApplyUniforms {
+            source_origin: [
+                destination.tile_x * ATLAS_TILE_SIZE,
+                destination.tile_y * ATLAS_TILE_SIZE,
+            ],
+            source_layer: destination.layer,
+            _pad0: 0,
+            center_local: [command.parameters[0], command.parameters[1]],
+            radius_px: command.parameters[2],
+            hardness: command.parameters[3],
+            opacity: command.parameters[4],
+            _pad1: [0; 3],
+        };
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-round-apply-uniform"),
+            size: std::mem::size_of::<RoundApplyUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        let scratch_view = self.scratch_a.create_layer_view(0)?;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-round-apply-bind-group"),
+            layout: &self.brush_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&destination.texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glaphica-round-apply-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-round-apply-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &scratch_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.scratch_a.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &destination.texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: destination.tile_x * ATLAS_TILE_SIZE,
+                    y: destination.tile_y * ATLAS_TILE_SIZE,
+                    z: destination.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    fn execute_round_merge_tile(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        provider: &impl BrushShaderProvider,
+        command: &MergeTileCommand,
+    ) -> Result<(), TileRendererError> {
+        if command.parameters.len() != 3 {
+            return Err(TileRendererError::InvalidBrushParameters {
+                brush_id: command.brush_id,
+                stage: BrushShaderStage::MergeTile,
+                expected: 3,
+                actual: command.parameters.len(),
+            });
+        }
+        let pipeline = self.round_merge_pipeline(device, provider, command.brush_id)?;
+        let origin = self.atlas_textures.resolve_tile(command.origin_tile_key)?;
+        let intermediate = self.atlas_textures.resolve_tile(command.intermediate_tile_key)?;
+        let destination = self.atlas_textures.resolve_tile(command.destination_tile_key)?;
+        let uniforms = RoundMergeUniforms {
+            origin_origin: [origin.tile_x * ATLAS_TILE_SIZE, origin.tile_y * ATLAS_TILE_SIZE],
+            origin_layer: origin.layer,
+            _pad0: 0,
+            intermediate_origin: [
+                intermediate.tile_x * ATLAS_TILE_SIZE,
+                intermediate.tile_y * ATLAS_TILE_SIZE,
+            ],
+            intermediate_layer: intermediate.layer,
+            _pad1: 0,
+            tint: [command.parameters[0], command.parameters[1], command.parameters[2]],
+            _pad2: 0.0,
+        };
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-round-merge-uniform"),
+            size: std::mem::size_of::<RoundMergeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        let scratch_view = self.scratch_a.create_layer_view(0)?;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-round-merge-bind-group"),
+            layout: &self.brush_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&origin.texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glaphica-round-merge-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-round-merge-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &scratch_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.scratch_a.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &destination.texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: destination.tile_x * ATLAS_TILE_SIZE,
+                    y: destination.tile_y * ATLAS_TILE_SIZE,
+                    z: destination.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    pub fn copy_tile(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source_tile_key: TileKey,
+        destination_tile_key: TileKey,
+    ) -> Result<(), TileRendererError> {
+        let source = self.atlas_textures.resolve_tile(source_tile_key)?;
+        let destination = self.atlas_textures.resolve_tile(destination_tile_key)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glaphica-tile-copy-encoder"),
+        });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &source.texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: source.tile_x * ATLAS_TILE_SIZE,
+                    y: source.tile_y * ATLAS_TILE_SIZE,
+                    z: source.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &destination.texture.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: destination.tile_x * ATLAS_TILE_SIZE,
+                    y: destination.tile_y * ATLAS_TILE_SIZE,
+                    z: destination.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
     pub fn present_tile(
         &mut self,
         device: &wgpu::Device,
@@ -836,6 +1486,35 @@ impl TileRenderer {
             });
         }
         queue.submit(Some(encoder.finish()));
+    }
+}
+
+struct RegisteredBrushExecutor<'a, Provider> {
+    provider: &'a Provider,
+}
+
+impl<Provider> BrushCommandExecutor for RegisteredBrushExecutor<'_, Provider>
+where
+    Provider: BrushShaderProvider,
+{
+    fn apply_dab(
+        &mut self,
+        renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command: &ApplyDabCommand,
+    ) -> Result<(), TileRendererError> {
+        renderer.execute_round_apply_dab(device, queue, self.provider, command)
+    }
+
+    fn merge_tile(
+        &mut self,
+        renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command: &MergeTileCommand,
+    ) -> Result<(), TileRendererError> {
+        renderer.execute_round_merge_tile(device, queue, self.provider, command)
     }
 }
 
