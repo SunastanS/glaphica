@@ -9,3 +9,4 @@ gla_document = { path = "../gla_document" }
 gla_image = { path = "../gla_image" }
 glaphica_core = { package = "core", path = "../core" }
 renderer = { path = "../renderer" }
+bytemuck = { version = "1", features = ["derive"] }

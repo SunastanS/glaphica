@@ -642,12 +642,7 @@ impl GlaDocRenderer {
             .ok_or(GlaDocError::InvalidNodeId(target_node_id))?;
 
         for &tile_index in tile_indices {
-            let sources = self.collect_tile_sources(
-                doc,
-                inputs,
-                tile_index,
-                active_layer_id,
-            )?;
+            let sources = self.collect_tile_sources(doc, inputs, tile_index, active_layer_id)?;
             let target_state = &mut self.node_resources[target_index].state;
             let target_image = match target_state {
                 RenderImageState::Active(image) => image,
@@ -688,12 +683,11 @@ impl GlaDocRenderer {
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
             let tile_key = match input.source_kind {
-                RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
-                    self.brush_preview_image
-                        .as_ref()
-                        .and_then(|preview_node| preview_node.tile_key(tile_index))
-                        .unwrap_or(atlas::TileKey::EMPTY)
-                }
+                RenderProgramSourceKind::Truth if input.node_id == active_layer_id => self
+                    .brush_preview_image
+                    .as_ref()
+                    .and_then(|preview_node| preview_node.tile_key(tile_index))
+                    .unwrap_or(atlas::TileKey::EMPTY),
                 RenderProgramSourceKind::Truth => doc
                     .node_image(input.node_id)?
                     .tile_key(tile_index)
@@ -978,7 +972,9 @@ mod tests {
         doc.set_active_layer(layer_id)
             .expect("active layer should update");
 
-        let active_tile = image_backend.alloc_active().expect("active tile should allocate");
+        let active_tile = image_backend
+            .alloc_active()
+            .expect("active tile should allocate");
         let active_tile_key = active_tile.tile_key();
         doc.active_layer_image_mut()
             .expect("layer image should exist")

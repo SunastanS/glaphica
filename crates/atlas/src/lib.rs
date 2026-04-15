@@ -84,6 +84,12 @@ impl TileOwner {
         decode_tile_key(self.key).backend_id
     }
 
+    pub fn into_tile_key(mut self) -> TileKey {
+        let key = self.key;
+        self.key = TileKey::EMPTY;
+        key
+    }
+
     fn new(recycle: BackendRecycleHandle, key: TileKey) -> Self {
         Self { recycle, key }
     }
@@ -720,6 +726,20 @@ impl Backend {
         inner.cache_active_tiles(keys)
     }
 
+    pub fn cache_active_owners(
+        &self,
+        owners: impl IntoIterator<Item = TileOwner>,
+    ) -> Result<CachedTileGroup, AtlasError> {
+        let mut keys = Vec::new();
+        for owner in owners {
+            if owner.backend_id() != self.backend_id()? {
+                return Err(AtlasError::WrongBackend);
+            }
+            keys.push(owner.into_tile_key());
+        }
+        self.cache_active_tiles(&keys)
+    }
+
     pub fn activate_cached_tile(&self, key: TileKey) -> Result<TileOwner, AtlasError> {
         let mut inner = self.lock_inner()?;
         self.drain_owned_reclaims(&mut inner)?;
@@ -1067,7 +1087,10 @@ mod tests {
             Err(AtlasError::GenerationMismatch)
         );
         assert_eq!(backend.cached_group_alive(&newest), Ok(true));
-        assert_eq!(backend.tile_state(replacement.tile_key()), Ok(TileState::Active));
+        assert_eq!(
+            backend.tile_state(replacement.tile_key()),
+            Ok(TileState::Active)
+        );
     }
 
     #[test]

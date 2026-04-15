@@ -52,11 +52,7 @@ impl SparseTileOwners {
             .zip(self.tile_owners.iter().map(TileOwner::tile_key))
     }
 
-    fn ensure_tile(
-        &mut self,
-        tile_index: usize,
-        backend: &Backend,
-    ) -> Result<TileKey, AtlasError> {
+    fn ensure_tile(&mut self, tile_index: usize, backend: &Backend) -> Result<TileKey, AtlasError> {
         if let Some(tile_key) = self.tile_key(tile_index) {
             return Ok(tile_key);
         }
@@ -66,6 +62,10 @@ impl SparseTileOwners {
         self.tile_indices.push(tile_index);
         self.tile_owners.push(tile_owner);
         Ok(tile_key)
+    }
+
+    fn into_tile_owners(self) -> Vec<TileOwner> {
+        self.tile_owners
     }
 }
 
@@ -91,156 +91,17 @@ impl BrushIntermediate {
                 tile_key,
             })
     }
+
+    pub fn into_tile_owners(self) -> Vec<TileOwner> {
+        self.tiles.into_tile_owners()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StrokeTileState {
+pub struct StrokeTileRecord {
     pub tile_index: usize,
-    pub active_tile_key: TileKey,
-    pub backup_tile_key: TileKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StrokeTileBackupCopy {
-    pub source_tile_key: TileKey,
-    pub cached_tile_key: TileKey,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StrokeBackupResult {
-    pub tile: StrokeTileState,
-    pub snapshot_copy: Option<StrokeTileBackupCopy>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StrokeTileBackupError {
-    Atlas(AtlasError),
-    Image(GlaImageTileAccessError),
-    WrongBackend {
-        expected: BackendId,
-        actual: BackendId,
-    },
-}
-
-impl Display for StrokeTileBackupError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Atlas(error) => Display::fmt(error, f),
-            Self::Image(error) => Display::fmt(error, f),
-            Self::WrongBackend { expected, actual } => write!(
-                f,
-                "stroke backup session targets backend {}, but image uses backend {}",
-                expected.raw(),
-                actual.raw()
-            ),
-        }
-    }
-}
-
-impl Error for StrokeTileBackupError {}
-
-impl From<AtlasError> for StrokeTileBackupError {
-    fn from(error: AtlasError) -> Self {
-        Self::Atlas(error)
-    }
-}
-
-impl From<GlaImageTileAccessError> for StrokeTileBackupError {
-    fn from(error: GlaImageTileAccessError) -> Self {
-        Self::Image(error)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StrokeTileBackupSession {
-    backend: Backend,
-    backend_id: BackendId,
-    backup_group: CachedTileGroup,
-    backed_up_tile_indices: Vec<usize>,
-    backup_tile_keys: Vec<TileKey>,
-}
-
-impl StrokeTileBackupSession {
-    pub fn new(backend: Backend) -> Result<Self, StrokeTileBackupError> {
-        let backend_id = backend.backend_id()?;
-        let backup_group = backend.create_cached_group()?;
-        Ok(Self {
-            backend,
-            backend_id,
-            backup_group,
-            backed_up_tile_indices: Vec::new(),
-            backup_tile_keys: Vec::new(),
-        })
-    }
-
-    pub fn backend_id(&self) -> BackendId {
-        self.backend_id
-    }
-
-    pub fn backup_group(&self) -> &CachedTileGroup {
-        &self.backup_group
-    }
-
-    pub fn backup_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        let backup_index = self
-            .backed_up_tile_indices
-            .iter()
-            .position(|&backed_up_tile_index| backed_up_tile_index == tile_index)?;
-        self.backup_tile_keys.get(backup_index).copied()
-    }
-
-    pub fn ensure_tile_backup(
-        &mut self,
-        image: &GlaImage,
-        tile_index: usize,
-    ) -> Result<StrokeBackupResult, StrokeTileBackupError> {
-        if image.backend() != self.backend_id {
-            return Err(StrokeTileBackupError::WrongBackend {
-                expected: self.backend_id,
-                actual: image.backend(),
-            });
-        }
-
-        let active_tile_key = image
-            .tile_key(tile_index)
-            .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-        if active_tile_key == TileKey::EMPTY {
-            return Ok(StrokeBackupResult {
-                tile: StrokeTileState {
-                    tile_index,
-                    active_tile_key,
-                    backup_tile_key: TileKey::EMPTY,
-                },
-                snapshot_copy: None,
-            });
-        }
-
-        if let Some(backup_tile_key) = self.backup_tile_key(tile_index) {
-            return Ok(StrokeBackupResult {
-                tile: StrokeTileState {
-                    tile_index,
-                    active_tile_key,
-                    backup_tile_key,
-                },
-                snapshot_copy: None,
-            });
-        }
-
-        let backup_tile_key = self.backend.alloc_cached_in_group(&mut self.backup_group)?;
-        self.backed_up_tile_indices.push(tile_index);
-        self.backup_tile_keys.push(backup_tile_key);
-        Ok(StrokeBackupResult {
-            tile: StrokeTileState {
-                tile_index,
-                active_tile_key,
-                backup_tile_key,
-            },
-            snapshot_copy: Some(StrokeTileBackupCopy {
-                source_tile_key: active_tile_key,
-                cached_tile_key: backup_tile_key,
-            }),
-        })
-    }
+    pub intermediate_tile_key: TileKey,
+    pub backup_tile_key: Option<TileKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,11 +152,77 @@ pub struct StrokeCommitBatch {
 }
 
 #[derive(Debug)]
+pub struct BrushBackend {
+    brush_id: BrushId,
+    intermediate_backend: Backend,
+    intermediate_backend_id: BackendId,
+    stroke_history_groups: Vec<CachedTileGroup>,
+}
+
+impl BrushBackend {
+    pub fn new(brush_id: BrushId, intermediate_backend: Backend) -> Result<Self, BrushStrokeError> {
+        let intermediate_backend_id = intermediate_backend.backend_id()?;
+        Ok(Self {
+            brush_id,
+            intermediate_backend,
+            intermediate_backend_id,
+            stroke_history_groups: Vec::new(),
+        })
+    }
+
+    pub fn brush_id(&self) -> BrushId {
+        self.brush_id
+    }
+
+    pub fn intermediate_backend(&self) -> &Backend {
+        &self.intermediate_backend
+    }
+
+    pub fn intermediate_backend_id(&self) -> BackendId {
+        self.intermediate_backend_id
+    }
+
+    pub fn stroke_history_groups(&self) -> &[CachedTileGroup] {
+        &self.stroke_history_groups
+    }
+
+    pub fn begin_stroke(&self) -> BrushStrokeState {
+        BrushStrokeState {
+            brush_id: self.brush_id,
+            intermediate_backend: self.intermediate_backend.clone(),
+            intermediate_backend_id: self.intermediate_backend_id,
+            intermediate: BrushIntermediate {
+                tiles: SparseTileOwners::new(self.intermediate_backend_id),
+            },
+            touched_tiles: Vec::new(),
+        }
+    }
+
+    pub fn archive_stroke(
+        &mut self,
+        stroke: BrushStrokeState,
+    ) -> Result<CachedTileGroup, BrushStrokeError> {
+        if stroke.brush_id != self.brush_id
+            || stroke.intermediate_backend_id != self.intermediate_backend_id
+        {
+            return Err(AtlasError::WrongBackend.into());
+        }
+
+        let cached_group = self
+            .intermediate_backend
+            .cache_active_owners(stroke.into_intermediate().into_tile_owners())?;
+        self.stroke_history_groups.push(cached_group.clone());
+        Ok(cached_group)
+    }
+}
+
+#[derive(Debug)]
 pub struct BrushStrokeState {
     brush_id: BrushId,
     intermediate_backend: Backend,
     intermediate_backend_id: BackendId,
     intermediate: BrushIntermediate,
+    touched_tiles: Vec<StrokeTileRecord>,
 }
 
 impl BrushStrokeState {
@@ -308,6 +235,7 @@ impl BrushStrokeState {
             intermediate: BrushIntermediate {
                 tiles: SparseTileOwners::new(intermediate_backend_id),
             },
+            touched_tiles: Vec::new(),
         })
     }
 
@@ -323,22 +251,58 @@ impl BrushStrokeState {
         &self.intermediate
     }
 
-    pub fn push_apply_dab(
+    pub fn into_intermediate(self) -> BrushIntermediate {
+        self.intermediate
+    }
+
+    pub fn touched_tiles(&self) -> &[StrokeTileRecord] {
+        &self.touched_tiles
+    }
+
+    fn touched_tile_index(&self, tile_index: usize) -> Option<usize> {
+        self.touched_tiles
+            .iter()
+            .position(|record| record.tile_index == tile_index)
+    }
+
+    fn ensure_touched_tile(
         &mut self,
         tile_index: usize,
-        reference_tile_key: Option<TileKey>,
-        parameters: Vec<f32>,
-        output: &mut Vec<RenderCommand>,
-    ) -> Result<TileKey, BrushStrokeError> {
-        let destination_tile_key = self
+    ) -> Result<&mut StrokeTileRecord, BrushStrokeError> {
+        if let Some(index) = self.touched_tile_index(tile_index) {
+            return self
+                .touched_tiles
+                .get_mut(index)
+                .ok_or(AtlasError::InvalidState.into());
+        }
+
+        let intermediate_tile_key = self
             .intermediate
             .tiles
             .ensure_tile(tile_index, &self.intermediate_backend)?;
+        self.touched_tiles.push(StrokeTileRecord {
+            tile_index,
+            intermediate_tile_key,
+            backup_tile_key: None,
+        });
+        self.touched_tiles
+            .last_mut()
+            .ok_or(AtlasError::InvalidState.into())
+    }
+
+    pub fn push_apply_dab(
+        &mut self,
+        tile_index: usize,
+        source_tile_key: Option<TileKey>,
+        brush_payload: Vec<u8>,
+        output: &mut Vec<RenderCommand>,
+    ) -> Result<TileKey, BrushStrokeError> {
+        let destination_tile_key = self.ensure_touched_tile(tile_index)?.intermediate_tile_key;
         output.push(RenderCommand::ApplyDab(ApplyDabCommand {
             brush_id: self.brush_id,
             destination_tile_key,
-            reference_tile_key,
-            parameters,
+            source_tile_key,
+            brush_payload,
         }));
         Ok(destination_tile_key)
     }
@@ -348,31 +312,30 @@ impl BrushStrokeState {
         tile_index: usize,
         origin_tile_key: TileKey,
         preview_tile_key: TileKey,
-        backup_tile_key: Option<TileKey>,
-        parameters: Vec<f32>,
+        brush_payload: Vec<u8>,
         output: &mut Vec<RenderCommand>,
     ) -> Option<TileKey> {
-        let Some(intermediate_tile_key) = self.intermediate.tile_key(tile_index) else {
+        let Some(record_index) = self.touched_tile_index(tile_index) else {
             return None;
         };
+        let intermediate_tile_key = self.touched_tiles.get(record_index)?.intermediate_tile_key;
         output.push(RenderCommand::MergeTile(MergeTileCommand {
             brush_id: self.brush_id,
             origin_tile_key,
             intermediate_tile_key,
             destination_tile_key: preview_tile_key,
-            backup_tile_key,
-            parameters,
+            brush_payload,
         }));
         Some(preview_tile_key)
     }
 
     pub fn build_commit_batch(
-        &self,
+        &mut self,
         image: &mut GlaImage,
         image_backend: &Backend,
         backup_store: &mut DocumentBackupStore,
         tile_indices: &[usize],
-        parameters: Vec<f32>,
+        brush_payload: Vec<u8>,
     ) -> Result<StrokeCommitBatch, BrushStrokeError> {
         let image_backend_id = image_backend.backend_id()?;
         if image.backend() != image_backend_id {
@@ -386,67 +349,62 @@ impl BrushStrokeState {
         affected_tiles.sort_unstable();
         affected_tiles.dedup();
 
+        let mut touched_tile_indexes = Vec::new();
         let mut backup_tile_indices = Vec::new();
-        let mut active_tile_keys = Vec::new();
-        let mut had_active_tile = Vec::new();
         for &tile_index in &affected_tiles {
-            if self.intermediate.tile_key(tile_index).is_none() {
+            let Some(record_index) = self.touched_tile_index(tile_index) else {
                 continue;
-            }
+            };
+            touched_tile_indexes.push(record_index);
             let active_tile_key = image
                 .tile_key(tile_index)
                 .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-            had_active_tile.push(active_tile_key != TileKey::EMPTY);
             if active_tile_key != TileKey::EMPTY {
                 backup_tile_indices.push(tile_index);
-                active_tile_keys.push(active_tile_key);
             }
         }
 
-        let backup_group = backup_store.retain_cached_group(active_tile_keys.len())?;
+        let backup_group = backup_store.retain_cached_group(backup_tile_indices.len())?;
         let backup_tile_keys = backup_group.keys().to_vec();
         let mut commands = Vec::new();
         let mut backup_key_cursor = 0usize;
-        let mut affected_cursor = 0usize;
-
-        for &tile_index in &affected_tiles {
-            let Some(intermediate_tile_key) = self.intermediate.tile_key(tile_index) else {
-                continue;
-            };
-            let had_active_tile = *had_active_tile
-                .get(affected_cursor)
+        for &record_index in &touched_tile_indexes {
+            let record = self
+                .touched_tiles
+                .get_mut(record_index)
                 .ok_or(AtlasError::InvalidState)?;
-            affected_cursor += 1;
+            let tile_index = record.tile_index;
+            let origin_tile_key = image
+                .tile_key(tile_index)
+                .ok_or(GlaImageTileAccessError::OutOfBounds)?;
             let destination_tile_key = ensure_image_active_tile(image, tile_index, image_backend)?;
-            let backup_tile_key = if had_active_tile {
+            let backup_tile_key = if origin_tile_key != TileKey::EMPTY {
                 let backup_tile_key = backup_tile_keys
                     .get(backup_key_cursor)
                     .copied()
                     .ok_or(AtlasError::InvalidState)?;
                 commands.push(RenderCommand::CopyTile(CopyTileCommand {
-                    source_tile_key: destination_tile_key,
+                    source_tile_key: origin_tile_key,
                     destination_tile_key: backup_tile_key,
                 }));
                 backup_key_cursor += 1;
+                record.backup_tile_key = Some(backup_tile_key);
                 Some(backup_tile_key)
             } else {
+                record.backup_tile_key = None;
                 None
             };
 
             commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: self.brush_id,
                 origin_tile_key: backup_tile_key.unwrap_or(TileKey::EMPTY),
-                intermediate_tile_key,
+                intermediate_tile_key: record.intermediate_tile_key,
                 destination_tile_key,
-                backup_tile_key,
-                parameters: parameters.clone(),
+                brush_payload: brush_payload.clone(),
             }));
         }
 
         if backup_key_cursor != backup_tile_keys.len() {
-            return Err(AtlasError::InvalidState.into());
-        }
-        if affected_cursor != had_active_tile.len() {
             return Err(AtlasError::InvalidState.into());
         }
 
@@ -477,7 +435,9 @@ fn ensure_image_active_tile(
         return Err(AtlasError::InvalidState.into());
     }
 
-    image.tile_key(tile_index).ok_or(GlaImageTileAccessError::OutOfBounds.into())
+    image
+        .tile_key(tile_index)
+        .ok_or(GlaImageTileAccessError::OutOfBounds.into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,9 +446,16 @@ pub struct BrushShaderRegistration {
     pub shader_spec: BrushShaderSpec,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug)]
+pub struct BrushRegistration {
+    pub brush_id: BrushId,
+    pub shader_spec: BrushShaderSpec,
+    pub backend: BrushBackend,
+}
+
+#[derive(Debug, Default)]
 pub struct BrushRegistry {
-    registrations: Vec<BrushShaderRegistration>,
+    registrations: Vec<BrushRegistration>,
 }
 
 impl BrushRegistry {
@@ -496,16 +463,26 @@ impl BrushRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, registration: BrushShaderRegistration) {
+    pub fn register(
+        &mut self,
+        shader_registration: BrushShaderRegistration,
+        intermediate_backend: Backend,
+    ) -> Result<(), BrushStrokeError> {
+        let registration = BrushRegistration {
+            brush_id: shader_registration.brush_id,
+            shader_spec: shader_registration.shader_spec,
+            backend: BrushBackend::new(shader_registration.brush_id, intermediate_backend)?,
+        };
         if let Some(index) = self
             .registrations
             .iter()
             .position(|candidate| candidate.brush_id == registration.brush_id)
         {
             self.registrations[index] = registration;
-            return;
+            return Ok(());
         }
         self.registrations.push(registration);
+        Ok(())
     }
 
     pub fn shader_spec(&self, brush_id: BrushId) -> Option<BrushShaderSpec> {
@@ -515,10 +492,26 @@ impl BrushRegistry {
             .map(|registration| registration.shader_spec)
     }
 
-    pub fn registration(&self, brush_id: BrushId) -> Option<&BrushShaderRegistration> {
+    pub fn registration(&self, brush_id: BrushId) -> Option<&BrushRegistration> {
         self.registrations
             .iter()
             .find(|registration| registration.brush_id == brush_id)
+    }
+
+    pub fn backend(&self, brush_id: BrushId) -> Option<&BrushBackend> {
+        self.registration(brush_id)
+            .map(|registration| &registration.backend)
+    }
+
+    pub fn backend_mut(&mut self, brush_id: BrushId) -> Option<&mut BrushBackend> {
+        self.registrations
+            .iter_mut()
+            .find(|registration| registration.brush_id == brush_id)
+            .map(|registration| &mut registration.backend)
+    }
+
+    pub fn begin_stroke(&self, brush_id: BrushId) -> Option<BrushStrokeState> {
+        self.backend(brush_id).map(BrushBackend::begin_stroke)
     }
 }
 
@@ -528,115 +521,11 @@ mod tests {
     use glaphica_core::IMAGE_TILE_SIZE;
     use renderer::{ApplyDabCommand, CopyTileCommand, MergeTileCommand, RenderCommand};
 
-    use crate::{
-        BrushId, BrushStrokeState, StrokeTileBackupCopy, StrokeTileBackupError,
-        StrokeTileBackupSession,
-    };
+    use crate::round::{ROUND_SHADER_SPEC, encode_round_apply_payload, encode_round_merge_payload};
+    use crate::{BrushBackend, BrushId, BrushRegistry, BrushShaderRegistration, BrushStrokeState};
     use atlas::{Backend, TileKey};
     use gla_document::DocumentBackupStore;
     use gla_image::{GlaImage, GlaImageLayout};
-
-    #[test]
-    fn first_non_empty_tile_backup_requests_snapshot_copy() {
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
-        let mut image = GlaImage::new(
-            GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE),
-            BackendId::new(2),
-        )
-        .expect("image should create");
-        let active_tile = backend.alloc_active().expect("active tile should allocate");
-        let active_tile_key = active_tile.tile_key();
-        image
-            .replace_tile_owner(1, active_tile)
-            .expect("tile owner should install");
-
-        let mut session =
-            StrokeTileBackupSession::new(backend.clone()).expect("session should create");
-        let prepared = session
-            .ensure_tile_backup(&image, 1)
-            .expect("backup should prepare");
-
-        assert_eq!(prepared.tile.tile_index, 1);
-        assert_eq!(prepared.tile.active_tile_key, active_tile_key);
-        assert_ne!(prepared.tile.backup_tile_key, TileKey::EMPTY);
-        assert_eq!(
-            prepared.snapshot_copy,
-            Some(StrokeTileBackupCopy {
-                source_tile_key: active_tile_key,
-                cached_tile_key: prepared.tile.backup_tile_key,
-            })
-        );
-        assert_eq!(session.backup_group().keys(), &[prepared.tile.backup_tile_key]);
-        assert_eq!(backend.tile_state(prepared.tile.backup_tile_key), Ok(TileState::Cached));
-    }
-
-    #[test]
-    fn repeated_tile_backup_reuses_existing_cached_tile() {
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
-        let mut image = GlaImage::new(
-            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(2),
-        )
-        .expect("image should create");
-        let active_tile = backend.alloc_active().expect("active tile should allocate");
-        image
-            .replace_tile_owner(0, active_tile)
-            .expect("tile owner should install");
-
-        let mut session =
-            StrokeTileBackupSession::new(backend).expect("session should create");
-        let first = session
-            .ensure_tile_backup(&image, 0)
-            .expect("first backup should prepare");
-        let second = session
-            .ensure_tile_backup(&image, 0)
-            .expect("second backup should prepare");
-
-        assert_eq!(second.tile.backup_tile_key, first.tile.backup_tile_key);
-        assert_eq!(second.snapshot_copy, None);
-        assert_eq!(session.backup_group().keys(), &[first.tile.backup_tile_key]);
-    }
-
-    #[test]
-    fn empty_tile_does_not_allocate_backup() {
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
-        let image = GlaImage::new(
-            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(2),
-        )
-        .expect("image should create");
-
-        let mut session =
-            StrokeTileBackupSession::new(backend).expect("session should create");
-        let prepared = session
-            .ensure_tile_backup(&image, 0)
-            .expect("empty tile should prepare");
-
-        assert_eq!(prepared.tile.active_tile_key, TileKey::EMPTY);
-        assert_eq!(prepared.tile.backup_tile_key, TileKey::EMPTY);
-        assert_eq!(prepared.snapshot_copy, None);
-        assert!(session.backup_group().keys().is_empty());
-    }
-
-    #[test]
-    fn backup_session_rejects_image_from_other_backend() {
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
-        let image = GlaImage::new(
-            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(3),
-        )
-        .expect("image should create");
-
-        let mut session =
-            StrokeTileBackupSession::new(backend).expect("session should create");
-        assert_eq!(
-            session.ensure_tile_backup(&image, 0),
-            Err(StrokeTileBackupError::WrongBackend {
-                expected: BackendId::new(2),
-                actual: BackendId::new(3),
-            })
-        );
-    }
 
     #[test]
     fn apply_dab_allocates_intermediate_tile_once() {
@@ -645,11 +534,13 @@ mod tests {
             BrushStrokeState::new(BrushId::new(5), backend.clone()).expect("state should build");
         let mut commands = Vec::new();
 
+        let first_payload = encode_round_apply_payload([8.0, 9.0], 10.0, 0.5, 0.75);
+        let second_payload = encode_round_apply_payload([3.0, 4.0], 5.0, 0.6, 0.25);
         let first = state
-            .push_apply_dab(4, None, vec![1.0, 2.0], &mut commands)
+            .push_apply_dab(4, None, first_payload.clone(), &mut commands)
             .expect("dab should build");
         let second = state
-            .push_apply_dab(4, Some(first), vec![3.0], &mut commands)
+            .push_apply_dab(4, Some(first), second_payload.clone(), &mut commands)
             .expect("dab should build");
 
         assert_eq!(first, second);
@@ -660,14 +551,14 @@ mod tests {
                 RenderCommand::ApplyDab(ApplyDabCommand {
                     brush_id: BrushId::new(5),
                     destination_tile_key: first,
-                    reference_tile_key: None,
-                    parameters: vec![1.0, 2.0],
+                    source_tile_key: None,
+                    brush_payload: first_payload,
                 }),
                 RenderCommand::ApplyDab(ApplyDabCommand {
                     brush_id: BrushId::new(5),
                     destination_tile_key: first,
-                    reference_tile_key: Some(first),
-                    parameters: vec![3.0],
+                    source_tile_key: Some(first),
+                    brush_payload: second_payload,
                 }),
             ]
         );
@@ -684,7 +575,12 @@ mod tests {
             BrushStrokeState::new(BrushId::new(9), backend).expect("state should build");
         let mut commands = Vec::new();
         let intermediate_tile_key = state
-            .push_apply_dab(0, None, vec![1.0], &mut commands)
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([1.0, 2.0], 3.0, 0.5, 1.0),
+                &mut commands,
+            )
             .expect("dab");
         commands.clear();
         let preview_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(13));
@@ -692,9 +588,16 @@ mod tests {
             .alloc_active()
             .expect("preview tile")
             .tile_key();
+        let merge_payload = encode_round_merge_payload([0.2, 0.3, 0.4]);
 
         let returned_tile_key = state
-            .push_preview_merge(0, active_tile_key, preview_tile_key, None, vec![9.0], &mut commands)
+            .push_preview_merge(
+                0,
+                active_tile_key,
+                preview_tile_key,
+                merge_payload.clone(),
+                &mut commands,
+            )
             .expect("preview merge should allocate");
 
         assert_eq!(returned_tile_key, preview_tile_key);
@@ -705,8 +608,7 @@ mod tests {
                 origin_tile_key: active_tile_key,
                 intermediate_tile_key,
                 destination_tile_key: preview_tile_key,
-                backup_tile_key: None,
-                parameters: vec![9.0],
+                brush_payload: merge_payload,
             })]
         );
     }
@@ -723,7 +625,9 @@ mod tests {
         .expect("image should create");
         let first_active = image_backend.alloc_active().expect("first active");
         let first_active_key = first_active.tile_key();
-        image.replace_tile_owner(0, first_active).expect("install tile");
+        image
+            .replace_tile_owner(0, first_active)
+            .expect("install tile");
 
         let mut state =
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
@@ -731,14 +635,31 @@ mod tests {
             DocumentBackupStore::new(backup_backend).expect("backup store should build");
         let mut draw_commands = Vec::new();
         let first_intermediate = state
-            .push_apply_dab(0, None, vec![1.0], &mut draw_commands)
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([4.0, 4.0], 6.0, 0.5, 1.0),
+                &mut draw_commands,
+            )
             .expect("dab");
         let second_intermediate = state
-            .push_apply_dab(1, None, vec![2.0], &mut draw_commands)
+            .push_apply_dab(
+                1,
+                None,
+                encode_round_apply_payload([2.0, 2.0], 5.0, 0.3, 0.9),
+                &mut draw_commands,
+            )
             .expect("dab");
+        let merge_payload = encode_round_merge_payload([0.1, 0.2, 0.3]);
 
         let batch = state
-            .build_commit_batch(&mut image, &image_backend, &mut backup_store, &[1, 0], vec![7.0])
+            .build_commit_batch(
+                &mut image,
+                &image_backend,
+                &mut backup_store,
+                &[1, 0],
+                merge_payload.clone(),
+            )
             .expect("commit batch should build");
 
         let second_active_key = image.tile_key(1).expect("tile key should exist");
@@ -757,19 +678,22 @@ mod tests {
                     origin_tile_key: batch.backup_tile_keys[0],
                     intermediate_tile_key: first_intermediate,
                     destination_tile_key: first_active_key,
-                    backup_tile_key: Some(batch.backup_tile_keys[0]),
-                    parameters: vec![7.0],
+                    brush_payload: merge_payload.clone(),
                 }),
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
                     origin_tile_key: TileKey::EMPTY,
                     intermediate_tile_key: second_intermediate,
                     destination_tile_key: second_active_key,
-                    backup_tile_key: None,
-                    parameters: vec![7.0],
+                    brush_payload: merge_payload.clone(),
                 }),
             ]
         );
+        assert_eq!(
+            state.touched_tiles()[0].backup_tile_key,
+            Some(batch.backup_tile_keys[0])
+        );
+        assert_eq!(state.touched_tiles()[1].backup_tile_key, None);
     }
 
     #[test]
@@ -782,7 +706,12 @@ mod tests {
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let mut commands = Vec::new();
         let intermediate_tile_key = state
-            .push_apply_dab(0, None, vec![4.0], &mut commands)
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([4.0, 4.0], 8.0, 1.0, 0.4),
+                &mut commands,
+            )
             .expect("dab");
         commands.clear();
         let preview_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(13));
@@ -790,9 +719,16 @@ mod tests {
             .alloc_active()
             .expect("preview tile")
             .tile_key();
+        let merge_payload = encode_round_merge_payload([0.9, 0.8, 0.7]);
 
         let returned_tile_key = state
-            .push_preview_merge(0, active_tile_key, preview_tile_key, None, vec![1.0], &mut commands)
+            .push_preview_merge(
+                0,
+                active_tile_key,
+                preview_tile_key,
+                merge_payload.clone(),
+                &mut commands,
+            )
             .expect("preview merge should allocate");
         assert_eq!(returned_tile_key, preview_tile_key);
 
@@ -803,9 +739,85 @@ mod tests {
                 origin_tile_key: active_tile_key,
                 intermediate_tile_key,
                 destination_tile_key: preview_tile_key,
-                backup_tile_key: None,
-                parameters: vec![1.0],
+                brush_payload: merge_payload,
             })]
         );
+    }
+
+    #[test]
+    fn atlas_backend_retires_stroke_intermediate_as_cached_group() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
+        let mut brush_backend =
+            BrushBackend::new(BrushId::new(17), backend.clone()).expect("backend should build");
+        let mut state = brush_backend.begin_stroke();
+        let mut commands = Vec::new();
+        let active_tile_key = state
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([4.0, 4.0], 8.0, 0.8, 0.7),
+                &mut commands,
+            )
+            .expect("dab");
+
+        let cached_group = brush_backend
+            .archive_stroke(state)
+            .expect("stroke should retire");
+
+        assert_eq!(cached_group.keys(), &[active_tile_key]);
+        assert_eq!(
+            brush_backend.stroke_history_groups(),
+            &[cached_group.clone()]
+        );
+        assert_eq!(backend.tile_state(active_tile_key), Ok(TileState::Cached));
+
+        let mut next_state = brush_backend.begin_stroke();
+        let next_tile_key = next_state
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([1.0, 1.0], 2.0, 0.2, 0.5),
+                &mut Vec::new(),
+            )
+            .expect("next dab");
+        assert_ne!(next_tile_key, active_tile_key);
+        assert_eq!(backend.tile_state(next_tile_key), Ok(TileState::Active));
+    }
+
+    #[test]
+    fn registry_registers_shader_and_backend_together() {
+        let brush_id = BrushId::new(23);
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(9));
+        let mut registry = BrushRegistry::new();
+
+        registry
+            .register(
+                BrushShaderRegistration {
+                    brush_id,
+                    shader_spec: ROUND_SHADER_SPEC,
+                },
+                backend,
+            )
+            .expect("registration should succeed");
+
+        assert_eq!(registry.shader_spec(brush_id), Some(ROUND_SHADER_SPEC));
+        let mut stroke = registry
+            .begin_stroke(brush_id)
+            .expect("stroke should build");
+        let tile_key = stroke
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([2.0, 3.0], 4.0, 0.4, 0.6),
+                &mut Vec::new(),
+            )
+            .expect("dab");
+        let backend = registry
+            .backend_mut(brush_id)
+            .expect("backend should exist");
+        let cached_group = backend.archive_stroke(stroke).expect("cache");
+
+        assert_eq!(cached_group.keys(), &[tile_key]);
+        assert_eq!(backend.stroke_history_groups(), &[cached_group]);
     }
 }
