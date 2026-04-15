@@ -3,13 +3,75 @@ use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileKey, TileOwner};
 use gla_document::DocumentBackupStore;
-use gla_image::{GlaImage, GlaImageTileAccessError};
+use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 pub use glaphica_core::BrushId;
+pub use glaphica_core::CanvasInput;
+use glaphica_core::CanvasVec2;
 use renderer::{
     ApplyDabCommand, BrushShaderSpec, CopyTileCommand, MergeTileCommand, RenderCommand,
 };
 
 pub mod round;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushInputBlock {
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushInputBlockList {
+    brush_id: BrushId,
+    blocks: Vec<BrushInputBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushInput {
+    pub brush_id: BrushId,
+    pub blocks: BrushInputBlockList,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrushInputError {
+    WrongBrush {
+        expected: BrushId,
+        actual: BrushId,
+    },
+    InvalidBlockLength {
+        brush_id: BrushId,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidBlockValue {
+        brush_id: BrushId,
+        block_index: usize,
+        value_index: usize,
+    },
+    Stroke(BrushStrokeError),
+}
+
+pub trait BrushInputProcessor: Send + Sync {
+    fn produce_input(
+        &self,
+        canvas_input: &[CanvasInput],
+    ) -> Result<BrushInput, BrushInputError>;
+
+    fn max_affected_radius_px(&self) -> u32;
+
+    fn block_center(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+    ) -> Result<CanvasVec2, BrushInputError>;
+
+    fn encode_apply_dab_payload(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+        tile_canvas_origin: CanvasVec2,
+    ) -> Result<Vec<u8>, BrushInputError>;
+
+    fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushIntermediateTile {
@@ -97,6 +159,81 @@ impl BrushIntermediate {
     }
 }
 
+impl BrushInputBlock {
+    pub fn new(values: Vec<f32>) -> Self {
+        Self { values }
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+}
+
+impl BrushInputBlockList {
+    pub fn new(brush_id: BrushId) -> Self {
+        Self {
+            brush_id,
+            blocks: Vec::new(),
+        }
+    }
+
+    pub fn brush_id(&self) -> BrushId {
+        self.brush_id
+    }
+
+    pub fn blocks(&self) -> &[BrushInputBlock] {
+        &self.blocks
+    }
+
+    pub fn push_block(&mut self, values: Vec<f32>) {
+        self.blocks.push(BrushInputBlock::new(values));
+    }
+}
+
+impl Display for BrushInputError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongBrush { expected, actual } => write!(
+                f,
+                "brush input is for brush {}, expected brush {}",
+                actual.raw(),
+                expected.raw()
+            ),
+            Self::InvalidBlockLength {
+                brush_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "brush {} input block length mismatch: expected {}, got {}",
+                brush_id.raw(),
+                expected,
+                actual
+            ),
+            Self::InvalidBlockValue {
+                brush_id,
+                block_index,
+                value_index,
+            } => write!(
+                f,
+                "brush {} input block {} contains invalid value at index {}",
+                brush_id.raw(),
+                block_index,
+                value_index
+            ),
+            Self::Stroke(error) => Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for BrushInputError {}
+
+impl From<BrushStrokeError> for BrushInputError {
+    fn from(error: BrushStrokeError) -> Self {
+        Self::Stroke(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrokeTileRecord {
     pub tile_index: usize,
@@ -143,11 +280,21 @@ impl From<GlaImageTileAccessError> for BrushStrokeError {
     }
 }
 
+impl From<GlaImageEnsureActiveTileError> for BrushStrokeError {
+    fn from(error: GlaImageEnsureActiveTileError) -> Self {
+        match error {
+            GlaImageEnsureActiveTileError::Atlas(error) => Self::Atlas(error),
+            GlaImageEnsureActiveTileError::TileAccess(error) => Self::Image(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrokeCommitBatch {
     pub backup_group: CachedTileGroup,
     pub backup_tile_indices: Vec<usize>,
     pub backup_tile_keys: Vec<TileKey>,
+    pub tile_records: Vec<StrokeTileRecord>,
     pub commands: Vec<RenderCommand>,
 }
 
@@ -377,7 +524,7 @@ impl BrushStrokeState {
             let origin_tile_key = image
                 .tile_key(tile_index)
                 .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-            let destination_tile_key = ensure_image_active_tile(image, tile_index, image_backend)?;
+            let destination_tile_key = image.ensure_active_tile_key(tile_index, image_backend)?;
             let backup_tile_key = if origin_tile_key != TileKey::EMPTY {
                 let backup_tile_key = backup_tile_keys
                     .get(backup_key_cursor)
@@ -412,32 +559,13 @@ impl BrushStrokeState {
             backup_group,
             backup_tile_indices,
             backup_tile_keys,
+            tile_records: touched_tile_indexes
+                .into_iter()
+                .map(|record_index| self.touched_tiles[record_index])
+                .collect(),
             commands,
         })
     }
-}
-
-fn ensure_image_active_tile(
-    image: &mut GlaImage,
-    tile_index: usize,
-    image_backend: &Backend,
-) -> Result<TileKey, BrushStrokeError> {
-    let tile_key = image
-        .tile_key(tile_index)
-        .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-    if tile_key != TileKey::EMPTY {
-        return Ok(tile_key);
-    }
-
-    let tile_owner = image_backend.alloc_active()?;
-    let previous = image.replace_tile_owner(tile_index, tile_owner)?;
-    if previous.tile_key() != TileKey::EMPTY {
-        return Err(AtlasError::InvalidState.into());
-    }
-
-    image
-        .tile_key(tile_index)
-        .ok_or(GlaImageTileAccessError::OutOfBounds.into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,14 +574,14 @@ pub struct BrushShaderRegistration {
     pub shader_spec: BrushShaderSpec,
 }
 
-#[derive(Debug)]
 pub struct BrushRegistration {
     pub brush_id: BrushId,
     pub shader_spec: BrushShaderSpec,
     pub backend: BrushBackend,
+    pub input_processor: Box<dyn BrushInputProcessor>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct BrushRegistry {
     registrations: Vec<BrushRegistration>,
 }
@@ -467,11 +595,13 @@ impl BrushRegistry {
         &mut self,
         shader_registration: BrushShaderRegistration,
         intermediate_backend: Backend,
+        input_processor: Box<dyn BrushInputProcessor>,
     ) -> Result<(), BrushStrokeError> {
         let registration = BrushRegistration {
             brush_id: shader_registration.brush_id,
             shader_spec: shader_registration.shader_spec,
             backend: BrushBackend::new(shader_registration.brush_id, intermediate_backend)?,
+            input_processor,
         };
         if let Some(index) = self
             .registrations
@@ -503,6 +633,11 @@ impl BrushRegistry {
             .map(|registration| &registration.backend)
     }
 
+    pub fn input_processor(&self, brush_id: BrushId) -> Option<&dyn BrushInputProcessor> {
+        self.registration(brush_id)
+            .map(|registration| registration.input_processor.as_ref())
+    }
+
     pub fn backend_mut(&mut self, brush_id: BrushId) -> Option<&mut BrushBackend> {
         self.registrations
             .iter_mut()
@@ -513,6 +648,56 @@ impl BrushRegistry {
     pub fn begin_stroke(&self, brush_id: BrushId) -> Option<BrushStrokeState> {
         self.backend(brush_id).map(BrushBackend::begin_stroke)
     }
+
+    pub fn produce_input(
+        &self,
+        brush_id: BrushId,
+        canvas_input: &[CanvasInput],
+    ) -> Result<BrushInput, BrushInputError> {
+        let processor = self.input_processor(brush_id).ok_or(BrushInputError::WrongBrush {
+            expected: brush_id,
+            actual: brush_id,
+        })?;
+        processor.produce_input(canvas_input)
+    }
+
+    pub fn max_affected_radius_px(&self, brush_id: BrushId) -> Option<u32> {
+        self.input_processor(brush_id)
+            .map(BrushInputProcessor::max_affected_radius_px)
+    }
+
+    pub fn block_center(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+    ) -> Result<CanvasVec2, BrushInputError> {
+        let processor = self.input_processor(input.brush_id).ok_or(BrushInputError::WrongBrush {
+            expected: input.brush_id,
+            actual: input.brush_id,
+        })?;
+        processor.block_center(input, block_index)
+    }
+
+    pub fn encode_apply_dab_payload(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+        tile_canvas_origin: CanvasVec2,
+    ) -> Result<Vec<u8>, BrushInputError> {
+        let processor = self.input_processor(input.brush_id).ok_or(BrushInputError::WrongBrush {
+            expected: input.brush_id,
+            actual: input.brush_id,
+        })?;
+        processor.encode_apply_dab_payload(input, block_index, tile_canvas_origin)
+    }
+
+    pub fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
+        let processor = self.input_processor(input.brush_id).ok_or(BrushInputError::WrongBrush {
+            expected: input.brush_id,
+            actual: input.brush_id,
+        })?;
+        processor.encode_merge_payload(input)
+    }
 }
 
 #[cfg(test)]
@@ -521,7 +706,10 @@ mod tests {
     use glaphica_core::IMAGE_TILE_SIZE;
     use renderer::{ApplyDabCommand, CopyTileCommand, MergeTileCommand, RenderCommand};
 
-    use crate::round::{ROUND_SHADER_SPEC, encode_round_apply_payload, encode_round_merge_payload};
+    use crate::round::{
+        ROUND_SHADER_SPEC, RoundBrushInputProcessor, encode_round_apply_payload,
+        encode_round_merge_payload,
+    };
     use crate::{BrushBackend, BrushId, BrushRegistry, BrushShaderRegistration, BrushStrokeState};
     use atlas::{Backend, TileKey};
     use gla_document::DocumentBackupStore;
@@ -797,6 +985,7 @@ mod tests {
                     shader_spec: ROUND_SHADER_SPEC,
                 },
                 backend,
+                Box::new(RoundBrushInputProcessor::default()),
             )
             .expect("registration should succeed");
 

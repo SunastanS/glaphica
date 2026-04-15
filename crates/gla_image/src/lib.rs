@@ -7,7 +7,8 @@ use atlas::TileKey;
 
 pub use crate::cached_image::{GlaCachedImage, GlaCachedImageCreateError};
 pub use crate::image::{
-    GlaImage, GlaImageCreateError, GlaImageTileAccessError, GlaImageTileRecBounds,
+    GlaImage, GlaImageCreateError, GlaImageEnsureActiveTileError, GlaImageTileAccessError,
+    GlaImageTileRecBounds,
 };
 pub use crate::layout::{GlaImageLayout, GlaImageLayoutError};
 pub use crate::stored_image::{GlaStoredImage, GlaStoredImageError};

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::document::{GlaDoc, GlaDocError};
 use crate::node::{GlaNodeId, GlaNodeKind};
-use atlas::{BackendId, TileKey};
+use atlas::{Backend, BackendId, TileKey};
 use gla_image::GlaImageLayout;
 use glaphica_core::{BlendMode, IMAGE_TILE_SIZE};
 
@@ -166,6 +166,7 @@ impl GlaDoc {
         path: impl AsRef<Path>,
         image_backend: BackendId,
         render_backend: BackendId,
+        backup_backend: Backend,
     ) -> Result<GlaDocLoadResult, GlaDocStorageError> {
         let root_path = path.as_ref();
         let document_path = root_path.join(DOCUMENT_FILE_NAME);
@@ -177,7 +178,7 @@ impl GlaDoc {
         let (layout, active_layer_index, nodes, child_indices) = parse_document_bytes(&bytes)?;
         validate_serialized_nodes(&nodes, &child_indices)?;
 
-        let mut doc = GlaDoc::new(layout, image_backend, render_backend)?;
+        let mut doc = GlaDoc::new(layout, image_backend, render_backend, backup_backend)?;
         doc.set_opacity(doc.root_id(), nodes[0].opacity)?;
         doc.set_blend_mode(doc.root_id(), nodes[0].blend_mode)?;
 
@@ -572,8 +573,13 @@ mod tests {
         write_document_fixture(&doc, &temp_dir, &[91, 29, 11], &[(0, 0), (2, 0), (3, 0)])
             .expect("fixture should write");
 
-        let loaded = GlaDoc::load_directory(&temp_dir, BackendId::new(13), BackendId::new(17))
-            .expect("document should load");
+        let loaded = GlaDoc::load_directory(
+            &temp_dir,
+            BackendId::new(13),
+            BackendId::new(17),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(19)),
+        )
+        .expect("document should load");
         let loaded_doc = loaded.doc;
 
         let mut preorder = Vec::new();
@@ -638,6 +644,7 @@ mod tests {
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
             image_backend,
             render_backend,
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(23)),
         )
         .expect("document should build")
     }

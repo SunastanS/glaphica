@@ -8,8 +8,11 @@ pub use atlas::BackendId;
 pub use gla_image::{GlaImage, GlaImageCreateError, GlaImageLayout};
 pub use glaphica_core::BlendMode;
 
-pub use crate::backup::DocumentBackupStore;
-pub use crate::document::{GlaDoc, GlaDocError};
+pub use crate::backup::{
+    DocumentBackupStore, DocumentUndoStack, DocumentUndoTileRecord, GlaDocUndoRestore,
+    GlaDocUndoTileAction,
+};
+pub use crate::document::{GlaDoc, GlaDocError, GlaDocUndoError};
 pub use crate::node::{GlaBranchNode, GlaLeafNode, GlaNode, GlaNodeId, GlaNodeKind};
 pub use crate::render::{
     GlaCompositeCommand, GlaRenderPass, GlaRenderRefresh, GlaRenderRefreshKind, GlaRenderSource,

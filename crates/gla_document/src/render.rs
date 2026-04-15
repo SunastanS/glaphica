@@ -378,7 +378,7 @@ fn collect_cache_nodes(passes: &[GlaRenderPass]) -> Vec<GlaNodeId> {
 
 #[cfg(test)]
 mod tests {
-    use atlas::BackendId;
+    use atlas::{AtlasLayout, Backend, BackendId};
     use glaphica_core::{CanvasVec2, IMAGE_TILE_SIZE};
 
     use crate::{
@@ -387,7 +387,13 @@ mod tests {
     };
 
     fn new_doc(layout: GlaImageLayout) -> GlaDoc {
-        GlaDoc::new(layout, BackendId::new(3), BackendId::new(7)).expect("document should build")
+        GlaDoc::new(
+            layout,
+            BackendId::new(3),
+            BackendId::new(7),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(11)),
+        )
+        .expect("document should build")
     }
 
     fn pass_node_ids(refresh: &crate::GlaRenderRefresh) -> Vec<GlaNodeId> {

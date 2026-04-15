@@ -113,7 +113,7 @@ fn tile_source_extent(layout: gla_document::GlaImageLayout, origin: CanvasVec2) 
 mod tests {
     use glaphica_core::IMAGE_TILE_SIZE;
 
-    use crate::present::tile_source_extent;
+    use crate::display::present::tile_source_extent;
     use gla_document::GlaImageLayout;
     use glaphica_core::CanvasVec2;
 

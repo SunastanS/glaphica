@@ -1,8 +1,12 @@
 use atlas::Backend;
-use brush::{BrushBackend, BrushId, BrushRegistry, round::ROUND_SHADER_REGISTRATION};
+use brush::{
+    BrushBackend, BrushId, BrushInput, BrushInputError, CanvasInput,
+    BrushRegistry,
+    round::{ROUND_SHADER_REGISTRATION, RoundBrushInputProcessor},
+};
 use renderer::{BrushShaderProvider, BrushShaderSpec};
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AppBrushRegistry {
     brushes: BrushRegistry,
 }
@@ -27,7 +31,11 @@ impl AppBrushRegistry {
         intermediate_backend: Backend,
     ) -> Result<(), brush::BrushStrokeError> {
         self.brushes
-            .register(ROUND_SHADER_REGISTRATION, intermediate_backend)
+            .register(
+                ROUND_SHADER_REGISTRATION,
+                intermediate_backend,
+                Box::new(RoundBrushInputProcessor::default()),
+            )
     }
 
     pub fn shader_spec(&self, brush_id: BrushId) -> Option<BrushShaderSpec> {
@@ -44,6 +52,40 @@ impl AppBrushRegistry {
 
     pub fn brush_backend_mut(&mut self, brush_id: BrushId) -> Option<&mut BrushBackend> {
         self.brushes.backend_mut(brush_id)
+    }
+
+    pub fn produce_input(
+        &self,
+        brush_id: BrushId,
+        canvas_input: &[CanvasInput],
+    ) -> Result<BrushInput, BrushInputError> {
+        self.brushes.produce_input(brush_id, canvas_input)
+    }
+
+    pub fn max_affected_radius_px(&self, brush_id: BrushId) -> Option<u32> {
+        self.brushes.max_affected_radius_px(brush_id)
+    }
+
+    pub fn block_center(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+    ) -> Result<glaphica_core::CanvasVec2, BrushInputError> {
+        self.brushes.block_center(input, block_index)
+    }
+
+    pub fn encode_apply_dab_payload(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+        tile_canvas_origin: glaphica_core::CanvasVec2,
+    ) -> Result<Vec<u8>, BrushInputError> {
+        self.brushes
+            .encode_apply_dab_payload(input, block_index, tile_canvas_origin)
+    }
+
+    pub fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
+        self.brushes.encode_merge_payload(input)
     }
 }
 

@@ -954,6 +954,7 @@ mod tests {
             GlaImageLayout::new(64, 64),
             BackendId::new(3),
             BackendId::new(7),
+            AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(11)),
         )
         .expect("document should build")
     }

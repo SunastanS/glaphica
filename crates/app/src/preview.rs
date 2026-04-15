@@ -15,7 +15,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::surface::{SurfaceError, SurfaceRuntime};
+use crate::display::{SurfaceError, SurfaceRuntime};
 use crate::{AppPresentError, AppView, AppViewMatrixError, present_root_tiles};
 
 #[derive(Debug)]
@@ -239,6 +239,7 @@ impl PreviewState {
         let mut backend_manager = BackendManager::new();
         let image_backend_id = backend_manager.add_backend(AtlasLayout::Tiny8)?;
         let render_backend_id = backend_manager.add_backend(AtlasLayout::Tiny8)?;
+        let backup_backend_id = backend_manager.add_backend(AtlasLayout::Tiny8)?;
         let image_backend = backend_manager
             .backend(image_backend_id)
             .ok_or(atlas::AtlasError::WrongBackend)?
@@ -247,15 +248,21 @@ impl PreviewState {
             .backend(render_backend_id)
             .ok_or(atlas::AtlasError::WrongBackend)?
             .clone();
+        let backup_backend = backend_manager
+            .backend(backup_backend_id)
+            .ok_or(atlas::AtlasError::WrongBackend)?
+            .clone();
 
         let mut tile_renderer = TileRenderer::new(&gpu.device)?;
         tile_renderer.ensure_backend(&gpu.device, &image_backend)?;
         tile_renderer.ensure_backend(&gpu.device, &render_backend)?;
+        tile_renderer.ensure_backend(&gpu.device, &backup_backend)?;
 
         let mut doc = GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 6, IMAGE_TILE_SIZE * 4),
             image_backend_id,
             render_backend_id,
+            backup_backend,
         )?;
         let back_layer = doc.append_layer(doc.root_id())?;
         let front_layer = doc.append_layer(doc.root_id())?;

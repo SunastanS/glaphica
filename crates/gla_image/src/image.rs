@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{BackendId, TileKey, TileOwner};
+use atlas::{AtlasError, Backend, BackendId, TileKey, TileOwner};
 use glaphica_core::CanvasVec2;
 
 use crate::{ImageId, ImageTileSlot, layout::GlaImageLayout};
@@ -45,6 +45,35 @@ impl Display for GlaImageTileAccessError {
 }
 
 impl Error for GlaImageTileAccessError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlaImageEnsureActiveTileError {
+    Atlas(AtlasError),
+    TileAccess(GlaImageTileAccessError),
+}
+
+impl Display for GlaImageEnsureActiveTileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Atlas(error) => Display::fmt(error, f),
+            Self::TileAccess(error) => Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for GlaImageEnsureActiveTileError {}
+
+impl From<AtlasError> for GlaImageEnsureActiveTileError {
+    fn from(error: AtlasError) -> Self {
+        Self::Atlas(error)
+    }
+}
+
+impl From<GlaImageTileAccessError> for GlaImageEnsureActiveTileError {
+    fn from(error: GlaImageTileAccessError) -> Self {
+        Self::TileAccess(error)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlaImageTileRecBounds {
@@ -125,6 +154,33 @@ impl GlaImage {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
         Ok(std::mem::replace(slot, TileOwner::empty()))
+    }
+
+    pub fn ensure_active_tile_key(
+        &mut self,
+        tile_index: usize,
+        backend: &Backend,
+    ) -> Result<TileKey, GlaImageEnsureActiveTileError> {
+        let actual_backend = backend.backend_id()?;
+        if actual_backend != self.backend {
+            return Err(GlaImageTileAccessError::WrongBackend {
+                expected: self.backend,
+                actual: actual_backend,
+            }
+            .into());
+        }
+
+        let existing_tile_key = self
+            .tile_key(tile_index)
+            .ok_or(GlaImageTileAccessError::OutOfBounds)?;
+        if existing_tile_key != TileKey::EMPTY {
+            return Ok(existing_tile_key);
+        }
+
+        let tile_owner = backend.alloc_active()?;
+        let tile_key = tile_owner.tile_key();
+        self.replace_tile_owner(tile_index, tile_owner)?;
+        Ok(tile_key)
     }
 
     pub fn resize_anchored_top_left(

@@ -16,6 +16,15 @@ impl BrushId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasInput {
+    pub time_ns: u64,
+    pub position: CanvasVec2,
+    pub pressure: f32,
+    pub tilt: RadianVec2,
+    pub twist: f32,
+}
+
 mod color;
 mod color_management;
 mod vec2;
