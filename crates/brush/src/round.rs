@@ -86,10 +86,7 @@ impl Default for RoundBrushInputProcessor {
 }
 
 impl BrushInputProcessor for RoundBrushInputProcessor {
-    fn produce_input(
-        &self,
-        canvas_input: &[CanvasInput],
-    ) -> Result<BrushInput, BrushInputError> {
+    fn produce_input(&self, canvas_input: &[CanvasInput]) -> Result<BrushInput, BrushInputError> {
         let mut blocks = BrushInputBlockList::new(ROUND_BRUSH_ID);
         for (block_index, sample) in canvas_input.iter().copied().enumerate() {
             if !sample.position.x.is_finite() {
@@ -207,7 +204,10 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
             }
         }
         let center = CanvasVec2::new(values[0], values[1]);
-        let local_center = [center.x - tile_canvas_origin.x, center.y - tile_canvas_origin.y];
+        let local_center = [
+            center.x - tile_canvas_origin.x,
+            center.y - tile_canvas_origin.y,
+        ];
         Ok(encode_round_apply_payload(
             local_center,
             values[2].max(0.0),

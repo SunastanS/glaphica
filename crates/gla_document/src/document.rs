@@ -472,7 +472,8 @@ impl GlaDoc {
         tile_records: Vec<DocumentUndoTileRecord>,
     ) -> Result<(), GlaDocError> {
         self.node(node_id)?;
-        self.undo_stack.push_entry(node_id, backup_group, tile_records);
+        self.undo_stack
+            .push_entry(node_id, backup_group, tile_records);
         Ok(())
     }
 
@@ -976,11 +977,15 @@ mod tests {
             backup_backend.clone(),
         )
         .expect("document should build");
-        let layer_id = doc.append_layer(doc.root_id()).expect("layer should append");
+        let layer_id = doc
+            .append_layer(doc.root_id())
+            .expect("layer should append");
         doc.set_active_layer(layer_id)
             .expect("active layer should update");
 
-        let current_tile = image_backend.alloc_active().expect("active tile should allocate");
+        let current_tile = image_backend
+            .alloc_active()
+            .expect("active tile should allocate");
         let current_tile_key = current_tile.tile_key();
         doc.active_layer_image_mut()
             .expect("active image should exist")
@@ -1025,11 +1030,15 @@ mod tests {
             backup_backend,
         )
         .expect("document should build");
-        let layer_id = doc.append_layer(doc.root_id()).expect("layer should append");
+        let layer_id = doc
+            .append_layer(doc.root_id())
+            .expect("layer should append");
         doc.set_active_layer(layer_id)
             .expect("active layer should update");
 
-        let current_tile = image_backend.alloc_active().expect("active tile should allocate");
+        let current_tile = image_backend
+            .alloc_active()
+            .expect("active tile should allocate");
         doc.active_layer_image_mut()
             .expect("active image should exist")
             .replace_tile_owner(0, current_tile)

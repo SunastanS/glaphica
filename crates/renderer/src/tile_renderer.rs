@@ -799,15 +799,13 @@ impl TileRenderer {
                 RenderCommand::MergeTile(command) => {
                     brush_executor.merge_tile(self, device, queue, &mut encoder, command)?
                 }
-                RenderCommand::CompositeTile(command) => {
-                    self.encode_composite_tile(
-                        device,
-                        queue,
-                        &mut encoder,
-                        command.target_tile_key,
-                        &command.inputs,
-                    )?
-                }
+                RenderCommand::CompositeTile(command) => self.encode_composite_tile(
+                    device,
+                    queue,
+                    &mut encoder,
+                    command.target_tile_key,
+                    &command.inputs,
+                )?,
                 RenderCommand::PresentTile(command) => {
                     let target = present_target.ok_or(TileRendererError::MissingPresentTarget)?;
                     self.encode_present_tile(
@@ -929,13 +927,7 @@ impl TileRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("glaphica-tile-composite-encoder"),
         });
-        self.encode_composite_tile(
-            device,
-            queue,
-            &mut encoder,
-            target_tile_key,
-            inputs,
-        )?;
+        self.encode_composite_tile(device, queue, &mut encoder, target_tile_key, inputs)?;
         queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -949,11 +941,7 @@ impl TileRenderer {
         inputs: &[TileCompositeSource],
     ) -> Result<(), TileRendererError> {
         let target = self.atlas_textures.resolve_tile(target_tile_key)?;
-        self.encode_clear_scratch_texture(
-            encoder,
-            true,
-            wgpu::Color::TRANSPARENT,
-        )?;
+        self.encode_clear_scratch_texture(encoder, true, wgpu::Color::TRANSPARENT)?;
         let mut read_from_a = true;
 
         for input in inputs {
@@ -1308,11 +1296,7 @@ impl TileRenderer {
             .resolve_tile(command.destination_tile_key)?;
         let (origin_texture_view, origin_origin, origin_layer) =
             if command.origin_tile_key == TileKey::EMPTY {
-                self.encode_clear_scratch_texture(
-                    encoder,
-                    false,
-                    wgpu::Color::TRANSPARENT,
-                )?;
+                self.encode_clear_scratch_texture(encoder, false, wgpu::Color::TRANSPARENT)?;
                 (&self.scratch_b.view, [0, 0], 0)
             } else {
                 let origin = self.atlas_textures.resolve_tile(command.origin_tile_key)?;
@@ -1492,14 +1476,7 @@ impl TileRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("glaphica-tile-present-encoder"),
         });
-        self.encode_present_tile(
-            device,
-            queue,
-            &mut encoder,
-            source_tile_key,
-            params,
-            target,
-        )?;
+        self.encode_present_tile(device, queue, &mut encoder, source_tile_key, params, target)?;
         queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -1602,7 +1579,7 @@ impl TileRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,

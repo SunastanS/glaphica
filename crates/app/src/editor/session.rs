@@ -2,21 +2,19 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend};
-use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError, BrushStrokeState};
+use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError};
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
-use gla_document::{
-    DocumentUndoTileRecord, GlaDoc, GlaDocError, GlaDocUndoError, GlaDocUndoTileAction,
-};
+use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaDocUndoTileAction};
 use renderer::{CopyTileCommand, RenderCommand, TileRenderer, TileRendererError};
 
 use crate::AppBrushRegistry;
+use crate::editor::stroke_transaction::StrokeTransaction;
 
 pub struct EditorSession {
     doc: GlaDoc,
     doc_renderer: GlaDocRenderer,
     brushes: AppBrushRegistry,
-    active_stroke: Option<BrushStrokeState>,
-    active_merge_payload: Option<Vec<u8>>,
+    active_stroke_transaction: Option<StrokeTransaction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,8 +132,7 @@ impl EditorSession {
             doc,
             doc_renderer,
             brushes,
-            active_stroke: None,
-            active_merge_payload: None,
+            active_stroke_transaction: None,
         }
     }
 
@@ -163,8 +160,10 @@ impl EditorSession {
         &mut self.brushes
     }
 
-    pub fn active_stroke(&self) -> Option<&BrushStrokeState> {
-        self.active_stroke.as_ref()
+    pub fn active_stroke(&self) -> Option<&brush::BrushStrokeState> {
+        self.active_stroke_transaction
+            .as_ref()
+            .map(StrokeTransaction::stroke)
     }
 
     pub fn begin_stroke(&mut self, brush_id: BrushId) -> Result<(), EditorSessionError> {
@@ -172,14 +171,15 @@ impl EditorSession {
             .brushes
             .begin_stroke(brush_id)
             .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
-        self.active_stroke = Some(stroke);
-        self.active_merge_payload = None;
+        self.active_stroke_transaction = Some(StrokeTransaction::new(stroke));
         Ok(())
     }
 
     pub fn cancel_stroke(&mut self) {
-        self.active_stroke = None;
-        self.active_merge_payload = None;
+        if let Some(transaction) = self.active_stroke_transaction.take() {
+            transaction.cancel(&mut self.doc_renderer);
+            return;
+        }
         self.doc_renderer.clear_brush_preview_image();
     }
 
@@ -242,44 +242,6 @@ impl EditorSession {
         })
     }
 
-    pub fn execute_preview_commands_gpu(
-        &mut self,
-        image_backend: &Backend,
-        tile_renderer: &mut TileRenderer,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        dirty_tile_indices: &[usize],
-        commands: &[RenderCommand],
-    ) -> Result<EditorRenderUpdate, EditorSessionError> {
-        let active_stroke = self
-            .active_stroke
-            .as_ref()
-            .ok_or(EditorSessionError::MissingActiveStroke)?;
-        let brush_backend = self.brushes.brush_backend(active_stroke.brush_id()).ok_or(
-            EditorSessionError::BrushNotRegistered(active_stroke.brush_id()),
-        )?;
-        let intermediate_backend = brush_backend.intermediate_backend();
-        let render_backend = self.doc_renderer.render_backend();
-
-        tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend(device, intermediate_backend)?;
-        tile_renderer.ensure_backend(device, render_backend)?;
-
-        let mut clear_batches = intermediate_backend.take_pending_clear_batches()?;
-        clear_batches.extend(render_backend.take_pending_clear_batches()?);
-        tile_renderer.execute_commands_with_shader_provider(
-            device,
-            queue,
-            &[image_backend, intermediate_backend, render_backend],
-            &clear_batches,
-            commands,
-            None,
-            &self.brushes,
-        )?;
-
-        self.refresh_active_tiles_gpu(tile_renderer, device, queue, dirty_tile_indices)
-    }
-
     pub fn process_brush_input_gpu(
         &mut self,
         image_backend: &Backend,
@@ -315,90 +277,31 @@ impl EditorSession {
             return Ok(None);
         }
 
-        let mut dirty_tile_indices = Vec::new();
-        let mut commands = Vec::new();
-        let mut active_merge_payload = None;
-
-        {
-            let active_image = self.doc.active_layer_image()?;
-            let stroke = self
-                .active_stroke
+        let dirty_tile_indices = {
+            let transaction = self
+                .active_stroke_transaction
                 .as_mut()
                 .ok_or(EditorSessionError::MissingActiveStroke)?;
-
-            for input in inputs {
-                let max_affected_radius = self
-                    .brushes
-                    .max_affected_radius_px(input.brush_id)
-                    .ok_or(EditorSessionError::BrushNotRegistered(input.brush_id))?;
-                active_merge_payload = Some(self.brushes.encode_merge_payload(input)?);
-                for (block_index, _) in input.blocks.blocks().iter().enumerate() {
-                    let center = self.brushes.block_center(input, block_index)?;
-                    let mut affected_tiles = Vec::new();
-                    active_image.layout().collect_affected_tile_indices(
-                        center,
-                        max_affected_radius,
-                        &mut affected_tiles,
-                    );
-                    for tile_index in affected_tiles {
-                        let tile_origin = active_image.tile_canvas_origin(tile_index).ok_or(
-                            EditorSessionError::Document(GlaDocError::InvalidTileIndex {
-                                tile_index,
-                                tile_count: active_image.tile_count(),
-                            }),
-                        )?;
-                        let source_tile_key = stroke.intermediate().tile_key(tile_index);
-                        let apply_payload = self.brushes.encode_apply_dab_payload(
-                            input,
-                            block_index,
-                            tile_origin,
-                        )?;
-                        stroke.push_apply_dab(
-                            tile_index,
-                            source_tile_key,
-                            apply_payload,
-                            &mut commands,
-                        )?;
-                        dirty_tile_indices.push(tile_index);
-                    }
-                }
-            }
-        }
-
-        if dirty_tile_indices.is_empty() {
+            transaction.process_inputs_gpu(
+                &self.doc,
+                &mut self.doc_renderer,
+                &self.brushes,
+                image_backend,
+                tile_renderer,
+                device,
+                queue,
+                inputs,
+            )?
+        };
+        let Some(dirty_tile_indices) = dirty_tile_indices else {
             return Ok(None);
-        }
-        dirty_tile_indices.sort_unstable();
-        dirty_tile_indices.dedup();
-        let merge_payload =
-            active_merge_payload.ok_or(EditorSessionError::MissingActiveMergePayload)?;
-        self.active_merge_payload = Some(merge_payload.clone());
-        {
-            let stroke = self
-                .active_stroke
-                .as_ref()
-                .ok_or(EditorSessionError::MissingActiveStroke)?;
-            for &tile_index in &dirty_tile_indices {
-                let (origin_tile_key, preview_tile_key) = self
-                    .doc_renderer
-                    .ensure_brush_preview_merge_target(&self.doc, tile_index)?;
-                stroke.push_preview_merge(
-                    tile_index,
-                    origin_tile_key,
-                    preview_tile_key,
-                    merge_payload.clone(),
-                    &mut commands,
-                );
-            }
-        }
+        };
 
-        Ok(Some(self.execute_preview_commands_gpu(
-            image_backend,
+        Ok(Some(self.refresh_active_tiles_gpu(
             tile_renderer,
             device,
             queue,
             &dirty_tile_indices,
-            &commands,
         )?))
     }
 
@@ -409,86 +312,21 @@ impl EditorSession {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<Option<EditorRenderUpdate>, EditorSessionError> {
-        let Some(mut stroke) = self.active_stroke.take() else {
+        let Some(transaction) = self.active_stroke_transaction.take() else {
             return Ok(None);
         };
-        let merge_payload = self
-            .active_merge_payload
-            .take()
-            .ok_or(EditorSessionError::MissingActiveMergePayload)?;
-
-        let brush_id = stroke.brush_id();
-        let tile_indices = stroke
-            .touched_tiles()
-            .iter()
-            .map(|record| record.tile_index)
-            .collect::<Vec<_>>();
-        if tile_indices.is_empty() {
-            self.doc_renderer.clear_brush_preview_image();
-            return Ok(None);
-        }
-        let intermediate_backend = self
-            .brushes
-            .brush_backend(brush_id)
-            .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?
-            .intermediate_backend()
-            .clone();
-        let active_layer_id = self.doc.active_layer_id();
-        let batch = {
-            let (image, backup_store) = self.doc.active_layer_image_and_backup_store_mut()?;
-            stroke.build_commit_batch(
-                image,
-                image_backend,
-                backup_store,
-                &tile_indices,
-                merge_payload,
-            )?
-        };
-
-        let backup_backend = self.doc.undo_stack().backup_store().backend();
-        let render_backend = self.doc_renderer.render_backend();
-        tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend(device, &intermediate_backend)?;
-        tile_renderer.ensure_backend(device, backup_backend)?;
-        tile_renderer.ensure_backend(device, render_backend)?;
-
-        let mut clear_batches = image_backend.take_pending_clear_batches()?;
-        clear_batches.extend(intermediate_backend.take_pending_clear_batches()?);
-        clear_batches.extend(render_backend.take_pending_clear_batches()?);
-        clear_batches.extend(backup_backend.take_pending_clear_batches()?);
-        tile_renderer.execute_commands_with_shader_provider(
+        let tile_indices = transaction.commit_gpu(
+            &mut self.doc,
+            &mut self.doc_renderer,
+            &mut self.brushes,
+            image_backend,
+            tile_renderer,
             device,
             queue,
-            &[
-                image_backend,
-                &intermediate_backend,
-                render_backend,
-                backup_backend,
-            ],
-            &clear_batches,
-            &batch.commands,
-            None,
-            &self.brushes,
         )?;
-
-        self.doc.push_undo_entry(
-            active_layer_id,
-            batch.backup_group,
-            batch
-                .tile_records
-                .into_iter()
-                .map(|record| {
-                    DocumentUndoTileRecord::new(record.tile_index, record.backup_tile_key)
-                })
-                .collect(),
-        )?;
-
-        let brush_backend = self
-            .brushes
-            .brush_backend_mut(brush_id)
-            .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
-        brush_backend.archive_stroke(stroke)?;
-        self.doc_renderer.clear_brush_preview_image();
+        let Some(tile_indices) = tile_indices else {
+            return Ok(None);
+        };
 
         Ok(Some(self.refresh_active_tiles_gpu(
             tile_renderer,

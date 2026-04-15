@@ -50,10 +50,7 @@ pub enum BrushInputError {
 }
 
 pub trait BrushInputProcessor: Send + Sync {
-    fn produce_input(
-        &self,
-        canvas_input: &[CanvasInput],
-    ) -> Result<BrushInput, BrushInputError>;
+    fn produce_input(&self, canvas_input: &[CanvasInput]) -> Result<BrushInput, BrushInputError>;
 
     fn max_affected_radius_px(&self) -> u32;
 
@@ -654,10 +651,12 @@ impl BrushRegistry {
         brush_id: BrushId,
         canvas_input: &[CanvasInput],
     ) -> Result<BrushInput, BrushInputError> {
-        let processor = self.input_processor(brush_id).ok_or(BrushInputError::WrongBrush {
-            expected: brush_id,
-            actual: brush_id,
-        })?;
+        let processor = self
+            .input_processor(brush_id)
+            .ok_or(BrushInputError::WrongBrush {
+                expected: brush_id,
+                actual: brush_id,
+            })?;
         processor.produce_input(canvas_input)
     }
 
@@ -671,10 +670,12 @@ impl BrushRegistry {
         input: &BrushInput,
         block_index: usize,
     ) -> Result<CanvasVec2, BrushInputError> {
-        let processor = self.input_processor(input.brush_id).ok_or(BrushInputError::WrongBrush {
-            expected: input.brush_id,
-            actual: input.brush_id,
-        })?;
+        let processor =
+            self.input_processor(input.brush_id)
+                .ok_or(BrushInputError::WrongBrush {
+                    expected: input.brush_id,
+                    actual: input.brush_id,
+                })?;
         processor.block_center(input, block_index)
     }
 
@@ -684,18 +685,22 @@ impl BrushRegistry {
         block_index: usize,
         tile_canvas_origin: CanvasVec2,
     ) -> Result<Vec<u8>, BrushInputError> {
-        let processor = self.input_processor(input.brush_id).ok_or(BrushInputError::WrongBrush {
-            expected: input.brush_id,
-            actual: input.brush_id,
-        })?;
+        let processor =
+            self.input_processor(input.brush_id)
+                .ok_or(BrushInputError::WrongBrush {
+                    expected: input.brush_id,
+                    actual: input.brush_id,
+                })?;
         processor.encode_apply_dab_payload(input, block_index, tile_canvas_origin)
     }
 
     pub fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
-        let processor = self.input_processor(input.brush_id).ok_or(BrushInputError::WrongBrush {
-            expected: input.brush_id,
-            actual: input.brush_id,
-        })?;
+        let processor =
+            self.input_processor(input.brush_id)
+                .ok_or(BrushInputError::WrongBrush {
+                    expected: input.brush_id,
+                    actual: input.brush_id,
+                })?;
         processor.encode_merge_payload(input)
     }
 }
