@@ -1,6 +1,6 @@
 mod context;
-pub mod tile_image_export;
 mod texture_io;
+pub mod tile_image_export;
 mod tile_renderer;
 
 pub use crate::context::{

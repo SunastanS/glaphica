@@ -63,6 +63,7 @@ enum PreviewInitError {
     ScreenPresentCache(ScreenPresentCacheError),
     TileRenderer(renderer::TileRendererError),
     View(AppViewMatrixError),
+    PuffinHttpServer(String),
 }
 
 impl Display for PreviewInitError {
@@ -78,6 +79,9 @@ impl Display for PreviewInitError {
             Self::ScreenPresentCache(error) => Display::fmt(error, f),
             Self::TileRenderer(error) => Display::fmt(error, f),
             Self::View(error) => Display::fmt(error, f),
+            Self::PuffinHttpServer(error) => {
+                write!(f, "failed to start puffin http server: {error}")
+            }
         }
     }
 }
@@ -209,6 +213,7 @@ struct PreviewState {
     stroke_active: bool,
     perf_trace: app_present_loop::PreviewPerfTraceConfig,
     perf_frame_seq: u64,
+    _puffin_server: Option<puffin_http::Server>,
 }
 
 impl ApplicationHandler for PreviewApp {

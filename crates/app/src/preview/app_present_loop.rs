@@ -18,20 +18,34 @@ const DEFAULT_BACKGROUND_COLOR: wgpu::Color = wgpu::Color {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PreviewPerfTraceConfig {
-    enabled: bool,
+    puffin_enabled: bool,
+    stderr_enabled: bool,
+    http_enabled: bool,
     slow_threshold: Duration,
 }
 
 impl PreviewPerfTraceConfig {
     pub(super) fn from_env() -> Self {
-        let enabled = env_flag("GLAPHICA_PREVIEW_PERF_TRACE");
+        let puffin_enabled = env_flag("GLAPHICA_PREVIEW_PERF_TRACE");
+        let stderr_enabled = env_flag("GLAPHICA_PREVIEW_PERF_TRACE_STDERR");
+        let http_enabled = env_flag("GLAPHICA_PREVIEW_PERF_TRACE_HTTP");
         let slow_threshold = env_millis("GLAPHICA_PREVIEW_PERF_TRACE_SLOW_MS")
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(8));
         Self {
-            enabled,
+            puffin_enabled,
+            stderr_enabled,
+            http_enabled,
             slow_threshold,
         }
+    }
+
+    pub(super) fn puffin_enabled(self) -> bool {
+        self.puffin_enabled || self.http_enabled
+    }
+
+    pub(super) fn http_enabled(self) -> bool {
+        self.http_enabled
     }
 }
 
@@ -46,6 +60,11 @@ struct PreviewFramePerf {
 
 impl PreviewState {
     pub(super) fn redraw(&mut self) -> Result<(), PreviewRuntimeError> {
+        if self.perf_trace.puffin_enabled {
+            puffin::GlobalProfiler::lock().new_frame();
+        }
+        puffin::profile_function!();
+
         let frame_started = std::time::Instant::now();
         let mut perf = PreviewFramePerf::default();
         let Some(runtime) = self.runtime.as_mut() else {
@@ -53,57 +72,68 @@ impl PreviewState {
         };
 
         let process_inputs_started = std::time::Instant::now();
-        runtime.process_pending_brush_input_gpu(
-            &self.image_backend,
-            &mut self.tile_renderer,
-            &self.gpu.device,
-            &self.gpu.queue,
-            MAX_PENDING_BRUSH_INPUTS_PER_FRAME,
-        )?;
+        {
+            puffin::profile_scope!("process_pending_brush_input_gpu");
+            runtime.process_pending_brush_input_gpu(
+                &self.image_backend,
+                &mut self.tile_renderer,
+                &self.gpu.device,
+                &self.gpu.queue,
+                MAX_PENDING_BRUSH_INPUTS_PER_FRAME,
+            )?;
+        }
         perf.process_inputs = process_inputs_started.elapsed();
 
         let dirty_tile_indices = runtime.frame_scheduler_mut().take_scheduled_tile_indices();
         perf.dirty_tile_count = dirty_tile_indices.len();
         if !dirty_tile_indices.is_empty() {
             let update_cache_started = std::time::Instant::now();
-            let screen_cache_view = self
-                .screen_cache
-                .texture()
-                .create_layer_view(0)
-                .map_err(ScreenPresentCacheError::from)?;
-            let screen_cache_target = RenderTarget2d {
-                view: &screen_cache_view,
-                format: self.screen_cache.texture().format,
-                width: self.screen_cache.texture().width,
-                height: self.screen_cache.texture().height,
-            };
-            if dirty_tile_indices.len() == self.full_tile_indices.len() {
-                self.tile_renderer.clear_render_target(
+            {
+                puffin::profile_scope!("update_screen_cache");
+                let screen_cache_view = self
+                    .screen_cache
+                    .texture()
+                    .create_layer_view(0)
+                    .map_err(ScreenPresentCacheError::from)?;
+                let screen_cache_target = RenderTarget2d {
+                    view: &screen_cache_view,
+                    format: self.screen_cache.texture().format,
+                    width: self.screen_cache.texture().width,
+                    height: self.screen_cache.texture().height,
+                };
+                if dirty_tile_indices.len() == self.full_tile_indices.len() {
+                    self.tile_renderer.clear_render_target(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        screen_cache_target,
+                        DEFAULT_BACKGROUND_COLOR,
+                    );
+                }
+                present_root_tiles(
+                    runtime.session().doc(),
+                    runtime.session().doc_renderer(),
+                    &mut self.tile_renderer,
                     &self.gpu.device,
                     &self.gpu.queue,
+                    runtime.view(),
                     screen_cache_target,
-                    DEFAULT_BACKGROUND_COLOR,
-                );
+                    &dirty_tile_indices,
+                )?;
             }
-            present_root_tiles(
-                runtime.session().doc(),
-                runtime.session().doc_renderer(),
-                &mut self.tile_renderer,
-                &self.gpu.device,
-                &self.gpu.queue,
-                runtime.view(),
-                screen_cache_target,
-                &dirty_tile_indices,
-            )?;
             perf.update_cache = update_cache_started.elapsed();
         }
 
         let acquire_frame_started = std::time::Instant::now();
-        let frame = self.surface.acquire_frame().map_err(|error| {
-            AppPresentError::DocRenderer(gla_doc_renderer::GlaDocRendererError::RenderExecution(
-                gla_doc_renderer::RenderExecutionError::new(error.to_string()),
-            ))
-        })?;
+        let frame = {
+            puffin::profile_scope!("surface_acquire_frame");
+            self.surface.acquire_frame().map_err(|error| {
+                AppPresentError::DocRenderer(
+                    gla_doc_renderer::GlaDocRendererError::RenderExecution(
+                        gla_doc_renderer::RenderExecutionError::new(error.to_string()),
+                    ),
+                )
+            })?
+        };
         perf.acquire_frame = acquire_frame_started.elapsed();
 
         let result = {
@@ -114,12 +144,15 @@ impl PreviewState {
                 height: self.surface.height(),
             };
             let present_surface_started = std::time::Instant::now();
-            let result = self.tile_renderer.present_texture_2d(
-                &self.gpu.device,
-                &self.gpu.queue,
-                self.screen_cache.texture(),
-                target,
-            );
+            let result = {
+                puffin::profile_scope!("present_surface");
+                self.tile_renderer.present_texture_2d(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    self.screen_cache.texture(),
+                    target,
+                )
+            };
             perf.present_surface = present_surface_started.elapsed();
             result.map_err(AppPresentError::from)
         };
@@ -139,7 +172,7 @@ impl PreviewState {
     }
 
     fn trace_frame_perf(&mut self, total: Duration, perf: &PreviewFramePerf) {
-        if !self.perf_trace.enabled || total < self.perf_trace.slow_threshold {
+        if !self.perf_trace.stderr_enabled || total < self.perf_trace.slow_threshold {
             return;
         }
         let stages = [

@@ -28,6 +28,10 @@ const DEFAULT_BRUSH_ATLAS_LAYOUT: AtlasLayout = AtlasLayout::Small11;
 
 impl PreviewState {
     pub(super) fn new(event_loop: &ActiveEventLoop) -> Result<Self, PreviewInitError> {
+        let perf_trace = super::app_present_loop::PreviewPerfTraceConfig::from_env();
+        puffin::set_scopes_on(perf_trace.puffin_enabled());
+        let puffin_server = start_puffin_server(perf_trace)?;
+
         let window = std::sync::Arc::new(
             event_loop
                 .create_window(WindowAttributes::default().with_title("glaphica-dev preview"))?,
@@ -104,10 +108,29 @@ impl PreviewState {
             cursor_position: None,
             modifiers: winit::keyboard::ModifiersState::default(),
             stroke_active: false,
-            perf_trace: super::app_present_loop::PreviewPerfTraceConfig::from_env(),
+            perf_trace,
             perf_frame_seq: 0,
+            _puffin_server: puffin_server,
         })
     }
+}
+
+fn start_puffin_server(
+    perf_trace: super::app_present_loop::PreviewPerfTraceConfig,
+) -> Result<Option<puffin_http::Server>, PreviewInitError> {
+    if !perf_trace.http_enabled() {
+        return Ok(None);
+    }
+
+    let bind_addr = env::var("GLAPHICA_PREVIEW_PERF_TRACE_HTTP_ADDR")
+        .unwrap_or_else(|_| format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT));
+    let server = puffin_http::Server::new(&bind_addr)
+        .map_err(|error| PreviewInitError::PuffinHttpServer(error.to_string()))?;
+    eprintln!(
+        "preview puffin profiler serving raw TCP on {}. this is not a browser HTTP endpoint; run `puffin_viewer` to inspect traces.",
+        bind_addr
+    );
+    Ok(Some(server))
 }
 
 fn create_gpu_runtime(

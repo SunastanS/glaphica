@@ -216,7 +216,6 @@ impl TextureColorRuntime {
             .map_err(TextureIoError::ColorManagement)?;
         Ok(readback)
     }
-
 }
 
 #[derive(Debug)]
@@ -539,5 +538,4 @@ mod tests {
                 .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
         );
     }
-
 }
