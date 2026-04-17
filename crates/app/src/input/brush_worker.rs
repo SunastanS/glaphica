@@ -17,6 +17,7 @@ pub struct BrushWorker {
 #[derive(Debug)]
 pub enum BrushWorkerError {
     BrushInput(BrushInputError),
+    BrushInit(BrushInputError),
     BrushNotRegistered(BrushId),
 }
 
@@ -24,6 +25,7 @@ impl Display for BrushWorkerError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BrushInput(error) => Display::fmt(error, f),
+            Self::BrushInit(error) => Display::fmt(error, f),
             Self::BrushNotRegistered(brush_id) => {
                 write!(f, "brush {} is not registered", brush_id.raw())
             }
@@ -46,7 +48,7 @@ impl BrushWorker {
         batch_capacity: usize,
     ) -> Result<Self, BrushWorkerError> {
         let active_input_stroke = begin_input_stroke(&brushes, active_brush_id)
-            .map_err(|_| BrushWorkerError::BrushNotRegistered(active_brush_id))?;
+            .map_err(map_begin_input_stroke_error)?;
         Ok(Self {
             brushes,
             active_brush_id,
@@ -72,7 +74,7 @@ impl BrushWorker {
             return Ok(());
         }
         self.active_input_stroke = begin_input_stroke(&self.brushes, brush_id)
-            .map_err(|_| BrushWorkerError::BrushNotRegistered(brush_id))?;
+            .map_err(map_begin_input_stroke_error)?;
         self.active_brush_id = brush_id;
         Ok(())
     }
@@ -134,25 +136,35 @@ fn begin_input_stroke(
     brushes.begin_input_stroke(brush_id)
 }
 
+fn map_begin_input_stroke_error(error: BrushInputError) -> BrushWorkerError {
+    match error {
+        BrushInputError::WrongBrush { expected, actual } if expected == actual => {
+            BrushWorkerError::BrushNotRegistered(expected)
+        }
+        error => BrushWorkerError::BrushInit(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use atlas::{AtlasLayout, Backend, BackendId};
-    use brush::BrushId;
+    use brush::{BrushId, BrushInputError, BrushStrokeError};
     use brush::round::ROUND_BRUSH_ID;
     use glaphica_core::{CanvasVec2, RadianVec2};
 
     use crate::{BrushWorker, create_brush_input_channels};
 
     #[test]
-    fn worker_turns_canvas_batch_into_brush_input_batch() {
+    fn worker_process_and_finish_emit_distinct_brush_input_batches() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(41));
         let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
         let (canvas_producer, canvas_consumer, brush_producer, brush_consumer) =
             create_brush_input_channels(8, 8);
         let mut worker = BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
-        let mut brush_inputs = Vec::new();
+        let mut processed_brush_inputs = Vec::new();
+        let mut finished_brush_inputs = Vec::new();
 
         canvas_producer.push(crate::CanvasInput {
             time_ns: 1,
@@ -172,14 +184,39 @@ mod tests {
         let produced = worker
             .process_canvas_input(&canvas_consumer, &brush_producer, 16, Duration::ZERO)
             .expect("process canvas input");
-        brush_consumer.drain_batch_with_wait(&mut brush_inputs, 1, Duration::ZERO);
+        brush_consumer.drain_batch_with_wait(&mut processed_brush_inputs, 1, Duration::ZERO);
 
-        assert!(produced >= 1);
-        assert_eq!(brush_inputs.len(), 1);
-        assert_eq!(brush_inputs[0].brush_id, ROUND_BRUSH_ID);
-        assert!(!brush_inputs[0].blocks.blocks().is_empty());
-        assert_eq!(brush_inputs[0].blocks.blocks()[0].values()[0], 10.0);
-        assert_eq!(brush_inputs[0].blocks.blocks()[0].values()[1], 20.0);
+        let finished = worker
+            .finish_active_stroke(&brush_producer)
+            .expect("finish stroke");
+        brush_consumer.drain_batch_with_wait(&mut finished_brush_inputs, 1, Duration::ZERO);
+
+        assert_eq!(produced, 1);
+        assert_eq!(processed_brush_inputs.len(), 1);
+        assert_eq!(processed_brush_inputs[0].brush_id, ROUND_BRUSH_ID);
+        assert_eq!(processed_brush_inputs[0].blocks.blocks().len(), 1);
+        assert_eq!(processed_brush_inputs[0].blocks.blocks()[0].values()[0], 10.0);
+        assert_eq!(processed_brush_inputs[0].blocks.blocks()[0].values()[1], 20.0);
+
+        assert_eq!(finished_brush_inputs.len(), 1);
+        assert_eq!(finished_brush_inputs[0].brush_id, ROUND_BRUSH_ID);
+        assert_eq!(finished, finished_brush_inputs[0].blocks.blocks().len());
+        assert!(finished > 0);
+
+        let processed_origin = (
+            processed_brush_inputs[0].blocks.blocks()[0].values()[0],
+            processed_brush_inputs[0].blocks.blocks()[0].values()[1],
+        );
+        let finished_positions = finished_brush_inputs[0]
+            .blocks
+            .blocks()
+            .iter()
+            .map(|block| (block.values()[0], block.values()[1]))
+            .collect::<Vec<_>>();
+
+        assert!(!finished_positions.contains(&processed_origin));
+        assert!(finished_positions.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(finished_positions.windows(2).all(|pair| pair[0].1 < pair[1].1));
     }
 
     #[test]
@@ -195,6 +232,23 @@ mod tests {
         assert!(matches!(
             error,
             crate::BrushWorkerError::BrushNotRegistered(brush_id) if brush_id == BrushId::new(999)
+        ));
+    }
+
+    #[test]
+    fn begin_input_stroke_preserves_non_registration_failures() {
+        let error = super::map_begin_input_stroke_error(BrushInputError::Stroke(
+            BrushStrokeError::WrongImageBackend {
+                expected: BackendId::new(7),
+                actual: BackendId::new(8),
+            },
+        ));
+
+        assert!(matches!(
+            error,
+            crate::BrushWorkerError::BrushInit(BrushInputError::Stroke(
+                BrushStrokeError::WrongImageBackend { expected, actual }
+            )) if expected == BackendId::new(7) && actual == BackendId::new(8)
         ));
     }
 }
