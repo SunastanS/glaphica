@@ -1,7 +1,112 @@
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use glaphica_core::{CanvasInput, CanvasVec2, RadianVec2};
+
+#[derive(Debug, Clone, Copy)]
+struct BrushPerfTraceConfig {
+    stderr_enabled: bool,
+    slow_threshold: Duration,
+    far_threshold: f32,
+}
+
+impl BrushPerfTraceConfig {
+    fn global() -> &'static Self {
+        static CONFIG: OnceLock<BrushPerfTraceConfig> = OnceLock::new();
+        CONFIG.get_or_init(Self::from_env)
+    }
+
+    fn from_env() -> Self {
+        Self {
+            stderr_enabled: env_flag("GLAPHICA_BRUSH_PERF_TRACE_STDERR"),
+            slow_threshold: env_millis("GLAPHICA_BRUSH_PERF_TRACE_SLOW_MS")
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::from_millis(8)),
+            far_threshold: env_f32("GLAPHICA_BRUSH_PERF_TRACE_FAR_PX").unwrap_or(8.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BrushLatencyPoint {
+    time_ns: u64,
+    position: CanvasVec2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct BrushLatencySnapshot {
+    pub time_ns: u64,
+    pub distance: f32,
+    pub input: BrushLatencyPoint,
+    pub draw: BrushLatencyPoint,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct BrushLatencyTraceState {
+    latest_input: Option<BrushLatencyPoint>,
+    latest_draw: Option<BrushLatencyPoint>,
+    drain_seq: u64,
+}
+
+impl BrushLatencyTraceState {
+    pub(crate) fn clear(&mut self) {
+        self.latest_input = None;
+        self.latest_draw = None;
+        self.drain_seq = 0;
+    }
+
+    pub(crate) fn record_input(&mut self, input: CanvasInput) {
+        self.latest_input = Some(BrushLatencyPoint {
+            time_ns: input.time_ns,
+            position: input.position,
+        });
+    }
+
+    pub(crate) fn record_current_draw(&mut self, sample: CommittedCanvasSample) {
+        self.latest_draw = Some(BrushLatencyPoint {
+            time_ns: sample.time_ns,
+            position: sample.position,
+        });
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<BrushLatencySnapshot> {
+        let input = self.latest_input?;
+        let draw = self.latest_draw?;
+        Some(BrushLatencySnapshot {
+            time_ns: input.time_ns.saturating_sub(draw.time_ns),
+            distance: distance_between(input.position, draw.position),
+            input,
+            draw,
+        })
+    }
+
+    pub(crate) fn trace_drain(&mut self, committed_spans: usize, emitted_dabs: usize) {
+        let Some(snapshot) = self.snapshot() else {
+            return;
+        };
+        let config = BrushPerfTraceConfig::global();
+        let slow = Duration::from_nanos(snapshot.time_ns) >= config.slow_threshold;
+        let far = snapshot.distance >= config.far_threshold;
+        if !config.stderr_enabled || !(slow || far) {
+            return;
+        }
+        self.drain_seq += 1;
+        eprintln!(
+            "[PERF][brush][drain={}] latency_ms={:.3} latency_px={:.3} emitted_dabs={} committed_spans={} current_draw=({:.3},{:.3}) cursor=({:.3},{:.3})",
+            self.drain_seq,
+            duration_ms(Duration::from_nanos(snapshot.time_ns)),
+            snapshot.distance,
+            emitted_dabs,
+            committed_spans,
+            snapshot.draw.position.x,
+            snapshot.draw.position.y,
+            snapshot.input.position.x,
+            snapshot.input.position.y,
+        );
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveKnot {
@@ -80,6 +185,8 @@ pub trait StrokeSmoother: Send {
     }
 
     fn finish_stroke(&mut self);
+
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample>;
 
     fn pop_committed_spans(
         &mut self,
@@ -541,12 +648,36 @@ impl StrokeCurveBuffer {
     }
 
     pub fn finish_stroke(&mut self) {
+        puffin::profile_scope!("stroke_smoother_finish_stroke");
         self.finished = true;
         self.recompute_mutable_tail();
         self.advance_stable_end();
     }
 
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+        if self.knots.is_empty() {
+            return None;
+        }
+        if self.finished {
+            return self
+                .knots
+                .back()
+                .copied()
+                .map(committed_sample_from_curve_knot);
+        }
+        let index = if self.stable_end == 0 {
+            0
+        } else {
+            self.stable_end.saturating_sub(1)
+        };
+        self.knots
+            .get(index)
+            .copied()
+            .map(committed_sample_from_curve_knot)
+    }
+
     fn push_input(&mut self, input: CanvasInput) -> Result<(), StrokeSmootherError> {
+        puffin::profile_scope!("stroke_smoother_push_input");
         validate_canvas_input(input, self.next_input_index)?;
         if let Some(previous) = self.raw_inputs.back() {
             if input.time_ns < previous.time_ns {
@@ -569,6 +700,7 @@ impl StrokeCurveBuffer {
     }
 
     fn pop_stable_spans(&mut self, output: &mut CommittedCanvasSpanBuffer) -> usize {
+        puffin::profile_scope!("stroke_smoother_pop_stable_spans");
         output.clear();
         output.set_global_s_start(self.emitted_arclength);
         if self.knots.is_empty() {
@@ -619,6 +751,7 @@ impl StrokeCurveBuffer {
     }
 
     fn advance_stable_end(&mut self) {
+        puffin::profile_scope!("stroke_smoother_advance_stable_end");
         if self.finished {
             self.stable_end = self.knots.len();
             return;
@@ -650,6 +783,7 @@ impl StrokeCurveBuffer {
     }
 
     fn recompute_mutable_tail(&mut self) {
+        puffin::profile_scope!("stroke_smoother_recompute_mutable_tail");
         if self.raw_inputs.is_empty() || self.knots.is_empty() {
             return;
         }
@@ -824,6 +958,13 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
 
     fn finish_stroke(&mut self) {}
 
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+        self.knots
+            .back()
+            .copied()
+            .map(committed_sample_from_curve_knot)
+    }
+
     fn pop_committed_spans(
         &mut self,
         output: &mut CommittedCanvasSpanBuffer,
@@ -890,6 +1031,10 @@ impl StrokeSmoother for DistanceOrTimeStrokeSmoother {
         self.curve.finish_stroke();
     }
 
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+        self.curve.current_drawing_sample()
+    }
+
     fn pop_committed_spans(
         &mut self,
         output: &mut CommittedCanvasSpanBuffer,
@@ -942,6 +1087,18 @@ fn curve_knot_from_input(previous_knot: Option<CurveKnot>, input: CanvasInput) -
     }
 }
 
+fn committed_sample_from_curve_knot(knot: CurveKnot) -> CommittedCanvasSample {
+    CommittedCanvasSample {
+        time_ns: knot.time_ns,
+        position: knot.position,
+        pressure: knot.pressure,
+        tilt: knot.tilt,
+        twist: knot.twist,
+        velocity: knot.velocity,
+        acceleration: knot.acceleration,
+    }
+}
+
 fn velocity_from_previous(
     previous_knot: Option<CurveKnot>,
     time_ns: u64,
@@ -979,6 +1136,25 @@ fn acceleration_from_previous(
 fn distance_between(lhs: CanvasVec2, rhs: CanvasVec2) -> f32 {
     let delta = subtract_canvas_vec2(lhs, rhs);
     (delta.x * delta.x + delta.y * delta.y).sqrt()
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn env_millis(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse::<u64>().ok()
+}
+
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok()?.parse::<f32>().ok()
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn lerp_u64(start: u64, end: u64, t: f32) -> u64 {
@@ -1438,9 +1614,89 @@ fn clamp_canvas_vec2_length(value: CanvasVec2, max_length: f32) -> CanvasVec2 {
 mod tests {
     use super::{
         ArcLengthCursor, CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot,
-        DistanceOrTimeStrokeSmoother, StrokeSmoother, StrokeSmootherError, distance_between,
+        DistanceOrTimeStrokeSmoother, PassthroughStrokeSmoother, StrokeSmoother,
+        StrokeSmootherError, distance_between,
     };
     use glaphica_core::{CanvasInput, CanvasVec2, RadianVec2};
+
+    #[test]
+    fn passthrough_current_drawing_sample_tracks_latest_input() {
+        let mut smoother = PassthroughStrokeSmoother::default();
+
+        smoother
+            .push_canvas_inputs(&[
+                CanvasInput {
+                    time_ns: 10,
+                    position: CanvasVec2::new(1.0, 2.0),
+                    pressure: 0.2,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+                CanvasInput {
+                    time_ns: 20,
+                    position: CanvasVec2::new(5.0, 8.0),
+                    pressure: 0.7,
+                    tilt: RadianVec2::new(0.1, 0.2),
+                    twist: 0.3,
+                },
+            ])
+            .expect("push inputs");
+
+        let sample = smoother
+            .current_drawing_sample()
+            .expect("current drawing sample");
+        assert_eq!(sample.time_ns, 20);
+        assert_eq!(sample.position, CanvasVec2::new(5.0, 8.0));
+        assert_eq!(sample.pressure, 0.7);
+    }
+
+    #[test]
+    fn distance_smoother_current_drawing_sample_tracks_stable_point() {
+        let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
+        let mut spans = CommittedCanvasSpanBuffer::new();
+
+        smoother
+            .push_canvas_inputs(&[
+                CanvasInput {
+                    time_ns: 0,
+                    position: CanvasVec2::new(0.0, 0.0),
+                    pressure: 0.2,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+                CanvasInput {
+                    time_ns: 10,
+                    position: CanvasVec2::new(2.0, 0.0),
+                    pressure: 0.2,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+                CanvasInput {
+                    time_ns: 20,
+                    position: CanvasVec2::new(8.0, 0.0),
+                    pressure: 0.2,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+            ])
+            .expect("push inputs");
+
+        let sample = smoother
+            .current_drawing_sample()
+            .expect("current drawing sample");
+        assert_eq!(sample.time_ns, 0);
+        assert_eq!(sample.position, CanvasVec2::new(0.0, 0.0));
+
+        smoother.finish_stroke();
+
+        let sample = smoother
+            .current_drawing_sample()
+            .expect("finished drawing sample");
+        smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        let last_span = spans.spans().last().expect("last span");
+        assert_eq!(sample.time_ns, last_span.end.time_ns);
+        assert_eq!(sample.position, last_span.end.position);
+    }
 
     #[test]
     fn smoother_rejects_non_monotonic_time() {

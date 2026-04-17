@@ -1,3 +1,4 @@
+use crate::smoother::BrushLatencyTraceState;
 use crate::{
     ArcLengthCursor, BrushId, BrushInput, BrushInputBlockList, BrushInputError,
     BrushInputProcessor, BrushShaderRegistration, BrushStrokeInputProcessor, CommittedCanvasSample,
@@ -50,6 +51,7 @@ pub struct RoundBrushStrokeInputProcessor {
     arclength_cursor: ArcLengthCursor,
     smoother: Box<dyn StrokeSmoother>,
     committed_spans: CommittedCanvasSpanBuffer,
+    latency_trace: BrushLatencyTraceState,
 }
 
 #[repr(C)]
@@ -128,6 +130,7 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
             arclength_cursor: ArcLengthCursor::default(),
             smoother: (self.smoother_factory)(),
             committed_spans: CommittedCanvasSpanBuffer::new(),
+            latency_trace: BrushLatencyTraceState::default(),
         })
     }
 
@@ -251,12 +254,17 @@ impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
         self.arclength_cursor = ArcLengthCursor::default();
         self.smoother.clear();
         self.committed_spans.clear();
+        self.latency_trace.clear();
     }
 
     fn push_canvas_inputs(
         &mut self,
         canvas_input: &[glaphica_core::CanvasInput],
     ) -> Result<(), BrushInputError> {
+        puffin::profile_scope!("round_brush_push_canvas_inputs");
+        for &input in canvas_input {
+            self.latency_trace.record_input(input);
+        }
         self.smoother.push_canvas_inputs(canvas_input)?;
         Ok(())
     }
@@ -266,21 +274,33 @@ impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
         Ok(())
     }
 
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+        self.smoother.current_drawing_sample()
+    }
+
     fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError> {
+        puffin::profile_scope!("round_brush_drain_brush_input");
         self.committed_spans.clear();
-        self.smoother
-            .pop_committed_spans(&mut self.committed_spans)?;
+        {
+            puffin::profile_scope!("round_brush_pop_committed_spans");
+            self.smoother
+                .pop_committed_spans(&mut self.committed_spans)?;
+        }
         if self.committed_spans.is_empty() {
+            self.latency_trace.trace_drain(0, 0);
             return Ok(None);
         }
 
         let mut blocks = BrushInputBlockList::new(ROUND_BRUSH_ID);
         let mut samples = Vec::new();
-        self.committed_spans.sample_by_arclength_from(
-            self.spacing_px,
-            &mut self.arclength_cursor,
-            &mut samples,
-        );
+        {
+            puffin::profile_scope!("round_brush_sample_by_arclength");
+            self.committed_spans.sample_by_arclength_from(
+                self.spacing_px,
+                &mut self.arclength_cursor,
+                &mut samples,
+            );
+        }
 
         for (block_index, sample) in samples.iter().copied().enumerate() {
             if self
@@ -300,6 +320,11 @@ impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
             )?;
             self.last_emitted_position = Some(sample.position);
         }
+        if let Some(sample) = self.current_drawing_sample() {
+            self.latency_trace.record_current_draw(sample);
+        }
+        self.latency_trace
+            .trace_drain(self.committed_spans.len(), blocks.blocks().len());
         if blocks.blocks().is_empty() {
             return Ok(None);
         }

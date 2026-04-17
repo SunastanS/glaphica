@@ -85,6 +85,8 @@ pub trait BrushStrokeInputProcessor: Send {
 
     fn finish_stroke(&mut self) -> Result<(), BrushInputError>;
 
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample>;
+
     fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError>;
 }
 
