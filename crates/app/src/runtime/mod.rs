@@ -113,11 +113,13 @@ impl AppRuntime {
 
     pub fn set_active_tool(&self, active_tool: ActiveTool) -> Result<(), AppRuntimeError> {
         self.brush_thread.set_active_tool(active_tool)?;
+        self.brush_thread.reset_active_stroke_processing();
         Ok(())
     }
 
     pub fn begin_active_tool_stroke(&mut self) -> Result<(), AppRuntimeError> {
         self.discard_pending_brush_inputs();
+        self.brush_thread.reset_active_stroke_processing();
         match self.brush_thread.active_tool() {
             ActiveTool::Brush(brush_id) => self.session.begin_stroke(brush_id)?,
         }
@@ -127,6 +129,7 @@ impl AppRuntime {
 
     pub fn cancel_stroke(&mut self) {
         self.session.cancel_stroke();
+        self.brush_thread.reset_active_stroke_processing();
         self.frame_scheduler.request_redraw();
     }
 
@@ -203,6 +206,7 @@ impl AppRuntime {
         queue: &wgpu::Queue,
         max_pending_inputs: usize,
     ) -> Result<Option<EditorRenderUpdate>, AppRuntimeError> {
+        self.brush_thread.finish_active_stroke_processing()?;
         self.process_pending_brush_input_gpu(
             image_backend,
             tile_renderer,
@@ -213,6 +217,7 @@ impl AppRuntime {
         let update =
             self.session
                 .commit_active_stroke(image_backend, tile_renderer, device, queue)?;
+        self.brush_thread.reset_active_stroke_processing();
         if let Some(update) = update.as_ref() {
             self.frame_scheduler.schedule_render_update(update);
         }

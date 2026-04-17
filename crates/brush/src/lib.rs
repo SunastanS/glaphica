@@ -12,6 +12,13 @@ use renderer::{
 };
 
 pub mod round;
+pub mod smoother;
+
+pub use crate::smoother::{
+    ArcLengthCursor, CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer,
+    CurveKnot, DistanceOrTimeStrokeSmoother, PassthroughStrokeSmoother, StrokeCurveBuffer,
+    StrokeSmoother, StrokeSmootherError,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrushInputBlock {
@@ -46,11 +53,12 @@ pub enum BrushInputError {
         block_index: usize,
         value_index: usize,
     },
+    Smoother(StrokeSmootherError),
     Stroke(BrushStrokeError),
 }
 
 pub trait BrushInputProcessor: Send + Sync {
-    fn produce_input(&self, canvas_input: &[CanvasInput]) -> Result<BrushInput, BrushInputError>;
+    fn begin_stroke(&self) -> Box<dyn BrushStrokeInputProcessor>;
 
     fn max_affected_radius_px(&self) -> u32;
 
@@ -68,6 +76,16 @@ pub trait BrushInputProcessor: Send + Sync {
     ) -> Result<Vec<u8>, BrushInputError>;
 
     fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError>;
+}
+
+pub trait BrushStrokeInputProcessor: Send {
+    fn reset(&mut self);
+
+    fn push_canvas_inputs(&mut self, canvas_input: &[CanvasInput]) -> Result<(), BrushInputError>;
+
+    fn finish_stroke(&mut self) -> Result<(), BrushInputError>;
+
+    fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,12 +236,19 @@ impl Display for BrushInputError {
                 block_index,
                 value_index
             ),
+            Self::Smoother(error) => Display::fmt(error, f),
             Self::Stroke(error) => Display::fmt(error, f),
         }
     }
 }
 
 impl Error for BrushInputError {}
+
+impl From<StrokeSmootherError> for BrushInputError {
+    fn from(error: StrokeSmootherError) -> Self {
+        Self::Smoother(error)
+    }
+}
 
 impl From<BrushStrokeError> for BrushInputError {
     fn from(error: BrushStrokeError) -> Self {
@@ -646,18 +671,17 @@ impl BrushRegistry {
         self.backend(brush_id).map(BrushBackend::begin_stroke)
     }
 
-    pub fn produce_input(
+    pub fn begin_input_stroke(
         &self,
         brush_id: BrushId,
-        canvas_input: &[CanvasInput],
-    ) -> Result<BrushInput, BrushInputError> {
+    ) -> Result<Box<dyn BrushStrokeInputProcessor>, BrushInputError> {
         let processor = self
             .input_processor(brush_id)
             .ok_or(BrushInputError::WrongBrush {
                 expected: brush_id,
                 actual: brush_id,
             })?;
-        processor.produce_input(canvas_input)
+        Ok(processor.begin_stroke())
     }
 
     pub fn max_affected_radius_px(&self, brush_id: BrushId) -> Option<u32> {
@@ -708,6 +732,7 @@ impl BrushRegistry {
 #[cfg(test)]
 mod tests {
     use atlas::{AtlasLayout, BackendId, TileState};
+    use glaphica_core::CanvasVec2;
     use glaphica_core::IMAGE_TILE_SIZE;
     use renderer::{ApplyDabCommand, CopyTileCommand, MergeTileCommand, RenderCommand};
 
@@ -715,7 +740,10 @@ mod tests {
         ROUND_SHADER_SPEC, RoundBrushInputProcessor, encode_round_apply_payload,
         encode_round_merge_payload,
     };
-    use crate::{BrushBackend, BrushId, BrushRegistry, BrushShaderRegistration, BrushStrokeState};
+    use crate::{
+        BrushBackend, BrushId, BrushRegistry, BrushShaderRegistration, BrushStrokeState,
+        CanvasInput,
+    };
     use atlas::{Backend, TileKey};
     use gla_document::DocumentBackupStore;
     use gla_image::{GlaImage, GlaImageLayout};
@@ -1013,5 +1041,52 @@ mod tests {
 
         assert_eq!(cached_group.keys(), &[tile_key]);
         assert_eq!(backend.stroke_history_groups(), &[cached_group]);
+    }
+
+    #[test]
+    fn registry_begins_stateful_input_stroke() {
+        let brush_id = crate::round::ROUND_BRUSH_ID;
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(11));
+        let mut registry = BrushRegistry::new();
+        registry
+            .register(
+                BrushShaderRegistration {
+                    brush_id,
+                    shader_spec: ROUND_SHADER_SPEC,
+                },
+                backend,
+                Box::new(RoundBrushInputProcessor::default()),
+            )
+            .expect("registration should succeed");
+
+        let mut stroke = registry
+            .begin_input_stroke(brush_id)
+            .expect("input stroke should build");
+
+        stroke
+            .push_canvas_inputs(&[
+                CanvasInput {
+                    time_ns: 1,
+                    position: CanvasVec2::new(2.0, 3.0),
+                    pressure: 0.6,
+                    tilt: glaphica_core::RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+                CanvasInput {
+                    time_ns: 2,
+                    position: CanvasVec2::new(8.0, 3.0),
+                    pressure: 0.6,
+                    tilt: glaphica_core::RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+            ])
+            .expect("push canvas input");
+        let input = stroke
+            .drain_brush_input()
+            .expect("drain brush input")
+            .expect("brush input should exist");
+
+        assert_eq!(input.brush_id, brush_id);
+        assert!(!input.blocks.blocks().is_empty());
     }
 }

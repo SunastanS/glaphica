@@ -88,6 +88,15 @@ impl<T> OverwriteRingProducer<T> {
             .expect("overwrite ring state should not be poisoned")
             .dropped
     }
+
+    pub fn clear(&self) {
+        self.shared
+            .state
+            .lock()
+            .expect("overwrite ring state should not be poisoned")
+            .queue
+            .clear();
+    }
 }
 
 impl<T> OverwriteRingConsumer<T> {
@@ -149,6 +158,15 @@ impl<T> OverwriteRingConsumer<T> {
             .lock()
             .expect("overwrite ring state should not be poisoned")
             .dropped
+    }
+
+    pub fn clear(&self) {
+        self.shared
+            .state
+            .lock()
+            .expect("overwrite ring state should not be poisoned")
+            .queue
+            .clear();
     }
 }
 

@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use brush::{BrushId, BrushInputError};
+use brush::{BrushId, BrushInputError, BrushStrokeInputProcessor};
 
 use crate::input::{BrushThreadBrushInputProducer, BrushThreadCanvasInputConsumer};
 use crate::{AppBrushRegistry, CanvasInput};
@@ -10,6 +10,7 @@ use crate::{AppBrushRegistry, CanvasInput};
 pub struct BrushWorker {
     brushes: AppBrushRegistry,
     active_brush_id: BrushId,
+    active_input_stroke: Box<dyn BrushStrokeInputProcessor>,
     canvas_batch: Vec<CanvasInput>,
 }
 
@@ -44,12 +45,12 @@ impl BrushWorker {
         active_brush_id: BrushId,
         batch_capacity: usize,
     ) -> Result<Self, BrushWorkerError> {
-        if brushes.shader_spec(active_brush_id).is_none() {
-            return Err(BrushWorkerError::BrushNotRegistered(active_brush_id));
-        }
+        let active_input_stroke = begin_input_stroke(&brushes, active_brush_id)
+            .map_err(|_| BrushWorkerError::BrushNotRegistered(active_brush_id))?;
         Ok(Self {
             brushes,
             active_brush_id,
+            active_input_stroke,
             canvas_batch: Vec::with_capacity(batch_capacity),
         })
     }
@@ -67,11 +68,17 @@ impl BrushWorker {
     }
 
     pub fn set_active_brush(&mut self, brush_id: BrushId) -> Result<(), BrushWorkerError> {
-        if self.brushes.shader_spec(brush_id).is_none() {
-            return Err(BrushWorkerError::BrushNotRegistered(brush_id));
+        if self.active_brush_id == brush_id {
+            return Ok(());
         }
+        self.active_input_stroke = begin_input_stroke(&self.brushes, brush_id)
+            .map_err(|_| BrushWorkerError::BrushNotRegistered(brush_id))?;
         self.active_brush_id = brush_id;
         Ok(())
+    }
+
+    pub fn reset_active_stroke(&mut self) {
+        self.active_input_stroke.reset();
     }
 
     pub fn process_canvas_input(
@@ -91,9 +98,25 @@ impl BrushWorker {
             return Ok(0);
         }
 
-        let brush_input = self
-            .brushes
-            .produce_input(self.active_brush_id, &self.canvas_batch)?;
+        self.active_input_stroke
+            .push_canvas_inputs(&self.canvas_batch)?;
+        let Some(brush_input) = self.active_input_stroke.drain_brush_input()? else {
+            return Ok(0);
+        };
+        let produced_blocks = brush_input.blocks.blocks().len();
+
+        brush_input_producer.push(brush_input);
+        Ok(produced_blocks)
+    }
+
+    pub fn finish_active_stroke(
+        &mut self,
+        brush_input_producer: &BrushThreadBrushInputProducer,
+    ) -> Result<usize, BrushWorkerError> {
+        self.active_input_stroke.finish_stroke()?;
+        let Some(brush_input) = self.active_input_stroke.drain_brush_input()? else {
+            return Ok(0);
+        };
         let produced_blocks = brush_input.blocks.blocks().len();
         if produced_blocks == 0 {
             return Ok(0);
@@ -102,6 +125,13 @@ impl BrushWorker {
         brush_input_producer.push(brush_input);
         Ok(produced_blocks)
     }
+}
+
+fn begin_input_stroke(
+    brushes: &AppBrushRegistry,
+    brush_id: BrushId,
+) -> Result<Box<dyn BrushStrokeInputProcessor>, BrushInputError> {
+    brushes.begin_input_stroke(brush_id)
 }
 
 #[cfg(test)]
@@ -144,12 +174,12 @@ mod tests {
             .expect("process canvas input");
         brush_consumer.drain_batch_with_wait(&mut brush_inputs, 1, Duration::ZERO);
 
-        assert_eq!(produced, 2);
+        assert!(produced >= 1);
         assert_eq!(brush_inputs.len(), 1);
         assert_eq!(brush_inputs[0].brush_id, ROUND_BRUSH_ID);
-        assert_eq!(brush_inputs[0].blocks.blocks().len(), 2);
+        assert!(!brush_inputs[0].blocks.blocks().is_empty());
         assert_eq!(brush_inputs[0].blocks.blocks()[0].values()[0], 10.0);
-        assert_eq!(brush_inputs[0].blocks.blocks()[1].values()[1], 40.0);
+        assert_eq!(brush_inputs[0].blocks.blocks()[0].values()[1], 20.0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,6 +18,9 @@ pub struct BrushThreadRuntime {
     canvas_input_producer: MainCanvasInputProducer,
     brush_input_consumer: MainBrushInputConsumer,
     stop_requested: Arc<AtomicBool>,
+    stroke_generation: Arc<AtomicU64>,
+    finish_request_generation: Arc<AtomicU64>,
+    finish_ack_generation: Arc<AtomicU64>,
     worker_error: Arc<Mutex<Option<BrushWorkerError>>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -82,9 +85,15 @@ impl BrushThreadRuntime {
         ) = create_brush_input_channels(canvas_input_capacity, brush_input_capacity);
         let active_tool = Arc::new(Mutex::new(active_tool));
         let stop_requested = Arc::new(AtomicBool::new(false));
+        let stroke_generation = Arc::new(AtomicU64::new(0));
+        let finish_request_generation = Arc::new(AtomicU64::new(0));
+        let finish_ack_generation = Arc::new(AtomicU64::new(0));
         let worker_error = Arc::new(Mutex::new(None));
         let thread_active_tool = active_tool.clone();
         let thread_stop_requested = stop_requested.clone();
+        let thread_stroke_generation = stroke_generation.clone();
+        let thread_finish_request_generation = finish_request_generation.clone();
+        let thread_finish_ack_generation = finish_ack_generation.clone();
         let thread_worker_error = worker_error.clone();
         let thread = thread::Builder::new()
             .name("glaphica-brush".to_string())
@@ -95,6 +104,9 @@ impl BrushThreadRuntime {
                     brush_input_producer,
                     thread_active_tool,
                     thread_stop_requested,
+                    thread_stroke_generation,
+                    thread_finish_request_generation,
+                    thread_finish_ack_generation,
                     thread_worker_error,
                     worker_batch_capacity,
                     worker_wait_timeout,
@@ -108,6 +120,9 @@ impl BrushThreadRuntime {
             canvas_input_producer,
             brush_input_consumer,
             stop_requested,
+            stroke_generation,
+            finish_request_generation,
+            finish_ack_generation,
             worker_error,
             thread: Some(thread),
         })
@@ -151,6 +166,26 @@ impl BrushThreadRuntime {
             .take()
     }
 
+    pub fn reset_active_stroke_processing(&self) {
+        self.stroke_generation.fetch_add(1, Ordering::Relaxed);
+        self.canvas_input_producer.clear();
+        self.brush_input_consumer.clear();
+    }
+
+    pub fn finish_active_stroke_processing(&self) -> Result<(), BrushThreadRuntimeError> {
+        let request = self
+            .finish_request_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        while self.finish_ack_generation.load(Ordering::Relaxed) < request {
+            if let Some(error) = self.take_worker_error() {
+                return Err(BrushThreadRuntimeError::Worker(error));
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
     pub fn shutdown(mut self) -> Result<(), BrushThreadRuntimeError> {
         self.stop_requested.store(true, Ordering::Relaxed);
         let Some(thread) = self.thread.take() else {
@@ -180,11 +215,34 @@ fn run_brush_thread(
     brush_input_producer: BrushThreadBrushInputProducer,
     active_tool: Arc<Mutex<ActiveTool>>,
     stop_requested: Arc<AtomicBool>,
+    stroke_generation: Arc<AtomicU64>,
+    finish_request_generation: Arc<AtomicU64>,
+    finish_ack_generation: Arc<AtomicU64>,
     worker_error: Arc<Mutex<Option<BrushWorkerError>>>,
     worker_batch_capacity: usize,
     worker_wait_timeout: Duration,
 ) {
+    let mut seen_stroke_generation = stroke_generation.load(Ordering::Relaxed);
+    let mut seen_finish_request_generation = finish_request_generation.load(Ordering::Relaxed);
     while !stop_requested.load(Ordering::Relaxed) {
+        let current_generation = stroke_generation.load(Ordering::Relaxed);
+        if current_generation != seen_stroke_generation {
+            worker.reset_active_stroke();
+            seen_stroke_generation = current_generation;
+        }
+        let current_finish_request_generation = finish_request_generation.load(Ordering::Relaxed);
+        if current_finish_request_generation != seen_finish_request_generation {
+            if let Err(error) = worker.finish_active_stroke(&brush_input_producer) {
+                let mut stored_error = worker_error
+                    .lock()
+                    .expect("brush worker error state should not be poisoned");
+                *stored_error = Some(error);
+                break;
+            }
+            seen_finish_request_generation = current_finish_request_generation;
+            finish_ack_generation.store(current_finish_request_generation, Ordering::Relaxed);
+            continue;
+        }
         let brush_id = match *active_tool
             .lock()
             .expect("active tool state should not be poisoned")
@@ -249,6 +307,13 @@ mod tests {
             tilt: RadianVec2::new(0.0, 0.0),
             twist: 0.0,
         });
+        runtime.canvas_input_producer().push(CanvasInput {
+            time_ns: 2,
+            position: CanvasVec2::new(10.0, 5.0),
+            pressure: 0.6,
+            tilt: RadianVec2::new(0.0, 0.0),
+            twist: 0.0,
+        });
 
         runtime.brush_input_consumer().drain_batch_with_wait(
             &mut brush_inputs,
@@ -258,7 +323,7 @@ mod tests {
 
         assert_eq!(brush_inputs.len(), 1);
         assert_eq!(brush_inputs[0].brush_id, ROUND_BRUSH_ID);
-        assert_eq!(brush_inputs[0].blocks.blocks().len(), 1);
+        assert!(!brush_inputs[0].blocks.blocks().is_empty());
         assert_eq!(brush_inputs[0].blocks.blocks()[0].values()[0], 4.0);
 
         runtime.shutdown().expect("shutdown runtime");

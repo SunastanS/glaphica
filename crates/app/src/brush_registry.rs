@@ -1,6 +1,6 @@
 use atlas::Backend;
 use brush::{
-    BrushBackend, BrushId, BrushInput, BrushInputError, BrushRegistry, CanvasInput,
+    BrushBackend, BrushId, BrushInput, BrushInputError, BrushRegistry, BrushStrokeInputProcessor,
     round::{ROUND_SHADER_REGISTRATION, RoundBrushInputProcessor},
 };
 use renderer::{BrushShaderProvider, BrushShaderSpec};
@@ -52,12 +52,11 @@ impl AppBrushRegistry {
         self.brushes.backend_mut(brush_id)
     }
 
-    pub fn produce_input(
+    pub fn begin_input_stroke(
         &self,
         brush_id: BrushId,
-        canvas_input: &[CanvasInput],
-    ) -> Result<BrushInput, BrushInputError> {
-        self.brushes.produce_input(brush_id, canvas_input)
+    ) -> Result<Box<dyn BrushStrokeInputProcessor>, BrushInputError> {
+        self.brushes.begin_input_stroke(brush_id)
     }
 
     pub fn max_affected_radius_px(&self, brush_id: BrushId) -> Option<u32> {
