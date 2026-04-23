@@ -1,0 +1,11 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+brush = { path = "../brush" }
+egui = "0.33.3"
+egui-winit = "0.33.3"
+ui_components = { path = "../ui_components" }
+winit = "0.30.13"

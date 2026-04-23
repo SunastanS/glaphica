@@ -3,12 +3,14 @@ use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
 use atlas::Backend;
+use brush::round::RoundBrushSettings;
 use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
 
 use crate::{
     ActiveTool, AppBrushRegistry, AppFrameScheduler, AppView, BrushThreadRuntime,
     BrushThreadRuntimeError, EditorRenderUpdate, EditorSession, EditorSessionError, ToolSet,
+    brush_registry::AppBrushRegistryUpdateError,
 };
 
 pub struct AppRuntime {
@@ -22,6 +24,7 @@ pub struct AppRuntime {
 pub enum AppRuntimeError {
     Session(EditorSessionError),
     BrushThread(BrushThreadRuntimeError),
+    BrushConfig(AppBrushRegistryUpdateError),
 }
 
 impl Display for AppRuntimeError {
@@ -29,6 +32,7 @@ impl Display for AppRuntimeError {
         match self {
             Self::Session(error) => Display::fmt(error, f),
             Self::BrushThread(error) => Display::fmt(error, f),
+            Self::BrushConfig(error) => Display::fmt(error, f),
         }
     }
 }
@@ -44,6 +48,12 @@ impl From<EditorSessionError> for AppRuntimeError {
 impl From<BrushThreadRuntimeError> for AppRuntimeError {
     fn from(error: BrushThreadRuntimeError) -> Self {
         Self::BrushThread(error)
+    }
+}
+
+impl From<AppBrushRegistryUpdateError> for AppRuntimeError {
+    fn from(error: AppBrushRegistryUpdateError) -> Self {
+        Self::BrushConfig(error)
     }
 }
 
@@ -114,6 +124,18 @@ impl AppRuntime {
     pub fn set_active_tool(&self, active_tool: ActiveTool) -> Result<(), AppRuntimeError> {
         self.brush_thread.set_active_tool(active_tool)?;
         self.brush_thread.reset_active_stroke_processing();
+        Ok(())
+    }
+
+    pub fn set_round_brush_settings(
+        &mut self,
+        settings: RoundBrushSettings,
+    ) -> Result<(), AppRuntimeError> {
+        self.cancel_stroke();
+        self.session
+            .brushes_mut()
+            .update_round_brush_settings(settings.clone())?;
+        self.brush_thread.update_round_brush_settings(settings);
         Ok(())
     }
 

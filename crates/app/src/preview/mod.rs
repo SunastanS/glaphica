@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use atlas::Backend;
-use renderer::{GpuContext, TileRenderer};
+use renderer::{EguiRenderer, GpuContext, TileRenderer};
+use ui::AppUi;
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::ModifiersState;
@@ -205,6 +206,8 @@ struct PreviewState {
     screen_cache: ScreenPresentCache,
     runtime: Option<AppRuntime>,
     tile_renderer: TileRenderer,
+    ui_renderer: EguiRenderer,
+    ui: AppUi,
     image_backend: Backend,
     full_tile_indices: Vec<usize>,
     started_at: Instant,

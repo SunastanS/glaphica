@@ -11,6 +11,10 @@ impl PreviewState {
         &mut self,
         event: WindowEvent,
     ) -> Result<PreviewEventAction, PreviewRuntimeError> {
+        let ui_response = self.ui.on_window_event(&self.window, &event);
+        let ui_event_consumed = ui_response.consumed;
+        let ui_requested_repaint = ui_response.repaint;
+
         match event {
             WindowEvent::CloseRequested => Ok(PreviewEventAction::Shutdown),
             WindowEvent::Resized(size) => {
@@ -28,19 +32,28 @@ impl PreviewState {
                         .frame_scheduler_mut()
                         .schedule_tile_indices(&self.full_tile_indices);
                 }
-                Ok(PreviewEventAction::RequestRedraw)
+                Ok(merge_redraw_request(
+                    PreviewEventAction::RequestRedraw,
+                    ui_requested_repaint,
+                ))
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                Ok(PreviewEventAction::None)
+                Ok(merge_redraw_request(
+                    PreviewEventAction::None,
+                    ui_requested_repaint,
+                ))
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = Some(ScreenVec2::new(position.x as f32, position.y as f32));
-                if self.stroke_active {
+                if self.stroke_active && !ui_event_consumed {
                     self.push_cursor_input();
                     return Ok(PreviewEventAction::RequestRedraw);
                 }
-                Ok(PreviewEventAction::None)
+                Ok(merge_redraw_request(
+                    PreviewEventAction::None,
+                    ui_requested_repaint,
+                ))
             }
             WindowEvent::MouseInput {
                 state,
@@ -48,6 +61,12 @@ impl PreviewState {
                 ..
             } => match state {
                 ElementState::Pressed => {
+                    if ui_event_consumed {
+                        return Ok(merge_redraw_request(
+                            PreviewEventAction::None,
+                            ui_requested_repaint,
+                        ));
+                    }
                     if !self.stroke_active
                         && let Some(runtime) = self.runtime.as_mut()
                     {
@@ -83,6 +102,12 @@ impl PreviewState {
                     },
                 ..
             } => {
+                if ui_event_consumed {
+                    return Ok(merge_redraw_request(
+                        PreviewEventAction::None,
+                        ui_requested_repaint,
+                    ));
+                }
                 if state == ElementState::Pressed
                     && !repeat
                     && self.modifiers.control_key()
@@ -99,13 +124,19 @@ impl PreviewState {
                     }
                     return Ok(PreviewEventAction::RequestRedraw);
                 }
-                Ok(PreviewEventAction::None)
+                Ok(merge_redraw_request(
+                    PreviewEventAction::None,
+                    ui_requested_repaint,
+                ))
             }
             WindowEvent::RedrawRequested => {
                 self.redraw()?;
                 Ok(PreviewEventAction::None)
             }
-            _ => Ok(PreviewEventAction::None),
+            _ => Ok(merge_redraw_request(
+                PreviewEventAction::None,
+                ui_requested_repaint,
+            )),
         }
     }
 
@@ -148,4 +179,14 @@ impl PreviewState {
             eprintln!("preview shutdown failed: {error}");
         }
     }
+}
+
+fn merge_redraw_request(
+    action: PreviewEventAction,
+    ui_requested_repaint: bool,
+) -> PreviewEventAction {
+    if ui_requested_repaint && matches!(action, PreviewEventAction::None) {
+        return PreviewEventAction::RequestRedraw;
+    }
+    action
 }

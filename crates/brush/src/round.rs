@@ -100,6 +100,17 @@ pub struct RoundBrushInputProcessor {
     smoother_factory: fn() -> Box<dyn StrokeSmoother>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundBrushSettings {
+    pub base_radius_px: f32,
+    pub spacing_ratio: f32,
+    pub base_hardness: f32,
+    pub base_flow: f32,
+    pub base_opacity: f32,
+    pub tint: [f32; 3],
+    pub modulations: RoundBrushModulationSet,
+}
+
 struct RoundBrushStrokeSampler {
     sampler: EquidistantStrokeSampler,
     base_radius_px: f32,
@@ -161,6 +172,12 @@ pub fn encode_round_merge_payload(settings: RoundMergeSettings) -> Vec<u8> {
 
 impl Default for RoundBrushInputProcessor {
     fn default() -> Self {
+        Self::from_settings(RoundBrushSettings::default())
+    }
+}
+
+impl Default for RoundBrushSettings {
+    fn default() -> Self {
         Self {
             base_radius_px: 5.0,
             spacing_ratio: 1.0,
@@ -169,6 +186,73 @@ impl Default for RoundBrushInputProcessor {
             base_opacity: 1.0,
             tint: [0.0, 0.0, 1.0],
             modulations: RoundBrushModulationSet::default(),
+        }
+    }
+}
+
+impl RoundBrushSettings {
+    pub fn with_base_radius_px(mut self, base_radius_px: f32) -> Self {
+        self.base_radius_px = base_radius_px;
+        self
+    }
+
+    pub fn with_spacing_ratio(mut self, spacing_ratio: f32) -> Self {
+        self.spacing_ratio = spacing_ratio;
+        self
+    }
+
+    pub fn with_base_hardness(mut self, base_hardness: f32) -> Self {
+        self.base_hardness = base_hardness;
+        self
+    }
+
+    pub fn with_base_flow(mut self, base_flow: f32) -> Self {
+        self.base_flow = base_flow;
+        self
+    }
+
+    pub fn with_base_opacity(mut self, base_opacity: f32) -> Self {
+        self.base_opacity = base_opacity;
+        self
+    }
+
+    pub fn with_tint(mut self, tint: [f32; 3]) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    pub fn with_modulation_curve(
+        mut self,
+        variable: RoundBrushDabVariable,
+        feature: RoundBrushInputFeature,
+        curve: ModulationCurve,
+    ) -> Self {
+        self.modulations = self.modulations.with_curve(variable, feature, curve);
+        self
+    }
+
+    pub fn with_modulations(mut self, modulations: RoundBrushModulationSet) -> Self {
+        self.modulations = modulations;
+        self
+    }
+}
+
+impl From<RoundBrushSettings> for RoundBrushInputProcessor {
+    fn from(settings: RoundBrushSettings) -> Self {
+        Self::from_settings(settings)
+    }
+}
+
+impl RoundBrushInputProcessor {
+    pub fn from_settings(settings: RoundBrushSettings) -> Self {
+        Self {
+            base_radius_px: settings.base_radius_px,
+            spacing_ratio: settings.spacing_ratio,
+            base_hardness: settings.base_hardness,
+            base_flow: settings.base_flow,
+            base_opacity: settings.base_opacity,
+            tint: settings.tint,
+            modulations: settings.modulations,
             smoother_factory: default_smoother_factory,
         }
     }
@@ -323,13 +407,45 @@ impl RoundBrushInputProcessor {
         self.base_radius_px * sanitized_spacing_ratio(self.spacing_ratio)
     }
 
+    pub fn settings(&self) -> RoundBrushSettings {
+        RoundBrushSettings {
+            base_radius_px: self.base_radius_px,
+            spacing_ratio: self.spacing_ratio,
+            base_hardness: self.base_hardness,
+            base_flow: self.base_flow,
+            base_opacity: self.base_opacity,
+            tint: self.tint,
+            modulations: self.modulations.clone(),
+        }
+    }
+
     pub fn with_base_radius_px(mut self, base_radius_px: f32) -> Self {
         self.base_radius_px = base_radius_px;
         self
     }
 
+    pub fn with_spacing_ratio(mut self, spacing_ratio: f32) -> Self {
+        self.spacing_ratio = spacing_ratio;
+        self
+    }
+
     pub fn with_base_hardness(mut self, base_hardness: f32) -> Self {
         self.base_hardness = base_hardness;
+        self
+    }
+
+    pub fn with_base_flow(mut self, base_flow: f32) -> Self {
+        self.base_flow = base_flow;
+        self
+    }
+
+    pub fn with_base_opacity(mut self, base_opacity: f32) -> Self {
+        self.base_opacity = base_opacity;
+        self
+    }
+
+    pub fn with_tint(mut self, tint: [f32; 3]) -> Self {
+        self.tint = tint;
         self
     }
 

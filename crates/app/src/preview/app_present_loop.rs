@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use renderer::RenderTarget2d;
+use ui::UiAction;
 
 use crate::{AppPresentError, ScreenPresentCacheError, SurfaceRuntime, present_root_tiles};
 
@@ -67,12 +68,12 @@ impl PreviewState {
 
         let frame_started = std::time::Instant::now();
         let mut perf = PreviewFramePerf::default();
-        let Some(runtime) = self.runtime.as_mut() else {
-            return Ok(());
-        };
 
         let process_inputs_started = std::time::Instant::now();
         {
+            let Some(runtime) = self.runtime.as_mut() else {
+                return Ok(());
+            };
             puffin::profile_scope!("process_pending_brush_input_gpu");
             runtime.process_pending_brush_input_gpu(
                 &self.image_backend,
@@ -84,7 +85,34 @@ impl PreviewState {
         }
         perf.process_inputs = process_inputs_started.elapsed();
 
-        let dirty_tile_indices = runtime.frame_scheduler_mut().take_scheduled_tile_indices();
+        let document_size = self
+            .runtime
+            .as_ref()
+            .map(|runtime| {
+                let layout = runtime.session().doc().layout();
+                [layout.size_x(), layout.size_y()]
+            })
+            .unwrap_or([0, 0]);
+        let ui_output = self
+            .ui
+            .paint(&self.window, document_size, self.stroke_active);
+        self.apply_ui_actions(&ui_output.actions)?;
+        self.ui_renderer.upload_textures(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &ui_output.textures_delta,
+        );
+        self.ui_renderer.upload_meshes(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &ui_output.clipped_primitives,
+        );
+
+        let dirty_tile_indices = self
+            .runtime
+            .as_mut()
+            .map(|runtime| runtime.frame_scheduler_mut().take_scheduled_tile_indices())
+            .unwrap_or_default();
         perf.dirty_tile_count = dirty_tile_indices.len();
         if !dirty_tile_indices.is_empty() {
             let update_cache_started = std::time::Instant::now();
@@ -109,6 +137,9 @@ impl PreviewState {
                         DEFAULT_BACKGROUND_COLOR,
                     );
                 }
+                let Some(runtime) = self.runtime.as_ref() else {
+                    return Ok(());
+                };
                 present_root_tiles(
                     runtime.session().doc(),
                     runtime.session().doc_renderer(),
@@ -144,22 +175,39 @@ impl PreviewState {
                 height: self.surface.height(),
             };
             let present_surface_started = std::time::Instant::now();
-            let result = {
+            let result: Result<(), AppPresentError> = (|| {
                 puffin::profile_scope!("present_surface");
                 self.tile_renderer.present_texture_2d(
                     &self.gpu.device,
                     &self.gpu.queue,
                     self.screen_cache.texture(),
                     target,
-                )
-            };
+                )?;
+                let mut encoder =
+                    self.gpu
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("glaphica-ui-overlay-encoder"),
+                        });
+                self.ui_renderer.render(
+                    &self.gpu.queue,
+                    &mut encoder,
+                    &frame.view,
+                    [self.surface.width(), self.surface.height()],
+                    ui_output.pixels_per_point,
+                );
+                self.gpu.queue.submit(Some(encoder.finish()));
+                Ok::<(), AppPresentError>(())
+            })();
             perf.present_surface = present_surface_started.elapsed();
-            result.map_err(AppPresentError::from)
+            result
         };
 
         match result {
             Ok(()) => {
-                runtime.frame_scheduler_mut().reset_redraw_request();
+                if let Some(runtime) = self.runtime.as_mut() {
+                    runtime.frame_scheduler_mut().reset_redraw_request();
+                }
                 SurfaceRuntime::present(frame);
                 self.trace_frame_perf(frame_started.elapsed(), &perf);
                 Ok(())
@@ -169,6 +217,30 @@ impl PreviewState {
                 Err(error.into())
             }
         }
+    }
+
+    fn apply_ui_actions(&mut self, actions: &[UiAction]) -> Result<(), PreviewRuntimeError> {
+        for action in actions {
+            match action {
+                UiAction::UndoRequested => {
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.undo_last_stroke_gpu(
+                            &self.image_backend,
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                        )?;
+                    }
+                }
+                UiAction::RoundBrushSettingsChanged(settings) => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.set_round_brush_settings(settings.clone())?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn trace_frame_perf(&mut self, total: Duration, perf: &PreviewFramePerf) {

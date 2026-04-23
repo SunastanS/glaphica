@@ -1,4 +1,5 @@
 mod context;
+mod egui_overlay;
 mod texture_io;
 pub mod tile_image_export;
 mod tile_renderer;
@@ -6,6 +7,7 @@ mod tile_renderer;
 pub use crate::context::{
     AdapterSelection, GpuContext, GpuContextInitDescriptor, GpuContextInitError,
 };
+pub use crate::egui_overlay::EguiRenderer;
 pub use crate::texture_io::{
     RendererTexture, RendererTextureDescriptor, TextureColorRuntime, TextureIoError,
     TextureReadback, TextureUploadDescriptor,

@@ -1,14 +1,35 @@
 use atlas::Backend;
 use brush::{
     BrushBackend, BrushId, BrushInput, BrushInputError, BrushRegistry, BrushStrokeInputProcessor,
-    round::{ROUND_SHADER_REGISTRATION, RoundBrushInputProcessor},
+    round::{
+        ROUND_BRUSH_ID, ROUND_SHADER_REGISTRATION, RoundBrushInputProcessor, RoundBrushSettings,
+    },
 };
 use renderer::{BrushShaderProvider, BrushShaderSpec};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 
 #[derive(Default)]
 pub struct AppBrushRegistry {
     brushes: BrushRegistry,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppBrushRegistryUpdateError {
+    BrushNotRegistered(BrushId),
+}
+
+impl Display for AppBrushRegistryUpdateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BrushNotRegistered(brush_id) => {
+                write!(f, "brush {} is not registered", brush_id.raw())
+            }
+        }
+    }
+}
+
+impl Error for AppBrushRegistryUpdateError {}
 
 impl AppBrushRegistry {
     pub fn new() -> Self {
@@ -21,6 +42,16 @@ impl AppBrushRegistry {
         Self::with_builtin_round_processor(
             intermediate_backend,
             RoundBrushInputProcessor::default(),
+        )
+    }
+
+    pub fn with_builtin_round_settings(
+        intermediate_backend: Backend,
+        settings: RoundBrushSettings,
+    ) -> Self {
+        Self::with_builtin_round_processor(
+            intermediate_backend,
+            RoundBrushInputProcessor::from(settings),
         )
     }
 
@@ -104,6 +135,21 @@ impl AppBrushRegistry {
 
     pub fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
         self.brushes.encode_merge_payload(input)
+    }
+
+    pub fn update_round_brush_settings(
+        &mut self,
+        settings: RoundBrushSettings,
+    ) -> Result<(), AppBrushRegistryUpdateError> {
+        if self.brushes.replace_input_processor(
+            ROUND_BRUSH_ID,
+            Box::new(RoundBrushInputProcessor::from(settings)),
+        ) {
+            return Ok(());
+        }
+        Err(AppBrushRegistryUpdateError::BrushNotRegistered(
+            ROUND_BRUSH_ID,
+        ))
     }
 }
 

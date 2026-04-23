@@ -2,12 +2,13 @@ use std::env;
 use std::time::Instant;
 
 use atlas::{AtlasLayout, Backend, BackendId, BackendManager};
-use brush::round::{ROUND_BRUSH_ID, RoundBrushInputProcessor};
+use brush::round::{ROUND_BRUSH_ID, RoundBrushSettings};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageCreateError, GlaImageLayout};
 use gla_image::GlaImageTileAccessError;
 use glaphica_core::ATLAS_TILE_SIZE;
-use renderer::{GpuContext, GpuContextInitDescriptor, TileRenderer};
+use renderer::{EguiRenderer, GpuContext, GpuContextInitDescriptor, TileRenderer};
+use ui::AppUi;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
@@ -65,15 +66,17 @@ impl PreviewState {
             &gpu.queue,
         )?;
 
-        let preview_round = RoundBrushInputProcessor::default()
+        let round_brush_settings = RoundBrushSettings::default()
             .with_base_radius_px(20.0)
             .with_base_hardness(0.3);
-        let session_brushes = AppBrushRegistry::with_builtin_round_processor(
+        let session_brushes = AppBrushRegistry::with_builtin_round_settings(
             brush_backend.clone(),
-            preview_round.clone(),
+            round_brush_settings.clone(),
         );
-        let worker_brushes =
-            AppBrushRegistry::with_builtin_round_processor(brush_backend, preview_round);
+        let worker_brushes = AppBrushRegistry::with_builtin_round_settings(
+            brush_backend,
+            round_brush_settings.clone(),
+        );
         let tool_set = ToolSet::new(vec![Tool::Brush(ROUND_BRUSH_ID)]);
         let active_tool = ActiveTool::Brush(ROUND_BRUSH_ID);
         let view = fitted_view(
@@ -101,6 +104,8 @@ impl PreviewState {
         let full_tile_count = usize::try_from(runtime.session().doc().layout().total_tiles())
             .map_err(|_| GlaDocError::ImageCreate(GlaImageCreateError::TooManyTiles))?;
         let full_tile_indices = (0..full_tile_count).collect::<Vec<_>>();
+        let ui = AppUi::new(event_loop, &window, round_brush_settings);
+        let ui_renderer = EguiRenderer::new(&gpu.device, surface.format());
 
         Ok(Self {
             window,
@@ -109,6 +114,8 @@ impl PreviewState {
             screen_cache,
             runtime: Some(runtime),
             tile_renderer,
+            ui_renderer,
+            ui,
             image_backend,
             full_tile_indices,
             started_at: Instant::now(),

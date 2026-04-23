@@ -2,10 +2,10 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use brush::{BrushId, BrushInputError, BrushStrokeInputProcessor};
+use brush::{BrushId, BrushInputError, BrushStrokeInputProcessor, round::RoundBrushSettings};
 
 use crate::input::{BrushThreadBrushInputProducer, BrushThreadCanvasInputConsumer};
-use crate::{AppBrushRegistry, CanvasInput};
+use crate::{AppBrushRegistry, CanvasInput, brush_registry::AppBrushRegistryUpdateError};
 
 pub struct BrushWorker {
     brushes: AppBrushRegistry,
@@ -18,6 +18,7 @@ pub struct BrushWorker {
 pub enum BrushWorkerError {
     BrushInput(BrushInputError),
     BrushInit(BrushInputError),
+    BrushConfig(AppBrushRegistryUpdateError),
     BrushNotRegistered(BrushId),
 }
 
@@ -26,6 +27,7 @@ impl Display for BrushWorkerError {
         match self {
             Self::BrushInput(error) => Display::fmt(error, f),
             Self::BrushInit(error) => Display::fmt(error, f),
+            Self::BrushConfig(error) => Display::fmt(error, f),
             Self::BrushNotRegistered(brush_id) => {
                 write!(f, "brush {} is not registered", brush_id.raw())
             }
@@ -38,6 +40,12 @@ impl Error for BrushWorkerError {}
 impl From<BrushInputError> for BrushWorkerError {
     fn from(error: BrushInputError) -> Self {
         Self::BrushInput(error)
+    }
+}
+
+impl From<AppBrushRegistryUpdateError> for BrushWorkerError {
+    fn from(error: AppBrushRegistryUpdateError) -> Self {
+        Self::BrushConfig(error)
     }
 }
 
@@ -81,6 +89,16 @@ impl BrushWorker {
 
     pub fn reset_active_stroke(&mut self) {
         self.active_input_stroke.reset();
+    }
+
+    pub fn update_round_brush_settings(
+        &mut self,
+        settings: RoundBrushSettings,
+    ) -> Result<(), BrushWorkerError> {
+        self.brushes.update_round_brush_settings(settings)?;
+        self.active_input_stroke = begin_input_stroke(&self.brushes, self.active_brush_id)
+            .map_err(map_begin_input_stroke_error)?;
+        Ok(())
     }
 
     pub fn process_canvas_input(

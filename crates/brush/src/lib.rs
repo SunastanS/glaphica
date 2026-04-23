@@ -748,6 +748,22 @@ impl BrushRegistry {
             .map(|registration| registration.input_processor.as_ref())
     }
 
+    pub fn replace_input_processor(
+        &mut self,
+        brush_id: BrushId,
+        input_processor: Box<dyn BrushInputProcessor>,
+    ) -> bool {
+        let Some(registration) = self
+            .registrations
+            .iter_mut()
+            .find(|registration| registration.brush_id == brush_id)
+        else {
+            return false;
+        };
+        registration.input_processor = input_processor;
+        true
+    }
+
     pub fn backend_mut(&mut self, brush_id: BrushId) -> Option<&mut BrushBackend> {
         self.registrations
             .iter_mut()

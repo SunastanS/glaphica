@@ -5,6 +5,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use brush::round::RoundBrushSettings;
+
 use crate::AppBrushRegistry;
 use crate::input::{
     ActiveTool, BrushThreadBrushInputProducer, BrushThreadCanvasInputConsumer, BrushWorker,
@@ -19,6 +21,7 @@ pub struct BrushThreadRuntime {
     brush_input_consumer: MainBrushInputConsumer,
     stop_requested: Arc<AtomicBool>,
     stroke_generation: Arc<AtomicU64>,
+    pending_round_brush_settings: Arc<Mutex<Option<RoundBrushSettings>>>,
     finish_state: Arc<FinishSignal>,
     thread: Option<JoinHandle<()>>,
 }
@@ -175,10 +178,12 @@ impl BrushThreadRuntime {
         let active_tool = Arc::new(Mutex::new(active_tool));
         let stop_requested = Arc::new(AtomicBool::new(false));
         let stroke_generation = Arc::new(AtomicU64::new(0));
+        let pending_round_brush_settings = Arc::new(Mutex::new(None));
         let finish_state = Arc::new(FinishSignal::new());
         let thread_active_tool = active_tool.clone();
         let thread_stop_requested = stop_requested.clone();
         let thread_stroke_generation = stroke_generation.clone();
+        let thread_pending_round_brush_settings = pending_round_brush_settings.clone();
         let thread_finish_state = finish_state.clone();
         let thread = thread::Builder::new()
             .name("glaphica-brush".to_string())
@@ -190,6 +195,7 @@ impl BrushThreadRuntime {
                     thread_active_tool,
                     thread_stop_requested,
                     thread_stroke_generation,
+                    thread_pending_round_brush_settings,
                     thread_finish_state,
                     worker_batch_capacity,
                     worker_wait_timeout,
@@ -204,6 +210,7 @@ impl BrushThreadRuntime {
             brush_input_consumer,
             stop_requested,
             stroke_generation,
+            pending_round_brush_settings,
             finish_state,
             thread: Some(thread),
         })
@@ -250,6 +257,14 @@ impl BrushThreadRuntime {
         self.brush_input_consumer.clear();
     }
 
+    pub fn update_round_brush_settings(&self, settings: RoundBrushSettings) {
+        let mut pending = self
+            .pending_round_brush_settings
+            .lock()
+            .expect("pending round brush settings should not be poisoned");
+        *pending = Some(settings);
+    }
+
     pub fn finish_active_stroke_processing(&self) -> Result<(), BrushThreadRuntimeError> {
         let request = self.finish_state.request_finish();
         self.finish_state
@@ -290,6 +305,7 @@ fn run_brush_thread(
     active_tool: Arc<Mutex<ActiveTool>>,
     stop_requested: Arc<AtomicBool>,
     stroke_generation: Arc<AtomicU64>,
+    pending_round_brush_settings: Arc<Mutex<Option<RoundBrushSettings>>>,
     finish_state: Arc<FinishSignal>,
     worker_batch_capacity: usize,
     worker_wait_timeout: Duration,
@@ -301,6 +317,16 @@ fn run_brush_thread(
         if current_generation != seen_stroke_generation {
             worker.reset_active_stroke();
             seen_stroke_generation = current_generation;
+        }
+        let pending_round_brush_settings = pending_round_brush_settings
+            .lock()
+            .expect("pending round brush settings should not be poisoned")
+            .take();
+        if let Some(settings) = pending_round_brush_settings {
+            if let Err(error) = worker.update_round_brush_settings(settings) {
+                finish_state.store_worker_error(error);
+                break;
+            }
         }
         let current_finish_request_generation = finish_state.request_generation();
         if current_finish_request_generation != seen_finish_request_generation {

@@ -11,6 +11,7 @@ gla_document = { path = "../gla_document" }
 gla_image = { path = "../gla_image" }
 glaphica_core = { package = "core", path = "../core" }
 renderer = { path = "../renderer" }
+ui = { path = "../ui" }
 slotmap = "1"
 wgpu = "28.0.0"
 winit = "0.30.13"
