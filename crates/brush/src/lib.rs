@@ -897,7 +897,7 @@ mod tests {
             .alloc_active()
             .expect("preview tile")
             .tile_key();
-        let merge_payload = encode_round_merge_payload([0.2, 0.3, 0.4]);
+        let merge_payload = encode_round_merge_payload([0.2, 0.3, 0.4], 1.0);
 
         let returned_tile_key = state
             .push_preview_merge(
@@ -959,7 +959,7 @@ mod tests {
                 &mut draw_commands,
             )
             .expect("dab");
-        let merge_payload = encode_round_merge_payload([0.1, 0.2, 0.3]);
+        let merge_payload = encode_round_merge_payload([0.1, 0.2, 0.3], 1.0);
 
         let batch = state
             .build_commit_batch(
@@ -1028,7 +1028,7 @@ mod tests {
             .alloc_active()
             .expect("preview tile")
             .tile_key();
-        let merge_payload = encode_round_merge_payload([0.9, 0.8, 0.7]);
+        let merge_payload = encode_round_merge_payload([0.9, 0.8, 0.7], 1.0);
 
         let returned_tile_key = state
             .push_preview_merge(

@@ -95,6 +95,14 @@ impl EquidistantStrokeSampler {
             cursor: EquidistantSamplerCursor::default(),
         }
     }
+
+    pub fn spacing(&self) -> f32 {
+        self.curve_sampler.spacing()
+    }
+
+    pub fn set_spacing(&mut self, spacing: f32) {
+        self.curve_sampler = EquidistantCurveSampler::new(spacing);
+    }
 }
 
 impl StrokeSampler for EquidistantStrokeSampler {

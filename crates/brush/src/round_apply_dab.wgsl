@@ -12,7 +12,7 @@ struct ApplyPayload {
     center_local_y: f32,
     radius_px: f32,
     hardness: f32,
-    opacity: f32,
+    flow: f32,
 }
 
 @group(0) @binding(0) var atlas_texture: texture_2d_array<f32>;
@@ -69,11 +69,11 @@ fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     );
     let tile_local = vec2f(pos.xy) - vec2f(tile_origin) - vec2f(1.0, 1.0);
     let radius = max(payload.radius_px, 0.0);
-    let opacity = max(payload.opacity, 0.0);
+    let flow = max(payload.flow, 0.0);
     let center_local = vec2f(payload.center_local_x, payload.center_local_y);
     let dist = distance(tile_local, center_local);
     let added =
-        round_kernel(radius, payload.hardness, dist) * opacity * thickness_gain(payload.hardness);
+        round_kernel(radius, payload.hardness, dist) * flow * thickness_gain(payload.hardness);
     let next_alpha = max(source.a + added, 0.0);
     return vec4f(0.0, 0.0, 0.0, next_alpha);
 }

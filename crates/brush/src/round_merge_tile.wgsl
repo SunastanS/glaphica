@@ -8,8 +8,7 @@ struct MergeUniforms {
 };
 
 struct MergePayload {
-    tint: vec3f,
-    _pad2: f32,
+    tint_and_opacity: vec4f,
 }
 
 @group(0) @binding(0) var origin_texture: texture_2d_array<f32>;
@@ -42,8 +41,9 @@ fn fs_merge_tile(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         i32(uniforms.intermediate_layer),
         0
     );
-    let effective_alpha = 1.0 - exp(-max(intermediate.a, 0.0));
+    let stroke_opacity = clamp(payload.tint_and_opacity.a, 0.0, 1.0);
+    let effective_alpha = stroke_opacity * (1.0 - exp(-max(intermediate.a, 0.0)));
     let out_alpha = base.a + (1.0 - base.a) * effective_alpha;
-    let out_rgb = mix(base.rgb, payload.tint, effective_alpha);
+    let out_rgb = mix(base.rgb, payload.tint_and_opacity.rgb, effective_alpha);
     return vec4f(out_rgb, out_alpha);
 }

@@ -29,13 +29,14 @@ pub const ROUND_SHADER_REGISTRATION: BrushShaderRegistration = BrushShaderRegist
     shader_spec: ROUND_SHADER_SPEC,
 };
 
-pub const ROUND_INPUT_BLOCK_LEN: usize = 8;
+pub const ROUND_INPUT_BLOCK_LEN: usize = 9;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundBrushInputProcessor {
     base_radius_px: f32,
-    spacing_px: f32,
+    spacing_ratio: f32,
     base_hardness: f32,
+    base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
     smoother_factory: fn() -> Box<dyn StrokeSmoother>,
@@ -44,7 +45,9 @@ pub struct RoundBrushInputProcessor {
 struct RoundBrushStrokeSampler {
     sampler: EquidistantStrokeSampler,
     base_radius_px: f32,
+    spacing_ratio: f32,
     base_hardness: f32,
+    base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
     last_emitted_position: Option<CanvasVec2>,
@@ -57,42 +60,43 @@ struct RoundApplyPayload {
     center_local_y: f32,
     radius_px: f32,
     hardness: f32,
-    opacity: f32,
+    flow: f32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct RoundMergePayload {
     tint: [f32; 3],
-    _pad2: f32,
+    opacity: f32,
 }
 
 pub fn encode_round_apply_payload(
     center_local: [f32; 2],
     radius_px: f32,
     hardness: f32,
-    opacity: f32,
+    flow: f32,
 ) -> Vec<u8> {
     bytemuck::bytes_of(&RoundApplyPayload {
         center_local_x: center_local[0],
         center_local_y: center_local[1],
         radius_px,
         hardness,
-        opacity,
+        flow,
     })
     .to_vec()
 }
 
-pub fn encode_round_merge_payload(tint: [f32; 3]) -> Vec<u8> {
-    bytemuck::bytes_of(&RoundMergePayload { tint, _pad2: 0.0 }).to_vec()
+pub fn encode_round_merge_payload(tint: [f32; 3], opacity: f32) -> Vec<u8> {
+    bytemuck::bytes_of(&RoundMergePayload { tint, opacity }).to_vec()
 }
 
 impl Default for RoundBrushInputProcessor {
     fn default() -> Self {
         Self {
             base_radius_px: 5.0,
-            spacing_px: 5.0,
+            spacing_ratio: 1.0,
             base_hardness: 0.7,
+            base_flow: 1.0,
             base_opacity: 1.0,
             tint: [0.0, 0.0, 1.0],
             smoother_factory: default_smoother_factory,
@@ -105,6 +109,10 @@ fn default_smoother_factory() -> Box<dyn StrokeSmoother> {
 }
 
 impl RoundBrushInputProcessor {
+    fn dab_spacing_px(&self) -> f32 {
+        (self.base_radius_px * self.spacing_ratio).max(f32::EPSILON)
+    }
+
     pub fn with_smoother_factory(
         mut self,
         smoother_factory: fn() -> Box<dyn StrokeSmoother>,
@@ -119,9 +127,11 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
         Box::new(SmoothedBrushStrokeInputProcessor::new(
             (self.smoother_factory)(),
             Box::new(RoundBrushStrokeSampler {
-                sampler: EquidistantStrokeSampler::new(self.spacing_px),
+                sampler: EquidistantStrokeSampler::new(self.dab_spacing_px()),
                 base_radius_px: self.base_radius_px,
+                spacing_ratio: self.spacing_ratio,
                 base_hardness: self.base_hardness,
+                base_flow: self.base_flow,
                 base_opacity: self.base_opacity,
                 tint: self.tint,
                 last_emitted_position: None,
@@ -239,7 +249,10 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
                 actual: last.len(),
             });
         }
-        Ok(encode_round_merge_payload([last[5], last[6], last[7]]))
+        Ok(encode_round_merge_payload(
+            [last[6], last[7], last[8]],
+            last[5].clamp(0.0, 1.0),
+        ))
     }
 }
 
@@ -253,6 +266,7 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
         &mut self,
         spans: &CommittedCanvasSpanBuffer,
     ) -> Result<Option<BrushInput>, BrushInputError> {
+        self.sampler.set_spacing(self.dab_spacing_px());
         let mut samples = Vec::new();
         self.sampler.sample_committed_spans(spans, &mut samples);
         let mut blocks = BrushInputBlockList::new(ROUND_BRUSH_ID);
@@ -269,6 +283,7 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
                 sample,
                 self.base_radius_px,
                 self.base_hardness,
+                self.base_flow,
                 self.base_opacity,
                 self.tint,
             )?;
@@ -285,6 +300,12 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
     }
 }
 
+impl RoundBrushStrokeSampler {
+    fn dab_spacing_px(&self) -> f32 {
+        (self.base_radius_px * self.spacing_ratio).max(f32::EPSILON)
+    }
+}
+
 fn same_canvas_position(lhs: CanvasVec2, rhs: CanvasVec2) -> bool {
     const EPSILON: f32 = 1e-5;
     (lhs.x - rhs.x).abs() <= EPSILON && (lhs.y - rhs.y).abs() <= EPSILON
@@ -296,6 +317,7 @@ fn push_round_block(
     sample: CommittedCanvasSample,
     base_radius_px: f32,
     base_hardness: f32,
+    base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
 ) -> Result<(), BrushInputError> {
@@ -322,12 +344,14 @@ fn push_round_block(
     }
 
     let pressure = sample.pressure.clamp(0.0, 1.0);
+    let dab_flow = base_flow * pressure;
     blocks.push_block(vec![
         sample.position.x,
         sample.position.y,
         base_radius_px,
         base_hardness,
-        base_opacity * pressure,
+        dab_flow,
+        base_opacity,
         tint[0],
         tint[1],
         tint[2],
@@ -351,7 +375,7 @@ mod tests {
     #[test]
     fn round_processor_encodes_payloads_from_blocks() {
         let mut input = BrushInputBlockList::new(ROUND_BRUSH_ID);
-        input.push_block(vec![10.0, 8.0, 6.0, 0.4, 0.7, 0.2, 0.3, 0.4]);
+        input.push_block(vec![10.0, 8.0, 6.0, 0.4, 0.7, 0.8, 0.2, 0.3, 0.4]);
         let input = BrushInput {
             brush_id: ROUND_BRUSH_ID,
             blocks: input,
@@ -366,7 +390,7 @@ mod tests {
             RoundBrushInputProcessor::default()
                 .encode_merge_payload(&input)
                 .expect("merge payload"),
-            encode_round_merge_payload([0.2, 0.3, 0.4])
+            encode_round_merge_payload([0.2, 0.3, 0.4], 0.8)
         );
     }
 
@@ -406,6 +430,7 @@ mod tests {
         assert_eq!(result.blocks.blocks()[0].values()[2], 5.0);
         assert_eq!(result.blocks.blocks()[0].values()[3], 0.7);
         assert_eq!(result.blocks.blocks()[0].values()[4], 0.5);
+        assert_eq!(result.blocks.blocks()[0].values()[5], 1.0);
     }
 
     #[test]
