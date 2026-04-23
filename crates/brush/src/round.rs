@@ -35,6 +35,7 @@ pub const ROUND_MERGE_LUT_LEN: usize = 128;
 
 const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
+const ROUND_DAB_KERNEL_BETA: f32 = 4.5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurvePoint {
@@ -801,7 +802,53 @@ fn sanitized_spacing_ratio(spacing_ratio: f32) -> f32 {
     }
 }
 
-fn round_hardness_threshold_source(stroke_flow: f32, hardness: f32) -> f32 {
+fn round_dab_kernel(relative_distance: f32) -> f32 {
+    let relative_distance = relative_distance.max(0.0);
+    if relative_distance >= 1.0 {
+        return 0.0;
+    }
+    let baseline = (-ROUND_DAB_KERNEL_BETA).exp();
+    let value = (-ROUND_DAB_KERNEL_BETA * relative_distance * relative_distance).exp();
+    ((value - baseline) / (1.0 - baseline)).max(0.0)
+}
+
+fn round_stroke_center_source_max(stroke_flow: f32, spacing_ratio: f32) -> f32 {
+    round_stroke_source_at_distance(stroke_flow, spacing_ratio, 0.0)
+}
+
+fn round_stroke_source_at_distance(
+    stroke_flow: f32,
+    spacing_ratio: f32,
+    normalized_distance: f32,
+) -> f32 {
+    let stroke_flow = stroke_flow.max(0.0);
+    if stroke_flow <= f32::EPSILON {
+        return 0.0;
+    }
+    if !normalized_distance.is_finite() {
+        return 0.0;
+    }
+
+    let spacing_ratio = sanitized_spacing_ratio(spacing_ratio);
+    let normalized_distance = normalized_distance.max(0.0);
+    if normalized_distance >= 1.0 {
+        return 0.0;
+    }
+
+    let mut kernel_sum = round_dab_kernel(normalized_distance);
+    let mut offset = spacing_ratio;
+    while offset < 1.0 {
+        let dab_distance = normalized_distance.hypot(offset);
+        if dab_distance >= 1.0 {
+            break;
+        }
+        kernel_sum += 2.0 * round_dab_kernel(dab_distance);
+        offset += spacing_ratio;
+    }
+    stroke_flow * kernel_sum
+}
+
+fn round_hardness_threshold_source(stroke_flow: f32, spacing_ratio: f32, hardness: f32) -> f32 {
     let stroke_flow = stroke_flow.max(0.0);
     let hardness = hardness.clamp(0.0, 1.0);
     if stroke_flow <= f32::EPSILON {
@@ -810,7 +857,7 @@ fn round_hardness_threshold_source(stroke_flow: f32, hardness: f32) -> f32 {
     if hardness >= 1.0 {
         return 0.0;
     }
-    (stroke_flow * (1.0 - hardness)).max(f32::EPSILON)
+    round_stroke_source_at_distance(stroke_flow, spacing_ratio, hardness).max(f32::EPSILON)
 }
 
 fn round_merge_coverage_for_source(
@@ -840,9 +887,11 @@ fn build_round_merge_payload(settings: RoundMergeSettings) -> RoundMergePayload 
         settings.opacity.clamp(0.0, 1.0),
     ];
     let stroke_flow = settings.stroke_flow.max(0.0);
+    let spacing_ratio = sanitized_spacing_ratio(settings.spacing_ratio);
     let hardness = settings.hardness.clamp(0.0, 1.0);
-    let source_max = stroke_flow;
-    let hardness_threshold_source = round_hardness_threshold_source(stroke_flow, hardness);
+    let source_max = round_stroke_center_source_max(stroke_flow, spacing_ratio);
+    let hardness_threshold_source =
+        round_hardness_threshold_source(stroke_flow, spacing_ratio, hardness);
     let mut source_to_lut_scale = 0.0;
     if source_max > f32::EPSILON {
         source_to_lut_scale = (ROUND_MERGE_LUT_LEN.saturating_sub(1) as f32) / source_max;
@@ -1521,18 +1570,30 @@ mod tests {
     }
 
     #[test]
-    fn hardness_maps_to_image_space_clip_threshold() {
+    fn hardness_maps_to_spacing_aware_clip_threshold() {
+        let stroke_flow = 1.0;
+        let spacing_ratio = 0.3;
         let hardness = 0.3;
-        let hardness_threshold_source = super::round_hardness_threshold_source(1.0, hardness);
+        let hardness_threshold_source =
+            super::round_hardness_threshold_source(stroke_flow, spacing_ratio, hardness);
+        let expected_threshold =
+            super::round_stroke_source_at_distance(stroke_flow, spacing_ratio, hardness);
 
-        assert!((hardness_threshold_source - 0.7).abs() <= 1e-5);
+        assert!((hardness_threshold_source - expected_threshold).abs() <= 1e-5);
         assert_eq!(
-            super::round_merge_coverage_for_source(0.7, hardness_threshold_source, hardness),
+            super::round_merge_coverage_for_source(
+                hardness_threshold_source,
+                hardness_threshold_source,
+                hardness,
+            ),
             1.0
         );
         assert!(
-            (super::round_merge_coverage_for_source(0.35, hardness_threshold_source, hardness,)
-                - 0.5)
+            (super::round_merge_coverage_for_source(
+                hardness_threshold_source * 0.5,
+                hardness_threshold_source,
+                hardness,
+            ) - 0.5)
                 .abs()
                 <= 1e-5
         );
@@ -1544,12 +1605,21 @@ mod tests {
         assert_eq!(super::round_merge_coverage_for_source(0.0, 0.0, 1.0), 0.0);
         assert_eq!(super::round_merge_coverage_for_source(0.1, 0.0, 1.0), 1.0);
         assert_eq!(super::round_merge_coverage_for_source(1.0, 0.0, 1.0), 1.0);
-        assert_eq!(super::round_hardness_threshold_source(1.0, 1.0), 0.0);
+        assert_eq!(super::round_hardness_threshold_source(1.0, 1.0, 1.0), 0.0);
         assert!(super::round_merge_coverage_for_source(0.25, 0.5, hardness) < 1.0);
     }
 
     #[test]
-    fn merge_payload_is_independent_of_spacing_ratio() {
+    fn stroke_center_source_max_increases_when_spacing_gets_denser() {
+        let sparse = super::round_stroke_center_source_max(1.0, 1.0);
+        let dense = super::round_stroke_center_source_max(1.0, 0.1);
+
+        assert!((sparse - 1.0).abs() <= 1e-5);
+        assert!(dense > sparse);
+    }
+
+    #[test]
+    fn merge_payload_uses_spacing_dependent_source_max() {
         let sparse = super::build_round_merge_payload(RoundMergeSettings {
             tint: [0.1, 0.2, 0.3],
             opacity: 1.0,
@@ -1565,7 +1635,15 @@ mod tests {
             hardness: 0.3,
         });
 
-        assert_eq!(sparse.lookup_params, dense.lookup_params);
-        assert_eq!(sparse.coverage_lut, dense.coverage_lut);
+        assert!(dense.lookup_params[1] > sparse.lookup_params[1]);
+        assert!(dense.lookup_params[0] < sparse.lookup_params[0]);
+    }
+
+    #[test]
+    fn clip_threshold_increases_when_spacing_gets_denser() {
+        let sparse = super::round_hardness_threshold_source(1.0, 1.0, 0.3);
+        let dense = super::round_hardness_threshold_source(1.0, 0.1, 0.3);
+
+        assert!(dense > sparse);
     }
 }

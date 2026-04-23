@@ -28,6 +28,14 @@ round 笔刷分为两层：
 
 ## 理论模型
 
+round brush 的 profile 可以拆成三个单变量关系：
+
+- `dab_kernel(q)`：单个 dab 写入 intermediate 时使用的径向核
+- `stroke_source(x)`：所有 dab 线性累加后的中间流量图
+- `merge_coverage(s)`：把 intermediate source 映射成最终 coverage
+
+`flow` 只缩放 `stroke_source`，`hardness` 只改变 `merge_coverage` 对 source 的解释。
+
 ### 1. Apply 阶段
 
 设单个 dab 使用一个紧支撑径向核 `K_dab`，其定义域为归一化半径：
@@ -59,44 +67,58 @@ round 笔刷分为两层：
 
 则某一点的累计流量是离散和：
 
-`A_sigma(rho) = flow * sum_{n in Z} K_dab(sqrt(rho^2 + (n * sigma)^2))`
+`S(d) = flow * sum_{n in Z} K_dab(sqrt(d^2 + (n * sigma)^2))`
 
-其中 `rho` 是该点到笔划中心线的归一化垂直距离。
+其中 `d` 是该点到笔划中心线的归一化垂直距离。
+
+中心最大值不是单个 dab 的 `flow`，而是：
+
+`U = flow * sum_{n in Z} K_dab(|n * sigma|)`
 
 当 `sigma` 足够小、局部曲率不高时，这个离散和可以近似为连续直线积分。这里可以把它看成一个 Abel 型变换。
 
 如果 `K_dab` 选成高斯族或其紧支撑近似核，那么：
 
-- `A_sigma(rho)` 仍然接近高斯族
-- 它的逆关系 `rho ~= A_sigma^{-1}(u)` 可以稳定近似
+- `S(d)` 仍然接近高斯族
+- `S(d)` 可以用来估计某个几何半径处的累计 source
 
 这正是本设计可行的核心原因。
 
 ### 3. Merge 阶段
 
-最终希望得到的并不是累计流量本身，而是一个由 `hardness` 控制的目标不透明度剖面。
+最终希望得到的并不是累计流量本身，而是一个由 `hardness` 控制的截断式 coverage。
 
-定义目标剖面 `P_h(rho)`：
+`hardness` 定义截断开始饱和的归一化半径：
 
-- `rho <= h` 时保持实心
-- `h < rho < 1` 时从 1 平滑下降到 0
-- `rho >= 1` 时为 0
+- `d <= h` 的区域 source 高于阈值，merge 后 coverage 被截断为 1
+- `h < d < 1` 的区域使用 source 的尾部高斜率区线性映射到 coverage
+- `d >= 1` 的区域 source 为 0
 
 这里的 `h` 是归一化硬边半径，也就是 `hardness` 参数的几何解释。
 
-如果中间表示构造得当，那么在“局部近似直线、spacing 足够稳定、曲率变化不剧烈”的条件下，累计流量 `source` 本身就近似编码了“当前像素到理想中心线的投影距离”。因此 merge 阶段不需要再次访问曲线几何，而是直接对累计流量应用传递函数：
+如果中间表示构造得当，那么在“局部近似直线、spacing 足够稳定、曲率变化不剧烈”的条件下，`S(h)` 就是这个硬边半径对应的累计 source 阈值：
 
-`T_sigma,h(u) = P_h(A_sigma^{-1}(u))`
+`threshold = S(h)`
 
-于是 merge 阶段的目标 alpha 为：
+也可以写成：
 
-`alpha_brush(source) = opacity * clamp(T_sigma,h(source), 0, 1)`
+`threshold = U * K_merge_sigma(h)`
+
+其中：
+
+`K_merge_sigma(h) = S(h) / S(0)`
+
+merge 阶段不做 `S^{-1}` 重映射，而是保留截断行为：
+
+`coverage = clamp(source / threshold, 0, 1)`
+
+`alpha_brush(source) = opacity * coverage`
 
 这一步是整个模型里最关键的设计结论：
 
 - 目标图像并不是在 merge 时重新按曲线几何“现算”出来的
 - 而是在 apply 阶段通过 dab 叠加，把几何目标近似编码进 intermediate
-- merge 只需要把这个中间表示解释为最终 coverage / alpha
+- merge 只需要把这个中间表示按 spacing-aware 阈值截断成最终 coverage / alpha
 - `size / spacing / flow / hardness` 的几何与叠加语义都被压进了一个单变量 transfer function
 
 ## 当前实现约定
@@ -140,9 +162,15 @@ round 笔刷分为两层：
 
 在 CPU 上生成一个单调 LUT：
 
-`lut[i] ~= T_sigma,h(u_i)`
+`lut[i] = clamp(u_i / threshold, 0, 1)`
 
-其中 `u_i` 取自累计流量范围 `[0, u_max]`。
+其中 `u_i` 取自累计流量范围 `[0, U]`，`U` 是直线常参数模型下的中心累计流量最大值，而不是单个 dab 的 `flow`。这点很重要：spacing 越小，中心像素会收到更多 dab 叠加；如果 LUT 仍按 `[0, flow]` 归一化，merge lookup 会过早 clamp，边缘会变硬。
+
+阈值同样不能用单个 dab 的 `flow` 推导，而应使用同一个直线累计模型：
+
+`threshold = S(h) = flow * sum_{n in Z} K_dab(sqrt(h^2 + (n * sigma)^2))`
+
+这保持了当前想要的截断软边：实心区域由阈值决定，软边来自 source 尾部被线性截断的部分，而不是把整条 profile 重映射成目标覆盖曲线。
 
 merge shader 读取 intermediate 的 `source` 后：
 
