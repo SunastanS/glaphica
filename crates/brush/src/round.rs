@@ -7,6 +7,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use glaphica_core::CanvasVec2;
 use renderer::{BrushShaderSource, BrushShaderSpec};
+use std::f32::consts::{FRAC_PI_2, PI};
 
 pub const ROUND_BRUSH_ID: BrushId = BrushId::new(1);
 
@@ -35,6 +36,59 @@ pub const ROUND_MERGE_LUT_LEN: usize = 128;
 const ROUND_DAB_KERNEL_BETA: f32 = 4.5;
 const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
 const ROUND_TRANSFER_PROFILE_SAMPLES: usize = 512;
+const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurvePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl CurvePoint {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModulationCurve {
+    points: Vec<CurvePoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveValidationError {
+    TooFewPoints,
+    PointOutOfRange { index: usize },
+    NotMonotonic { index: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundBrushInputFeature {
+    Pressure,
+    Tilt,
+    Twist,
+    Speed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundBrushDabVariable {
+    Radius,
+    Flow,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundBrushVariableModulation {
+    pressure: ModulationCurve,
+    tilt: ModulationCurve,
+    twist: ModulationCurve,
+    speed: ModulationCurve,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundBrushModulationSet {
+    radius: RoundBrushVariableModulation,
+    flow: RoundBrushVariableModulation,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundBrushInputProcessor {
@@ -44,6 +98,7 @@ pub struct RoundBrushInputProcessor {
     base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
+    modulations: RoundBrushModulationSet,
     smoother_factory: fn() -> Box<dyn StrokeSmoother>,
 }
 
@@ -55,6 +110,7 @@ struct RoundBrushStrokeSampler {
     base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
+    modulations: RoundBrushModulationSet,
     last_emitted_position: Option<CanvasVec2>,
 }
 
@@ -84,6 +140,12 @@ struct RoundMergePayload {
     coverage_lut: [f32; ROUND_MERGE_LUT_LEN],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RoundDabParameters {
+    radius_px: f32,
+    flow: f32,
+}
+
 pub fn encode_round_apply_payload(center_local: [f32; 2], radius_px: f32, flow: f32) -> Vec<u8> {
     bytemuck::bytes_of(&RoundApplyPayload {
         center_local_x: center_local[0],
@@ -108,8 +170,149 @@ impl Default for RoundBrushInputProcessor {
             base_flow: 1.0,
             base_opacity: 1.0,
             tint: [0.0, 0.0, 1.0],
+            modulations: RoundBrushModulationSet::default(),
             smoother_factory: default_smoother_factory,
         }
+    }
+}
+
+impl ModulationCurve {
+    pub fn new(points: Vec<CurvePoint>) -> Result<Self, CurveValidationError> {
+        Self::validate_points(&points)?;
+        Ok(Self { points })
+    }
+
+    pub fn flat_one() -> Self {
+        Self {
+            points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+        }
+    }
+
+    pub fn identity() -> Self {
+        Self {
+            points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+        }
+    }
+
+    pub fn sample(&self, x: f32) -> f32 {
+        eval_unit_interval_curve_polynomial(&self.points, x).unwrap_or(1.0)
+    }
+
+    pub fn points(&self) -> &[CurvePoint] {
+        &self.points
+    }
+
+    fn validate_points(points: &[CurvePoint]) -> Result<(), CurveValidationError> {
+        if points.len() < 2 {
+            return Err(CurveValidationError::TooFewPoints);
+        }
+
+        let mut prev_x = 0.0f32;
+        let mut first = true;
+        for (index, point) in points.iter().enumerate() {
+            if !(0.0..=1.0).contains(&point.x) || !(0.0..=1.0).contains(&point.y) {
+                return Err(CurveValidationError::PointOutOfRange { index });
+            }
+            if first {
+                prev_x = point.x;
+                first = false;
+                continue;
+            }
+            if point.x <= prev_x {
+                return Err(CurveValidationError::NotMonotonic { index });
+            }
+            prev_x = point.x;
+        }
+        Ok(())
+    }
+}
+
+impl Default for RoundBrushVariableModulation {
+    fn default() -> Self {
+        Self {
+            pressure: ModulationCurve::flat_one(),
+            tilt: ModulationCurve::flat_one(),
+            twist: ModulationCurve::flat_one(),
+            speed: ModulationCurve::flat_one(),
+        }
+    }
+}
+
+impl RoundBrushVariableModulation {
+    fn curve(&self, feature: RoundBrushInputFeature) -> &ModulationCurve {
+        match feature {
+            RoundBrushInputFeature::Pressure => &self.pressure,
+            RoundBrushInputFeature::Tilt => &self.tilt,
+            RoundBrushInputFeature::Twist => &self.twist,
+            RoundBrushInputFeature::Speed => &self.speed,
+        }
+    }
+
+    fn curve_mut(&mut self, feature: RoundBrushInputFeature) -> &mut ModulationCurve {
+        match feature {
+            RoundBrushInputFeature::Pressure => &mut self.pressure,
+            RoundBrushInputFeature::Tilt => &mut self.tilt,
+            RoundBrushInputFeature::Twist => &mut self.twist,
+            RoundBrushInputFeature::Speed => &mut self.speed,
+        }
+    }
+
+    fn sample_factor(&self, sample: CommittedCanvasSample) -> f32 {
+        self.pressure.sample(normalized_round_input_feature(
+            RoundBrushInputFeature::Pressure,
+            sample,
+        )) * self.tilt.sample(normalized_round_input_feature(
+            RoundBrushInputFeature::Tilt,
+            sample,
+        )) * self.twist.sample(normalized_round_input_feature(
+            RoundBrushInputFeature::Twist,
+            sample,
+        )) * self.speed.sample(normalized_round_input_feature(
+            RoundBrushInputFeature::Speed,
+            sample,
+        ))
+    }
+}
+
+impl Default for RoundBrushModulationSet {
+    fn default() -> Self {
+        let radius = RoundBrushVariableModulation::default();
+        let mut flow = RoundBrushVariableModulation::default();
+        *flow.curve_mut(RoundBrushInputFeature::Pressure) = ModulationCurve::identity();
+        Self { radius, flow }
+    }
+}
+
+impl RoundBrushModulationSet {
+    pub fn with_curve(
+        mut self,
+        variable: RoundBrushDabVariable,
+        feature: RoundBrushInputFeature,
+        curve: ModulationCurve,
+    ) -> Self {
+        *self.variable_mut(variable).curve_mut(feature) = curve;
+        self
+    }
+
+    fn variable(&self, variable: RoundBrushDabVariable) -> &RoundBrushVariableModulation {
+        match variable {
+            RoundBrushDabVariable::Radius => &self.radius,
+            RoundBrushDabVariable::Flow => &self.flow,
+        }
+    }
+
+    fn variable_mut(
+        &mut self,
+        variable: RoundBrushDabVariable,
+    ) -> &mut RoundBrushVariableModulation {
+        match variable {
+            RoundBrushDabVariable::Radius => &mut self.radius,
+            RoundBrushDabVariable::Flow => &mut self.flow,
+        }
+    }
+
+    fn sample_factor(&self, variable: RoundBrushDabVariable, sample: CommittedCanvasSample) -> f32 {
+        self.variable(variable).sample_factor(sample)
     }
 }
 
@@ -120,6 +323,21 @@ fn default_smoother_factory() -> Box<dyn StrokeSmoother> {
 impl RoundBrushInputProcessor {
     fn dab_spacing_px(&self) -> f32 {
         self.base_radius_px * sanitized_spacing_ratio(self.spacing_ratio)
+    }
+
+    pub fn with_modulation_curve(
+        mut self,
+        variable: RoundBrushDabVariable,
+        feature: RoundBrushInputFeature,
+        curve: ModulationCurve,
+    ) -> Self {
+        self.modulations = self.modulations.with_curve(variable, feature, curve);
+        self
+    }
+
+    pub fn with_modulations(mut self, modulations: RoundBrushModulationSet) -> Self {
+        self.modulations = modulations;
+        self
     }
 
     pub fn with_smoother_factory(
@@ -143,6 +361,7 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
                 base_flow: self.base_flow,
                 base_opacity: self.base_opacity,
                 tint: self.tint,
+                modulations: self.modulations.clone(),
                 last_emitted_position: None,
             }),
         ))
@@ -307,6 +526,7 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
                 self.base_flow,
                 self.base_opacity,
                 self.tint,
+                &self.modulations,
             )?;
             self.last_emitted_position = Some(sample.position);
         }
@@ -342,6 +562,7 @@ fn push_round_block(
     base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
+    modulations: &RoundBrushModulationSet,
 ) -> Result<(), BrushInputError> {
     if !sample.position.x.is_finite() {
         return Err(BrushInputError::InvalidBlockValue {
@@ -365,13 +586,12 @@ fn push_round_block(
         });
     }
 
-    let pressure = sample.pressure.clamp(0.0, 1.0);
-    let dab_flow = base_flow * pressure;
+    let dab = round_dab_parameters(sample, base_radius_px, base_flow, modulations);
     blocks.push_block(vec![
         sample.position.x,
         sample.position.y,
-        base_radius_px,
-        dab_flow,
+        dab.radius_px,
+        dab.flow,
         base_flow,
         sanitized_spacing_ratio(spacing_ratio),
         base_hardness,
@@ -381,6 +601,72 @@ fn push_round_block(
         tint[2],
     ]);
     Ok(())
+}
+
+fn round_dab_parameters(
+    sample: CommittedCanvasSample,
+    base_radius_px: f32,
+    base_flow: f32,
+    modulations: &RoundBrushModulationSet,
+) -> RoundDabParameters {
+    let radius_px = base_radius_px.max(0.0)
+        * modulations
+            .sample_factor(RoundBrushDabVariable::Radius, sample)
+            .clamp(0.0, 1.0);
+    let flow = base_flow.max(0.0)
+        * modulations
+            .sample_factor(RoundBrushDabVariable::Flow, sample)
+            .clamp(0.0, 1.0);
+    RoundDabParameters { radius_px, flow }
+}
+
+fn normalized_round_input_feature(
+    feature: RoundBrushInputFeature,
+    sample: CommittedCanvasSample,
+) -> f32 {
+    match feature {
+        RoundBrushInputFeature::Pressure => sample.pressure.clamp(0.0, 1.0),
+        RoundBrushInputFeature::Tilt => normalize_tilt(sample.tilt),
+        RoundBrushInputFeature::Twist => normalize_twist(sample.twist),
+        RoundBrushInputFeature::Speed => normalize_speed(sample.velocity),
+    }
+}
+
+fn normalize_tilt(tilt: glaphica_core::RadianVec2) -> f32 {
+    let magnitude = (tilt.x * tilt.x + tilt.y * tilt.y).sqrt();
+    (magnitude / FRAC_PI_2).clamp(0.0, 1.0)
+}
+
+fn normalize_twist(twist: f32) -> f32 {
+    ((twist + PI) / (2.0 * PI)).clamp(0.0, 1.0)
+}
+
+fn normalize_speed(velocity: CanvasVec2) -> f32 {
+    let speed = (velocity.x * velocity.x + velocity.y * velocity.y).sqrt();
+    (speed / ROUND_INPUT_MAX_SPEED_PX_PER_S).clamp(0.0, 1.0)
+}
+
+fn eval_unit_interval_curve_polynomial(points: &[CurvePoint], x: f32) -> Option<f32> {
+    if points.len() < 2 {
+        return None;
+    }
+    let x = x.clamp(0.0, 1.0);
+    let mut y = 0.0f32;
+    for (i, point_i) in points.iter().enumerate() {
+        let mut basis = 1.0f32;
+        for (j, point_j) in points.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let denominator = point_i.x - point_j.x;
+            if denominator.abs() <= f32::EPSILON {
+                return None;
+            }
+            basis *= (x - point_j.x) / denominator;
+        }
+        y += point_i.y * basis;
+    }
+    Some(y.clamp(0.0, 1.0))
 }
 
 fn sanitized_spacing_ratio(spacing_ratio: f32) -> f32 {
@@ -534,11 +820,14 @@ fn coverage_for_source(source: f32, profile: &[RoundSourceProfileSample]) -> f32
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::PI;
+
     use crate::{
         BrushInput, BrushInputBlockList, BrushInputProcessor, CanvasInput,
         PassthroughStrokeSmoother, StrokeSmoother,
         round::{
-            ROUND_BRUSH_ID, RoundBrushInputProcessor, RoundMergeSettings,
+            CurvePoint, ModulationCurve, ROUND_BRUSH_ID, RoundBrushDabVariable,
+            RoundBrushInputFeature, RoundBrushInputProcessor, RoundMergeSettings,
             encode_round_merge_payload,
         },
     };
@@ -615,6 +904,87 @@ mod tests {
         assert_eq!(result.blocks.blocks()[0].values()[5], 1.0);
         assert_eq!(result.blocks.blocks()[0].values()[6], 0.7);
         assert_eq!(result.blocks.blocks()[0].values()[7], 1.0);
+    }
+
+    #[test]
+    fn round_processor_can_map_pressure_to_radius_per_dab() {
+        let processor = RoundBrushInputProcessor::default()
+            .with_smoother_factory(passthrough_smoother_factory)
+            .with_modulation_curve(
+                RoundBrushDabVariable::Radius,
+                RoundBrushInputFeature::Pressure,
+                ModulationCurve::identity(),
+            );
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[CanvasInput {
+                time_ns: 1,
+                position: glaphica_core::CanvasVec2::new(11.0, 13.0),
+                pressure: 0.5,
+                tilt: glaphica_core::RadianVec2::new(0.0, 0.0),
+                twist: 0.0,
+            }])
+            .expect("push should succeed");
+        let result = stroke
+            .drain_brush_input()
+            .expect("drain should succeed")
+            .expect("brush input should exist");
+
+        assert_eq!(result.blocks.blocks().len(), 1);
+        assert_eq!(result.blocks.blocks()[0].values()[2], 2.5);
+    }
+
+    #[test]
+    fn round_processor_can_map_twist_to_flow_per_dab() {
+        let processor = RoundBrushInputProcessor::default()
+            .with_smoother_factory(passthrough_smoother_factory)
+            .with_modulation_curve(
+                RoundBrushDabVariable::Flow,
+                RoundBrushInputFeature::Pressure,
+                ModulationCurve::flat_one(),
+            )
+            .with_modulation_curve(
+                RoundBrushDabVariable::Flow,
+                RoundBrushInputFeature::Twist,
+                ModulationCurve::new(vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)])
+                    .expect("valid curve"),
+            );
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[CanvasInput {
+                time_ns: 1,
+                position: glaphica_core::CanvasVec2::new(11.0, 13.0),
+                pressure: 1.0,
+                tilt: glaphica_core::RadianVec2::new(0.0, 0.0),
+                twist: 0.0,
+            }])
+            .expect("push should succeed");
+        let result = stroke
+            .drain_brush_input()
+            .expect("drain should succeed")
+            .expect("brush input should exist");
+
+        assert_eq!(result.blocks.blocks().len(), 1);
+        assert!((result.blocks.blocks()[0].values()[3] - 0.5).abs() <= 1e-5);
+
+        let mut full_twist = processor.begin_stroke();
+        full_twist
+            .push_canvas_inputs(&[CanvasInput {
+                time_ns: 2,
+                position: glaphica_core::CanvasVec2::new(21.0, 13.0),
+                pressure: 1.0,
+                tilt: glaphica_core::RadianVec2::new(0.0, 0.0),
+                twist: PI,
+            }])
+            .expect("push should succeed");
+        let full_twist_result = full_twist
+            .drain_brush_input()
+            .expect("drain should succeed")
+            .expect("brush input should exist");
+
+        assert_eq!(full_twist_result.blocks.blocks()[0].values()[3], 1.0);
     }
 
     #[test]
