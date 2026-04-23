@@ -1,8 +1,8 @@
 use crate::{
     BrushId, BrushInput, BrushInputBlockList, BrushInputError, BrushInputProcessor,
-    BrushSampleEncoder, BrushShaderRegistration, BrushStrokeInputProcessor, CommittedCanvasSample,
-    DistanceOrTimeStrokeSmoother, EquidistantStrokeSampler, SampledBrushStrokeInputProcessor,
-    StrokeSmoother,
+    BrushShaderRegistration, BrushStrokeInputProcessor, BrushStrokeSampler, CommittedCanvasSample,
+    CommittedCanvasSpanBuffer, DistanceOrTimeStrokeSmoother, EquidistantStrokeSampler,
+    SmoothedBrushStrokeInputProcessor, StrokeSampler, StrokeSmoother,
 };
 use bytemuck::{Pod, Zeroable};
 use glaphica_core::CanvasVec2;
@@ -41,7 +41,8 @@ pub struct RoundBrushInputProcessor {
     smoother_factory: fn() -> Box<dyn StrokeSmoother>,
 }
 
-struct RoundBrushSampleEncoder {
+struct RoundBrushStrokeSampler {
+    sampler: EquidistantStrokeSampler,
     base_radius_px: f32,
     base_hardness: f32,
     base_opacity: f32,
@@ -115,10 +116,10 @@ impl RoundBrushInputProcessor {
 
 impl BrushInputProcessor for RoundBrushInputProcessor {
     fn begin_stroke(&self) -> Box<dyn BrushStrokeInputProcessor> {
-        Box::new(SampledBrushStrokeInputProcessor::new(
+        Box::new(SmoothedBrushStrokeInputProcessor::new(
             (self.smoother_factory)(),
-            Box::new(EquidistantStrokeSampler::new(self.spacing_px)),
-            Box::new(RoundBrushSampleEncoder {
+            Box::new(RoundBrushStrokeSampler {
+                sampler: EquidistantStrokeSampler::new(self.spacing_px),
                 base_radius_px: self.base_radius_px,
                 base_hardness: self.base_hardness,
                 base_opacity: self.base_opacity,
@@ -242,15 +243,18 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
     }
 }
 
-impl BrushSampleEncoder for RoundBrushSampleEncoder {
+impl BrushStrokeSampler for RoundBrushStrokeSampler {
     fn reset(&mut self) {
+        self.sampler.reset();
         self.last_emitted_position = None;
     }
 
-    fn encode_samples(
+    fn sample_brush_input(
         &mut self,
-        samples: &[CommittedCanvasSample],
+        spans: &CommittedCanvasSpanBuffer,
     ) -> Result<Option<BrushInput>, BrushInputError> {
+        let mut samples = Vec::new();
+        self.sampler.sample_committed_spans(spans, &mut samples);
         let mut blocks = BrushInputBlockList::new(ROUND_BRUSH_ID);
         for (block_index, sample) in samples.iter().copied().enumerate() {
             if self

@@ -95,44 +95,40 @@ pub trait BrushStrokeInputProcessor: Send {
     fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError>;
 }
 
-pub(crate) trait BrushSampleEncoder: Send {
+pub(crate) trait BrushStrokeSampler: Send {
     fn reset(&mut self);
 
-    fn encode_samples(
+    fn sample_brush_input(
         &mut self,
-        samples: &[CommittedCanvasSample],
+        spans: &CommittedCanvasSpanBuffer,
     ) -> Result<Option<BrushInput>, BrushInputError>;
 }
 
-pub(crate) struct SampledBrushStrokeInputProcessor {
+pub(crate) struct SmoothedBrushStrokeInputProcessor {
     smoother: Box<dyn StrokeSmoother>,
-    sampler: Box<dyn StrokeSampler>,
-    encoder: Box<dyn BrushSampleEncoder>,
+    brush_sampler: Box<dyn BrushStrokeSampler>,
     committed_spans: CommittedCanvasSpanBuffer,
     latency_trace: BrushLatencyTraceState,
 }
 
-impl SampledBrushStrokeInputProcessor {
+impl SmoothedBrushStrokeInputProcessor {
     pub(crate) fn new(
         smoother: Box<dyn StrokeSmoother>,
-        sampler: Box<dyn StrokeSampler>,
-        encoder: Box<dyn BrushSampleEncoder>,
+        brush_sampler: Box<dyn BrushStrokeSampler>,
     ) -> Self {
         Self {
             smoother,
-            sampler,
-            encoder,
+            brush_sampler,
             committed_spans: CommittedCanvasSpanBuffer::new(),
             latency_trace: BrushLatencyTraceState::default(),
         }
     }
 }
 
-impl BrushStrokeInputProcessor for SampledBrushStrokeInputProcessor {
+impl BrushStrokeInputProcessor for SmoothedBrushStrokeInputProcessor {
     fn reset(&mut self) {
-        self.sampler.reset();
         self.smoother.clear();
-        self.encoder.reset();
+        self.brush_sampler.reset();
         self.committed_spans.clear();
         self.latency_trace.clear();
     }
@@ -163,15 +159,13 @@ impl BrushStrokeInputProcessor for SampledBrushStrokeInputProcessor {
             return Ok(None);
         }
 
-        let mut samples = Vec::new();
-        self.sampler
-            .sample_committed_spans(&self.committed_spans, &mut samples);
-
         if let Some(sample) = self.current_drawing_sample() {
             self.latency_trace.record_current_draw(sample);
         }
 
-        let encoded = self.encoder.encode_samples(&samples)?;
+        let encoded = self
+            .brush_sampler
+            .sample_brush_input(&self.committed_spans)?;
         let emitted_blocks = encoded
             .as_ref()
             .map(|input| input.blocks.blocks().len())
