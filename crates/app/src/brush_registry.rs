@@ -18,9 +18,19 @@ impl AppBrushRegistry {
     }
 
     pub fn with_builtin_round(intermediate_backend: Backend) -> Self {
+        Self::with_builtin_round_processor(
+            intermediate_backend,
+            RoundBrushInputProcessor::default(),
+        )
+    }
+
+    pub fn with_builtin_round_processor(
+        intermediate_backend: Backend,
+        input_processor: RoundBrushInputProcessor,
+    ) -> Self {
         let mut registry = Self::new();
         registry
-            .register_round(intermediate_backend)
+            .register_round_with_processor(intermediate_backend, input_processor)
             .expect("builtin round backend should register");
         registry
     }
@@ -29,10 +39,21 @@ impl AppBrushRegistry {
         &mut self,
         intermediate_backend: Backend,
     ) -> Result<(), brush::BrushStrokeError> {
+        self.register_round_with_processor(
+            intermediate_backend,
+            RoundBrushInputProcessor::default(),
+        )
+    }
+
+    pub fn register_round_with_processor(
+        &mut self,
+        intermediate_backend: Backend,
+        input_processor: RoundBrushInputProcessor,
+    ) -> Result<(), brush::BrushStrokeError> {
         self.brushes.register(
             ROUND_SHADER_REGISTRATION,
             intermediate_backend,
-            Box::new(RoundBrushInputProcessor::default()),
+            Box::new(input_processor),
         )
     }
 

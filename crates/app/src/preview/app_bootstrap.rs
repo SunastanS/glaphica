@@ -2,7 +2,7 @@ use std::env;
 use std::time::Instant;
 
 use atlas::{AtlasLayout, Backend, BackendId, BackendManager};
-use brush::round::ROUND_BRUSH_ID;
+use brush::round::{ROUND_BRUSH_ID, RoundBrushInputProcessor};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageCreateError, GlaImageLayout};
 use gla_image::GlaImageTileAccessError;
@@ -65,8 +65,15 @@ impl PreviewState {
             &gpu.queue,
         )?;
 
-        let session_brushes = AppBrushRegistry::with_builtin_round(brush_backend.clone());
-        let worker_brushes = AppBrushRegistry::with_builtin_round(brush_backend);
+        let preview_round = RoundBrushInputProcessor::default()
+            .with_base_radius_px(20.0)
+            .with_base_hardness(0.3);
+        let session_brushes = AppBrushRegistry::with_builtin_round_processor(
+            brush_backend.clone(),
+            preview_round.clone(),
+        );
+        let worker_brushes =
+            AppBrushRegistry::with_builtin_round_processor(brush_backend, preview_round);
         let tool_set = ToolSet::new(vec![Tool::Brush(ROUND_BRUSH_ID)]);
         let active_tool = ActiveTool::Brush(ROUND_BRUSH_ID);
         let view = fitted_view(
