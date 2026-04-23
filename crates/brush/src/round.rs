@@ -1,8 +1,8 @@
-use crate::smoother::BrushLatencyTraceState;
 use crate::{
-    ArcLengthCursor, BrushId, BrushInput, BrushInputBlockList, BrushInputError,
-    BrushInputProcessor, BrushShaderRegistration, BrushStrokeInputProcessor, CommittedCanvasSample,
-    CommittedCanvasSpanBuffer, DistanceOrTimeStrokeSmoother, StrokeSmoother,
+    BrushId, BrushInput, BrushInputBlockList, BrushInputError, BrushInputProcessor,
+    BrushSampleEncoder, BrushShaderRegistration, BrushStrokeInputProcessor, CommittedCanvasSample,
+    DistanceOrTimeStrokeSmoother, EquidistantStrokeSampler, SampledBrushStrokeInputProcessor,
+    StrokeSmoother,
 };
 use bytemuck::{Pod, Zeroable};
 use glaphica_core::CanvasVec2;
@@ -41,17 +41,12 @@ pub struct RoundBrushInputProcessor {
     smoother_factory: fn() -> Box<dyn StrokeSmoother>,
 }
 
-pub struct RoundBrushStrokeInputProcessor {
+struct RoundBrushSampleEncoder {
     base_radius_px: f32,
-    spacing_px: f32,
     base_hardness: f32,
     base_opacity: f32,
     tint: [f32; 3],
     last_emitted_position: Option<CanvasVec2>,
-    arclength_cursor: ArcLengthCursor,
-    smoother: Box<dyn StrokeSmoother>,
-    committed_spans: CommittedCanvasSpanBuffer,
-    latency_trace: BrushLatencyTraceState,
 }
 
 #[repr(C)]
@@ -120,18 +115,17 @@ impl RoundBrushInputProcessor {
 
 impl BrushInputProcessor for RoundBrushInputProcessor {
     fn begin_stroke(&self) -> Box<dyn BrushStrokeInputProcessor> {
-        Box::new(RoundBrushStrokeInputProcessor {
-            base_radius_px: self.base_radius_px,
-            spacing_px: self.spacing_px,
-            base_hardness: self.base_hardness,
-            base_opacity: self.base_opacity,
-            tint: self.tint,
-            last_emitted_position: None,
-            arclength_cursor: ArcLengthCursor::default(),
-            smoother: (self.smoother_factory)(),
-            committed_spans: CommittedCanvasSpanBuffer::new(),
-            latency_trace: BrushLatencyTraceState::default(),
-        })
+        Box::new(SampledBrushStrokeInputProcessor::new(
+            (self.smoother_factory)(),
+            Box::new(EquidistantStrokeSampler::new(self.spacing_px)),
+            Box::new(RoundBrushSampleEncoder {
+                base_radius_px: self.base_radius_px,
+                base_hardness: self.base_hardness,
+                base_opacity: self.base_opacity,
+                tint: self.tint,
+                last_emitted_position: None,
+            }),
+        ))
     }
 
     fn max_affected_radius_px(&self) -> u32 {
@@ -248,60 +242,16 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
     }
 }
 
-impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
+impl BrushSampleEncoder for RoundBrushSampleEncoder {
     fn reset(&mut self) {
         self.last_emitted_position = None;
-        self.arclength_cursor = ArcLengthCursor::default();
-        self.smoother.clear();
-        self.committed_spans.clear();
-        self.latency_trace.clear();
     }
 
-    fn push_canvas_inputs(
+    fn encode_samples(
         &mut self,
-        canvas_input: &[glaphica_core::CanvasInput],
-    ) -> Result<(), BrushInputError> {
-        puffin::profile_scope!("round_brush_push_canvas_inputs");
-        for &input in canvas_input {
-            self.latency_trace.record_input(input);
-        }
-        self.smoother.push_canvas_inputs(canvas_input)?;
-        Ok(())
-    }
-
-    fn finish_stroke(&mut self) -> Result<(), BrushInputError> {
-        self.smoother.finish_stroke();
-        Ok(())
-    }
-
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
-        self.smoother.current_drawing_sample()
-    }
-
-    fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError> {
-        puffin::profile_scope!("round_brush_drain_brush_input");
-        self.committed_spans.clear();
-        {
-            puffin::profile_scope!("round_brush_pop_committed_spans");
-            self.smoother
-                .pop_committed_spans(&mut self.committed_spans)?;
-        }
-        if self.committed_spans.is_empty() {
-            self.latency_trace.trace_drain(0, 0);
-            return Ok(None);
-        }
-
+        samples: &[CommittedCanvasSample],
+    ) -> Result<Option<BrushInput>, BrushInputError> {
         let mut blocks = BrushInputBlockList::new(ROUND_BRUSH_ID);
-        let mut samples = Vec::new();
-        {
-            puffin::profile_scope!("round_brush_sample_by_arclength");
-            self.committed_spans.sample_by_arclength_from(
-                self.spacing_px,
-                &mut self.arclength_cursor,
-                &mut samples,
-            );
-        }
-
         for (block_index, sample) in samples.iter().copied().enumerate() {
             if self
                 .last_emitted_position
@@ -320,11 +270,6 @@ impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
             )?;
             self.last_emitted_position = Some(sample.position);
         }
-        if let Some(sample) = self.current_drawing_sample() {
-            self.latency_trace.record_current_draw(sample);
-        }
-        self.latency_trace
-            .trace_drain(self.committed_spans.len(), blocks.blocks().len());
         if blocks.blocks().is_empty() {
             return Ok(None);
         }

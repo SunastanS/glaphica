@@ -47,8 +47,8 @@ impl BrushWorker {
         active_brush_id: BrushId,
         batch_capacity: usize,
     ) -> Result<Self, BrushWorkerError> {
-        let active_input_stroke = begin_input_stroke(&brushes, active_brush_id)
-            .map_err(map_begin_input_stroke_error)?;
+        let active_input_stroke =
+            begin_input_stroke(&brushes, active_brush_id).map_err(map_begin_input_stroke_error)?;
         Ok(Self {
             brushes,
             active_brush_id,
@@ -73,8 +73,8 @@ impl BrushWorker {
         if self.active_brush_id == brush_id {
             return Ok(());
         }
-        self.active_input_stroke = begin_input_stroke(&self.brushes, brush_id)
-            .map_err(map_begin_input_stroke_error)?;
+        self.active_input_stroke =
+            begin_input_stroke(&self.brushes, brush_id).map_err(map_begin_input_stroke_error)?;
         self.active_brush_id = brush_id;
         Ok(())
     }
@@ -150,8 +150,8 @@ mod tests {
     use std::time::Duration;
 
     use atlas::{AtlasLayout, Backend, BackendId};
-    use brush::{BrushId, BrushInputError, BrushStrokeError};
     use brush::round::ROUND_BRUSH_ID;
+    use brush::{BrushId, BrushInputError, BrushStrokeError};
     use glaphica_core::{CanvasVec2, RadianVec2};
 
     use crate::{BrushWorker, create_brush_input_channels};
@@ -195,8 +195,14 @@ mod tests {
         assert_eq!(processed_brush_inputs.len(), 1);
         assert_eq!(processed_brush_inputs[0].brush_id, ROUND_BRUSH_ID);
         assert_eq!(processed_brush_inputs[0].blocks.blocks().len(), 1);
-        assert_eq!(processed_brush_inputs[0].blocks.blocks()[0].values()[0], 10.0);
-        assert_eq!(processed_brush_inputs[0].blocks.blocks()[0].values()[1], 20.0);
+        assert_eq!(
+            processed_brush_inputs[0].blocks.blocks()[0].values()[0],
+            10.0
+        );
+        assert_eq!(
+            processed_brush_inputs[0].blocks.blocks()[0].values()[1],
+            20.0
+        );
 
         assert_eq!(finished_brush_inputs.len(), 1);
         assert_eq!(finished_brush_inputs[0].brush_id, ROUND_BRUSH_ID);
@@ -215,8 +221,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!finished_positions.contains(&processed_origin));
-        assert!(finished_positions.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        assert!(finished_positions.windows(2).all(|pair| pair[0].1 < pair[1].1));
+        assert!(
+            finished_positions
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+        );
+        assert!(
+            finished_positions
+                .windows(2)
+                .all(|pair| pair[0].1 < pair[1].1)
+        );
     }
 
     #[test]

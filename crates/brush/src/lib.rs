@@ -10,14 +10,19 @@ use glaphica_core::CanvasVec2;
 use renderer::{
     ApplyDabCommand, BrushShaderSpec, CopyTileCommand, MergeTileCommand, RenderCommand,
 };
+use smoother::BrushLatencyTraceState;
 
 pub mod round;
+pub mod sampler;
 pub mod smoother;
 
+pub use crate::sampler::{
+    EquidistantCurveSampler, EquidistantSamplerCursor, EquidistantStrokeSampler, StrokeSampler,
+};
 pub use crate::smoother::{
-    ArcLengthCursor, CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer,
-    CurveKnot, DistanceOrTimeStrokeSmoother, PassthroughStrokeSmoother, StrokeCurveBuffer,
-    StrokeSmoother, StrokeSmootherError,
+    CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot,
+    DistanceOrTimeStrokeSmoother, PassthroughStrokeSmoother, StrokeCurveBuffer, StrokeSmoother,
+    StrokeSmootherError,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +93,93 @@ pub trait BrushStrokeInputProcessor: Send {
     fn current_drawing_sample(&self) -> Option<CommittedCanvasSample>;
 
     fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError>;
+}
+
+pub(crate) trait BrushSampleEncoder: Send {
+    fn reset(&mut self);
+
+    fn encode_samples(
+        &mut self,
+        samples: &[CommittedCanvasSample],
+    ) -> Result<Option<BrushInput>, BrushInputError>;
+}
+
+pub(crate) struct SampledBrushStrokeInputProcessor {
+    smoother: Box<dyn StrokeSmoother>,
+    sampler: Box<dyn StrokeSampler>,
+    encoder: Box<dyn BrushSampleEncoder>,
+    committed_spans: CommittedCanvasSpanBuffer,
+    latency_trace: BrushLatencyTraceState,
+}
+
+impl SampledBrushStrokeInputProcessor {
+    pub(crate) fn new(
+        smoother: Box<dyn StrokeSmoother>,
+        sampler: Box<dyn StrokeSampler>,
+        encoder: Box<dyn BrushSampleEncoder>,
+    ) -> Self {
+        Self {
+            smoother,
+            sampler,
+            encoder,
+            committed_spans: CommittedCanvasSpanBuffer::new(),
+            latency_trace: BrushLatencyTraceState::default(),
+        }
+    }
+}
+
+impl BrushStrokeInputProcessor for SampledBrushStrokeInputProcessor {
+    fn reset(&mut self) {
+        self.sampler.reset();
+        self.smoother.clear();
+        self.encoder.reset();
+        self.committed_spans.clear();
+        self.latency_trace.clear();
+    }
+
+    fn push_canvas_inputs(&mut self, canvas_input: &[CanvasInput]) -> Result<(), BrushInputError> {
+        for &input in canvas_input {
+            self.latency_trace.record_input(input);
+        }
+        self.smoother.push_canvas_inputs(canvas_input)?;
+        Ok(())
+    }
+
+    fn finish_stroke(&mut self) -> Result<(), BrushInputError> {
+        self.smoother.finish_stroke();
+        Ok(())
+    }
+
+    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+        self.smoother.current_drawing_sample()
+    }
+
+    fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError> {
+        self.committed_spans.clear();
+        self.smoother
+            .pop_committed_spans(&mut self.committed_spans)?;
+        if self.committed_spans.is_empty() {
+            self.latency_trace.trace_drain(0, 0);
+            return Ok(None);
+        }
+
+        let mut samples = Vec::new();
+        self.sampler
+            .sample_committed_spans(&self.committed_spans, &mut samples);
+
+        if let Some(sample) = self.current_drawing_sample() {
+            self.latency_trace.record_current_draw(sample);
+        }
+
+        let encoded = self.encoder.encode_samples(&samples)?;
+        let emitted_blocks = encoded
+            .as_ref()
+            .map(|input| input.blocks.blocks().len())
+            .unwrap_or(0);
+        self.latency_trace
+            .trace_drain(self.committed_spans.len(), emitted_blocks);
+        Ok(encoded)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
