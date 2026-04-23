@@ -29,7 +29,12 @@ pub const ROUND_SHADER_REGISTRATION: BrushShaderRegistration = BrushShaderRegist
     shader_spec: ROUND_SHADER_SPEC,
 };
 
-pub const ROUND_INPUT_BLOCK_LEN: usize = 9;
+pub const ROUND_INPUT_BLOCK_LEN: usize = 11;
+pub const ROUND_MERGE_LUT_LEN: usize = 128;
+
+const ROUND_DAB_KERNEL_BETA: f32 = 4.5;
+const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
+const ROUND_TRANSFER_PROFILE_SAMPLES: usize = 512;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundBrushInputProcessor {
@@ -59,35 +64,39 @@ struct RoundApplyPayload {
     center_local_x: f32,
     center_local_y: f32,
     radius_px: f32,
-    hardness: f32,
     flow: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundMergeSettings {
+    pub tint: [f32; 3],
+    pub opacity: f32,
+    pub stroke_flow: f32,
+    pub spacing_ratio: f32,
+    pub hardness: f32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct RoundMergePayload {
-    tint: [f32; 3],
-    opacity: f32,
+    tint_and_opacity: [f32; 4],
+    lookup_params: [f32; 4],
+    coverage_lut: [f32; ROUND_MERGE_LUT_LEN],
 }
 
-pub fn encode_round_apply_payload(
-    center_local: [f32; 2],
-    radius_px: f32,
-    hardness: f32,
-    flow: f32,
-) -> Vec<u8> {
+pub fn encode_round_apply_payload(center_local: [f32; 2], radius_px: f32, flow: f32) -> Vec<u8> {
     bytemuck::bytes_of(&RoundApplyPayload {
         center_local_x: center_local[0],
         center_local_y: center_local[1],
         radius_px,
-        hardness,
         flow,
     })
     .to_vec()
 }
 
-pub fn encode_round_merge_payload(tint: [f32; 3], opacity: f32) -> Vec<u8> {
-    bytemuck::bytes_of(&RoundMergePayload { tint, opacity }).to_vec()
+pub fn encode_round_merge_payload(settings: RoundMergeSettings) -> Vec<u8> {
+    let payload = build_round_merge_payload(settings);
+    bytemuck::bytes_of(&payload).to_vec()
 }
 
 impl Default for RoundBrushInputProcessor {
@@ -110,7 +119,7 @@ fn default_smoother_factory() -> Box<dyn StrokeSmoother> {
 
 impl RoundBrushInputProcessor {
     fn dab_spacing_px(&self) -> f32 {
-        (self.base_radius_px * self.spacing_ratio).max(f32::EPSILON)
+        self.base_radius_px * sanitized_spacing_ratio(self.spacing_ratio)
     }
 
     pub fn with_smoother_factory(
@@ -221,7 +230,6 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
             local_center,
             values[2].max(0.0),
             values[3],
-            values[4],
         ))
     }
 
@@ -249,10 +257,22 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
                 actual: last.len(),
             });
         }
-        Ok(encode_round_merge_payload(
-            [last[6], last[7], last[8]],
-            last[5].clamp(0.0, 1.0),
-        ))
+        for (value_index, value) in last.iter().copied().enumerate() {
+            if !value.is_finite() {
+                return Err(BrushInputError::InvalidBlockValue {
+                    brush_id: ROUND_BRUSH_ID,
+                    block_index: input.blocks.blocks().len().saturating_sub(1),
+                    value_index,
+                });
+            }
+        }
+        Ok(encode_round_merge_payload(RoundMergeSettings {
+            tint: [last[8], last[9], last[10]],
+            opacity: last[7].clamp(0.0, 1.0),
+            stroke_flow: last[4].max(0.0),
+            spacing_ratio: last[5],
+            hardness: last[6],
+        }))
     }
 }
 
@@ -282,6 +302,7 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
                 block_index,
                 sample,
                 self.base_radius_px,
+                self.spacing_ratio,
                 self.base_hardness,
                 self.base_flow,
                 self.base_opacity,
@@ -302,7 +323,7 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
 
 impl RoundBrushStrokeSampler {
     fn dab_spacing_px(&self) -> f32 {
-        (self.base_radius_px * self.spacing_ratio).max(f32::EPSILON)
+        self.base_radius_px * sanitized_spacing_ratio(self.spacing_ratio)
     }
 }
 
@@ -316,6 +337,7 @@ fn push_round_block(
     block_index: usize,
     sample: CommittedCanvasSample,
     base_radius_px: f32,
+    spacing_ratio: f32,
     base_hardness: f32,
     base_flow: f32,
     base_opacity: f32,
@@ -349,8 +371,10 @@ fn push_round_block(
         sample.position.x,
         sample.position.y,
         base_radius_px,
-        base_hardness,
         dab_flow,
+        base_flow,
+        sanitized_spacing_ratio(spacing_ratio),
+        base_hardness,
         base_opacity,
         tint[0],
         tint[1],
@@ -359,12 +383,164 @@ fn push_round_block(
     Ok(())
 }
 
+fn sanitized_spacing_ratio(spacing_ratio: f32) -> f32 {
+    if spacing_ratio.is_finite() {
+        spacing_ratio.max(ROUND_MIN_SPACING_RATIO)
+    } else {
+        ROUND_MIN_SPACING_RATIO
+    }
+}
+
+fn round_dab_kernel(relative_distance: f32) -> f32 {
+    if !relative_distance.is_finite() || relative_distance >= 1.0 {
+        return 0.0;
+    }
+    let relative_distance = relative_distance.max(0.0);
+    let baseline = (-ROUND_DAB_KERNEL_BETA).exp();
+    let value = (-ROUND_DAB_KERNEL_BETA * relative_distance * relative_distance).exp();
+    ((value - baseline) / (1.0 - baseline)).max(0.0)
+}
+
+fn round_straight_line_source(relative_distance: f32, stroke_flow: f32, spacing_ratio: f32) -> f32 {
+    let relative_distance = relative_distance.clamp(0.0, 1.0);
+    let stroke_flow = stroke_flow.max(0.0);
+    if stroke_flow <= f32::EPSILON {
+        return 0.0;
+    }
+    let spacing_ratio = sanitized_spacing_ratio(spacing_ratio);
+    let tangential_limit = (1.0 - relative_distance * relative_distance)
+        .max(0.0)
+        .sqrt();
+    let max_index = (tangential_limit / spacing_ratio).floor().max(0.0) as usize;
+    let mut total = round_dab_kernel(relative_distance);
+    for offset_index in 1..=max_index {
+        let tangential_offset = offset_index as f32 * spacing_ratio;
+        let dab_distance =
+            (relative_distance * relative_distance + tangential_offset * tangential_offset).sqrt();
+        total += 2.0 * round_dab_kernel(dab_distance);
+    }
+    stroke_flow * total
+}
+
+fn round_target_coverage(relative_distance: f32, hardness: f32) -> f32 {
+    let relative_distance = relative_distance.clamp(0.0, 1.0);
+    let hardness = hardness.clamp(0.0, 1.0);
+    if relative_distance >= 1.0 {
+        return 0.0;
+    }
+    if hardness >= 1.0 || relative_distance <= hardness {
+        return 1.0;
+    }
+    let edge_distance = (relative_distance - hardness) / (1.0 - hardness).max(f32::EPSILON);
+    round_dab_kernel(edge_distance)
+}
+
+fn build_round_merge_payload(settings: RoundMergeSettings) -> RoundMergePayload {
+    let mut coverage_lut = [0.0; ROUND_MERGE_LUT_LEN];
+    let tint_and_opacity = [
+        settings.tint[0],
+        settings.tint[1],
+        settings.tint[2],
+        settings.opacity.clamp(0.0, 1.0),
+    ];
+    let source_profile = build_round_source_profile(
+        settings.stroke_flow.max(0.0),
+        settings.spacing_ratio,
+        settings.hardness,
+    );
+    let source_max = source_profile
+        .first()
+        .map(|sample| sample.source)
+        .unwrap_or(0.0);
+    let mut source_to_lut_scale = 0.0;
+    if source_max > f32::EPSILON {
+        source_to_lut_scale = (ROUND_MERGE_LUT_LEN.saturating_sub(1) as f32) / source_max;
+        for (index, lut_value) in coverage_lut.iter_mut().enumerate() {
+            let source = source_max * index as f32 / (ROUND_MERGE_LUT_LEN.saturating_sub(1) as f32);
+            *lut_value = coverage_for_source(source, &source_profile);
+        }
+    }
+    RoundMergePayload {
+        tint_and_opacity,
+        lookup_params: [source_to_lut_scale, source_max, 0.0, 0.0],
+        coverage_lut,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RoundSourceProfileSample {
+    source: f32,
+    coverage: f32,
+}
+
+fn build_round_source_profile(
+    stroke_flow: f32,
+    spacing_ratio: f32,
+    hardness: f32,
+) -> Vec<RoundSourceProfileSample> {
+    let mut profile = Vec::with_capacity(ROUND_TRANSFER_PROFILE_SAMPLES + 1);
+    let spacing_ratio = sanitized_spacing_ratio(spacing_ratio);
+    for index in 0..=ROUND_TRANSFER_PROFILE_SAMPLES {
+        let relative_distance = index as f32 / ROUND_TRANSFER_PROFILE_SAMPLES as f32;
+        profile.push(RoundSourceProfileSample {
+            source: round_straight_line_source(relative_distance, stroke_flow, spacing_ratio),
+            coverage: round_target_coverage(relative_distance, hardness),
+        });
+    }
+    for index in 1..profile.len() {
+        if profile[index].source > profile[index - 1].source {
+            profile[index].source = profile[index - 1].source;
+        }
+    }
+    profile
+}
+
+fn coverage_for_source(source: f32, profile: &[RoundSourceProfileSample]) -> f32 {
+    if source <= 0.0 {
+        return 0.0;
+    }
+    let Some(first) = profile.first().copied() else {
+        return 0.0;
+    };
+    if source >= first.source {
+        return first.coverage;
+    }
+    let Some(last) = profile.last().copied() else {
+        return 0.0;
+    };
+    if source <= last.source {
+        return last.coverage;
+    }
+
+    let mut low = 0usize;
+    let mut high = profile.len().saturating_sub(1);
+    while low + 1 < high {
+        let mid = (low + high) / 2;
+        if profile[mid].source >= source {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let low_sample = profile[low];
+    let high_sample = profile[high];
+    let source_span = (low_sample.source - high_sample.source).abs();
+    if source_span <= f32::EPSILON {
+        return high_sample.coverage;
+    }
+    let t = ((low_sample.source - source) / source_span).clamp(0.0, 1.0);
+    low_sample.coverage + (high_sample.coverage - low_sample.coverage) * t
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         BrushInput, BrushInputBlockList, BrushInputProcessor, CanvasInput,
         PassthroughStrokeSmoother, StrokeSmoother,
-        round::{ROUND_BRUSH_ID, RoundBrushInputProcessor, encode_round_merge_payload},
+        round::{
+            ROUND_BRUSH_ID, RoundBrushInputProcessor, RoundMergeSettings,
+            encode_round_merge_payload,
+        },
     };
     use glaphica_core::CanvasVec2;
 
@@ -375,7 +551,7 @@ mod tests {
     #[test]
     fn round_processor_encodes_payloads_from_blocks() {
         let mut input = BrushInputBlockList::new(ROUND_BRUSH_ID);
-        input.push_block(vec![10.0, 8.0, 6.0, 0.4, 0.7, 0.8, 0.2, 0.3, 0.4]);
+        input.push_block(vec![10.0, 8.0, 6.0, 0.7, 0.9, 0.8, 0.4, 0.6, 0.2, 0.3, 0.4]);
         let input = BrushInput {
             brush_id: ROUND_BRUSH_ID,
             blocks: input,
@@ -390,7 +566,13 @@ mod tests {
             RoundBrushInputProcessor::default()
                 .encode_merge_payload(&input)
                 .expect("merge payload"),
-            encode_round_merge_payload([0.2, 0.3, 0.4], 0.8)
+            encode_round_merge_payload(RoundMergeSettings {
+                tint: [0.2, 0.3, 0.4],
+                opacity: 0.6,
+                stroke_flow: 0.9,
+                spacing_ratio: 0.8,
+                hardness: 0.4,
+            })
         );
     }
 
@@ -428,9 +610,11 @@ mod tests {
         assert_eq!(result.blocks.blocks()[0].values()[0], 11.0);
         assert_eq!(result.blocks.blocks()[0].values()[1], 13.0);
         assert_eq!(result.blocks.blocks()[0].values()[2], 5.0);
-        assert_eq!(result.blocks.blocks()[0].values()[3], 0.7);
-        assert_eq!(result.blocks.blocks()[0].values()[4], 0.5);
+        assert_eq!(result.blocks.blocks()[0].values()[3], 0.5);
+        assert_eq!(result.blocks.blocks()[0].values()[4], 1.0);
         assert_eq!(result.blocks.blocks()[0].values()[5], 1.0);
+        assert_eq!(result.blocks.blocks()[0].values()[6], 0.7);
+        assert_eq!(result.blocks.blocks()[0].values()[7], 1.0);
     }
 
     #[test]
@@ -847,5 +1031,44 @@ mod tests {
             &streamed_positions[..comparable_len],
             &finished_positions[..comparable_len]
         );
+    }
+
+    #[test]
+    fn merge_payload_lookup_table_is_monotonic() {
+        let payload = super::build_round_merge_payload(RoundMergeSettings {
+            tint: [0.1, 0.2, 0.3],
+            opacity: 0.8,
+            stroke_flow: 1.0,
+            spacing_ratio: 0.7,
+            hardness: 0.4,
+        });
+
+        assert_eq!(payload.coverage_lut[0], 0.0);
+        assert!(payload.lookup_params[0] > 0.0);
+        assert!(payload.coverage_lut[super::ROUND_MERGE_LUT_LEN - 1] > 0.99);
+        for window in payload.coverage_lut.windows(2) {
+            assert!(window[0] <= window[1], "{window:?}");
+        }
+    }
+
+    #[test]
+    fn harder_merge_payload_keeps_more_coverage_at_same_source() {
+        let soft = super::build_round_merge_payload(RoundMergeSettings {
+            tint: [0.1, 0.2, 0.3],
+            opacity: 1.0,
+            stroke_flow: 1.0,
+            spacing_ratio: 0.8,
+            hardness: 0.2,
+        });
+        let hard = super::build_round_merge_payload(RoundMergeSettings {
+            tint: [0.1, 0.2, 0.3],
+            opacity: 1.0,
+            stroke_flow: 1.0,
+            spacing_ratio: 0.8,
+            hardness: 0.8,
+        });
+
+        let mid_index = super::ROUND_MERGE_LUT_LEN / 2;
+        assert!(hard.coverage_lut[mid_index] >= soft.coverage_lut[mid_index]);
     }
 }

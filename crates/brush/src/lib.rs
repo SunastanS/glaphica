@@ -825,8 +825,8 @@ mod tests {
     use renderer::{ApplyDabCommand, CopyTileCommand, MergeTileCommand, RenderCommand};
 
     use crate::round::{
-        ROUND_SHADER_SPEC, RoundBrushInputProcessor, encode_round_apply_payload,
-        encode_round_merge_payload,
+        ROUND_SHADER_SPEC, RoundBrushInputProcessor, RoundMergeSettings,
+        encode_round_apply_payload, encode_round_merge_payload,
     };
     use crate::{
         BrushBackend, BrushId, BrushRegistry, BrushShaderRegistration, BrushStrokeState,
@@ -843,8 +843,8 @@ mod tests {
             BrushStrokeState::new(BrushId::new(5), backend.clone()).expect("state should build");
         let mut commands = Vec::new();
 
-        let first_payload = encode_round_apply_payload([8.0, 9.0], 10.0, 0.5, 0.75);
-        let second_payload = encode_round_apply_payload([3.0, 4.0], 5.0, 0.6, 0.25);
+        let first_payload = encode_round_apply_payload([8.0, 9.0], 10.0, 0.75);
+        let second_payload = encode_round_apply_payload([3.0, 4.0], 5.0, 0.25);
         let first = state
             .push_apply_dab(4, None, first_payload.clone(), &mut commands)
             .expect("dab should build");
@@ -887,7 +887,7 @@ mod tests {
             .push_apply_dab(
                 0,
                 None,
-                encode_round_apply_payload([1.0, 2.0], 3.0, 0.5, 1.0),
+                encode_round_apply_payload([1.0, 2.0], 3.0, 1.0),
                 &mut commands,
             )
             .expect("dab");
@@ -897,7 +897,13 @@ mod tests {
             .alloc_active()
             .expect("preview tile")
             .tile_key();
-        let merge_payload = encode_round_merge_payload([0.2, 0.3, 0.4], 1.0);
+        let merge_payload = encode_round_merge_payload(RoundMergeSettings {
+            tint: [0.2, 0.3, 0.4],
+            opacity: 1.0,
+            stroke_flow: 1.0,
+            spacing_ratio: 1.0,
+            hardness: 0.7,
+        });
 
         let returned_tile_key = state
             .push_preview_merge(
@@ -947,7 +953,7 @@ mod tests {
             .push_apply_dab(
                 0,
                 None,
-                encode_round_apply_payload([4.0, 4.0], 6.0, 0.5, 1.0),
+                encode_round_apply_payload([4.0, 4.0], 6.0, 1.0),
                 &mut draw_commands,
             )
             .expect("dab");
@@ -955,11 +961,17 @@ mod tests {
             .push_apply_dab(
                 1,
                 None,
-                encode_round_apply_payload([2.0, 2.0], 5.0, 0.3, 0.9),
+                encode_round_apply_payload([2.0, 2.0], 5.0, 0.9),
                 &mut draw_commands,
             )
             .expect("dab");
-        let merge_payload = encode_round_merge_payload([0.1, 0.2, 0.3], 1.0);
+        let merge_payload = encode_round_merge_payload(RoundMergeSettings {
+            tint: [0.1, 0.2, 0.3],
+            opacity: 1.0,
+            stroke_flow: 1.0,
+            spacing_ratio: 1.0,
+            hardness: 0.7,
+        });
 
         let batch = state
             .build_commit_batch(
@@ -1018,7 +1030,7 @@ mod tests {
             .push_apply_dab(
                 0,
                 None,
-                encode_round_apply_payload([4.0, 4.0], 8.0, 1.0, 0.4),
+                encode_round_apply_payload([4.0, 4.0], 8.0, 0.4),
                 &mut commands,
             )
             .expect("dab");
@@ -1028,7 +1040,13 @@ mod tests {
             .alloc_active()
             .expect("preview tile")
             .tile_key();
-        let merge_payload = encode_round_merge_payload([0.9, 0.8, 0.7], 1.0);
+        let merge_payload = encode_round_merge_payload(RoundMergeSettings {
+            tint: [0.9, 0.8, 0.7],
+            opacity: 1.0,
+            stroke_flow: 1.0,
+            spacing_ratio: 1.0,
+            hardness: 0.7,
+        });
 
         let returned_tile_key = state
             .push_preview_merge(
@@ -1064,7 +1082,7 @@ mod tests {
             .push_apply_dab(
                 0,
                 None,
-                encode_round_apply_payload([4.0, 4.0], 8.0, 0.8, 0.7),
+                encode_round_apply_payload([4.0, 4.0], 8.0, 0.7),
                 &mut commands,
             )
             .expect("dab");
@@ -1085,7 +1103,7 @@ mod tests {
             .push_apply_dab(
                 0,
                 None,
-                encode_round_apply_payload([1.0, 1.0], 2.0, 0.2, 0.5),
+                encode_round_apply_payload([1.0, 1.0], 2.0, 0.5),
                 &mut Vec::new(),
             )
             .expect("next dab");
@@ -1118,7 +1136,7 @@ mod tests {
             .push_apply_dab(
                 0,
                 None,
-                encode_round_apply_payload([2.0, 3.0], 4.0, 0.4, 0.6),
+                encode_round_apply_payload([2.0, 3.0], 4.0, 0.6),
                 &mut Vec::new(),
             )
             .expect("dab");

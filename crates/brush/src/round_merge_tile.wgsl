@@ -7,8 +7,13 @@ struct MergeUniforms {
     _pad1: u32,
 };
 
+const ROUND_MERGE_LUT_LEN: u32 = 128u;
+const ROUND_MERGE_LUT_LAST: f32 = 127.0;
+
 struct MergePayload {
     tint_and_opacity: vec4f,
+    lookup_params: vec4f,
+    coverage_lut: array<f32, ROUND_MERGE_LUT_LEN>,
 }
 
 @group(0) @binding(0) var origin_texture: texture_2d_array<f32>;
@@ -24,6 +29,16 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
         vec2<f32>(-1.0, 3.0),
     );
     return vec4<f32>(positions[vertex_index], 0.0, 1.0);
+}
+
+fn lookup_coverage(source: f32) -> f32 {
+    let scaled_index = clamp(max(source, 0.0) * payload.lookup_params.x, 0.0, ROUND_MERGE_LUT_LAST);
+    let lower_index = u32(floor(scaled_index));
+    let upper_index = min(lower_index + 1u, ROUND_MERGE_LUT_LEN - 1u);
+    let interp_t = scaled_index - floor(scaled_index);
+    let lower_value = payload.coverage_lut[lower_index];
+    let upper_value = payload.coverage_lut[upper_index];
+    return mix(lower_value, upper_value, interp_t);
 }
 
 @fragment
@@ -42,7 +57,8 @@ fn fs_merge_tile(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         0
     );
     let stroke_opacity = clamp(payload.tint_and_opacity.a, 0.0, 1.0);
-    let effective_alpha = stroke_opacity * (1.0 - exp(-max(intermediate.a, 0.0)));
+    let coverage = clamp(lookup_coverage(intermediate.a), 0.0, 1.0);
+    let effective_alpha = stroke_opacity * coverage;
     let out_alpha = base.a + (1.0 - base.a) * effective_alpha;
     let out_rgb = mix(base.rgb, payload.tint_and_opacity.rgb, effective_alpha);
     return vec4f(out_rgb, out_alpha);
