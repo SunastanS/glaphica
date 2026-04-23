@@ -20,13 +20,13 @@ pub struct BrushThreadRuntime {
     stop_requested: Arc<AtomicBool>,
     stroke_generation: Arc<AtomicU64>,
     finish_state: Arc<FinishSignal>,
-    worker_error: Arc<Mutex<Option<BrushWorkerError>>>,
     thread: Option<JoinHandle<()>>,
 }
 
 struct FinishState {
     request_generation: u64,
     ack_generation: u64,
+    worker_error: Option<BrushWorkerError>,
 }
 
 struct FinishSignal {
@@ -40,6 +40,7 @@ impl FinishSignal {
             state: Mutex::new(FinishState {
                 request_generation: 0,
                 ack_generation: 0,
+                worker_error: None,
             }),
             changed: Condvar::new(),
         }
@@ -56,11 +57,7 @@ impl FinishSignal {
         request_generation
     }
 
-    fn wait_for_ack_or_error(
-        &self,
-        request_generation: u64,
-        worker_error: &Mutex<Option<BrushWorkerError>>,
-    ) -> Result<(), BrushWorkerError> {
+    fn wait_for_ack_or_error(&self, request_generation: u64) -> Result<(), BrushWorkerError> {
         let mut state = self
             .state
             .lock()
@@ -69,11 +66,7 @@ impl FinishSignal {
             if state.ack_generation >= request_generation {
                 return Ok(());
             }
-            if let Some(error) = worker_error
-                .lock()
-                .expect("brush worker error state should not be poisoned")
-                .take()
-            {
+            if let Some(error) = state.worker_error.take() {
                 return Err(error);
             }
             state = self
@@ -90,12 +83,29 @@ impl FinishSignal {
             .request_generation
     }
 
+    fn take_worker_error(&self) -> Option<BrushWorkerError> {
+        self.state
+            .lock()
+            .expect("finish state should not be poisoned")
+            .worker_error
+            .take()
+    }
+
     fn ack_finish(&self, request_generation: u64) {
         let mut state = self
             .state
             .lock()
             .expect("finish state should not be poisoned");
         state.ack_generation = request_generation;
+        self.changed.notify_all();
+    }
+
+    fn store_worker_error(&self, error: BrushWorkerError) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("finish state should not be poisoned");
+        state.worker_error = Some(error);
         self.changed.notify_all();
     }
 
@@ -166,12 +176,10 @@ impl BrushThreadRuntime {
         let stop_requested = Arc::new(AtomicBool::new(false));
         let stroke_generation = Arc::new(AtomicU64::new(0));
         let finish_state = Arc::new(FinishSignal::new());
-        let worker_error = Arc::new(Mutex::new(None));
         let thread_active_tool = active_tool.clone();
         let thread_stop_requested = stop_requested.clone();
         let thread_stroke_generation = stroke_generation.clone();
         let thread_finish_state = finish_state.clone();
-        let thread_worker_error = worker_error.clone();
         let thread = thread::Builder::new()
             .name("glaphica-brush".to_string())
             .spawn(move || {
@@ -183,7 +191,6 @@ impl BrushThreadRuntime {
                     thread_stop_requested,
                     thread_stroke_generation,
                     thread_finish_state,
-                    thread_worker_error,
                     worker_batch_capacity,
                     worker_wait_timeout,
                 );
@@ -198,7 +205,6 @@ impl BrushThreadRuntime {
             stop_requested,
             stroke_generation,
             finish_state,
-            worker_error,
             thread: Some(thread),
         })
     }
@@ -235,10 +241,7 @@ impl BrushThreadRuntime {
     }
 
     pub fn take_worker_error(&self) -> Option<BrushWorkerError> {
-        self.worker_error
-            .lock()
-            .expect("brush worker error state should not be poisoned")
-            .take()
+        self.finish_state.take_worker_error()
     }
 
     pub fn reset_active_stroke_processing(&self) {
@@ -250,7 +253,7 @@ impl BrushThreadRuntime {
     pub fn finish_active_stroke_processing(&self) -> Result<(), BrushThreadRuntimeError> {
         let request = self.finish_state.request_finish();
         self.finish_state
-            .wait_for_ack_or_error(request, &self.worker_error)
+            .wait_for_ack_or_error(request)
             .map_err(BrushThreadRuntimeError::Worker)?;
         Ok(())
     }
@@ -288,7 +291,6 @@ fn run_brush_thread(
     stop_requested: Arc<AtomicBool>,
     stroke_generation: Arc<AtomicU64>,
     finish_state: Arc<FinishSignal>,
-    worker_error: Arc<Mutex<Option<BrushWorkerError>>>,
     worker_batch_capacity: usize,
     worker_wait_timeout: Duration,
 ) {
@@ -303,7 +305,7 @@ fn run_brush_thread(
         let current_finish_request_generation = finish_state.request_generation();
         if current_finish_request_generation != seen_finish_request_generation {
             if let Err(error) = worker.finish_active_stroke(&brush_input_producer) {
-                store_worker_error(&worker_error, &finish_state, error);
+                finish_state.store_worker_error(error);
                 break;
             }
             seen_finish_request_generation = current_finish_request_generation;
@@ -317,7 +319,7 @@ fn run_brush_thread(
             ActiveTool::Brush(brush_id) => brush_id,
         };
         if let Err(error) = worker.set_active_brush(brush_id) {
-            store_worker_error(&worker_error, &finish_state, error);
+            finish_state.store_worker_error(error);
             break;
         }
         match worker.process_canvas_input(
@@ -328,23 +330,11 @@ fn run_brush_thread(
         ) {
             Ok(_) => {}
             Err(error) => {
-                store_worker_error(&worker_error, &finish_state, error);
+                finish_state.store_worker_error(error);
                 break;
             }
         }
     }
-}
-
-fn store_worker_error(
-    worker_error: &Mutex<Option<BrushWorkerError>>,
-    finish_state: &FinishSignal,
-    error: BrushWorkerError,
-) {
-    let mut stored_error = worker_error
-        .lock()
-        .expect("brush worker error state should not be poisoned");
-    *stored_error = Some(error);
-    finish_state.notify_changed();
 }
 
 #[cfg(test)]
