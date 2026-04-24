@@ -7,10 +7,11 @@ pub mod types;
 pub use atlas_texture_set::AtlasTextureStage;
 pub use brush_encode::BrushEncodeStage;
 pub use types::{
-    ApplyDabCommand, BrushCommandExecutor, BrushIntermediateFormat, BrushShaderProvider,
-    BrushShaderSource, BrushShaderSpec, BrushShaderStage, CompositeTileCommand, CopyTileCommand,
-    MergeTileCommand, PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d,
-    TileCompositeSource, TileRendererError,
+    ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
+    BrushCommandExecutor, BrushIntermediateFormat, BrushShaderProvider, BrushShaderSource,
+    BrushShaderSpec, BrushShaderStage, CompositeTileCommand, CopyTileCommand, MergeTileCommand,
+    PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource,
+    TileRendererError,
 };
 
 use atlas::TileKey;

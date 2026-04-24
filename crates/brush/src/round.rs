@@ -6,20 +6,40 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glaphica_core::CanvasVec2;
-use renderer::{BrushIntermediateFormat, BrushShaderSource, BrushShaderSpec};
+use renderer::{
+    ApplyDabBlend, ApplyDabShaderValidation, ApplyDabShaderVariant, BrushIntermediateFormat,
+    BrushShaderSource, BrushShaderSpec,
+};
 use std::f32::consts::{FRAC_PI_2, PI};
 
 pub const ROUND_BRUSH_ID: BrushId = BrushId::new(1);
 
 pub const ROUND_APPLY_DAB_WGSL: &str = include_str!("round_apply_dab.wgsl");
+pub const ROUND_APPLY_DAB_LINEAR_ADD_WGSL: &str = include_str!("round_apply_dab_linear_add.wgsl");
 pub const ROUND_MERGE_TILE_WGSL: &str = include_str!("round_merge_tile.wgsl");
+
+pub const ROUND_APPLY_DAB_SHADER_VARIANTS: &[ApplyDabShaderVariant] = &[
+    ApplyDabShaderVariant {
+        source: BrushShaderSource {
+            wgsl: ROUND_APPLY_DAB_LINEAR_ADD_WGSL,
+            entry_point: "fs_apply_dab_linear_add",
+        },
+        validation: ApplyDabShaderValidation::LinearAddBlend,
+        blend: ApplyDabBlend::LinearAdd,
+    },
+    ApplyDabShaderVariant {
+        source: BrushShaderSource {
+            wgsl: ROUND_APPLY_DAB_WGSL,
+            entry_point: "fs_apply_dab",
+        },
+        validation: ApplyDabShaderValidation::Always,
+        blend: ApplyDabBlend::Replace,
+    },
+];
 
 pub const ROUND_SHADER_SPEC: BrushShaderSpec = BrushShaderSpec {
     intermediate_format: BrushIntermediateFormat::R16Float,
-    apply_dab: BrushShaderSource {
-        wgsl: ROUND_APPLY_DAB_WGSL,
-        entry_point: "fs_apply_dab",
-    },
+    apply_dab_variants: ROUND_APPLY_DAB_SHADER_VARIANTS,
     merge_tile: BrushShaderSource {
         wgsl: ROUND_MERGE_TILE_WGSL,
         entry_point: "fs_merge_tile",

@@ -3,8 +3,9 @@ use glaphica_core::{ATLAS_TILE_SIZE, BrushId};
 
 use super::atlas_texture_set::AtlasTextureStage;
 use super::types::{
-    ApplyDabCommand, BrushIntermediateFormat, BrushShaderProvider, BrushShaderStage,
-    MergeTileCommand, TileRendererError,
+    ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
+    BrushIntermediateFormat, BrushShaderProvider, BrushShaderSource, BrushShaderSpec,
+    BrushShaderStage, MergeTileCommand, TileRendererError,
 };
 
 #[repr(C)]
@@ -31,7 +32,7 @@ struct MergeTileUniformHeader {
 
 #[derive(Debug, Default)]
 struct BrushPipelineSet {
-    apply_dab: Vec<Option<wgpu::RenderPipeline>>,
+    apply_dab: Vec<Vec<Option<wgpu::RenderPipeline>>>,
     merge_tile: Vec<Option<wgpu::RenderPipeline>>,
 }
 
@@ -147,39 +148,112 @@ impl BrushEncodeStage {
         stage: BrushShaderStage,
     ) -> Result<(), TileRendererError> {
         let index = brush_id.raw() as usize;
-        let pipeline_slots = match stage {
-            BrushShaderStage::ApplyDab => &mut self.pipelines.apply_dab,
-            BrushShaderStage::MergeTile => &mut self.pipelines.merge_tile,
-        };
-        if pipeline_slots.len() <= index {
-            pipeline_slots.resize_with(index + 1, || None);
-        }
-        if pipeline_slots[index].is_some() {
-            return Ok(());
-        }
-
         let shader_spec = provider
             .shader_spec(brush_id)
             .ok_or(TileRendererError::MissingBrushShader { brush_id, stage })?;
-        let shader_source = match stage {
-            BrushShaderStage::ApplyDab => shader_spec.apply_dab,
-            BrushShaderStage::MergeTile => shader_spec.merge_tile,
-        };
-        let target_format = match stage {
-            BrushShaderStage::ApplyDab => map_intermediate_format(shader_spec.intermediate_format),
-            BrushShaderStage::MergeTile => wgpu::TextureFormat::Rgba8Unorm,
-        };
+        match stage {
+            BrushShaderStage::ApplyDab => {
+                for (variant_index, variant) in
+                    shader_spec.apply_dab_variants.iter().copied().enumerate()
+                {
+                    if variant.validation != ApplyDabShaderValidation::Always {
+                        continue;
+                    }
+                    self.ensure_apply_dab_variant_pipeline(
+                        device,
+                        shader_spec,
+                        brush_id,
+                        variant_index,
+                    )?;
+                }
+                Ok(())
+            }
+            BrushShaderStage::MergeTile => {
+                let pipeline_slots = &mut self.pipelines.merge_tile;
+                if pipeline_slots.len() <= index {
+                    pipeline_slots.resize_with(index + 1, || None);
+                }
+                if pipeline_slots[index].is_some() {
+                    return Ok(());
+                }
+
+                let pipeline = Self::create_brush_pipeline(
+                    device,
+                    &self.bind_group_layout,
+                    shader_spec.merge_tile,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    None,
+                    "glaphica-brush-pipeline",
+                );
+                pipeline_slots[index] = Some(pipeline);
+                Ok(())
+            }
+        }
+    }
+
+    fn ensure_apply_dab_variant_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        shader_spec: BrushShaderSpec,
+        brush_id: BrushId,
+        variant_index: usize,
+    ) -> Result<(), TileRendererError> {
+        let variant = shader_spec.apply_dab_variants.get(variant_index).ok_or(
+            TileRendererError::MissingBrushShader {
+                brush_id,
+                stage: BrushShaderStage::ApplyDab,
+            },
+        )?;
+        let brush_index = brush_id.raw() as usize;
+        if self.pipelines.apply_dab.len() <= brush_index {
+            self.pipelines
+                .apply_dab
+                .resize_with(brush_index + 1, Vec::new);
+        }
+        let pipeline_slots = self.pipelines.apply_dab.get_mut(brush_index).ok_or(
+            TileRendererError::MissingBrushShader {
+                brush_id,
+                stage: BrushShaderStage::ApplyDab,
+            },
+        )?;
+        if pipeline_slots.len() <= variant_index {
+            pipeline_slots.resize_with(variant_index + 1, || None);
+        }
+        if pipeline_slots[variant_index].is_some() {
+            return Ok(());
+        }
+        let target_format = map_intermediate_format(shader_spec.intermediate_format);
+        let pipeline = Self::create_brush_pipeline(
+            device,
+            &self.bind_group_layout,
+            variant.source,
+            target_format,
+            blend_state_for_apply_dab_variant(*variant),
+            "glaphica-brush-apply-pipeline",
+        );
+        pipeline_slots[variant_index] = Some(pipeline);
+        Ok(())
+    }
+
+    fn create_brush_pipeline(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        shader_source: BrushShaderSource,
+        target_format: wgpu::TextureFormat,
+        blend: Option<wgpu::BlendState>,
+        label: &'static str,
+    ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glaphica-brush-shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.wgsl.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("glaphica-brush-pipeline-layout"),
-            bind_group_layouts: &[&self.bind_group_layout],
+            bind_group_layouts: &[bind_group_layout],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glaphica-brush-pipeline"),
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -196,15 +270,13 @@ impl BrushEncodeStage {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: None,
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             multiview_mask: None,
             cache: None,
-        });
-        pipeline_slots[index] = Some(pipeline);
-        Ok(())
+        })
     }
 
     fn brush_pipeline(
@@ -215,15 +287,43 @@ impl BrushEncodeStage {
         stage: BrushShaderStage,
     ) -> Result<wgpu::RenderPipeline, TileRendererError> {
         self.ensure_brush_pipeline(device, provider, brush_id, stage)?;
-        let pipelines = match stage {
-            BrushShaderStage::ApplyDab => &self.pipelines.apply_dab,
-            BrushShaderStage::MergeTile => &self.pipelines.merge_tile,
-        };
-        pipelines
+        match stage {
+            BrushShaderStage::ApplyDab => self.apply_dab_variant_pipeline(
+                device,
+                provider
+                    .shader_spec(brush_id)
+                    .ok_or(TileRendererError::MissingBrushShader { brush_id, stage })?,
+                brush_id,
+                0,
+            ),
+            BrushShaderStage::MergeTile => self
+                .pipelines
+                .merge_tile
+                .get(brush_id.raw() as usize)
+                .and_then(Option::as_ref)
+                .cloned()
+                .ok_or(TileRendererError::MissingBrushShader { brush_id, stage }),
+        }
+    }
+
+    fn apply_dab_variant_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        shader_spec: BrushShaderSpec,
+        brush_id: BrushId,
+        variant_index: usize,
+    ) -> Result<wgpu::RenderPipeline, TileRendererError> {
+        self.ensure_apply_dab_variant_pipeline(device, shader_spec, brush_id, variant_index)?;
+        self.pipelines
+            .apply_dab
             .get(brush_id.raw() as usize)
+            .and_then(|pipelines| pipelines.get(variant_index))
             .and_then(Option::as_ref)
             .cloned()
-            .ok_or(TileRendererError::MissingBrushShader { brush_id, stage })
+            .ok_or(TileRendererError::MissingBrushShader {
+                brush_id,
+                stage: BrushShaderStage::ApplyDab,
+            })
     }
 
     pub fn encode_apply_dab(
@@ -235,12 +335,6 @@ impl BrushEncodeStage {
         provider: &impl BrushShaderProvider,
         command: &ApplyDabCommand,
     ) -> Result<(), TileRendererError> {
-        let pipeline = self.brush_pipeline(
-            device,
-            provider,
-            command.brush_id,
-            BrushShaderStage::ApplyDab,
-        )?;
         let destination = atlas_texture_set.resolve_tile(command.destination_tile_key)?;
         let shader_spec = provider.shader_spec(command.brush_id).ok_or(
             TileRendererError::MissingBrushShader {
@@ -248,6 +342,59 @@ impl BrushEncodeStage {
                 stage: BrushShaderStage::ApplyDab,
             },
         )?;
+        for (variant_index, variant) in shader_spec.apply_dab_variants.iter().copied().enumerate() {
+            if !self.apply_dab_variant_is_supported(device, shader_spec, variant, command) {
+                continue;
+            }
+            let pipeline = self.apply_dab_variant_pipeline(
+                device,
+                shader_spec,
+                command.brush_id,
+                variant_index,
+            )?;
+            match variant.blend {
+                ApplyDabBlend::Replace => {
+                    return self.encode_apply_dab_read_modify_write(
+                        device,
+                        queue,
+                        encoder,
+                        atlas_texture_set,
+                        shader_spec,
+                        &pipeline,
+                        &destination,
+                        command,
+                    );
+                }
+                ApplyDabBlend::LinearAdd => {
+                    return self.encode_apply_dab_direct_linear_add(
+                        device,
+                        queue,
+                        encoder,
+                        &pipeline,
+                        &destination,
+                        command,
+                    );
+                }
+            }
+        }
+
+        Err(TileRendererError::MissingBrushShader {
+            brush_id: command.brush_id,
+            stage: BrushShaderStage::ApplyDab,
+        })
+    }
+
+    fn encode_apply_dab_read_modify_write(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        atlas_texture_set: &AtlasTextureStage,
+        shader_spec: BrushShaderSpec,
+        pipeline: &wgpu::RenderPipeline,
+        destination: &super::atlas_texture_set::ResolvedAtlasTile<'_>,
+        command: &ApplyDabCommand,
+    ) -> Result<(), TileRendererError> {
         let scratch = self.apply_scratch(shader_spec.intermediate_format);
         let source_tile_key = command
             .source_tile_key
@@ -338,7 +485,117 @@ impl BrushEncodeStage {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&pipeline);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_scissor_rect(
+                destination.tile_x * ATLAS_TILE_SIZE,
+                destination.tile_y * ATLAS_TILE_SIZE,
+                ATLAS_TILE_SIZE,
+                ATLAS_TILE_SIZE,
+            );
+            pass.draw(0..3, 0..1);
+        }
+        Ok(())
+    }
+
+    fn apply_dab_variant_is_supported(
+        &self,
+        device: &wgpu::Device,
+        shader_spec: BrushShaderSpec,
+        variant: ApplyDabShaderVariant,
+        command: &ApplyDabCommand,
+    ) -> bool {
+        match variant.validation {
+            ApplyDabShaderValidation::Always => true,
+            ApplyDabShaderValidation::LinearAddBlend => {
+                let source_matches_destination = command
+                    .source_tile_key
+                    .is_none_or(|source_tile_key| source_tile_key == command.destination_tile_key);
+                if !source_matches_destination {
+                    return false;
+                }
+
+                let format = map_intermediate_format(shader_spec.intermediate_format);
+                format
+                    .guaranteed_format_features(device.features())
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
+            }
+        }
+    }
+
+    fn encode_apply_dab_direct_linear_add(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        destination: &super::atlas_texture_set::ResolvedAtlasTile<'_>,
+        command: &ApplyDabCommand,
+    ) -> Result<(), TileRendererError> {
+        let uniform_header = ApplyDabUniformHeader {
+            tile_origin_x: destination.tile_x * ATLAS_TILE_SIZE,
+            tile_origin_y: destination.tile_y * ATLAS_TILE_SIZE,
+            source_origin_x: 0,
+            source_origin_y: 0,
+            source_layer: 0,
+            _pad0: 0,
+        };
+        let uniform_buffer = Self::build_brush_buffer(
+            device,
+            queue,
+            "glaphica-brush-apply-linear-add-uniform",
+            bytemuck::bytes_of(&uniform_header),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let payload_buffer = Self::build_brush_buffer(
+            device,
+            queue,
+            "glaphica-brush-apply-linear-add-payload",
+            &command.brush_payload,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let destination_view = destination.texture.create_layer_view(destination.layer)?;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-brush-apply-linear-add-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.scratch_r16.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.scratch_r16.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: payload_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-brush-apply-linear-add-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &destination_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_scissor_rect(
                 destination.tile_x * ATLAS_TILE_SIZE,
@@ -535,5 +792,27 @@ fn map_intermediate_format(format: BrushIntermediateFormat) -> wgpu::TextureForm
     match format {
         BrushIntermediateFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
         BrushIntermediateFormat::R16Float => wgpu::TextureFormat::R16Float,
+    }
+}
+
+fn blend_state_for_apply_dab_variant(variant: ApplyDabShaderVariant) -> Option<wgpu::BlendState> {
+    match variant.blend {
+        ApplyDabBlend::Replace => None,
+        ApplyDabBlend::LinearAdd => Some(linear_add_blend_state()),
+    }
+}
+
+fn linear_add_blend_state() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
     }
 }

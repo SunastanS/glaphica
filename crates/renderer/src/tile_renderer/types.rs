@@ -155,9 +155,28 @@ pub struct BrushShaderSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyDabShaderValidation {
+    Always,
+    LinearAddBlend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyDabBlend {
+    Replace,
+    LinearAdd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyDabShaderVariant {
+    pub source: BrushShaderSource,
+    pub validation: ApplyDabShaderValidation,
+    pub blend: ApplyDabBlend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushShaderSpec {
     pub intermediate_format: BrushIntermediateFormat,
-    pub apply_dab: BrushShaderSource,
+    pub apply_dab_variants: &'static [ApplyDabShaderVariant],
     pub merge_tile: BrushShaderSource,
 }
 
