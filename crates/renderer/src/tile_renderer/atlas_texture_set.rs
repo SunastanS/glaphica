@@ -1,12 +1,13 @@
 use atlas::{AtlasLayout, BackendId, TileKey};
 use glaphica_core::ATLAS_TILE_SIZE;
 
-use super::types::TileRendererError;
+use super::types::{BrushIntermediateFormat, TileRendererError};
 use crate::{RendererTexture, RendererTextureDescriptor};
 
 #[derive(Debug)]
 struct AtlasBackendTexture {
     layout: AtlasLayout,
+    format: BrushIntermediateFormat,
     texture: RendererTexture,
 }
 
@@ -36,6 +37,7 @@ impl AtlasTextureSet {
         &mut self,
         device: &wgpu::Device,
         backend: &atlas::Backend,
+        format: BrushIntermediateFormat,
     ) -> Result<&AtlasBackendTexture, TileRendererError> {
         let backend_id = backend.backend_id()?;
         let index = backend_id.raw() as usize;
@@ -47,9 +49,47 @@ impl AtlasTextureSet {
             let edge = layout.tiles_per_edge() * ATLAS_TILE_SIZE;
             let texture = RendererTexture::new(
                 device,
-                &RendererTextureDescriptor::atlas_rgba8_unorm(None, edge, edge, layout.layers()),
+                &RendererTextureDescriptor::atlas_with_format(
+                    None,
+                    edge,
+                    edge,
+                    layout.layers(),
+                    format,
+                ),
             )?;
-            self.backends[index] = Some(AtlasBackendTexture { layout, texture });
+            self.backends[index] = Some(AtlasBackendTexture {
+                layout,
+                format,
+                texture,
+            });
+        }
+        if let Some(backend) = self.backends[index].as_ref() {
+            if backend.format != format {
+                return Err(TileRendererError::BackendTextureFormatMismatch {
+                    backend_id,
+                    expected: format,
+                    actual: backend.format,
+                });
+            }
+        }
+        self.backends[index]
+            .as_ref()
+            .ok_or(TileRendererError::MissingBackendTexture(backend_id))
+    }
+
+    fn ensure_backend_texture_default(
+        &mut self,
+        device: &wgpu::Device,
+        backend: &atlas::Backend,
+    ) -> Result<&AtlasBackendTexture, TileRendererError> {
+        let backend_id = backend.backend_id()?;
+        let index = backend_id.raw() as usize;
+        if self.backends.len() <= index || self.backends[index].is_none() {
+            return self.ensure_backend_texture(
+                device,
+                backend,
+                BrushIntermediateFormat::Rgba8Unorm,
+            );
         }
         self.backends[index]
             .as_ref()
@@ -96,7 +136,18 @@ impl AtlasTextureStage {
         backend: &atlas::Backend,
     ) -> Result<(), TileRendererError> {
         self.atlas_textures
-            .ensure_backend_texture(device, backend)?;
+            .ensure_backend_texture_default(device, backend)?;
+        Ok(())
+    }
+
+    pub fn ensure_backend_with_format(
+        &mut self,
+        device: &wgpu::Device,
+        backend: &atlas::Backend,
+        format: BrushIntermediateFormat,
+    ) -> Result<(), TileRendererError> {
+        self.atlas_textures
+            .ensure_backend_texture(device, backend, format)?;
         Ok(())
     }
 
@@ -116,7 +167,7 @@ impl AtlasTextureStage {
     ) -> Result<(), TileRendererError> {
         for backend in backends {
             self.atlas_textures
-                .ensure_backend_texture(device, backend)?;
+                .ensure_backend_texture_default(device, backend)?;
         }
         let zero_tile = vec![0u8; (ATLAS_TILE_SIZE * ATLAS_TILE_SIZE * 4) as usize];
         for batch in clear_batches {
@@ -164,8 +215,11 @@ impl AtlasTextureStage {
         tile_key: TileKey,
         pixels_rgba8: &[u8],
     ) -> Result<(), TileRendererError> {
-        self.atlas_textures
-            .ensure_backend_texture(device, backend)?;
+        self.atlas_textures.ensure_backend_texture(
+            device,
+            backend,
+            BrushIntermediateFormat::Rgba8Unorm,
+        )?;
         let resolved = self.atlas_textures.resolve_tile(tile_key)?;
         let expected_len = (ATLAS_TILE_SIZE * ATLAS_TILE_SIZE * 4) as usize;
         if pixels_rgba8.len() != expected_len {

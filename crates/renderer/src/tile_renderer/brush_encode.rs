@@ -3,7 +3,8 @@ use glaphica_core::{ATLAS_TILE_SIZE, BrushId};
 
 use super::atlas_texture_set::AtlasTextureStage;
 use super::types::{
-    ApplyDabCommand, BrushShaderProvider, BrushShaderStage, MergeTileCommand, TileRendererError,
+    ApplyDabCommand, BrushIntermediateFormat, BrushShaderProvider, BrushShaderStage,
+    MergeTileCommand, TileRendererError,
 };
 
 #[repr(C)]
@@ -39,6 +40,7 @@ pub struct BrushEncodeStage {
     pipelines: BrushPipelineSet,
     scratch_a: crate::RendererTexture,
     scratch_b: crate::RendererTexture,
+    scratch_r16: crate::RendererTexture,
 }
 
 impl BrushEncodeStage {
@@ -92,9 +94,29 @@ impl BrushEncodeStage {
         Ok(Self {
             bind_group_layout,
             pipelines: BrushPipelineSet::default(),
-            scratch_a: create_scratch_texture(device, "glaphica-brush-scratch-a")?,
-            scratch_b: create_scratch_texture(device, "glaphica-brush-scratch-b")?,
+            scratch_a: create_scratch_texture(
+                device,
+                "glaphica-brush-scratch-a",
+                BrushIntermediateFormat::Rgba8Unorm,
+            )?,
+            scratch_b: create_scratch_texture(
+                device,
+                "glaphica-brush-scratch-b",
+                BrushIntermediateFormat::Rgba8Unorm,
+            )?,
+            scratch_r16: create_scratch_texture(
+                device,
+                "glaphica-brush-scratch-r16",
+                BrushIntermediateFormat::R16Float,
+            )?,
         })
+    }
+
+    fn apply_scratch(&self, format: BrushIntermediateFormat) -> &crate::RendererTexture {
+        match format {
+            BrushIntermediateFormat::Rgba8Unorm => &self.scratch_b,
+            BrushIntermediateFormat::R16Float => &self.scratch_r16,
+        }
     }
 
     fn build_brush_buffer(
@@ -143,6 +165,10 @@ impl BrushEncodeStage {
             BrushShaderStage::ApplyDab => shader_spec.apply_dab,
             BrushShaderStage::MergeTile => shader_spec.merge_tile,
         };
+        let target_format = match stage {
+            BrushShaderStage::ApplyDab => map_intermediate_format(shader_spec.intermediate_format),
+            BrushShaderStage::MergeTile => wgpu::TextureFormat::Rgba8Unorm,
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glaphica-brush-shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.wgsl.into()),
@@ -169,7 +195,7 @@ impl BrushEncodeStage {
                 entry_point: Some(shader_source.entry_point),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: target_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -216,6 +242,13 @@ impl BrushEncodeStage {
             BrushShaderStage::ApplyDab,
         )?;
         let destination = atlas_texture_set.resolve_tile(command.destination_tile_key)?;
+        let shader_spec = provider.shader_spec(command.brush_id).ok_or(
+            TileRendererError::MissingBrushShader {
+                brush_id: command.brush_id,
+                stage: BrushShaderStage::ApplyDab,
+            },
+        )?;
+        let scratch = self.apply_scratch(shader_spec.intermediate_format);
         let source_tile_key = command
             .source_tile_key
             .unwrap_or(command.destination_tile_key);
@@ -232,7 +265,7 @@ impl BrushEncodeStage {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyTextureInfo {
-                texture: &self.scratch_b.texture,
+                texture: &scratch.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -272,11 +305,11 @@ impl BrushEncodeStage {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.scratch_b.view),
+                    resource: wgpu::BindingResource::TextureView(&scratch.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.scratch_b.view),
+                    resource: wgpu::BindingResource::TextureView(&scratch.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -482,17 +515,25 @@ impl BrushEncodeStage {
 fn create_scratch_texture(
     device: &wgpu::Device,
     label: &'static str,
+    format: BrushIntermediateFormat,
 ) -> Result<crate::RendererTexture, TileRendererError> {
     let descriptor = crate::RendererTextureDescriptor {
         label: Some(label),
         width: ATLAS_TILE_SIZE,
         height: ATLAS_TILE_SIZE,
         layers: 1,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: map_intermediate_format(format),
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST
             | wgpu::TextureUsages::RENDER_ATTACHMENT,
     };
     Ok(crate::RendererTexture::new(device, &descriptor)?)
+}
+
+fn map_intermediate_format(format: BrushIntermediateFormat) -> wgpu::TextureFormat {
+    match format {
+        BrushIntermediateFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        BrushIntermediateFormat::R16Float => wgpu::TextureFormat::R16Float,
+    }
 }

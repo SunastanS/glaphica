@@ -42,7 +42,7 @@ fn round_kernel(radius: f32, pixel_distance: f32) -> f32 {
 }
 
 @fragment
-fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) f32 {
     let pixel = vec2u(pos.xy);
     let tile_origin = vec2u(uniforms.tile_origin_x, uniforms.tile_origin_y);
     let tile_pixel = pixel - tile_origin;
@@ -58,6 +58,5 @@ fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let center_local = vec2f(payload.center_local_x, payload.center_local_y);
     let pixel_distance = distance(tile_local, center_local);
     let added = round_kernel(radius, pixel_distance) * flow;
-    let next_alpha = max(source.a + added, 0.0);
-    return vec4f(0.0, 0.0, 0.0, next_alpha);
+    return max(source.r + added, 0.0);
 }

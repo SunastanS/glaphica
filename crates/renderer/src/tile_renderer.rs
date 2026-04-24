@@ -7,9 +7,10 @@ pub mod types;
 pub use atlas_texture_set::AtlasTextureStage;
 pub use brush_encode::BrushEncodeStage;
 pub use types::{
-    ApplyDabCommand, BrushCommandExecutor, BrushShaderProvider, BrushShaderSource, BrushShaderSpec,
-    BrushShaderStage, CompositeTileCommand, CopyTileCommand, MergeTileCommand, PresentTileCommand,
-    PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource, TileRendererError,
+    ApplyDabCommand, BrushCommandExecutor, BrushIntermediateFormat, BrushShaderProvider,
+    BrushShaderSource, BrushShaderSpec, BrushShaderStage, CompositeTileCommand, CopyTileCommand,
+    MergeTileCommand, PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d,
+    TileCompositeSource, TileRendererError,
 };
 
 use atlas::TileKey;
@@ -40,6 +41,16 @@ impl TileRenderer {
         backend: &atlas::Backend,
     ) -> Result<(), TileRendererError> {
         self.atlas_texture_set.ensure_backend(device, backend)
+    }
+
+    pub fn ensure_backend_with_format(
+        &mut self,
+        device: &wgpu::Device,
+        backend: &atlas::Backend,
+        format: BrushIntermediateFormat,
+    ) -> Result<(), TileRendererError> {
+        self.atlas_texture_set
+            .ensure_backend_with_format(device, backend, format)
     }
 
     pub fn apply_clear_batches(
@@ -181,6 +192,32 @@ impl TileRenderer {
         present_target: Option<RenderTarget2d<'_>>,
         provider: &impl BrushShaderProvider,
     ) -> Result<(), TileRendererError> {
+        for command in commands {
+            let (brush_id, tile_key) = match command {
+                RenderCommand::ApplyDab(command) => {
+                    (command.brush_id, command.destination_tile_key)
+                }
+                RenderCommand::MergeTile(command) => {
+                    (command.brush_id, command.intermediate_tile_key)
+                }
+                _ => continue,
+            };
+            let shader_spec =
+                provider
+                    .shader_spec(brush_id)
+                    .ok_or(TileRendererError::MissingBrushShader {
+                        brush_id,
+                        stage: BrushShaderStage::ApplyDab,
+                    })?;
+            let backend_id = tile_key.parts().backend_id;
+            if let Some(backend) = backends
+                .iter()
+                .copied()
+                .find(|backend| backend.backend_id().ok() == Some(backend_id))
+            {
+                self.ensure_backend_with_format(device, backend, shader_spec.intermediate_format)?;
+            }
+        }
         let mut executor = RegisteredBrushExecutor { provider };
         self.execute_commands_with_brush_executor(
             device,

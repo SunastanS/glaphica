@@ -139,11 +139,11 @@ impl StrokeTransaction {
             return Ok(None);
         }
 
-        let intermediate_backend = brushes
+        let brush_backend = brushes
             .brush_backend(brush_id)
-            .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?
-            .intermediate_backend()
-            .clone();
+            .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
+        let intermediate_backend = brush_backend.intermediate_backend().clone();
+        let intermediate_format = brush_backend.intermediate_format();
         let active_layer_id = doc.active_layer_id();
         let batch = {
             let (image, backup_store) = doc.active_layer_image_and_backup_store_mut()?;
@@ -159,7 +159,11 @@ impl StrokeTransaction {
         let backup_backend = doc.undo_stack().backup_store().backend();
         let render_backend = doc_renderer.render_backend();
         tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend(device, &intermediate_backend)?;
+        tile_renderer.ensure_backend_with_format(
+            device,
+            &intermediate_backend,
+            intermediate_format,
+        )?;
         tile_renderer.ensure_backend(device, backup_backend)?;
         tile_renderer.ensure_backend(device, render_backend)?;
 
@@ -224,7 +228,11 @@ impl StrokeTransaction {
         let render_backend = doc_renderer.render_backend();
 
         tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend(device, intermediate_backend)?;
+        tile_renderer.ensure_backend_with_format(
+            device,
+            intermediate_backend,
+            brush_backend.intermediate_format(),
+        )?;
         tile_renderer.ensure_backend(device, render_backend)?;
 
         let mut clear_batches = intermediate_backend.take_pending_clear_batches()?;

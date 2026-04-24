@@ -8,7 +8,8 @@ pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
 use renderer::{
-    ApplyDabCommand, BrushShaderSpec, CopyTileCommand, MergeTileCommand, RenderCommand,
+    ApplyDabCommand, BrushIntermediateFormat, BrushShaderSpec, CopyTileCommand, MergeTileCommand,
+    RenderCommand,
 };
 use smoother::BrushLatencyTraceState;
 
@@ -413,16 +414,22 @@ pub struct BrushBackend {
     brush_id: BrushId,
     intermediate_backend: Backend,
     intermediate_backend_id: BackendId,
+    intermediate_format: BrushIntermediateFormat,
     stroke_history_groups: Vec<CachedTileGroup>,
 }
 
 impl BrushBackend {
-    pub fn new(brush_id: BrushId, intermediate_backend: Backend) -> Result<Self, BrushStrokeError> {
+    pub fn new(
+        brush_id: BrushId,
+        intermediate_backend: Backend,
+        intermediate_format: BrushIntermediateFormat,
+    ) -> Result<Self, BrushStrokeError> {
         let intermediate_backend_id = intermediate_backend.backend_id()?;
         Ok(Self {
             brush_id,
             intermediate_backend,
             intermediate_backend_id,
+            intermediate_format,
             stroke_history_groups: Vec::new(),
         })
     }
@@ -437,6 +444,10 @@ impl BrushBackend {
 
     pub fn intermediate_backend_id(&self) -> BackendId {
         self.intermediate_backend_id
+    }
+
+    pub fn intermediate_format(&self) -> BrushIntermediateFormat {
+        self.intermediate_format
     }
 
     pub fn stroke_history_groups(&self) -> &[CachedTileGroup] {
@@ -710,7 +721,11 @@ impl BrushRegistry {
         let registration = BrushRegistration {
             brush_id: shader_registration.brush_id,
             shader_spec: shader_registration.shader_spec,
-            backend: BrushBackend::new(shader_registration.brush_id, intermediate_backend)?,
+            backend: BrushBackend::new(
+                shader_registration.brush_id,
+                intermediate_backend,
+                shader_registration.shader_spec.intermediate_format,
+            )?,
             input_processor,
         };
         if let Some(index) = self
@@ -1090,8 +1105,12 @@ mod tests {
     #[test]
     fn atlas_backend_retires_stroke_intermediate_as_cached_group() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
-        let mut brush_backend =
-            BrushBackend::new(BrushId::new(17), backend.clone()).expect("backend should build");
+        let mut brush_backend = BrushBackend::new(
+            BrushId::new(17),
+            backend.clone(),
+            renderer::BrushIntermediateFormat::Rgba8Unorm,
+        )
+        .expect("backend should build");
         let mut state = brush_backend.begin_stroke();
         let mut commands = Vec::new();
         let active_tile_key = state

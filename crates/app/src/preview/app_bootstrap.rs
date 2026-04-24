@@ -2,7 +2,7 @@ use std::env;
 use std::time::Instant;
 
 use atlas::{AtlasLayout, Backend, BackendId, BackendManager};
-use brush::round::{ROUND_BRUSH_ID, RoundBrushSettings};
+use brush::round::{ROUND_BRUSH_ID, ROUND_SHADER_SPEC, RoundBrushSettings};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageCreateError, GlaImageLayout};
 use gla_image::GlaImageTileAccessError;
@@ -219,7 +219,11 @@ fn create_render_resources(
     tile_renderer.ensure_backend(&gpu.device, &image_backend)?;
     tile_renderer.ensure_backend(&gpu.device, &render_backend)?;
     tile_renderer.ensure_backend(&gpu.device, &backup_backend)?;
-    tile_renderer.ensure_backend(&gpu.device, &brush_backend)?;
+    tile_renderer.ensure_backend_with_format(
+        &gpu.device,
+        &brush_backend,
+        ROUND_SHADER_SPEC.intermediate_format,
+    )?;
 
     Ok((
         image_backend_id,

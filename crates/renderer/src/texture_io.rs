@@ -320,12 +320,35 @@ pub struct RendererTextureDescriptor<'a> {
 
 impl<'a> RendererTextureDescriptor<'a> {
     pub fn atlas_rgba8_unorm(label: Option<&'a str>, width: u32, height: u32, layers: u32) -> Self {
+        Self::atlas_with_format(
+            label,
+            width,
+            height,
+            layers,
+            crate::tile_renderer::types::BrushIntermediateFormat::Rgba8Unorm,
+        )
+    }
+
+    pub fn atlas_with_format(
+        label: Option<&'a str>,
+        width: u32,
+        height: u32,
+        layers: u32,
+        format: crate::tile_renderer::types::BrushIntermediateFormat,
+    ) -> Self {
         Self {
             label,
             width,
             height,
             layers,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: match format {
+                crate::tile_renderer::types::BrushIntermediateFormat::Rgba8Unorm => {
+                    wgpu::TextureFormat::Rgba8Unorm
+                }
+                crate::tile_renderer::types::BrushIntermediateFormat::R16Float => {
+                    wgpu::TextureFormat::R16Float
+                }
+            },
             usage: wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::TEXTURE_BINDING

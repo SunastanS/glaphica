@@ -13,6 +13,11 @@ pub enum TileRendererError {
     Atlas(AtlasError),
     TextureIo(TextureIoError),
     MissingBackendTexture(BackendId),
+    BackendTextureFormatMismatch {
+        backend_id: BackendId,
+        expected: BrushIntermediateFormat,
+        actual: BrushIntermediateFormat,
+    },
     InvalidTileKey,
     MissingPresentTarget,
     UnsupportedCommand(&'static str),
@@ -34,6 +39,15 @@ impl Display for TileRendererError {
                     backend_id.raw()
                 )
             }
+            Self::BackendTextureFormatMismatch {
+                backend_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "atlas backend {} was requested as {expected:?}, but already exists as {actual:?}",
+                backend_id.raw()
+            ),
             Self::InvalidTileKey => f.write_str("invalid tile key"),
             Self::MissingPresentTarget => f.write_str("present command requires a render target"),
             Self::UnsupportedCommand(name) => {
@@ -62,6 +76,12 @@ impl From<TextureIoError> for TileRendererError {
     fn from(error: TextureIoError) -> Self {
         Self::TextureIo(error)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushIntermediateFormat {
+    Rgba8Unorm,
+    R16Float,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +156,7 @@ pub struct BrushShaderSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushShaderSpec {
+    pub intermediate_format: BrushIntermediateFormat,
     pub apply_dab: BrushShaderSource,
     pub merge_tile: BrushShaderSource,
 }

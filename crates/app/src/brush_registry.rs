@@ -163,6 +163,7 @@ impl BrushShaderProvider for AppBrushRegistry {
 mod tests {
     use atlas::{AtlasLayout, Backend, BackendId};
     use brush::round::{ROUND_BRUSH_ID, ROUND_SHADER_SPEC};
+    use renderer::BrushIntermediateFormat;
 
     use crate::brush_registry::AppBrushRegistry;
 
@@ -175,6 +176,12 @@ mod tests {
             registry.shader_spec(ROUND_BRUSH_ID),
             Some(ROUND_SHADER_SPEC)
         );
-        assert!(registry.brush_backend(ROUND_BRUSH_ID).is_some());
+        let brush_backend = registry
+            .brush_backend(ROUND_BRUSH_ID)
+            .expect("round backend should be registered");
+        assert_eq!(
+            brush_backend.intermediate_format(),
+            BrushIntermediateFormat::R16Float
+        );
     }
 }
