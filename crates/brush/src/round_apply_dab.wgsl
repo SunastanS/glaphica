@@ -18,7 +18,7 @@ struct ApplyPayload {
 @group(0) @binding(2) var<uniform> uniforms: ApplyUniforms;
 @group(0) @binding(3) var<storage, read> payload: ApplyPayload;
 
-const ROUND_DAB_KERNEL_BETA: f32 = 4.5;
+const ROUND_DAB_KERNEL_A: f32 = 3.0;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -31,14 +31,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 }
 
 fn round_kernel(radius: f32, pixel_distance: f32) -> f32 {
+    // K_dab(r) = (1 - r^2)^a_+
     if (radius <= 0.0 || pixel_distance >= radius) {
         return 0.0;
     }
 
-    let relative_distance = max(pixel_distance / radius, 0.0);
-    let baseline = exp(-ROUND_DAB_KERNEL_BETA);
-    let value = exp(-ROUND_DAB_KERNEL_BETA * relative_distance * relative_distance);
-    return max((value - baseline) / (1.0 - baseline), 0.0);
+    let r = pixel_distance / radius;
+    let r2 = r * r;
+    return pow(1.0 - r2, ROUND_DAB_KERNEL_A);
 }
 
 @fragment

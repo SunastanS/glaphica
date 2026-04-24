@@ -36,7 +36,7 @@ pub const ROUND_MERGE_LUT_LEN: usize = 128;
 
 const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
-const ROUND_DAB_KERNEL_BETA: f32 = 4.5;
+const ROUND_DAB_KERNEL_A: f32 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurvePoint {
@@ -804,13 +804,12 @@ fn sanitized_spacing_ratio(spacing_ratio: f32) -> f32 {
 }
 
 fn round_dab_kernel(relative_distance: f32) -> f32 {
-    let relative_distance = relative_distance.max(0.0);
+    // K_dab(r) = (1 - r^2)^a_+
     if relative_distance >= 1.0 {
         return 0.0;
     }
-    let baseline = (-ROUND_DAB_KERNEL_BETA).exp();
-    let value = (-ROUND_DAB_KERNEL_BETA * relative_distance * relative_distance).exp();
-    ((value - baseline) / (1.0 - baseline)).max(0.0)
+    let r2 = relative_distance * relative_distance;
+    (1.0 - r2).powf(ROUND_DAB_KERNEL_A)
 }
 
 fn round_stroke_center_source_max(stroke_flow: f32, spacing_ratio: f32) -> f32 {

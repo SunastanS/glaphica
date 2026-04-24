@@ -57,7 +57,8 @@ fn fs_merge_tile(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         0
     );
     let stroke_opacity = clamp(payload.tint_and_opacity.a, 0.0, 1.0);
-    let coverage = clamp(lookup_coverage(intermediate.r), 0.0, 1.0);
+    let coverage_raw = clamp(lookup_coverage(intermediate.r), 0.0, 1.0);
+    let coverage = coverage_raw * coverage_raw * (3.0 - 2.0 * coverage_raw);
     let effective_alpha = stroke_opacity * coverage;
     let out_alpha = base.a + (1.0 - base.a) * effective_alpha;
     let out_rgb = mix(base.rgb, payload.tint_and_opacity.rgb, effective_alpha);
