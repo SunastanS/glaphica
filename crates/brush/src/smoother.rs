@@ -200,6 +200,7 @@ pub struct PassthroughStrokeSmoother {
     knots: VecDeque<CurveKnot>,
     next_input_index: usize,
     emitted_prefix: usize,
+    emitted_initial_knot: bool,
     emitted_arclength: f32,
 }
 
@@ -447,7 +448,7 @@ impl StrokeCurveBuffer {
 
         let mut count = 0;
 
-        if !self.initial_point_emitted && self.stable_end == 0 {
+        if !self.initial_point_emitted && self.stable_end.saturating_sub(self.emitted_prefix) < 2 {
             if let Some(first) = self.knots.front().copied() {
                 output.push_knot(first);
                 self.initial_point_emitted = true;
@@ -457,7 +458,7 @@ impl StrokeCurveBuffer {
 
         let knot_start = self.emitted_prefix.min(self.stable_end);
 
-        if self.stable_end <= knot_start {
+        if self.stable_end < knot_start + 2 {
             return 0;
         }
 
@@ -664,6 +665,7 @@ impl Default for PassthroughStrokeSmoother {
             knots: VecDeque::new(),
             next_input_index: 0,
             emitted_prefix: 0,
+            emitted_initial_knot: false,
             emitted_arclength: 0.0,
         }
     }
@@ -674,6 +676,7 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         self.knots.clear();
         self.next_input_index = 0;
         self.emitted_prefix = 0;
+        self.emitted_initial_knot = false;
         self.emitted_arclength = 0.0;
     }
 
@@ -714,10 +717,21 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
             return Ok(0);
         }
 
-        let mut count = 0;
         let end_index = self.knots.len();
+
+        if !self.emitted_initial_knot && end_index < 2 {
+            output.push_knot(self.knots[0]);
+            self.emitted_initial_knot = true;
+            return Ok(1);
+        }
+
         let knot_start = self.emitted_prefix.min(end_index.saturating_sub(1));
 
+        if end_index < knot_start + 2 {
+            return Ok(0);
+        }
+
+        let mut count = 0;
         for index in knot_start..end_index {
             output.push_knot(self.knots[index]);
             if index > knot_start {
@@ -1507,5 +1521,69 @@ mod tests {
                 value_index: 0,
             }
         );
+    }
+
+    #[test]
+    fn smooth_pop_does_not_emit_boundary_knot_without_new_spans() {
+        let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
+        let mut spans = CommittedCanvasSpanBuffer::new();
+
+        smoother
+            .push_canvas_inputs(&[
+                CanvasInput {
+                    time_ns: 0,
+                    position: CanvasVec2::new(0.0, 0.0),
+                    pressure: 0.5,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+                CanvasInput {
+                    time_ns: 10,
+                    position: CanvasVec2::new(2.0, 0.0),
+                    pressure: 0.5,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+                CanvasInput {
+                    time_ns: 20,
+                    position: CanvasVec2::new(8.0, 0.0),
+                    pressure: 0.5,
+                    tilt: RadianVec2::new(0.0, 0.0),
+                    twist: 0.0,
+                },
+            ])
+            .expect("push inputs");
+
+        let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
+        assert_eq!(count, 1);
+        assert_eq!(spans.knot_count(), 1);
+
+        let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
+        assert_eq!(count, 0);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn passthrough_pop_does_not_re_emit_initial_knot() {
+        let mut smoother = PassthroughStrokeSmoother::default();
+        let mut spans = CommittedCanvasSpanBuffer::new();
+
+        smoother
+            .push_canvas_input(CanvasInput {
+                time_ns: 0,
+                position: CanvasVec2::new(0.0, 0.0),
+                pressure: 0.5,
+                tilt: RadianVec2::new(0.0, 0.0),
+                twist: 0.0,
+            })
+            .expect("push input");
+
+        let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
+        assert_eq!(count, 1);
+        assert_eq!(spans.knot_count(), 1);
+
+        let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
+        assert_eq!(count, 0);
+        assert!(spans.is_empty());
     }
 }
