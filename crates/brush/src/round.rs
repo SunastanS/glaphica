@@ -865,7 +865,7 @@ fn round_stroke_source_at_distance(
         kernel_sum += 2.0 * round_dab_kernel(dab_distance);
         offset += spacing_ratio;
     }
-    stroke_flow * kernel_sum
+    kernel_sum
 }
 
 fn round_hardness_threshold_source(stroke_flow: f32, spacing_ratio: f32, hardness: f32) -> f32 {
