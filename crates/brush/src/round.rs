@@ -18,7 +18,16 @@ pub const ROUND_APPLY_DAB_WGSL: &str = include_str!("round_apply_dab.wgsl");
 pub const ROUND_APPLY_DAB_LINEAR_ADD_WGSL: &str = include_str!("round_apply_dab_linear_add.wgsl");
 pub const ROUND_MERGE_TILE_WGSL: &str = include_str!("round_merge_tile.wgsl");
 
-pub const ROUND_APPLY_DAB_SHADER_VARIANTS: &[ApplyDabShaderVariant] = &[
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundApplyDabBlendMode {
+    LinearAdd,
+    Max,
+    Multiply,
+}
+
+pub const ROUND_APPLY_DAB_BLEND_MODE: RoundApplyDabBlendMode = RoundApplyDabBlendMode::Max;
+
+const ROUND_APPLY_DAB_LINEAR_ADD_SHADER_VARIANTS: &[ApplyDabShaderVariant] = &[
     ApplyDabShaderVariant {
         source: BrushShaderSource {
             wgsl: ROUND_APPLY_DAB_LINEAR_ADD_WGSL,
@@ -37,6 +46,38 @@ pub const ROUND_APPLY_DAB_SHADER_VARIANTS: &[ApplyDabShaderVariant] = &[
     },
 ];
 
+const ROUND_APPLY_DAB_MAX_SHADER_VARIANTS: &[ApplyDabShaderVariant] = &[ApplyDabShaderVariant {
+    source: BrushShaderSource {
+        wgsl: ROUND_APPLY_DAB_WGSL,
+        entry_point: "fs_apply_dab_max",
+    },
+    validation: ApplyDabShaderValidation::Always,
+    blend: ApplyDabBlend::Replace,
+}];
+
+const ROUND_APPLY_DAB_MULTIPLY_SHADER_VARIANTS: &[ApplyDabShaderVariant] =
+    &[ApplyDabShaderVariant {
+        source: BrushShaderSource {
+            wgsl: ROUND_APPLY_DAB_WGSL,
+            entry_point: "fs_apply_dab_multiply",
+        },
+        validation: ApplyDabShaderValidation::Always,
+        blend: ApplyDabBlend::Replace,
+    }];
+
+pub const fn round_apply_dab_shader_variants_for_mode(
+    mode: RoundApplyDabBlendMode,
+) -> &'static [ApplyDabShaderVariant] {
+    match mode {
+        RoundApplyDabBlendMode::LinearAdd => ROUND_APPLY_DAB_LINEAR_ADD_SHADER_VARIANTS,
+        RoundApplyDabBlendMode::Max => ROUND_APPLY_DAB_MAX_SHADER_VARIANTS,
+        RoundApplyDabBlendMode::Multiply => ROUND_APPLY_DAB_MULTIPLY_SHADER_VARIANTS,
+    }
+}
+
+pub const ROUND_APPLY_DAB_SHADER_VARIANTS: &[ApplyDabShaderVariant] =
+    round_apply_dab_shader_variants_for_mode(ROUND_APPLY_DAB_BLEND_MODE);
+
 pub const ROUND_SHADER_SPEC: BrushShaderSpec = BrushShaderSpec {
     intermediate_format: BrushIntermediateFormat::R16Float,
     apply_dab_variants: ROUND_APPLY_DAB_SHADER_VARIANTS,
@@ -52,7 +93,6 @@ pub const ROUND_SHADER_REGISTRATION: BrushShaderRegistration = BrushShaderRegist
 };
 
 pub const ROUND_INPUT_BLOCK_LEN: usize = 11;
-pub const ROUND_MERGE_LUT_LEN: usize = 128;
 
 const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
@@ -167,8 +207,7 @@ pub struct RoundMergeSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct RoundMergePayload {
     tint_and_opacity: [f32; 4],
-    lookup_params: [f32; 4],
-    coverage_lut: [f32; ROUND_MERGE_LUT_LEN],
+    coverage_params: [f32; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -832,43 +871,105 @@ fn round_dab_kernel(relative_distance: f32) -> f32 {
     (1.0 - r2).powf(ROUND_DAB_KERNEL_A)
 }
 
-fn round_stroke_center_source_max(stroke_flow: f32, spacing_ratio: f32) -> f32 {
-    round_stroke_source_at_distance(stroke_flow, spacing_ratio, 0.0)
-}
-
 fn round_stroke_source_at_distance(
     stroke_flow: f32,
     spacing_ratio: f32,
+    normalized_distance: f32,
+) -> f32 {
+    round_stroke_source_at_distance_for_mode(
+        ROUND_APPLY_DAB_BLEND_MODE,
+        stroke_flow,
+        spacing_ratio,
+        normalized_distance,
+    )
+}
+
+fn round_stroke_source_at_distance_for_mode(
+    mode: RoundApplyDabBlendMode,
+    stroke_flow: f32,
+    spacing_ratio: f32,
+    normalized_distance: f32,
+) -> f32 {
+    let tangent_offset = match mode {
+        RoundApplyDabBlendMode::Max => sanitized_spacing_ratio(spacing_ratio) * 0.5,
+        RoundApplyDabBlendMode::LinearAdd | RoundApplyDabBlendMode::Multiply => 0.0,
+    };
+    round_stroke_source_at_offset_for_mode(
+        mode,
+        stroke_flow,
+        spacing_ratio,
+        tangent_offset,
+        normalized_distance,
+    )
+}
+
+fn round_stroke_source_at_offset_for_mode(
+    mode: RoundApplyDabBlendMode,
+    stroke_flow: f32,
+    spacing_ratio: f32,
+    tangent_offset: f32,
     normalized_distance: f32,
 ) -> f32 {
     let stroke_flow = stroke_flow.max(0.0);
     if stroke_flow <= f32::EPSILON {
         return 0.0;
     }
-    if !normalized_distance.is_finite() {
+    if !tangent_offset.is_finite() || !normalized_distance.is_finite() {
         return 0.0;
     }
 
     let spacing_ratio = sanitized_spacing_ratio(spacing_ratio);
+    let tangent_offset = tangent_offset.abs();
     let normalized_distance = normalized_distance.max(0.0);
     if normalized_distance >= 1.0 {
         return 0.0;
     }
 
-    let mut kernel_sum = round_dab_kernel(normalized_distance);
+    let center_distance = normalized_distance.hypot(tangent_offset);
+    let mut source = round_dab_kernel(center_distance) * stroke_flow;
     let mut offset = spacing_ratio;
     while offset < 1.0 {
-        let dab_distance = normalized_distance.hypot(offset);
-        if dab_distance >= 1.0 {
+        let previous_dab_distance = normalized_distance.hypot(tangent_offset + offset);
+        let next_dab_distance = normalized_distance.hypot((tangent_offset - offset).abs());
+        if previous_dab_distance >= 1.0 && next_dab_distance >= 1.0 {
             break;
         }
-        kernel_sum += 2.0 * round_dab_kernel(dab_distance);
+        let previous_dab_source = round_dab_kernel(previous_dab_distance) * stroke_flow;
+        let next_dab_source = round_dab_kernel(next_dab_distance) * stroke_flow;
+        source = blend_round_intermediate_sources(mode, source, previous_dab_source);
+        source = blend_round_intermediate_sources(mode, source, next_dab_source);
         offset += spacing_ratio;
     }
-    kernel_sum
+    source
+}
+
+fn blend_round_intermediate_sources(
+    mode: RoundApplyDabBlendMode,
+    source: f32,
+    dab_source: f32,
+) -> f32 {
+    match mode {
+        RoundApplyDabBlendMode::LinearAdd => source + dab_source,
+        RoundApplyDabBlendMode::Max => source.max(dab_source),
+        RoundApplyDabBlendMode::Multiply => 1.0 - (1.0 - source) * (1.0 - dab_source),
+    }
 }
 
 fn round_hardness_threshold_source(stroke_flow: f32, spacing_ratio: f32, hardness: f32) -> f32 {
+    round_hardness_threshold_source_for_mode(
+        ROUND_APPLY_DAB_BLEND_MODE,
+        stroke_flow,
+        spacing_ratio,
+        hardness,
+    )
+}
+
+fn round_hardness_threshold_source_for_mode(
+    mode: RoundApplyDabBlendMode,
+    stroke_flow: f32,
+    spacing_ratio: f32,
+    hardness: f32,
+) -> f32 {
     let stroke_flow = stroke_flow.max(0.0);
     let hardness = hardness.clamp(0.0, 1.0);
     if stroke_flow <= f32::EPSILON {
@@ -877,7 +978,11 @@ fn round_hardness_threshold_source(stroke_flow: f32, spacing_ratio: f32, hardnes
     if hardness >= 1.0 {
         return 0.0;
     }
-    round_stroke_source_at_distance(stroke_flow, spacing_ratio, hardness).max(f32::EPSILON)
+    if mode == RoundApplyDabBlendMode::Max {
+        return (round_dab_kernel(hardness) * stroke_flow).max(f32::EPSILON);
+    }
+    round_stroke_source_at_distance_for_mode(mode, stroke_flow, spacing_ratio, hardness)
+        .max(f32::EPSILON)
 }
 
 fn round_merge_coverage_for_source(
@@ -899,7 +1004,13 @@ fn round_merge_coverage_for_source(
 }
 
 fn build_round_merge_payload(settings: RoundMergeSettings) -> RoundMergePayload {
-    let mut coverage_lut = [0.0; ROUND_MERGE_LUT_LEN];
+    build_round_merge_payload_for_mode(settings, ROUND_APPLY_DAB_BLEND_MODE)
+}
+
+fn build_round_merge_payload_for_mode(
+    settings: RoundMergeSettings,
+    mode: RoundApplyDabBlendMode,
+) -> RoundMergePayload {
     let tint_and_opacity = [
         settings.tint[0],
         settings.tint[1],
@@ -909,22 +1020,11 @@ fn build_round_merge_payload(settings: RoundMergeSettings) -> RoundMergePayload 
     let stroke_flow = settings.stroke_flow.max(0.0);
     let spacing_ratio = sanitized_spacing_ratio(settings.spacing_ratio);
     let hardness = settings.hardness.clamp(0.0, 1.0);
-    let source_max = round_stroke_center_source_max(stroke_flow, spacing_ratio);
     let hardness_threshold_source =
-        round_hardness_threshold_source(stroke_flow, spacing_ratio, hardness);
-    let mut source_to_lut_scale = 0.0;
-    if source_max > f32::EPSILON {
-        source_to_lut_scale = (ROUND_MERGE_LUT_LEN.saturating_sub(1) as f32) / source_max;
-        for (index, lut_value) in coverage_lut.iter_mut().enumerate() {
-            let source = source_max * index as f32 / (ROUND_MERGE_LUT_LEN.saturating_sub(1) as f32);
-            *lut_value =
-                round_merge_coverage_for_source(source, hardness_threshold_source, hardness);
-        }
-    }
+        round_hardness_threshold_source_for_mode(mode, stroke_flow, spacing_ratio, hardness);
     RoundMergePayload {
         tint_and_opacity,
-        lookup_params: [source_to_lut_scale, source_max, 0.0, 0.0],
-        coverage_lut,
+        coverage_params: [hardness_threshold_source, hardness, 0.0, 0.0],
     }
 }
 
@@ -936,15 +1036,49 @@ mod tests {
         BrushInput, BrushInputBlockList, BrushInputProcessor, CanvasInput,
         PassthroughStrokeSmoother, StrokeSmoother,
         round::{
-            CurvePoint, ModulationCurve, ROUND_BRUSH_ID, RoundBrushDabVariable,
-            RoundBrushInputFeature, RoundBrushInputProcessor, RoundMergeSettings,
-            encode_round_merge_payload,
+            CurvePoint, ModulationCurve, ROUND_APPLY_DAB_LINEAR_ADD_WGSL, ROUND_APPLY_DAB_WGSL,
+            ROUND_BRUSH_ID, RoundApplyDabBlendMode, RoundBrushDabVariable, RoundBrushInputFeature,
+            RoundBrushInputProcessor, RoundMergeSettings, encode_round_merge_payload,
+            round_apply_dab_shader_variants_for_mode,
         },
     };
     use glaphica_core::CanvasVec2;
+    use renderer::{ApplyDabBlend, ApplyDabShaderValidation};
 
     fn passthrough_smoother_factory() -> Box<dyn StrokeSmoother> {
         Box::new(PassthroughStrokeSmoother::default())
+    }
+
+    #[test]
+    fn round_apply_dab_blend_modes_select_expected_shader_variants() {
+        let linear_add =
+            round_apply_dab_shader_variants_for_mode(RoundApplyDabBlendMode::LinearAdd);
+        assert_eq!(linear_add.len(), 2);
+        assert_eq!(linear_add[0].source.wgsl, ROUND_APPLY_DAB_LINEAR_ADD_WGSL);
+        assert_eq!(linear_add[0].source.entry_point, "fs_apply_dab_linear_add");
+        assert_eq!(
+            linear_add[0].validation,
+            ApplyDabShaderValidation::LinearAddBlend
+        );
+        assert_eq!(linear_add[0].blend, ApplyDabBlend::LinearAdd);
+        assert_eq!(linear_add[1].source.wgsl, ROUND_APPLY_DAB_WGSL);
+        assert_eq!(linear_add[1].source.entry_point, "fs_apply_dab");
+        assert_eq!(linear_add[1].validation, ApplyDabShaderValidation::Always);
+        assert_eq!(linear_add[1].blend, ApplyDabBlend::Replace);
+
+        let max = round_apply_dab_shader_variants_for_mode(RoundApplyDabBlendMode::Max);
+        assert_eq!(max.len(), 1);
+        assert_eq!(max[0].source.wgsl, ROUND_APPLY_DAB_WGSL);
+        assert_eq!(max[0].source.entry_point, "fs_apply_dab_max");
+        assert_eq!(max[0].validation, ApplyDabShaderValidation::Always);
+        assert_eq!(max[0].blend, ApplyDabBlend::Replace);
+
+        let multiply = round_apply_dab_shader_variants_for_mode(RoundApplyDabBlendMode::Multiply);
+        assert_eq!(multiply.len(), 1);
+        assert_eq!(multiply[0].source.wgsl, ROUND_APPLY_DAB_WGSL);
+        assert_eq!(multiply[0].source.entry_point, "fs_apply_dab_multiply");
+        assert_eq!(multiply[0].validation, ApplyDabShaderValidation::Always);
+        assert_eq!(multiply[0].blend, ApplyDabBlend::Replace);
     }
 
     #[test]
@@ -1551,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_payload_lookup_table_is_monotonic() {
+    fn merge_payload_encodes_direct_coverage_params() {
         let payload = super::build_round_merge_payload(RoundMergeSettings {
             tint: [0.1, 0.2, 0.3],
             opacity: 0.8,
@@ -1559,13 +1693,11 @@ mod tests {
             spacing_ratio: 0.7,
             hardness: 0.4,
         });
+        let expected_threshold = super::round_hardness_threshold_source(1.0, 0.7, 0.4);
 
-        assert_eq!(payload.coverage_lut[0], 0.0);
-        assert!(payload.lookup_params[0] > 0.0);
-        assert!(payload.coverage_lut[super::ROUND_MERGE_LUT_LEN - 1] > 0.99);
-        for window in payload.coverage_lut.windows(2) {
-            assert!(window[0] <= window[1], "{window:?}");
-        }
+        assert_eq!(payload.tint_and_opacity, [0.1, 0.2, 0.3, 0.8]);
+        assert!((payload.coverage_params[0] - expected_threshold).abs() <= 1e-5);
+        assert_eq!(payload.coverage_params[1], 0.4);
     }
 
     #[test]
@@ -1585,19 +1717,32 @@ mod tests {
             hardness: 0.8,
         });
 
-        let mid_index = super::ROUND_MERGE_LUT_LEN / 2;
-        assert!(hard.coverage_lut[mid_index] >= soft.coverage_lut[mid_index]);
+        let source = 0.25;
+        let soft_coverage =
+            super::round_merge_coverage_for_source(source, soft.coverage_params[0], 0.2);
+        let hard_coverage =
+            super::round_merge_coverage_for_source(source, hard.coverage_params[0], 0.8);
+
+        assert!(hard_coverage >= soft_coverage);
     }
 
     #[test]
-    fn hardness_maps_to_spacing_aware_clip_threshold() {
+    fn linear_add_hardness_maps_to_spacing_aware_clip_threshold() {
         let stroke_flow = 1.0;
         let spacing_ratio = 0.3;
         let hardness = 0.3;
-        let hardness_threshold_source =
-            super::round_hardness_threshold_source(stroke_flow, spacing_ratio, hardness);
-        let expected_threshold =
-            super::round_stroke_source_at_distance(stroke_flow, spacing_ratio, hardness);
+        let hardness_threshold_source = super::round_hardness_threshold_source_for_mode(
+            RoundApplyDabBlendMode::LinearAdd,
+            stroke_flow,
+            spacing_ratio,
+            hardness,
+        );
+        let expected_threshold = super::round_stroke_source_at_distance_for_mode(
+            RoundApplyDabBlendMode::LinearAdd,
+            stroke_flow,
+            spacing_ratio,
+            hardness,
+        );
 
         assert!((hardness_threshold_source - expected_threshold).abs() <= 1e-5);
         assert_eq!(
@@ -1630,39 +1775,92 @@ mod tests {
     }
 
     #[test]
-    fn stroke_center_source_max_increases_when_spacing_gets_denser() {
-        let sparse = super::round_stroke_center_source_max(1.0, 1.0);
-        let dense = super::round_stroke_center_source_max(1.0, 0.1);
+    fn max_blend_source_scale_stays_independent_of_dense_spacing() {
+        let sparse_spacing = 1.0;
+        let dense_spacing = 0.1;
+        let sparse = super::round_stroke_source_at_distance_for_mode(
+            RoundApplyDabBlendMode::Max,
+            1.0,
+            sparse_spacing,
+            0.0,
+        );
+        let dense = super::round_stroke_source_at_distance_for_mode(
+            RoundApplyDabBlendMode::Max,
+            1.0,
+            dense_spacing,
+            0.0,
+        );
+        let threshold = super::round_hardness_threshold_source_for_mode(
+            RoundApplyDabBlendMode::Max,
+            1.0,
+            dense_spacing,
+            0.3,
+        );
 
-        assert!((sparse - 1.0).abs() <= 1e-5);
-        assert!(dense > sparse);
+        let sparse_midpoint = sparse_spacing * 0.5;
+        let dense_midpoint = dense_spacing * 0.5;
+        assert!((sparse - super::round_dab_kernel(sparse_midpoint)).abs() <= 1e-5);
+        assert!((dense - super::round_dab_kernel(dense_midpoint)).abs() <= 1e-5);
+        assert!((threshold - super::round_dab_kernel(0.3)).abs() <= 1e-5);
     }
 
     #[test]
-    fn merge_payload_uses_spacing_dependent_source_max() {
-        let sparse = super::build_round_merge_payload(RoundMergeSettings {
-            tint: [0.1, 0.2, 0.3],
-            opacity: 1.0,
-            stroke_flow: 1.0,
-            spacing_ratio: 1.0,
-            hardness: 0.3,
-        });
-        let dense = super::build_round_merge_payload(RoundMergeSettings {
-            tint: [0.1, 0.2, 0.3],
-            opacity: 1.0,
-            stroke_flow: 1.0,
-            spacing_ratio: 0.1,
-            hardness: 0.3,
-        });
+    fn multiply_blend_source_scale_matches_apply_dab_formula() {
+        let stroke_flow = 0.5;
+        let spacing_ratio = 0.5;
+        let expected_neighbor = super::round_dab_kernel(spacing_ratio) * stroke_flow;
+        let expected =
+            1.0 - (1.0 - stroke_flow) * (1.0 - expected_neighbor) * (1.0 - expected_neighbor);
+        let actual = super::round_stroke_source_at_distance_for_mode(
+            RoundApplyDabBlendMode::Multiply,
+            stroke_flow,
+            spacing_ratio,
+            0.0,
+        );
 
-        assert!(dense.lookup_params[1] > sparse.lookup_params[1]);
-        assert!(dense.lookup_params[0] < sparse.lookup_params[0]);
+        assert!((actual - expected).abs() <= 1e-5);
+    }
+
+    #[test]
+    fn merge_payload_uses_spacing_dependent_threshold() {
+        let sparse = super::build_round_merge_payload_for_mode(
+            RoundMergeSettings {
+                tint: [0.1, 0.2, 0.3],
+                opacity: 1.0,
+                stroke_flow: 1.0,
+                spacing_ratio: 1.0,
+                hardness: 0.3,
+            },
+            RoundApplyDabBlendMode::LinearAdd,
+        );
+        let dense = super::build_round_merge_payload_for_mode(
+            RoundMergeSettings {
+                tint: [0.1, 0.2, 0.3],
+                opacity: 1.0,
+                stroke_flow: 1.0,
+                spacing_ratio: 0.1,
+                hardness: 0.3,
+            },
+            RoundApplyDabBlendMode::LinearAdd,
+        );
+
+        assert!(dense.coverage_params[0] > sparse.coverage_params[0]);
     }
 
     #[test]
     fn clip_threshold_increases_when_spacing_gets_denser() {
-        let sparse = super::round_hardness_threshold_source(1.0, 1.0, 0.3);
-        let dense = super::round_hardness_threshold_source(1.0, 0.1, 0.3);
+        let sparse = super::round_hardness_threshold_source_for_mode(
+            RoundApplyDabBlendMode::LinearAdd,
+            1.0,
+            1.0,
+            0.3,
+        );
+        let dense = super::round_hardness_threshold_source_for_mode(
+            RoundApplyDabBlendMode::LinearAdd,
+            1.0,
+            0.1,
+            0.3,
+        );
 
         assert!(dense > sparse);
     }

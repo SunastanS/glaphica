@@ -31,7 +31,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 }
 
 fn round_kernel(radius: f32, pixel_distance: f32) -> f32 {
-    // K_dab(r) = (1 - r^2)^a_+
     if (radius <= 0.0 || pixel_distance >= radius) {
         return 0.0;
     }
@@ -41,8 +40,7 @@ fn round_kernel(radius: f32, pixel_distance: f32) -> f32 {
     return pow(1.0 - r2, ROUND_DAB_KERNEL_A);
 }
 
-@fragment
-fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) f32 {
+fn apply_dab_source(pos: vec4f) -> vec2f {
     let pixel = vec2u(pos.xy);
     let tile_origin = vec2u(uniforms.tile_origin_x, uniforms.tile_origin_y);
     let tile_pixel = pixel - tile_origin;
@@ -58,5 +56,23 @@ fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) f32 {
     let center_local = vec2f(payload.center_local_x, payload.center_local_y);
     let pixel_distance = distance(tile_local, center_local);
     let added = round_kernel(radius, pixel_distance) * flow;
-    return max(source.r + added, 0.0);
+    return vec2f(source.r, max(added, 0.0));
+}
+
+@fragment
+fn fs_apply_dab(@builtin(position) pos: vec4f) -> @location(0) f32 {
+    let values = apply_dab_source(pos);
+    return max(values.x + values.y, 0.0);
+}
+
+@fragment
+fn fs_apply_dab_max(@builtin(position) pos: vec4f) -> @location(0) f32 {
+    let values = apply_dab_source(pos);
+    return max(values.x, values.y);
+}
+
+@fragment
+fn fs_apply_dab_multiply(@builtin(position) pos: vec4f) -> @location(0) f32 {
+    let values = apply_dab_source(pos);
+    return 1.0 - (1.0 - values.x) * (1.0 - values.y);
 }

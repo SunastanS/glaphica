@@ -1562,7 +1562,9 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
+        let count = smoother
+            .pop_committed_spans(&mut spans)
+            .expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
     }
@@ -1586,7 +1588,9 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
+        let count = smoother
+            .pop_committed_spans(&mut spans)
+            .expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
     }
@@ -1619,7 +1623,9 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(spans.span_count(), 1);
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
+        let count = smoother
+            .pop_committed_spans(&mut spans)
+            .expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
     }
