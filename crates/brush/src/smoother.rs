@@ -744,6 +744,10 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
             count += 1;
         }
 
+        if count > 0 {
+            self.emitted_initial_knot = true;
+        }
+
         if end_index > 0 {
             self.emitted_prefix = end_index.saturating_sub(1);
         }
@@ -1581,6 +1585,39 @@ mod tests {
         let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
+
+        let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
+        assert_eq!(count, 0);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn passthrough_first_pop_with_two_knots_marks_initial_as_emitted() {
+        let mut smoother = PassthroughStrokeSmoother::default();
+        let mut spans = CommittedCanvasSpanBuffer::new();
+
+        smoother
+            .push_canvas_input(CanvasInput {
+                time_ns: 0,
+                position: CanvasVec2::new(0.0, 0.0),
+                pressure: 0.5,
+                tilt: RadianVec2::new(0.0, 0.0),
+                twist: 0.0,
+            })
+            .expect("push first");
+        smoother
+            .push_canvas_input(CanvasInput {
+                time_ns: 1,
+                position: CanvasVec2::new(1.0, 0.0),
+                pressure: 0.5,
+                tilt: RadianVec2::new(0.0, 0.0),
+                twist: 0.0,
+            })
+            .expect("push second");
+
+        let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
+        assert_eq!(count, 2);
+        assert_eq!(spans.span_count(), 1);
 
         let count = smoother.pop_committed_spans(&mut spans).expect("second pop");
         assert_eq!(count, 0);
