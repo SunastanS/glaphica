@@ -172,7 +172,7 @@ impl BrushStrokeInputProcessor for SmoothedBrushStrokeInputProcessor {
             .map(|input| input.blocks.blocks().len())
             .unwrap_or(0);
         self.latency_trace
-            .trace_drain(self.committed_spans.len(), emitted_blocks);
+            .trace_drain(self.committed_spans.knot_count(), emitted_blocks);
         Ok(encoded)
     }
 }

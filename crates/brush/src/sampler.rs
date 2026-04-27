@@ -59,8 +59,27 @@ impl EquidistantCurveSampler {
             return;
         }
 
-        let arclength_tables = spans
-            .spans()
+        if spans.span_count() == 0 {
+            let knot = spans.knots()[0];
+            if cursor.next_sample_s <= spans.global_s_start() {
+                output.push(CommittedCanvasSample {
+                    time_ns: knot.time_ns,
+                    position: knot.position,
+                    pressure: knot.pressure,
+                    tilt: knot.tilt,
+                    twist: knot.twist,
+                    velocity: knot.velocity,
+                    acceleration: knot.acceleration,
+                });
+                cursor.next_sample_s += self.spacing;
+            }
+            return;
+        }
+
+        let committed_spans = spans.collect_spans();
+        let committed_spans_slice = committed_spans.as_slice();
+
+        let arclength_tables = committed_spans_slice
             .iter()
             .map(SpanArcTable::from_span)
             .collect::<Vec<_>>();
@@ -72,7 +91,7 @@ impl EquidistantCurveSampler {
         );
         while cursor.next_sample_s <= batch_end_s {
             output.push(sample_at_global_s(
-                spans.spans(),
+                committed_spans_slice,
                 &arclength_tables,
                 &span_global_starts,
                 cursor.next_sample_s,
@@ -485,8 +504,8 @@ mod tests {
 
     use super::{EquidistantCurveSampler, EquidistantSamplerCursor, SpanArcTable, span_arclength};
     use crate::{
-        CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot, DistanceOrTimeStrokeSmoother,
-        StrokeSmoother,
+        CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot,
+        DistanceOrTimeStrokeSmoother, StrokeSmoother,
     };
     use glaphica_core::{CanvasInput, CanvasVec2};
 
@@ -519,7 +538,16 @@ mod tests {
         smoother.finish_stroke();
         smoother.pop_committed_spans(&mut spans).expect("pop spans");
 
-        output.push(spans.spans()[0].sample(0.0));
+        let knot = spans.knots()[0];
+        output.push(CommittedCanvasSample {
+            time_ns: knot.time_ns,
+            position: knot.position,
+            pressure: knot.pressure,
+            tilt: knot.tilt,
+            twist: knot.twist,
+            velocity: knot.velocity,
+            acceleration: knot.acceleration,
+        });
         cursor = EquidistantSamplerCursor::new(4.0);
         sampler.sample_spans(&spans, &mut cursor, &mut output);
 
@@ -535,30 +563,30 @@ mod tests {
         let mut output = Vec::new();
         let sampler = EquidistantCurveSampler::new(4.0);
         let mut cursor = EquidistantSamplerCursor::new(4.0);
-        spans.push_span(CommittedCanvasSpan {
-            start: CurveKnot {
-                time_ns: 0,
-                position: CanvasVec2::new(0.0, 0.0),
-                pressure: 1.0,
-                tilt: RadianVec2::new(0.0, 0.0),
-                twist: 0.0,
-                velocity: CanvasVec2::new(10.0, 0.0),
-                acceleration: CanvasVec2::new(0.0, 0.0),
-                cumulative_s: 0.0,
-            },
-            end: CurveKnot {
-                time_ns: 1_000_000_000,
-                position: CanvasVec2::new(10.0, 10.0),
-                pressure: 1.0,
-                tilt: RadianVec2::new(0.0, 0.0),
-                twist: 0.0,
-                velocity: CanvasVec2::new(0.0, 10.0),
-                acceleration: CanvasVec2::new(0.0, 0.0),
-                cumulative_s: 20.0,
-            },
-        });
+        let start_knot = CurveKnot {
+            time_ns: 0,
+            position: CanvasVec2::new(0.0, 0.0),
+            pressure: 1.0,
+            tilt: RadianVec2::new(0.0, 0.0),
+            twist: 0.0,
+            velocity: CanvasVec2::new(10.0, 0.0),
+            acceleration: CanvasVec2::new(0.0, 0.0),
+            cumulative_s: 0.0,
+        };
+        let end_knot = CurveKnot {
+            time_ns: 1_000_000_000,
+            position: CanvasVec2::new(10.0, 10.0),
+            pressure: 1.0,
+            tilt: RadianVec2::new(0.0, 0.0),
+            twist: 0.0,
+            velocity: CanvasVec2::new(0.0, 10.0),
+            acceleration: CanvasVec2::new(0.0, 0.0),
+            cumulative_s: 20.0,
+        };
+        spans.push_knot(start_knot);
+        spans.push_knot(end_knot);
 
-        output.push(spans.spans()[0].sample(0.0));
+        output.push(spans.span_at(0).unwrap().sample(0.0));
         sampler.sample_spans(&spans, &mut cursor, &mut output);
 
         assert_eq!(output.len(), 4);
@@ -599,11 +627,15 @@ mod tests {
 
         let sampler = EquidistantCurveSampler::new(4.0);
         let mut first_batch = CommittedCanvasSpanBuffer::new();
-        first_batch.push_span(make_span(0.0, 6.0, 0.0, 6.0));
+        let span0 = make_span(0.0, 6.0, 0.0, 6.0);
+        first_batch.push_knot(span0.start);
+        first_batch.push_knot(span0.end);
 
         let mut second_batch = CommittedCanvasSpanBuffer::new();
         second_batch.set_global_s_start(6.0);
-        second_batch.push_span(make_span(6.0, 12.0, 6.0, 12.0));
+        let span1 = make_span(6.0, 12.0, 6.0, 12.0);
+        second_batch.push_knot(span1.start);
+        second_batch.push_knot(span1.end);
 
         let mut cursor = EquidistantSamplerCursor::new(4.0);
         let mut output = Vec::new();

@@ -200,13 +200,12 @@ pub struct PassthroughStrokeSmoother {
     knots: VecDeque<CurveKnot>,
     next_input_index: usize,
     emitted_prefix: usize,
-    initial_point_emitted: bool,
     emitted_arclength: f32,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct CommittedCanvasSpanBuffer {
-    spans: Vec<CommittedCanvasSpan>,
+    knots: Vec<CurveKnot>,
     global_s_start: f32,
 }
 
@@ -318,28 +317,50 @@ impl CommittedCanvasSpanBuffer {
     }
 
     pub fn clear(&mut self) {
-        self.spans.clear();
+        self.knots.clear();
         self.global_s_start = 0.0;
     }
 
-    pub fn len(&self) -> usize {
-        self.spans.len()
+    pub fn knot_count(&self) -> usize {
+        self.knots.len()
+    }
+
+    pub fn span_count(&self) -> usize {
+        self.knots.len().saturating_sub(1)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.spans.is_empty()
+        self.knots.is_empty()
     }
 
     pub fn global_s_start(&self) -> f32 {
         self.global_s_start
     }
 
-    pub fn spans(&self) -> &[CommittedCanvasSpan] {
-        &self.spans
+    pub fn knots(&self) -> &[CurveKnot] {
+        &self.knots
     }
 
-    pub fn push_span(&mut self, span: CommittedCanvasSpan) {
-        self.spans.push(span);
+    pub fn push_knot(&mut self, knot: CurveKnot) {
+        self.knots.push(knot);
+    }
+
+    pub fn span_at(&self, index: usize) -> Option<CommittedCanvasSpan> {
+        Some(CommittedCanvasSpan {
+            start: *self.knots.get(index)?,
+            end: *self.knots.get(index + 1)?,
+        })
+    }
+
+    pub fn spans_iter(&self) -> impl Iterator<Item = CommittedCanvasSpan> + '_ {
+        self.knots.windows(2).map(|w| CommittedCanvasSpan {
+            start: w[0],
+            end: w[1],
+        })
+    }
+
+    pub fn collect_spans(&self) -> Vec<CommittedCanvasSpan> {
+        self.spans_iter().collect()
     }
 
     pub(crate) fn set_global_s_start(&mut self, global_s_start: f32) {
@@ -424,33 +445,36 @@ impl StrokeCurveBuffer {
             return 0;
         }
 
-        let mut count = 0usize;
-        if !self.initial_point_emitted && self.stable_end.saturating_sub(self.emitted_prefix) < 2 {
+        let mut count = 0;
+
+        if !self.initial_point_emitted && self.stable_end == 0 {
             if let Some(first) = self.knots.front().copied() {
-                output.push_span(CommittedCanvasSpan {
-                    start: first,
-                    end: first,
-                });
+                output.push_knot(first);
                 self.initial_point_emitted = true;
-                count += 1;
+                return 1;
             }
         }
 
-        let span_start = self.emitted_prefix.min(self.stable_end);
-        if self.stable_end >= span_start + 2 {
-            for index in span_start..(self.stable_end - 1) {
-                let Some(start) = self.knots.get(index).copied() else {
-                    break;
+        let knot_start = self.emitted_prefix.min(self.stable_end);
+
+        if self.stable_end <= knot_start {
+            return 0;
+        }
+
+        for index in knot_start..self.stable_end {
+            output.push_knot(self.knots[index]);
+            if index > knot_start {
+                let span = CommittedCanvasSpan {
+                    start: self.knots[index - 1],
+                    end: self.knots[index],
                 };
-                let Some(end) = self.knots.get(index + 1).copied() else {
-                    break;
-                };
-                let span = CommittedCanvasSpan { start, end };
                 self.emitted_arclength += span_arclength(&span);
-                output.push_span(span);
-                count += 1;
             }
-            self.emitted_prefix = self.stable_end - 1;
+            count += 1;
+        }
+
+        if self.stable_end > 0 {
+            self.emitted_prefix = self.stable_end.saturating_sub(1);
         }
 
         count
@@ -640,7 +664,6 @@ impl Default for PassthroughStrokeSmoother {
             knots: VecDeque::new(),
             next_input_index: 0,
             emitted_prefix: 0,
-            initial_point_emitted: false,
             emitted_arclength: 0.0,
         }
     }
@@ -651,7 +674,6 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         self.knots.clear();
         self.next_input_index = 0;
         self.emitted_prefix = 0;
-        self.initial_point_emitted = false;
         self.emitted_arclength = 0.0;
     }
 
@@ -692,35 +714,24 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
             return Ok(0);
         }
 
-        let mut count = 0usize;
-        if !self.initial_point_emitted {
-            let Some(first) = self.knots.front().copied() else {
-                return Ok(0);
-            };
-            output.push_span(CommittedCanvasSpan {
-                start: first,
-                end: first,
-            });
-            self.initial_point_emitted = true;
+        let mut count = 0;
+        let end_index = self.knots.len();
+        let knot_start = self.emitted_prefix.min(end_index.saturating_sub(1));
+
+        for index in knot_start..end_index {
+            output.push_knot(self.knots[index]);
+            if index > knot_start {
+                let span = CommittedCanvasSpan {
+                    start: self.knots[index - 1],
+                    end: self.knots[index],
+                };
+                self.emitted_arclength += span_arclength(&span);
+            }
             count += 1;
         }
 
-        let last_segment_start = self.knots.len().saturating_sub(1);
-        let span_start = self.emitted_prefix.min(last_segment_start);
-        if self.knots.len() >= span_start + 2 {
-            for index in span_start..last_segment_start {
-                let Some(start) = self.knots.get(index).copied() else {
-                    break;
-                };
-                let Some(end) = self.knots.get(index + 1).copied() else {
-                    break;
-                };
-                let span = CommittedCanvasSpan { start, end };
-                self.emitted_arclength += span_arclength(&span);
-                output.push_span(span);
-                count += 1;
-            }
-            self.emitted_prefix = last_segment_start;
+        if end_index > 0 {
+            self.emitted_prefix = end_index.saturating_sub(1);
         }
 
         Ok(count)
@@ -1100,7 +1111,9 @@ mod tests {
             .current_drawing_sample()
             .expect("finished drawing sample");
         smoother.pop_committed_spans(&mut spans).expect("pop spans");
-        let last_span = spans.spans().last().expect("last span");
+        let last_span = spans
+            .span_at(spans.span_count().saturating_sub(1))
+            .expect("last span");
         assert_eq!(sample.time_ns, last_span.end.time_ns);
         assert_eq!(sample.position, last_span.end.position);
     }
@@ -1171,8 +1184,8 @@ mod tests {
         let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
 
         assert_eq!(count, 1);
-        assert_eq!(spans.spans()[0].start.position, CanvasVec2::new(0.0, 0.0));
-        assert_eq!(spans.spans()[0].end.position, CanvasVec2::new(0.0, 0.0));
+        assert_eq!(spans.knot_count(), 1);
+        assert_eq!(spans.knots()[0].position, CanvasVec2::new(0.0, 0.0));
     }
 
     #[test]
@@ -1217,10 +1230,9 @@ mod tests {
 
         assert!(count >= 1);
         let smoothed_middle = spans
-            .spans()
+            .knots()
             .last()
-            .expect("at least one committed span")
-            .end
+            .expect("at least one committed knot")
             .position;
         assert!(smoothed_middle.x > 2.0);
         assert!(smoothed_middle.y < 6.0);
@@ -1253,8 +1265,8 @@ mod tests {
         let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
 
         assert_eq!(count, 1);
-        assert_eq!(spans.spans()[0].start.position, CanvasVec2::new(4.0, 5.0));
-        assert_eq!(spans.spans()[0].end.position, CanvasVec2::new(4.0, 5.0));
+        assert_eq!(spans.knot_count(), 1);
+        assert_eq!(spans.knots()[0].position, CanvasVec2::new(4.0, 5.0));
     }
 
     #[test]
@@ -1288,9 +1300,10 @@ mod tests {
         smoother.finish_stroke();
         let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
 
-        assert_eq!(count, 1);
-        assert_eq!(spans.spans()[0].start.position, CanvasVec2::new(0.0, 0.0));
-        assert_eq!(spans.spans()[0].end.position, CanvasVec2::new(1.0, 0.0));
+        assert_eq!(count, 2);
+        let first_span = spans.span_at(0).expect("first span");
+        assert_eq!(first_span.start.position, CanvasVec2::new(0.0, 0.0));
+        assert_eq!(first_span.end.position, CanvasVec2::new(1.0, 0.0));
     }
 
     #[test]
@@ -1335,8 +1348,7 @@ mod tests {
         smoother.pop_committed_spans(&mut spans).expect("pop spans");
 
         let end = spans
-            .spans()
-            .last()
+            .span_at(spans.span_count().saturating_sub(1))
             .expect("committed span after finish")
             .end
             .position;
@@ -1371,8 +1383,9 @@ mod tests {
         smoother.finish_stroke();
         let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
 
-        assert_eq!(count, 1);
-        assert_ne!(spans.spans()[0].start.time_ns, spans.spans()[0].end.time_ns);
+        assert_eq!(count, 2);
+        let first_span = spans.span_at(0).expect("first span");
+        assert_ne!(first_span.start.time_ns, first_span.end.time_ns);
     }
 
     #[test]
