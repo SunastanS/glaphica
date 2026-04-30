@@ -353,6 +353,8 @@ fn run_brush_thread(
             &brush_input_producer,
             worker_batch_capacity,
             worker_wait_timeout,
+            &stroke_generation,
+            &mut seen_stroke_generation,
         ) {
             Ok(_) => {}
             Err(error) => {
