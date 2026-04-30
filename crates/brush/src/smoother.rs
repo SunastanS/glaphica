@@ -441,7 +441,6 @@ impl StrokeCurveBuffer {
     fn pop_stable_spans(&mut self, output: &mut CommittedCanvasSpanBuffer) -> usize {
         puffin::profile_scope!("stroke_smoother_pop_stable_spans");
         output.clear();
-        output.set_global_s_start(self.emitted_arclength);
         if self.knots.is_empty() {
             return 0;
         }
@@ -452,6 +451,7 @@ impl StrokeCurveBuffer {
             if let Some(first) = self.knots.front().copied() {
                 output.push_knot(first);
                 self.initial_point_emitted = true;
+                self.emitted_prefix = 1;
                 return 1;
             }
         }
@@ -461,6 +461,15 @@ impl StrokeCurveBuffer {
         if self.stable_end < knot_start + 2 {
             return 0;
         }
+
+        if knot_start > 0
+            && knot_start < self.knots.len()
+            && self.knots[knot_start - 1].cumulative_s > 0.0
+        {
+            self.emitted_arclength +=
+                self.knots[knot_start].cumulative_s - self.knots[knot_start - 1].cumulative_s;
+        }
+        output.set_global_s_start(self.emitted_arclength);
 
         for index in knot_start..self.stable_end {
             output.push_knot(self.knots[index]);
@@ -712,7 +721,6 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         output: &mut CommittedCanvasSpanBuffer,
     ) -> Result<usize, StrokeSmootherError> {
         output.clear();
-        output.set_global_s_start(self.emitted_arclength);
         if self.knots.is_empty() {
             return Ok(0);
         }
@@ -722,6 +730,7 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         if !self.emitted_initial_knot && end_index < 2 {
             output.push_knot(self.knots[0]);
             self.emitted_initial_knot = true;
+            self.emitted_prefix = 1;
             return Ok(1);
         }
 
@@ -730,6 +739,15 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         if end_index < knot_start + 2 {
             return Ok(0);
         }
+
+        if knot_start > 0
+            && knot_start < self.knots.len()
+            && self.knots[knot_start - 1].cumulative_s > 0.0
+        {
+            self.emitted_arclength +=
+                self.knots[knot_start].cumulative_s - self.knots[knot_start - 1].cumulative_s;
+        }
+        output.set_global_s_start(self.emitted_arclength);
 
         let mut count = 0;
         for index in knot_start..end_index {
