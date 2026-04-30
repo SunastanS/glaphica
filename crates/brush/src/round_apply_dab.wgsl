@@ -18,7 +18,7 @@ struct ApplyPayload {
 @group(0) @binding(2) var<uniform> uniforms: ApplyUniforms;
 @group(0) @binding(3) var<storage, read> payload: ApplyPayload;
 
-const ROUND_DAB_KERNEL_A: f32 = 2.0;
+const ROUND_DAB_KERNEL_A: f32 = 1.5;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
