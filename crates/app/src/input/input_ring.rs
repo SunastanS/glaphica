@@ -5,7 +5,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use brush::BrushInput;
-use glaphica_core::CanvasInput;
 
 #[derive(Debug)]
 struct RingState<T> {
@@ -36,8 +35,6 @@ pub struct OverwriteRingConsumer<T> {
 unsafe impl<T: Send> Send for OverwriteRingProducer<T> {}
 unsafe impl<T: Send> Send for OverwriteRingConsumer<T> {}
 
-pub type MainCanvasInputProducer = OverwriteRingProducer<CanvasInput>;
-pub type BrushThreadCanvasInputConsumer = OverwriteRingConsumer<CanvasInput>;
 pub type BrushThreadBrushInputProducer = OverwriteRingProducer<BrushInput>;
 pub type MainBrushInputConsumer = OverwriteRingConsumer<BrushInput>;
 
@@ -171,27 +168,10 @@ impl<T> OverwriteRingConsumer<T> {
 }
 
 pub fn create_brush_input_channels(
-    canvas_input_capacity: usize,
     brush_input_capacity: usize,
-) -> (
-    MainCanvasInputProducer,
-    BrushThreadCanvasInputConsumer,
-    BrushThreadBrushInputProducer,
-    MainBrushInputConsumer,
-) {
-    let canvas_shared = Arc::new(SharedOverwriteRing::new(canvas_input_capacity));
+) -> (BrushThreadBrushInputProducer, MainBrushInputConsumer) {
     let brush_shared = Arc::new(SharedOverwriteRing::new(brush_input_capacity));
     (
-        OverwriteRingProducer {
-            shared: canvas_shared.clone(),
-            _spsc_marker: Cell::new(()),
-            _not_clone: PhantomData,
-        },
-        OverwriteRingConsumer {
-            shared: canvas_shared,
-            _spsc_marker: Cell::new(()),
-            _not_clone: PhantomData,
-        },
         OverwriteRingProducer {
             shared: brush_shared.clone(),
             _spsc_marker: Cell::new(()),
@@ -210,48 +190,12 @@ mod tests {
     use std::time::Duration;
 
     use brush::{BrushId, BrushInput, BrushInputBlockList};
-    use glaphica_core::CanvasInput;
 
     use crate::input::create_brush_input_channels;
 
     #[test]
-    fn canvas_input_ring_overwrites_oldest_items_when_full() {
-        let (producer, consumer, _, _) = create_brush_input_channels(2, 2);
-        let mut output = Vec::new();
-
-        producer.push(CanvasInput {
-            time_ns: 1,
-            position: glaphica_core::CanvasVec2::new(1.0, 2.0),
-            pressure: 0.5,
-            tilt: glaphica_core::RadianVec2::new(0.0, 0.0),
-            twist: 0.0,
-        });
-        producer.push(CanvasInput {
-            time_ns: 2,
-            position: glaphica_core::CanvasVec2::new(3.0, 4.0),
-            pressure: 0.6,
-            tilt: glaphica_core::RadianVec2::new(0.1, 0.2),
-            twist: 0.3,
-        });
-        producer.push(CanvasInput {
-            time_ns: 3,
-            position: glaphica_core::CanvasVec2::new(5.0, 6.0),
-            pressure: 0.7,
-            tilt: glaphica_core::RadianVec2::new(0.4, 0.5),
-            twist: 0.6,
-        });
-
-        consumer.drain_batch_with_wait(&mut output, 4, Duration::ZERO);
-
-        assert_eq!(producer.dropped_items(), 1);
-        assert_eq!(output.len(), 2);
-        assert_eq!(output[0].time_ns, 2);
-        assert_eq!(output[1].time_ns, 3);
-    }
-
-    #[test]
     fn brush_input_ring_drains_newest_blocks() {
-        let (_, _, producer, consumer) = create_brush_input_channels(2, 4);
+        let (producer, consumer) = create_brush_input_channels(4);
         let mut output = Vec::new();
         let mut blocks = BrushInputBlockList::new(BrushId::new(7));
         blocks.push_block(vec![1.0, 2.0, 3.0]);

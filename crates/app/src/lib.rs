@@ -16,9 +16,8 @@ pub use crate::editor::{EditorRenderUpdate, EditorSession, EditorSessionError};
 pub use crate::export::{AppExportError, export_document_directory};
 pub use crate::frame::AppFrameScheduler;
 pub use crate::input::{
-    ActiveTool, BrushThreadBrushInputProducer, BrushThreadCanvasInputConsumer, BrushThreadRuntime,
-    BrushThreadRuntimeError, BrushWorker, BrushWorkerError, MainBrushInputConsumer,
-    MainCanvasInputProducer, create_brush_input_channels,
+    ActiveTool, BrushThreadBrushInputProducer, BrushThreadRuntime, BrushThreadRuntimeError,
+    BrushWorker, BrushWorkerError, MainBrushInputConsumer, create_brush_input_channels,
 };
 pub use crate::input::{Tool, ToolSet};
 pub use crate::preview::{AppPreviewError, run_preview_window};

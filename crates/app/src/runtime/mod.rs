@@ -141,7 +141,7 @@ impl AppRuntime {
 
     pub fn begin_active_tool_stroke(&mut self) -> Result<(), AppRuntimeError> {
         self.discard_pending_brush_inputs();
-        self.brush_thread.reset_active_stroke_processing();
+        self.brush_thread.begin_active_stroke_processing();
         match self.brush_thread.active_tool() {
             ActiveTool::Brush(brush_id) => self.session.begin_stroke(brush_id)?,
         }
@@ -151,7 +151,7 @@ impl AppRuntime {
 
     pub fn cancel_stroke(&mut self) {
         self.session.cancel_stroke();
-        self.brush_thread.reset_active_stroke_processing();
+        self.brush_thread.cancel_active_stroke_processing();
         self.frame_scheduler.request_redraw();
     }
 
@@ -169,7 +169,7 @@ impl AppRuntime {
     }
 
     pub fn push_canvas_input(&self, input: CanvasInput) {
-        self.brush_thread.canvas_input_producer().push(input);
+        self.brush_thread.push_canvas_input(input);
     }
 
     pub fn push_screen_input(

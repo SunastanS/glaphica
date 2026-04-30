@@ -451,7 +451,6 @@ impl StrokeCurveBuffer {
             if let Some(first) = self.knots.front().copied() {
                 output.push_knot(first);
                 self.initial_point_emitted = true;
-                self.emitted_prefix = 1;
                 return 1;
             }
         }
@@ -462,13 +461,6 @@ impl StrokeCurveBuffer {
             return 0;
         }
 
-        if knot_start > 0
-            && knot_start < self.knots.len()
-            && self.knots[knot_start - 1].cumulative_s > 0.0
-        {
-            self.emitted_arclength +=
-                self.knots[knot_start].cumulative_s - self.knots[knot_start - 1].cumulative_s;
-        }
         output.set_global_s_start(self.emitted_arclength);
 
         for index in knot_start..self.stable_end {
@@ -730,7 +722,6 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         if !self.emitted_initial_knot && end_index < 2 {
             output.push_knot(self.knots[0]);
             self.emitted_initial_knot = true;
-            self.emitted_prefix = 1;
             return Ok(1);
         }
 
@@ -740,13 +731,6 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
             return Ok(0);
         }
 
-        if knot_start > 0
-            && knot_start < self.knots.len()
-            && self.knots[knot_start - 1].cumulative_s > 0.0
-        {
-            self.emitted_arclength +=
-                self.knots[knot_start].cumulative_s - self.knots[knot_start - 1].cumulative_s;
-        }
         output.set_global_s_start(self.emitted_arclength);
 
         let mut count = 0;
@@ -1069,8 +1053,9 @@ pub(crate) fn clamp_canvas_vec2_length(value: CanvasVec2, max_length: f32) -> Ca
 mod tests {
     use super::{
         CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot, DistanceOrTimeStrokeSmoother,
-        PassthroughStrokeSmoother, StrokeSmoother, StrokeSmootherError, distance_between,
+        PassthroughStrokeSmoother, StrokeSmoother, StrokeSmootherError,
     };
+    use crate::sampler::{EquidistantCurveSampler, EquidistantSamplerCursor};
     use glaphica_core::{CanvasInput, CanvasVec2, RadianVec2};
 
     #[test]
@@ -1646,5 +1631,112 @@ mod tests {
             .expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn passthrough_initial_knot_does_not_skip_first_span_samples() {
+        let mut smoother = PassthroughStrokeSmoother::default();
+        let mut spans = CommittedCanvasSpanBuffer::new();
+        let sampler = EquidistantCurveSampler::new(5.0);
+        let mut cursor = EquidistantSamplerCursor::default();
+        let mut samples = Vec::new();
+
+        smoother
+            .push_canvas_input(straight_input(0, 0.0))
+            .expect("push initial");
+        assert_eq!(
+            smoother
+                .pop_committed_spans(&mut spans)
+                .expect("initial pop"),
+            1
+        );
+        sampler.sample_spans(&spans, &mut cursor, &mut samples);
+
+        smoother
+            .push_canvas_inputs(&[
+                straight_input(1_000_000_000, 10.0),
+                straight_input(2_000_000_000, 20.0),
+            ])
+            .expect("push motion");
+        assert_eq!(
+            smoother
+                .pop_committed_spans(&mut spans)
+                .expect("motion pop"),
+            3
+        );
+        assert_eq!(spans.global_s_start(), 0.0);
+        assert_eq!(spans.knots()[0].position, CanvasVec2::new(0.0, 0.0));
+        sampler.sample_spans(&spans, &mut cursor, &mut samples);
+
+        assert_sample_xs(&samples, &[0.0, 5.0, 10.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn passthrough_global_s_start_does_not_double_count_batch_boundary() {
+        let mut smoother = PassthroughStrokeSmoother::default();
+        let mut spans = CommittedCanvasSpanBuffer::new();
+        let sampler = EquidistantCurveSampler::new(10.0);
+        let mut cursor = EquidistantSamplerCursor::default();
+        let mut samples = Vec::new();
+
+        smoother
+            .push_canvas_inputs(&[
+                straight_input(0, 0.0),
+                straight_input(1_000_000_000, 10.0),
+                straight_input(2_000_000_000, 20.0),
+            ])
+            .expect("push first batch");
+        assert_eq!(
+            smoother.pop_committed_spans(&mut spans).expect("first pop"),
+            3
+        );
+        assert_eq!(spans.global_s_start(), 0.0);
+        sampler.sample_spans(&spans, &mut cursor, &mut samples);
+
+        smoother
+            .push_canvas_inputs(&[
+                straight_input(3_000_000_000, 30.0),
+                straight_input(4_000_000_000, 40.0),
+            ])
+            .expect("push second batch");
+        assert_eq!(
+            smoother
+                .pop_committed_spans(&mut spans)
+                .expect("second pop"),
+            3
+        );
+        assert_eq!(spans.global_s_start(), 20.0);
+        assert_eq!(spans.knots()[0].position, CanvasVec2::new(20.0, 0.0));
+        sampler.sample_spans(&spans, &mut cursor, &mut samples);
+
+        assert_sample_xs(&samples, &[0.0, 10.0, 20.0, 30.0, 40.0]);
+    }
+
+    fn straight_input(time_ns: u64, x: f32) -> CanvasInput {
+        CanvasInput {
+            time_ns,
+            position: CanvasVec2::new(x, 0.0),
+            pressure: 0.5,
+            tilt: RadianVec2::new(0.0, 0.0),
+            twist: 0.0,
+        }
+    }
+
+    fn assert_sample_xs(samples: &[super::CommittedCanvasSample], expected_xs: &[f32]) {
+        let actual_xs = samples
+            .iter()
+            .map(|sample| sample.position.x)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_xs.len(),
+            expected_xs.len(),
+            "actual sample xs: {actual_xs:?}"
+        );
+        for (actual, expected) in actual_xs.iter().zip(expected_xs) {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "actual sample xs: {actual_xs:?}, expected {expected_xs:?}"
+            );
+        }
     }
 }

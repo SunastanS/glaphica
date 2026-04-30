@@ -1,17 +1,14 @@
+use brush::{BrushId, BrushInputError, BrushStrokeInputProcessor, round::RoundBrushSettings};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::time::Duration;
 
-use brush::{BrushId, BrushInputError, BrushStrokeInputProcessor, round::RoundBrushSettings};
-
-use crate::input::{BrushThreadBrushInputProducer, BrushThreadCanvasInputConsumer};
+use crate::input::BrushThreadBrushInputProducer;
 use crate::{AppBrushRegistry, CanvasInput, brush_registry::AppBrushRegistryUpdateError};
 
 pub struct BrushWorker {
     brushes: AppBrushRegistry,
     active_brush_id: BrushId,
     active_input_stroke: Box<dyn BrushStrokeInputProcessor>,
-    canvas_batch: Vec<CanvasInput>,
 }
 
 #[derive(Debug)]
@@ -53,7 +50,7 @@ impl BrushWorker {
     pub fn new(
         brushes: AppBrushRegistry,
         active_brush_id: BrushId,
-        batch_capacity: usize,
+        _batch_capacity: usize,
     ) -> Result<Self, BrushWorkerError> {
         let active_input_stroke =
             begin_input_stroke(&brushes, active_brush_id).map_err(map_begin_input_stroke_error)?;
@@ -61,7 +58,6 @@ impl BrushWorker {
             brushes,
             active_brush_id,
             active_input_stroke,
-            canvas_batch: Vec::with_capacity(batch_capacity),
         })
     }
 
@@ -101,34 +97,16 @@ impl BrushWorker {
         Ok(())
     }
 
-    pub fn process_canvas_input(
+    pub fn process_canvas_inputs(
         &mut self,
-        canvas_input_consumer: &BrushThreadCanvasInputConsumer,
+        canvas_inputs: &[CanvasInput],
         brush_input_producer: &BrushThreadBrushInputProducer,
-        max_batch_size: usize,
-        wait_timeout: Duration,
-        stroke_generation: &std::sync::atomic::AtomicU64,
-        seen_generation: &mut u64,
     ) -> Result<usize, BrushWorkerError> {
-        self.canvas_batch.clear();
-        canvas_input_consumer.drain_batch_with_wait(
-            &mut self.canvas_batch,
-            max_batch_size,
-            wait_timeout,
-        );
-
-        let current_generation = stroke_generation.load(std::sync::atomic::Ordering::Relaxed);
-        if current_generation != *seen_generation {
-            self.reset_active_stroke();
-            *seen_generation = current_generation;
-        }
-
-        if self.canvas_batch.is_empty() {
+        if canvas_inputs.is_empty() {
             return Ok(0);
         }
 
-        self.active_input_stroke
-            .push_canvas_inputs(&self.canvas_batch)?;
+        self.active_input_stroke.push_canvas_inputs(canvas_inputs)?;
         let Some(brush_input) = self.active_input_stroke.drain_brush_input()? else {
             return Ok(0);
         };
@@ -187,38 +165,36 @@ mod tests {
     fn worker_process_and_finish_emit_distinct_brush_input_batches() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(41));
         let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
-        let (canvas_producer, canvas_consumer, brush_producer, brush_consumer) =
-            create_brush_input_channels(8, 8);
+        let (brush_producer, brush_consumer) = create_brush_input_channels(8);
         let mut worker = BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
         let mut processed_brush_inputs = Vec::new();
         let mut finished_brush_inputs = Vec::new();
 
-        canvas_producer.push(crate::CanvasInput {
-            time_ns: 1,
-            position: CanvasVec2::new(10.0, 20.0),
-            pressure: 0.25,
-            tilt: RadianVec2::new(0.0, 0.0),
-            twist: 0.0,
-        });
-        canvas_producer.push(crate::CanvasInput {
-            time_ns: 2,
-            position: CanvasVec2::new(30.0, 40.0),
-            pressure: 0.75,
-            tilt: RadianVec2::new(0.1, 0.2),
-            twist: 0.3,
-        });
-
-        let gen_atomic = std::sync::atomic::AtomicU64::new(0);
-        let mut seen_gen = 0;
+        let canvas_inputs = [
+            crate::CanvasInput {
+                time_ns: 1,
+                position: CanvasVec2::new(10.0, 20.0),
+                pressure: 0.25,
+                tilt: RadianVec2::new(0.0, 0.0),
+                twist: 0.0,
+            },
+            crate::CanvasInput {
+                time_ns: 2,
+                position: CanvasVec2::new(30.0, 40.0),
+                pressure: 0.75,
+                tilt: RadianVec2::new(0.1, 0.2),
+                twist: 0.3,
+            },
+            crate::CanvasInput {
+                time_ns: 3,
+                position: CanvasVec2::new(60.0, 80.0),
+                pressure: 0.75,
+                tilt: RadianVec2::new(0.1, 0.2),
+                twist: 0.3,
+            },
+        ];
         let produced = worker
-            .process_canvas_input(
-                &canvas_consumer,
-                &brush_producer,
-                16,
-                Duration::ZERO,
-                &gen_atomic,
-                &mut seen_gen,
-            )
+            .process_canvas_inputs(&canvas_inputs, &brush_producer)
             .expect("process canvas input");
         brush_consumer.drain_batch_with_wait(&mut processed_brush_inputs, 1, Duration::ZERO);
 
@@ -300,96 +276,5 @@ mod tests {
                 BrushStrokeError::WrongImageBackend { expected, actual }
             )) if expected == BackendId::new(7) && actual == BackendId::new(8)
         ));
-    }
-
-    #[test]
-    fn generation_change_during_wait_resets_before_processing_first_input() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-        use std::thread;
-
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(54));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
-        let (canvas_producer, canvas_consumer, brush_producer, brush_consumer) =
-            create_brush_input_channels(8, 8);
-        let mut worker = BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
-
-        let blocked = Arc::new(AtomicBool::new(false));
-        let generation = Arc::new(AtomicU64::new(0));
-
-        let blocked_clone = blocked.clone();
-        let generation_clone = generation.clone();
-
-        let handle = thread::spawn(move || {
-            blocked_clone.store(true, Ordering::Release);
-            let mut seen_gen = 0;
-            let result = worker.process_canvas_input(
-                &canvas_consumer,
-                &brush_producer,
-                16,
-                Duration::from_secs(10),
-                &generation_clone,
-                &mut seen_gen,
-            );
-            (worker, canvas_consumer, brush_producer, result, seen_gen)
-        });
-
-        while !blocked.load(Ordering::Acquire) {
-            thread::yield_now();
-        }
-        thread::sleep(Duration::from_millis(50));
-
-        generation.store(1, Ordering::Relaxed);
-
-        let press_position = CanvasVec2::new(100.0, 100.0);
-        canvas_producer.push(crate::CanvasInput {
-            time_ns: 1,
-            position: press_position,
-            pressure: 0.5,
-            tilt: RadianVec2::new(0.0, 0.0),
-            twist: 0.0,
-        });
-
-        let (_worker, _canvas_consumer, _brush_producer, result, seen_gen) =
-            handle.join().expect("worker thread");
-
-        assert_eq!(
-            seen_gen, 1,
-            "worker must update seen_generation after reset"
-        );
-
-        let produced = result.expect("first input must be processed successfully");
-        assert!(
-            produced > 0,
-            "first input must produce output, not be discarded"
-        );
-
-        let mut brush_inputs = Vec::new();
-        brush_consumer.drain_batch_with_wait(&mut brush_inputs, 16, Duration::ZERO);
-
-        assert_eq!(
-            brush_inputs.len(),
-            1,
-            "only one BrushInput for the first press"
-        );
-        let blocks = brush_inputs[0].blocks.blocks();
-        assert_eq!(
-            blocks.len(),
-            1,
-            "first dab must be a single block (spans=0)"
-        );
-
-        let dab_x = blocks[0].values()[0];
-        let dab_y = blocks[0].values()[1];
-        assert!(
-            (dab_x - press_position.x).abs() < 0.01,
-            "dab x={dab_x} must be at press x={}",
-            press_position.x
-        );
-        assert!(
-            (dab_y - press_position.y).abs() < 0.01,
-            "dab y={dab_y} must be at press y={}",
-            press_position.y
-        );
     }
 }
