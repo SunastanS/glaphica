@@ -96,7 +96,7 @@ pub const ROUND_INPUT_BLOCK_LEN: usize = 11;
 
 const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
-const ROUND_DAB_KERNEL_A: f32 = 3.0;
+const ROUND_DAB_KERNEL_A: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurvePoint {
@@ -1805,6 +1805,63 @@ mod tests {
     }
 
     #[test]
+    fn max_blend_centerline_seams_when_spacing_exceeds_hardness_diameter() {
+        let spacing_ratio = 1.0;
+        let hardness = 0.3;
+        let stroke_flow = 1.0;
+        let threshold = super::round_hardness_threshold_source_for_mode(
+            RoundApplyDabBlendMode::Max,
+            stroke_flow,
+            spacing_ratio,
+            hardness,
+        );
+        let dab_center_source = super::round_stroke_source_at_offset_for_mode(
+            RoundApplyDabBlendMode::Max,
+            stroke_flow,
+            spacing_ratio,
+            0.0,
+            0.0,
+        );
+        let dab_midpoint_source = super::round_stroke_source_at_offset_for_mode(
+            RoundApplyDabBlendMode::Max,
+            stroke_flow,
+            spacing_ratio,
+            spacing_ratio * 0.5,
+            0.0,
+        );
+        let center_coverage =
+            super::round_merge_coverage_for_source(dab_center_source, threshold, hardness);
+        let midpoint_coverage =
+            super::round_merge_coverage_for_source(dab_midpoint_source, threshold, hardness);
+
+        assert_eq!(center_coverage, 1.0);
+        assert!(midpoint_coverage < 1.0);
+    }
+
+    #[test]
+    fn max_blend_dab_sequence_never_reduces_intermediate_source() {
+        let stroke_flow = 1.0;
+        let spacing_ratio = 1.0;
+        let sample_offsets = [-0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25];
+        for sample_offset in sample_offsets {
+            let first_dab_distance = (sample_offset - 0.0f32).abs();
+            let second_dab_distance = (sample_offset - spacing_ratio).abs();
+            let first_source = super::round_dab_kernel(first_dab_distance) * stroke_flow;
+            let second_dab_source = super::round_dab_kernel(second_dab_distance) * stroke_flow;
+            let second_source = super::blend_round_intermediate_sources(
+                RoundApplyDabBlendMode::Max,
+                first_source,
+                second_dab_source,
+            );
+
+            assert!(
+                second_source >= first_source,
+                "sample_offset={sample_offset} first={first_source} second={second_source}"
+            );
+        }
+    }
+
+    #[test]
     fn multiply_blend_source_scale_matches_apply_dab_formula() {
         let stroke_flow = 0.5;
         let spacing_ratio = 0.5;
@@ -1819,6 +1876,14 @@ mod tests {
         );
 
         assert!((actual - expected).abs() <= 1e-5);
+    }
+
+    #[test]
+    fn round_dab_kernel_keeps_a_visible_soft_tail() {
+        assert_eq!(super::round_dab_kernel(0.0), 1.0);
+        assert!(super::round_dab_kernel(0.8) > 0.1);
+        assert!(super::round_dab_kernel(0.95) < 0.02);
+        assert_eq!(super::round_dab_kernel(1.0), 0.0);
     }
 
     #[test]
