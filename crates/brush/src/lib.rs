@@ -81,7 +81,7 @@ pub trait BrushInputProcessor: Send + Sync {
         tile_canvas_origin: CanvasVec2,
     ) -> Result<Vec<u8>, BrushInputError>;
 
-    fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError>;
+    fn merge_payload(&self) -> Vec<u8>;
 }
 
 pub trait BrushStrokeInputProcessor: Send {
@@ -837,14 +837,9 @@ impl BrushRegistry {
         processor.encode_apply_dab_payload(input, block_index, tile_canvas_origin)
     }
 
-    pub fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
-        let processor =
-            self.input_processor(input.brush_id)
-                .ok_or(BrushInputError::WrongBrush {
-                    expected: input.brush_id,
-                    actual: input.brush_id,
-                })?;
-        processor.encode_merge_payload(input)
+    pub fn merge_payload(&self, brush_id: BrushId) -> Option<Vec<u8>> {
+        let processor = self.input_processor(brush_id)?;
+        Some(processor.merge_payload())
     }
 }
 

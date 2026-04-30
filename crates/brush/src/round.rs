@@ -25,7 +25,7 @@ pub enum RoundApplyDabBlendMode {
     Multiply,
 }
 
-pub const ROUND_APPLY_DAB_BLEND_MODE: RoundApplyDabBlendMode = RoundApplyDabBlendMode::Max;
+pub const ROUND_APPLY_DAB_BLEND_MODE: RoundApplyDabBlendMode = RoundApplyDabBlendMode::LinearAdd;
 
 const ROUND_APPLY_DAB_LINEAR_ADD_SHADER_VARIANTS: &[ApplyDabShaderVariant] = &[
     ApplyDabShaderVariant {
@@ -96,7 +96,7 @@ pub const ROUND_INPUT_BLOCK_LEN: usize = 11;
 
 const ROUND_MIN_SPACING_RATIO: f32 = 0.05;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
-const ROUND_DAB_KERNEL_A: f32 = 2.0;
+const ROUND_DAB_KERNEL_A: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurvePoint {
@@ -637,46 +637,14 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
         ))
     }
 
-    fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
-        if input.brush_id != ROUND_BRUSH_ID {
-            return Err(BrushInputError::WrongBrush {
-                expected: ROUND_BRUSH_ID,
-                actual: input.brush_id,
-            });
-        }
-        let last = input
-            .blocks
-            .blocks()
-            .last()
-            .ok_or(BrushInputError::InvalidBlockLength {
-                brush_id: ROUND_BRUSH_ID,
-                expected: 1,
-                actual: 0,
-            })?
-            .values();
-        if last.len() != ROUND_INPUT_BLOCK_LEN {
-            return Err(BrushInputError::InvalidBlockLength {
-                brush_id: ROUND_BRUSH_ID,
-                expected: ROUND_INPUT_BLOCK_LEN,
-                actual: last.len(),
-            });
-        }
-        for (value_index, value) in last.iter().copied().enumerate() {
-            if !value.is_finite() {
-                return Err(BrushInputError::InvalidBlockValue {
-                    brush_id: ROUND_BRUSH_ID,
-                    block_index: input.blocks.blocks().len().saturating_sub(1),
-                    value_index,
-                });
-            }
-        }
-        Ok(encode_round_merge_payload(RoundMergeSettings {
-            tint: [last[8], last[9], last[10]],
-            opacity: last[7].clamp(0.0, 1.0),
-            stroke_flow: last[4].max(0.0),
-            spacing_ratio: last[5],
-            hardness: last[6],
-        }))
+    fn merge_payload(&self) -> Vec<u8> {
+        encode_round_merge_payload(RoundMergeSettings {
+            tint: self.tint,
+            opacity: self.base_opacity,
+            stroke_flow: self.base_flow,
+            spacing_ratio: self.spacing_ratio,
+            hardness: self.base_hardness,
+        })
     }
 }
 
@@ -1038,7 +1006,8 @@ mod tests {
         round::{
             CurvePoint, ModulationCurve, ROUND_APPLY_DAB_LINEAR_ADD_WGSL, ROUND_APPLY_DAB_WGSL,
             ROUND_BRUSH_ID, RoundApplyDabBlendMode, RoundBrushDabVariable, RoundBrushInputFeature,
-            RoundBrushInputProcessor, RoundMergeSettings, encode_round_merge_payload,
+            RoundBrushInputProcessor, RoundBrushModulationSet, RoundBrushSettings,
+            RoundMergeSettings, encode_round_merge_payload,
             round_apply_dab_shader_variants_for_mode,
         },
     };
@@ -1082,7 +1051,31 @@ mod tests {
     }
 
     #[test]
-    fn round_processor_encodes_payloads_from_blocks() {
+    fn round_processor_produces_merge_payload_from_settings() {
+        let settings = RoundBrushSettings {
+            base_radius_px: 5.0,
+            spacing_ratio: 0.8,
+            base_hardness: 0.4,
+            base_flow: 0.9,
+            base_opacity: 0.6,
+            tint: [0.2, 0.3, 0.4],
+            modulations: RoundBrushModulationSet::default(),
+        };
+        let processor = RoundBrushInputProcessor::from(settings);
+        assert_eq!(
+            processor.merge_payload(),
+            encode_round_merge_payload(RoundMergeSettings {
+                tint: [0.2, 0.3, 0.4],
+                opacity: 0.6,
+                stroke_flow: 0.9,
+                spacing_ratio: 0.8,
+                hardness: 0.4,
+            })
+        );
+    }
+
+    #[test]
+    fn round_processor_encodes_apply_dab_payload_from_blocks() {
         let mut input = BrushInputBlockList::new(ROUND_BRUSH_ID);
         input.push_block(vec![10.0, 8.0, 6.0, 0.7, 0.9, 0.8, 0.4, 0.6, 0.2, 0.3, 0.4]);
         let input = BrushInput {
@@ -1095,18 +1088,6 @@ mod tests {
             .expect("processing should succeed");
 
         assert!(!result.is_empty());
-        assert_eq!(
-            RoundBrushInputProcessor::default()
-                .encode_merge_payload(&input)
-                .expect("merge payload"),
-            encode_round_merge_payload(RoundMergeSettings {
-                tint: [0.2, 0.3, 0.4],
-                opacity: 0.6,
-                stroke_flow: 0.9,
-                spacing_ratio: 0.8,
-                hardness: 0.4,
-            })
-        );
     }
 
     #[test]
@@ -1882,7 +1863,7 @@ mod tests {
     fn round_dab_kernel_keeps_a_visible_soft_tail() {
         assert_eq!(super::round_dab_kernel(0.0), 1.0);
         assert!(super::round_dab_kernel(0.8) > 0.1);
-        assert!(super::round_dab_kernel(0.95) < 0.02);
+        assert!(super::round_dab_kernel(0.95) < 0.04);
         assert_eq!(super::round_dab_kernel(1.0), 0.0);
     }
 

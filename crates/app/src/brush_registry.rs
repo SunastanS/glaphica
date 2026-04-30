@@ -133,8 +133,8 @@ impl AppBrushRegistry {
             .encode_apply_dab_payload(input, block_index, tile_canvas_origin)
     }
 
-    pub fn encode_merge_payload(&self, input: &BrushInput) -> Result<Vec<u8>, BrushInputError> {
-        self.brushes.encode_merge_payload(input)
+    pub fn merge_payload(&self, brush_id: BrushId) -> Option<Vec<u8>> {
+        self.brushes.merge_payload(brush_id)
     }
 
     pub fn update_round_brush_settings(

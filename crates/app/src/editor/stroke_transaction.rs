@@ -42,13 +42,11 @@ impl StrokeTransaction {
         let active_image = doc.active_layer_image()?;
         let mut dirty_tile_indices = Vec::new();
         let mut commands = Vec::new();
-        let mut merge_payload = None;
 
         for input in inputs {
             let max_affected_radius = brushes
                 .max_affected_radius_px(input.brush_id)
                 .ok_or(EditorSessionError::BrushNotRegistered(input.brush_id))?;
-            merge_payload = Some(brushes.encode_merge_payload(input)?);
             for (block_index, _) in input.blocks.blocks().iter().enumerate() {
                 let center = brushes.block_center(input, block_index)?;
                 let mut affected_tiles = Vec::new();
@@ -85,7 +83,9 @@ impl StrokeTransaction {
         dirty_tile_indices.sort_unstable();
         dirty_tile_indices.dedup();
 
-        let merge_payload = merge_payload.ok_or(EditorSessionError::MissingActiveMergePayload)?;
+        let merge_payload = brushes.merge_payload(self.stroke.brush_id()).ok_or(
+            EditorSessionError::BrushNotRegistered(self.stroke.brush_id()),
+        )?;
         self.merge_payload = Some(merge_payload.clone());
         for &tile_index in &dirty_tile_indices {
             let (origin_tile_key, preview_tile_key) =
