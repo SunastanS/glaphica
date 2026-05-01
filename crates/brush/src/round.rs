@@ -150,7 +150,7 @@ pub struct RoundBrushModulationSet {
     flow: RoundBrushVariableModulation,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RoundBrushInputProcessor {
     base_radius_px: f32,
     spacing_ratio: f32,
@@ -160,6 +160,18 @@ pub struct RoundBrushInputProcessor {
     tint: [f32; 3],
     modulations: RoundBrushModulationSet,
     smoother_factory: fn() -> Box<dyn StrokeSmoother>,
+}
+
+impl PartialEq for RoundBrushInputProcessor {
+    fn eq(&self, other: &Self) -> bool {
+        self.base_radius_px == other.base_radius_px
+            && self.spacing_ratio == other.spacing_ratio
+            && self.base_hardness == other.base_hardness
+            && self.base_flow == other.base_flow
+            && self.base_opacity == other.base_opacity
+            && self.tint == other.tint
+            && self.modulations == other.modulations
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,15 +394,6 @@ impl Default for RoundBrushVariableModulation {
 }
 
 impl RoundBrushVariableModulation {
-    fn curve(&self, feature: RoundBrushInputFeature) -> &ModulationCurve {
-        match feature {
-            RoundBrushInputFeature::Pressure => &self.pressure,
-            RoundBrushInputFeature::Tilt => &self.tilt,
-            RoundBrushInputFeature::Twist => &self.twist,
-            RoundBrushInputFeature::Speed => &self.speed,
-        }
-    }
-
     fn curve_mut(&mut self, feature: RoundBrushInputFeature) -> &mut ModulationCurve {
         match feature {
             RoundBrushInputFeature::Pressure => &mut self.pressure,
@@ -839,19 +842,6 @@ fn round_dab_kernel(relative_distance: f32) -> f32 {
     (1.0 - r2).powf(ROUND_DAB_KERNEL_A)
 }
 
-fn round_stroke_source_at_distance(
-    stroke_flow: f32,
-    spacing_ratio: f32,
-    normalized_distance: f32,
-) -> f32 {
-    round_stroke_source_at_distance_for_mode(
-        ROUND_APPLY_DAB_BLEND_MODE,
-        stroke_flow,
-        spacing_ratio,
-        normalized_distance,
-    )
-}
-
 fn round_stroke_source_at_distance_for_mode(
     mode: RoundApplyDabBlendMode,
     stroke_flow: f32,
@@ -923,6 +913,7 @@ fn blend_round_intermediate_sources(
     }
 }
 
+#[allow(dead_code)]
 fn round_hardness_threshold_source(stroke_flow: f32, spacing_ratio: f32, hardness: f32) -> f32 {
     round_hardness_threshold_source_for_mode(
         ROUND_APPLY_DAB_BLEND_MODE,
@@ -953,6 +944,7 @@ fn round_hardness_threshold_source_for_mode(
         .max(f32::EPSILON)
 }
 
+#[allow(dead_code)]
 fn round_merge_coverage_for_source(
     source: f32,
     hardness_threshold_source: f32,

@@ -31,7 +31,7 @@ impl BrushPerfTraceConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct BrushLatencyPoint {
+pub(crate) struct BrushLatencyPoint {
     time_ns: u64,
     position: CanvasVec2,
 }
