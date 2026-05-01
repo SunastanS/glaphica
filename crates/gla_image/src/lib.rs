@@ -5,13 +5,30 @@ mod stored_image;
 
 use atlas::TileKey;
 
-pub use crate::cached_image::{GlaCachedImage, GlaCachedImageCreateError};
+pub use crate::cached_image::{
+    GlaCachedImage, GlaCachedImageActivateError, GlaCachedImageCreateError,
+};
 pub use crate::image::{
     GlaImage, GlaImageCreateError, GlaImageEnsureActiveTileError, GlaImageTileAccessError,
     GlaImageTileRecBounds,
 };
 pub use crate::layout::{GlaImageLayout, GlaImageLayoutError};
 pub use crate::stored_image::{GlaStoredImage, GlaStoredImageError};
+
+pub trait TileGrid {
+    fn layout(&self) -> GlaImageLayout;
+    fn tile_count(&self) -> usize;
+}
+
+pub trait AtlasTileMap: TileGrid {
+    fn tile_key(&self, tile_index: usize) -> Option<TileKey>;
+}
+
+pub trait PixelTileSource: TileGrid {
+    type Error;
+
+    fn copy_tile_rgba8(&self, tile_index: usize, output: &mut Vec<u8>) -> Result<(), Self::Error>;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ImageId(pub u64);

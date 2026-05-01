@@ -17,8 +17,10 @@ use crate::node::{GlaNode, GlaNodeId};
 
 pub struct GlaDoc {
     layout: GlaImageLayout,
-    image_backend: BackendId,
-    render_backend: BackendId,
+    image_backend: Backend,
+    image_backend_id: BackendId,
+    render_backend: Backend,
+    render_backend_id: BackendId,
     undo_stack: DocumentUndoStack,
     root_id: GlaNodeId,
     active_layer_id: GlaNodeId,
@@ -160,12 +162,14 @@ impl From<GlaImageEnsureActiveTileError> for GlaDocUndoError {
 impl GlaDoc {
     pub fn new(
         layout: GlaImageLayout,
-        image_backend: BackendId,
-        render_backend: BackendId,
+        image_backend: Backend,
+        render_backend: Backend,
         backup_backend: Backend,
     ) -> Result<Self, GlaDocError> {
+        let image_backend_id = image_backend.backend_id();
+        let render_backend_id = render_backend.backend_id();
         let mut nodes = SlotMap::with_key();
-        let root_image = GlaImage::new(layout, render_backend)?;
+        let root_image = GlaImage::new(layout, render_backend.clone())?;
         let root_id = nodes.insert(GlaNode::new_root(root_image, 1.0, BlendMode::Normal));
         let mut active_layer_ancestor_chain = SmallVec::new();
         active_layer_ancestor_chain.push(root_id);
@@ -174,7 +178,9 @@ impl GlaDoc {
         Ok(Self {
             layout,
             image_backend,
+            image_backend_id,
             render_backend,
+            render_backend_id,
             undo_stack,
             root_id,
             active_layer_id: root_id,
@@ -188,11 +194,19 @@ impl GlaDoc {
     }
 
     pub fn image_backend(&self) -> BackendId {
-        self.image_backend
+        self.image_backend_id
+    }
+
+    pub fn image_backend_ref(&self) -> &Backend {
+        &self.image_backend
     }
 
     pub fn render_backend(&self) -> BackendId {
-        self.render_backend
+        self.render_backend_id
+    }
+
+    pub fn render_backend_ref(&self) -> &Backend {
+        &self.render_backend
     }
 
     pub fn undo_stack(&self) -> &DocumentUndoStack {
@@ -319,7 +333,7 @@ impl GlaDoc {
         parent_id: GlaNodeId,
         index: usize,
     ) -> Result<GlaNodeId, GlaDocError> {
-        let image = GlaImage::new(self.layout, self.image_backend)?;
+        let image = GlaImage::new(self.layout, self.image_backend.clone())?;
         let node = GlaNode::new_leaf(parent_id, image, 1.0, BlendMode::Normal);
         self.insert_node(parent_id, index, node)
     }
@@ -329,7 +343,7 @@ impl GlaDoc {
         parent_id: GlaNodeId,
         index: usize,
     ) -> Result<GlaNodeId, GlaDocError> {
-        let image = GlaImage::new(self.layout, self.render_backend)?;
+        let image = GlaImage::new(self.layout, self.render_backend.clone())?;
         let node = GlaNode::new_branch(parent_id, image, 1.0, BlendMode::Normal);
         self.insert_node(parent_id, index, node)
     }
@@ -486,10 +500,7 @@ impl GlaDoc {
             .push_entry(self.active_layer_id, backup_group, tile_records);
     }
 
-    pub fn restore_last_undo(
-        &mut self,
-        image_backend: &Backend,
-    ) -> Result<Option<GlaDocUndoRestore>, GlaDocUndoError> {
+    pub fn restore_last_undo(&mut self) -> Result<Option<GlaDocUndoRestore>, GlaDocUndoError> {
         let Some(entry) = self.undo_stack.pop_entry() else {
             return Ok(None);
         };
@@ -498,8 +509,7 @@ impl GlaDoc {
         for record in entry.tile_records() {
             if let Some(source_tile_key) = record.backup_tile_key() {
                 let image = self.node_image_mut(entry.node_id())?;
-                let destination_tile_key =
-                    image.ensure_active_tile_key(record.tile_index(), image_backend)?;
+                let destination_tile_key = image.ensure_active_tile_key(record.tile_index())?;
                 tile_actions.push(GlaDocUndoTileAction::RestoreFromBackup {
                     tile_index: record.tile_index(),
                     source_tile_key,
@@ -664,8 +674,8 @@ mod tests {
     fn new_doc() -> GlaDoc {
         match GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(3),
-            BackendId::new(7),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(3)),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(7)),
             Backend::new(AtlasLayout::Tiny8, BackendId::new(11)),
         ) {
             Ok(doc) => doc,
@@ -684,7 +694,7 @@ mod tests {
         assert_eq!(doc.active_layer_id(), doc.root_id());
         assert_eq!(doc.active_layer_ancestor_chain(), &[doc.root_id()]);
         assert_eq!(root.kind(), GlaNodeKind::Root);
-        assert_eq!(root.image().backend(), BackendId::new(7));
+        assert_eq!(root.image().backend_id(), BackendId::new(7));
         assert_eq!(root.opacity(), 1.0);
         assert_eq!(root.blend_mode(), BlendMode::Normal);
     }
@@ -711,9 +721,9 @@ mod tests {
         };
 
         assert_eq!(group.kind(), GlaNodeKind::Branch);
-        assert_eq!(group.image().backend(), BackendId::new(7));
+        assert_eq!(group.image().backend_id(), BackendId::new(7));
         assert_eq!(layer.kind(), GlaNodeKind::Leaf);
-        assert_eq!(layer.image().backend(), BackendId::new(3));
+        assert_eq!(layer.image().backend_id(), BackendId::new(3));
     }
 
     #[test]
@@ -868,11 +878,11 @@ mod tests {
         let selected_layer = doc.set_active_layer(layer);
         assert_eq!(selected_layer, Ok(()));
         assert_eq!(
-            doc.active_layer_image().map(|image| image.backend()),
+            doc.active_layer_image().map(|image| image.backend_id()),
             Ok(doc.image_backend())
         );
         assert_eq!(
-            doc.active_layer_image_mut().map(|image| image.backend()),
+            doc.active_layer_image_mut().map(|image| image.backend_id()),
             Ok(doc.image_backend())
         );
     }
@@ -969,11 +979,12 @@ mod tests {
     #[test]
     fn restore_last_undo_reuses_existing_image_tile_for_backup_restore() {
         let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
+        let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let backup_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(11));
         let mut doc = GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(3),
-            BackendId::new(7),
+            image_backend.clone(),
+            render_backend,
             backup_backend.clone(),
         )
         .expect("document should build");
@@ -1004,7 +1015,7 @@ mod tests {
         );
 
         let restore = doc
-            .restore_last_undo(&image_backend)
+            .restore_last_undo()
             .expect("undo should restore")
             .expect("undo entry should exist");
 
@@ -1022,11 +1033,12 @@ mod tests {
     #[test]
     fn restore_last_undo_clears_tile_when_previous_state_was_empty() {
         let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
+        let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let backup_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(11));
         let mut doc = GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(3),
-            BackendId::new(7),
+            image_backend.clone(),
+            render_backend,
             backup_backend,
         )
         .expect("document should build");
@@ -1054,7 +1066,7 @@ mod tests {
         );
 
         let restore = doc
-            .restore_last_undo(&image_backend)
+            .restore_last_undo()
             .expect("undo should restore")
             .expect("undo entry should exist");
 

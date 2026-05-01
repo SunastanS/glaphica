@@ -64,14 +64,14 @@ pub struct AtlasSlotAddress {
 
 #[derive(Debug)]
 pub struct TileOwner {
-    recycle: BackendRecycleHandle,
+    recycle: Option<BackendRecycleHandle>,
     key: TileKey,
 }
 
 impl TileOwner {
     pub fn empty() -> Self {
         Self {
-            recycle: BackendRecycleHandle::new(),
+            recycle: None,
             key: TileKey::EMPTY,
         }
     }
@@ -91,7 +91,10 @@ impl TileOwner {
     }
 
     fn new(recycle: BackendRecycleHandle, key: TileKey) -> Self {
-        Self { recycle, key }
+        Self {
+            recycle: Some(recycle),
+            key,
+        }
     }
 }
 
@@ -100,7 +103,9 @@ impl Drop for TileOwner {
         if self.key == TileKey::EMPTY {
             return;
         }
-        self.recycle.enqueue(self.key);
+        if let Some(recycle) = &self.recycle {
+            recycle.enqueue(self.key);
+        }
         self.key = TileKey::EMPTY;
     }
 }
@@ -246,6 +251,7 @@ pub struct ClearBatch {
     pub slots: Vec<u32>,
 }
 
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedTileGroup {
     group_id: u32,
@@ -253,10 +259,6 @@ pub struct CachedTileGroup {
 }
 
 impl CachedTileGroup {
-    pub fn group_id(&self) -> u32 {
-        self.group_id
-    }
-
     pub fn keys(&self) -> &[TileKey] {
         &self.keys
     }
@@ -275,6 +277,80 @@ enum SlotOwner {
 #[derive(Debug, Clone, Default)]
 struct CacheGroup {
     slots: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct CacheManager {
+    groups: Vec<CacheGroup>,
+    eviction_queue: VecDeque<CacheGroupId>,
+    next_group_id: u32,
+}
+
+impl CacheManager {
+    fn new() -> Self {
+        Self {
+            groups: Vec::new(),
+            eviction_queue: VecDeque::new(),
+            next_group_id: 0,
+        }
+    }
+
+    fn group(&self, group_id: CacheGroupId) -> Result<&CacheGroup, AtlasError> {
+        self.groups
+            .get(group_id.0 as usize)
+            .ok_or(AtlasError::InvalidState)
+    }
+
+    fn group_mut(&mut self, group_id: CacheGroupId) -> Result<&mut CacheGroup, AtlasError> {
+        self.groups
+            .get_mut(group_id.0 as usize)
+            .ok_or(AtlasError::InvalidState)
+    }
+
+    fn acquire_vacant_group(&mut self) -> CacheGroupId {
+        if let Some(index) = self.groups.iter().position(|group| group.slots.is_empty()) {
+            return CacheGroupId(index as u32);
+        }
+
+        let id = CacheGroupId(self.next_group_id);
+        self.next_group_id = self.next_group_id.wrapping_add(1);
+        self.groups.push(CacheGroup::default());
+        id
+    }
+
+    fn detach_slot_from_group(
+        &mut self,
+        group_id: CacheGroupId,
+        slot: u32,
+    ) -> Result<(), AtlasError> {
+        let slots = &mut self.group_mut(group_id)?.slots;
+        let Some(index) = slots.iter().position(|&candidate| candidate == slot) else {
+            return Err(AtlasError::InvalidSlot);
+        };
+        slots.swap_remove(index);
+        Ok(())
+    }
+
+    fn push_group_queue(&mut self, group_id: CacheGroupId) {
+        self.eviction_queue.push_back(group_id);
+    }
+
+    fn clear_group_slots(&mut self, group_id: CacheGroupId) -> Result<(), AtlasError> {
+        self.group_mut(group_id)?.slots.clear();
+        Ok(())
+    }
+
+    fn pop_oldest_non_empty_group(
+        &mut self,
+    ) -> Result<Option<(CacheGroupId, Vec<u32>)>, AtlasError> {
+        while let Some(group_id) = self.eviction_queue.pop_front() {
+            let group = self.group(group_id)?;
+            if !group.slots.is_empty() {
+                return Ok(Some((group_id, group.slots.clone())));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -318,9 +394,7 @@ struct BackendInner {
     slot_pool: SlotPool,
     generations: Box<[u32]>,
     slot_owners: Box<[SlotOwner]>,
-    cache_groups: Vec<CacheGroup>,
-    cached_group_queue: VecDeque<CacheGroupId>,
-    next_group_id: u32,
+    cache_manager: CacheManager,
     pending_clear_batches: Vec<ClearBatch>,
 }
 
@@ -333,9 +407,7 @@ impl BackendInner {
             slot_pool: SlotPool::default(),
             generations: vec![0; total_slots as usize].into_boxed_slice(),
             slot_owners: vec![SlotOwner::Vacant; total_slots as usize].into_boxed_slice(),
-            cache_groups: Vec::new(),
-            cached_group_queue: VecDeque::new(),
-            next_group_id: 0,
+            cache_manager: CacheManager::new(),
             pending_clear_batches: Vec::new(),
         }
     }
@@ -353,13 +425,13 @@ impl BackendInner {
 
     fn alloc_cached(&mut self, count: usize) -> Result<CachedTileGroup, AtlasError> {
         self.ensure_capacity(count)?;
-        let group_id = self.acquire_vacant_group();
+        let group_id = self.cache_manager.acquire_vacant_group();
         let mut keys = Vec::with_capacity(count);
 
         for _ in 0..count {
             let slot = self.alloc_slot()?;
             self.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
-            self.group_mut(group_id)?.slots.push(slot);
+            self.cache_manager.group_mut(group_id)?.slots.push(slot);
             keys.push(encode_tile_key(
                 self.backend_id,
                 self.generations[slot as usize],
@@ -367,7 +439,7 @@ impl BackendInner {
             ));
         }
 
-        self.cached_group_queue.push_back(group_id);
+        self.cache_manager.push_group_queue(group_id);
         Ok(CachedTileGroup {
             group_id: group_id.0,
             keys,
@@ -375,17 +447,17 @@ impl BackendInner {
     }
 
     fn create_cached_group(&mut self) -> CachedTileGroup {
-        let group_id = self.acquire_vacant_group();
+        let group_id = self.cache_manager.acquire_vacant_group();
         CachedTileGroup {
             group_id: group_id.0,
             keys: Vec::new(),
         }
     }
 
-    fn alloc_cached_in_group(
+    fn alloc_cached_extending_group(
         &mut self,
-        cached: &mut CachedTileGroup,
-    ) -> Result<TileKey, AtlasError> {
+        cached: &CachedTileGroup,
+    ) -> Result<(TileKey, CachedTileGroup), AtlasError> {
         let group_id = CacheGroupId(cached.group_id);
         if !self.cached_group_matches_handle(group_id, &cached.keys)? {
             return Err(AtlasError::GenerationMismatch);
@@ -394,14 +466,19 @@ impl BackendInner {
         self.ensure_capacity(1)?;
         let slot = self.alloc_slot()?;
         self.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
-        self.group_mut(group_id)?.slots.push(slot);
+        self.cache_manager.group_mut(group_id)?.slots.push(slot);
         if cached.keys.is_empty() {
-            self.cached_group_queue.push_back(group_id);
+            self.cache_manager.push_group_queue(group_id);
         }
 
         let key = encode_tile_key(self.backend_id, self.generations[slot as usize], slot);
-        cached.keys.push(key);
-        Ok(key)
+        let mut new_keys = cached.keys.clone();
+        new_keys.push(key);
+        let new_cached = CachedTileGroup {
+            group_id: cached.group_id,
+            keys: new_keys,
+        };
+        Ok((key, new_cached))
     }
 
     fn cache_active_tiles(&mut self, keys: &[TileKey]) -> Result<CachedTileGroup, AtlasError> {
@@ -412,7 +489,7 @@ impl BackendInner {
             });
         }
 
-        let group_id = self.acquire_vacant_group();
+        let group_id = self.cache_manager.acquire_vacant_group();
         let mut cached_keys = Vec::with_capacity(keys.len());
         for &key in keys {
             let slot = self.validate_key(key)?;
@@ -420,11 +497,11 @@ impl BackendInner {
                 return Err(AtlasError::InvalidState);
             }
             self.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
-            self.group_mut(group_id)?.slots.push(slot);
+            self.cache_manager.group_mut(group_id)?.slots.push(slot);
             cached_keys.push(key);
         }
 
-        self.cached_group_queue.push_back(group_id);
+        self.cache_manager.push_group_queue(group_id);
         Ok(CachedTileGroup {
             group_id: group_id.0,
             keys: cached_keys,
@@ -442,7 +519,7 @@ impl BackendInner {
             return Err(AtlasError::InvalidState);
         };
 
-        self.detach_slot_from_group(group_id, slot)?;
+        self.cache_manager.detach_slot_from_group(group_id, slot)?;
         self.slot_owners[slot as usize] = SlotOwner::Active;
         Ok(key)
     }
@@ -538,13 +615,16 @@ impl BackendInner {
     }
 
     fn reclaim_oldest_cached_group(&mut self) -> Result<bool, AtlasError> {
-        while let Some(group_id) = self.cached_group_queue.pop_front() {
-            if !self.group(group_id)?.slots.is_empty() {
-                self.release_group(group_id)?;
-                return Ok(true);
-            }
+        let Some((group_id, slots)) = self.cache_manager.pop_oldest_non_empty_group()? else {
+            return Ok(false);
+        };
+        let mut cleared_slots = Vec::with_capacity(slots.len());
+        for slot in slots {
+            self.release_slot(slot, &mut cleared_slots)?;
         }
-        Ok(false)
+        self.cache_manager.clear_group_slots(group_id)?;
+        self.push_clear_batch(cleared_slots);
+        Ok(true)
     }
 
     fn validate_key(&self, key: TileKey) -> Result<u32, AtlasError> {
@@ -571,7 +651,7 @@ impl BackendInner {
             SlotOwner::Vacant => return Err(AtlasError::InvalidSlot),
             SlotOwner::Active => {}
             SlotOwner::Cached(group_id) => {
-                self.detach_slot_from_group(group_id, slot)?;
+                self.cache_manager.detach_slot_from_group(group_id, slot)?;
             }
         }
 
@@ -583,13 +663,12 @@ impl BackendInner {
     }
 
     fn release_group(&mut self, group_id: CacheGroupId) -> Result<(), AtlasError> {
-        let slots = self.group(group_id)?.slots.clone();
+        let slots = self.cache_manager.group(group_id)?.slots.clone();
         let mut cleared_slots = Vec::with_capacity(slots.len());
         for slot in slots {
             self.release_slot(slot, &mut cleared_slots)?;
         }
-        let group = self.group_mut(group_id)?;
-        group.slots.clear();
+        self.cache_manager.clear_group_slots(group_id)?;
         self.push_clear_batch(cleared_slots);
         Ok(())
     }
@@ -605,39 +684,12 @@ impl BackendInner {
         });
     }
 
-    fn acquire_vacant_group(&mut self) -> CacheGroupId {
-        if let Some(index) = self
-            .cache_groups
-            .iter()
-            .position(|group| group.slots.is_empty())
-        {
-            return CacheGroupId(index as u32);
-        }
-
-        let id = CacheGroupId(self.next_group_id);
-        self.next_group_id = self.next_group_id.wrapping_add(1);
-        self.cache_groups.push(CacheGroup::default());
-        id
-    }
-
-    fn group(&self, group_id: CacheGroupId) -> Result<&CacheGroup, AtlasError> {
-        self.cache_groups
-            .get(group_id.0 as usize)
-            .ok_or(AtlasError::InvalidState)
-    }
-
-    fn group_mut(&mut self, group_id: CacheGroupId) -> Result<&mut CacheGroup, AtlasError> {
-        self.cache_groups
-            .get_mut(group_id.0 as usize)
-            .ok_or(AtlasError::InvalidState)
-    }
-
     fn cached_group_matches_handle(
         &self,
         group_id: CacheGroupId,
         keys: &[TileKey],
     ) -> Result<bool, AtlasError> {
-        let Ok(group) = self.group(group_id) else {
+        let Ok(group) = self.cache_manager.group(group_id) else {
             return Ok(false);
         };
         if group.slots.len() != keys.len() {
@@ -655,23 +707,11 @@ impl BackendInner {
 
         Ok(true)
     }
-
-    fn detach_slot_from_group(
-        &mut self,
-        group_id: CacheGroupId,
-        slot: u32,
-    ) -> Result<(), AtlasError> {
-        let slots = &mut self.group_mut(group_id)?.slots;
-        let Some(index) = slots.iter().position(|&candidate| candidate == slot) else {
-            return Err(AtlasError::InvalidSlot);
-        };
-        slots.swap_remove(index);
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Backend {
+    backend_id: BackendId,
     inner: Arc<Mutex<BackendInner>>,
     recycle: BackendRecycleHandle,
 }
@@ -679,51 +719,45 @@ pub struct Backend {
 impl Backend {
     pub fn new(layout: AtlasLayout, backend_id: BackendId) -> Self {
         Self {
+            backend_id,
             inner: Arc::new(Mutex::new(BackendInner::new(layout, backend_id))),
             recycle: BackendRecycleHandle::new(),
         }
     }
 
-    pub fn backend_id(&self) -> Result<BackendId, AtlasError> {
-        Ok(self.lock_inner()?.backend_id)
+    pub const fn backend_id(&self) -> BackendId {
+        self.backend_id
     }
 
     pub fn layout(&self) -> Result<AtlasLayout, AtlasError> {
-        Ok(self.lock_inner()?.layout)
+        self.with_inner(|inner| Ok(inner.layout))
     }
 
     pub fn alloc_active(&self) -> Result<TileOwner, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        let key = inner.alloc_active()?;
+        let key = self.with_inner(|inner| inner.alloc_active())?;
         Ok(TileOwner::new(self.recycle.clone(), key))
     }
 
     pub fn alloc_cached(&self, count: usize) -> Result<CachedTileGroup, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        inner.alloc_cached(count)
+        self.with_inner(|inner| inner.alloc_cached(count))
     }
 
     pub fn create_cached_group(&self) -> Result<CachedTileGroup, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        Ok(inner.create_cached_group())
+        self.with_inner(|inner| Ok(inner.create_cached_group()))
     }
 
-    pub fn alloc_cached_in_group(
+    /// Returns the newly allocated key and an updated group handle.
+    ///
+    /// Callers must keep the returned `CachedTileGroup`; the input handle does not mutate.
+    pub fn alloc_cached_extending_group(
         &self,
-        cached: &mut CachedTileGroup,
-    ) -> Result<TileKey, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        inner.alloc_cached_in_group(cached)
+        cached: &CachedTileGroup,
+    ) -> Result<(TileKey, CachedTileGroup), AtlasError> {
+        self.with_inner(|inner| inner.alloc_cached_extending_group(cached))
     }
 
     pub fn cache_active_tiles(&self, keys: &[TileKey]) -> Result<CachedTileGroup, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        inner.cache_active_tiles(keys)
+        self.with_inner(|inner| inner.cache_active_tiles(keys))
     }
 
     pub fn cache_active_owners(
@@ -732,7 +766,7 @@ impl Backend {
     ) -> Result<CachedTileGroup, AtlasError> {
         let mut keys = Vec::new();
         for owner in owners {
-            if owner.backend_id() != self.backend_id()? {
+            if owner.backend_id() != self.backend_id {
                 return Err(AtlasError::WrongBackend);
             }
             keys.push(owner.into_tile_key());
@@ -741,9 +775,7 @@ impl Backend {
     }
 
     pub fn activate_cached_tile(&self, key: TileKey) -> Result<TileOwner, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        let key = inner.activate_cached_tile(key)?;
+        let key = self.with_inner(|inner| inner.activate_cached_tile(key))?;
         Ok(TileOwner::new(self.recycle.clone(), key))
     }
 
@@ -751,9 +783,7 @@ impl Backend {
         &self,
         cached: &CachedTileGroup,
     ) -> Result<Vec<TileOwner>, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        let keys = inner.activate_cached_group(cached)?;
+        let keys = self.with_inner(|inner| inner.activate_cached_group(cached))?;
         Ok(keys
             .into_iter()
             .map(|key| TileOwner::new(self.recycle.clone(), key))
@@ -761,33 +791,32 @@ impl Backend {
     }
 
     pub fn free(&self, key: TileKey) -> Result<(), AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        inner.free(key)
+        self.with_inner(|inner| inner.free(key))
     }
 
     pub fn tile_state(&self, key: TileKey) -> Result<TileState, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        inner.tile_state(key)
+        self.with_inner(|inner| inner.tile_state(key))
     }
 
     pub fn tile_stats(&self) -> Result<BackendTileStats, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        Ok(inner.tile_stats())
+        self.with_inner(|inner| Ok(inner.tile_stats()))
     }
 
     pub fn take_pending_clear_batches(&self) -> Result<Vec<ClearBatch>, AtlasError> {
-        let mut inner = self.lock_inner()?;
-        self.drain_owned_reclaims(&mut inner)?;
-        Ok(inner.take_pending_clear_batches())
+        self.with_inner(|inner| Ok(inner.take_pending_clear_batches()))
     }
 
     pub fn cached_group_alive(&self, cached: &CachedTileGroup) -> Result<bool, AtlasError> {
+        self.with_inner(|inner| inner.cached_group_alive(cached))
+    }
+
+    fn with_inner<R>(
+        &self,
+        f: impl FnOnce(&mut BackendInner) -> Result<R, AtlasError>,
+    ) -> Result<R, AtlasError> {
         let mut inner = self.lock_inner()?;
         self.drain_owned_reclaims(&mut inner)?;
-        inner.cached_group_alive(cached)
+        f(&mut inner)
     }
 
     fn lock_inner(&self) -> Result<MutexGuard<'_, BackendInner>, AtlasError> {
@@ -865,8 +894,8 @@ fn decode_tile_key(key: TileKey) -> TileKeyParts {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasError, AtlasLayout, Backend, BackendId, BackendManager, ClearBatch, TileState,
-        decode_tile_key,
+        AtlasError, AtlasLayout, Backend, BackendId, BackendManager, CacheGroupId, CacheManager,
+        ClearBatch, TileState, decode_tile_key,
     };
 
     #[test]
@@ -930,6 +959,84 @@ mod tests {
         );
         assert_eq!(backend.tile_state(newest.keys()[0]), Ok(TileState::Cached));
         assert!(oldest_slots.contains(&replacement_slot));
+    }
+
+    #[test]
+    fn pending_clear_batches_are_taken_once() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let active = backend.alloc_active().expect("active tile should allocate");
+        let active_slot = decode_tile_key(active.tile_key()).slot_index;
+        drop(active);
+
+        assert_eq!(
+            backend.take_pending_clear_batches(),
+            Ok(vec![ClearBatch {
+                backend_id: BackendId::new(0),
+                slots: vec![active_slot],
+            }])
+        );
+        assert_eq!(backend.take_pending_clear_batches(), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn cache_manager_empty_queue_returns_no_reclaim_candidate() {
+        let mut manager = CacheManager::new();
+
+        assert_eq!(manager.pop_oldest_non_empty_group(), Ok(None));
+    }
+
+    #[test]
+    fn cache_manager_skips_empty_groups_and_returns_oldest_non_empty_group() {
+        let mut manager = CacheManager::new();
+        let empty = manager.acquire_vacant_group();
+        manager.group_mut(empty).unwrap().slots.push(5);
+        let oldest_non_empty = manager.acquire_vacant_group();
+        manager.group_mut(oldest_non_empty).unwrap().slots.push(7);
+        let newer_non_empty = manager.acquire_vacant_group();
+        manager.group_mut(newer_non_empty).unwrap().slots.push(9);
+        manager.clear_group_slots(empty).unwrap();
+        manager.push_group_queue(empty);
+        manager.push_group_queue(oldest_non_empty);
+        manager.push_group_queue(newer_non_empty);
+
+        assert_eq!(
+            manager.pop_oldest_non_empty_group(),
+            Ok(Some((oldest_non_empty, vec![7])))
+        );
+        assert_eq!(
+            manager.pop_oldest_non_empty_group(),
+            Ok(Some((newer_non_empty, vec![9])))
+        );
+        assert_eq!(manager.pop_oldest_non_empty_group(), Ok(None));
+    }
+
+    #[test]
+    fn cache_manager_reuses_empty_group() {
+        let mut manager = CacheManager::new();
+        let first = manager.acquire_vacant_group();
+        manager.group_mut(first).unwrap().slots.push(1);
+        manager.clear_group_slots(first).unwrap();
+
+        let reused = manager.acquire_vacant_group();
+
+        assert_eq!(reused, first);
+    }
+
+    #[test]
+    fn cache_manager_does_not_reclaim_cleared_group_twice() {
+        let mut manager = CacheManager::new();
+        let group = manager.acquire_vacant_group();
+        manager.group_mut(group).unwrap().slots.push(1);
+        manager.push_group_queue(group);
+
+        assert_eq!(
+            manager.pop_oldest_non_empty_group(),
+            Ok(Some((group, vec![1])))
+        );
+        manager.clear_group_slots(group).unwrap();
+        manager.push_group_queue(group);
+
+        assert_eq!(manager.pop_oldest_non_empty_group(), Ok(None));
     }
 
     #[test]
@@ -1046,17 +1153,17 @@ mod tests {
     }
 
     #[test]
-    fn alloc_cached_in_group_appends_keys_in_order() {
+    fn alloc_cached_extending_group_appends_keys_in_order() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
-        let mut cached = backend
+        let cached = backend
             .create_cached_group()
             .expect("cached group should create");
 
-        let first = backend
-            .alloc_cached_in_group(&mut cached)
+        let (first, cached) = backend
+            .alloc_cached_extending_group(&cached)
             .expect("first cached key should allocate");
-        let second = backend
-            .alloc_cached_in_group(&mut cached)
+        let (second, cached) = backend
+            .alloc_cached_extending_group(&cached)
             .expect("second cached key should allocate");
 
         assert_eq!(cached.keys(), &[first, second]);
@@ -1065,16 +1172,17 @@ mod tests {
     }
 
     #[test]
-    fn alloc_cached_in_group_rejects_reclaimed_group_handle() {
+    fn alloc_cached_extending_group_rejects_reclaimed_group_handle() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
         let total_slots = AtlasLayout::Tiny8.total_slots() as usize;
         let mut oldest = backend
             .create_cached_group()
             .expect("cached group should create");
         for _ in 0..(total_slots / 2) {
-            backend
-                .alloc_cached_in_group(&mut oldest)
+            let (_, new_oldest) = backend
+                .alloc_cached_extending_group(&oldest)
                 .expect("cached key should allocate");
+            oldest = new_oldest;
         }
         let newest = backend
             .alloc_cached(total_slots / 2)
@@ -1083,7 +1191,7 @@ mod tests {
 
         assert_eq!(backend.cached_group_alive(&oldest), Ok(false));
         assert_eq!(
-            backend.alloc_cached_in_group(&mut oldest),
+            backend.alloc_cached_extending_group(&oldest),
             Err(AtlasError::GenerationMismatch)
         );
         assert_eq!(backend.cached_group_alive(&newest), Ok(true));
@@ -1125,6 +1233,6 @@ mod tests {
             None => return,
         };
 
-        assert_eq!(resolved.backend_id(), Ok(backend_id));
+        assert_eq!(resolved.backend_id(), backend_id);
     }
 }

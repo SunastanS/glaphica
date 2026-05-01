@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::document::{GlaDoc, GlaDocError};
 use crate::node::{GlaNodeId, GlaNodeKind};
-use atlas::{Backend, BackendId, TileKey};
+use atlas::{Backend, TileKey};
 use gla_image::GlaImageLayout;
 use glaphica_core::{BlendMode, IMAGE_TILE_SIZE};
 
@@ -164,8 +164,8 @@ impl GlaDoc {
 
     pub fn load_directory(
         path: impl AsRef<Path>,
-        image_backend: BackendId,
-        render_backend: BackendId,
+        image_backend: Backend,
+        render_backend: Backend,
         backup_backend: Backend,
     ) -> Result<GlaDocLoadResult, GlaDocStorageError> {
         let root_path = path.as_ref();
@@ -537,7 +537,10 @@ mod tests {
 
     #[test]
     fn plan_write_and_load_round_trip_preserves_tree_and_assets() {
-        let mut doc = new_doc(BackendId::new(3), BackendId::new(7));
+        let mut doc = new_doc(
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(3)),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(7)),
+        );
         let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
         let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         doc.set_opacity(doc.root_id(), 0.75)
@@ -575,8 +578,8 @@ mod tests {
 
         let loaded = GlaDoc::load_directory(
             &temp_dir,
-            BackendId::new(13),
-            BackendId::new(17),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(13)),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(17)),
             Backend::new(AtlasLayout::Tiny8, BackendId::new(19)),
         )
         .expect("document should load");
@@ -639,7 +642,7 @@ mod tests {
         assert_eq!(root_layer_id, root_layer_id);
     }
 
-    fn new_doc(image_backend: BackendId, render_backend: BackendId) -> GlaDoc {
+    fn new_doc(image_backend: Backend, render_backend: Backend) -> GlaDoc {
         GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
             image_backend,

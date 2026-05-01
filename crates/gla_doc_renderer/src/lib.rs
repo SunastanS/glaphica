@@ -4,8 +4,8 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasError, Backend as AtlasBackend};
 use gla_document::{GlaDoc, GlaDocError, GlaNodeId, GlaNodeKind};
 use gla_image::{
-    GlaCachedImage, GlaCachedImageCreateError, GlaImage, GlaImageCreateError,
-    GlaImageTileAccessError,
+    GlaCachedImage, GlaCachedImageActivateError, GlaCachedImageCreateError, GlaImage,
+    GlaImageCreateError, GlaImageEnsureActiveTileError, GlaImageTileAccessError,
 };
 use glaphica_core::BlendMode;
 use renderer::{
@@ -107,6 +107,7 @@ pub enum GlaDocRendererError {
     Document(GlaDocError),
     Atlas(AtlasError),
     CachedImageCreate(GlaCachedImageCreateError),
+    CachedImageActivate(GlaCachedImageActivateError),
     ImageCreate(GlaImageCreateError),
     ImageTileAccess(GlaImageTileAccessError),
     TileRenderer(TileRendererError),
@@ -121,6 +122,7 @@ impl Display for GlaDocRendererError {
             Self::Document(error) => Display::fmt(error, f),
             Self::Atlas(error) => Display::fmt(error, f),
             Self::CachedImageCreate(error) => Display::fmt(error, f),
+            Self::CachedImageActivate(error) => Display::fmt(error, f),
             Self::ImageCreate(error) => Display::fmt(error, f),
             Self::ImageTileAccess(error) => Display::fmt(error, f),
             Self::TileRenderer(error) => Display::fmt(error, f),
@@ -128,6 +130,12 @@ impl Display for GlaDocRendererError {
             Self::RenderExecution(error) => Display::fmt(error, f),
             Self::MissingActivePlan => f.write_str("missing active render plan"),
         }
+    }
+}
+
+impl From<GlaCachedImageActivateError> for GlaDocRendererError {
+    fn from(error: GlaCachedImageActivateError) -> Self {
+        Self::CachedImageActivate(error)
     }
 }
 
@@ -154,6 +162,15 @@ impl From<GlaCachedImageCreateError> for GlaDocRendererError {
 impl From<GlaImageCreateError> for GlaDocRendererError {
     fn from(error: GlaImageCreateError) -> Self {
         Self::ImageCreate(error)
+    }
+}
+
+impl From<GlaImageEnsureActiveTileError> for GlaDocRendererError {
+    fn from(error: GlaImageEnsureActiveTileError) -> Self {
+        match error {
+            GlaImageEnsureActiveTileError::Atlas(e) => Self::Atlas(e),
+            GlaImageEnsureActiveTileError::TileAccess(e) => Self::ImageTileAccess(e),
+        }
     }
 }
 
@@ -260,13 +277,18 @@ impl GlaDocRenderer {
         tile_index: usize,
     ) -> Result<atlas::TileKey, GlaDocRendererError> {
         if self.brush_preview_image.is_none() {
-            self.brush_preview_image = Some(GlaImage::new(doc.layout(), doc.render_backend())?);
+            self.brush_preview_image = Some(GlaImage::new(
+                doc.layout(),
+                doc.render_backend_ref().clone(),
+            )?);
         }
         let preview_image = self
             .brush_preview_image
             .as_mut()
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        ensure_active_target_tile(preview_image, tile_index, &self.render_backend)
+        preview_image
+            .ensure_active_tile_key(tile_index)
+            .map_err(Into::into)
     }
 
     pub fn ensure_brush_preview_merge_target(
@@ -519,21 +541,20 @@ impl GlaDocRenderer {
                 }
             };
 
-            let mut active_keys = Vec::new();
-            for tile_index in 0..active_image.tile_count() {
-                let tile_key = active_image
-                    .tile_key(tile_index)
-                    .unwrap_or(atlas::TileKey::EMPTY);
+            let (layout, tile_owners) = active_image.into_tile_owners();
+            let mut tile_keys = Vec::with_capacity(tile_owners.len());
+            let mut non_empty_owners = Vec::new();
+            for tile_owner in tile_owners {
+                let tile_key = tile_owner.tile_key();
+                tile_keys.push(tile_key);
                 if tile_key != atlas::TileKey::EMPTY {
-                    active_keys.push(tile_key);
+                    non_empty_owners.push(tile_owner);
                 }
             }
 
-            let cached_group = self.render_backend.cache_active_tiles(&active_keys)?;
-            entry.state = RenderImageState::Cached(GlaCachedImage::from_active_image(
-                &active_image,
-                cached_group,
-            )?);
+            let cached_group = self.render_backend.cache_active_owners(non_empty_owners)?;
+            entry.state =
+                RenderImageState::Cached(GlaCachedImage::new(layout, cached_group, tile_keys)?);
         }
 
         Ok(())
@@ -553,17 +574,19 @@ impl GlaDocRenderer {
                 .ok_or(GlaDocError::InvalidNodeId(node_id))?;
 
             let state = std::mem::replace(&mut entry.state, RenderImageState::Empty);
-            entry.state =
-                match state {
-                    RenderImageState::Active(image) => RenderImageState::Active(image),
-                    RenderImageState::Cached(cached) => RenderImageState::Active(
-                        restore_cached_image(doc, &self.render_backend, &cached)?,
-                    ),
-                    RenderImageState::Empty => {
-                        newly_allocated_nodes.push(node_id);
-                        RenderImageState::Active(GlaImage::new(doc.layout(), doc.render_backend())?)
-                    }
-                };
+            entry.state = match state {
+                RenderImageState::Active(image) => RenderImageState::Active(image),
+                RenderImageState::Cached(cached) => {
+                    RenderImageState::Active(cached.activate(&self.render_backend)?)
+                }
+                RenderImageState::Empty => {
+                    newly_allocated_nodes.push(node_id);
+                    RenderImageState::Active(GlaImage::new(
+                        doc.layout(),
+                        doc.render_backend_ref().clone(),
+                    )?)
+                }
+            };
         }
 
         Ok(newly_allocated_nodes)
@@ -662,8 +685,7 @@ impl GlaDocRenderer {
                 continue;
             }
 
-            let target_key =
-                ensure_active_target_tile(target_image, tile_index, &self.render_backend)?;
+            let target_key = target_image.ensure_active_tile_key(tile_index)?;
             output.push(RenderCommand::CompositeTile(CompositeTileCommand {
                 target_tile_key: target_key,
                 inputs: sources,
@@ -723,54 +745,6 @@ impl GlaDocRenderer {
         }
         Ok(sources)
     }
-}
-
-fn restore_cached_image(
-    doc: &GlaDoc,
-    render_backend: &AtlasBackend,
-    cached: &GlaCachedImage,
-) -> Result<GlaImage, GlaDocRendererError> {
-    let mut image = GlaImage::new(doc.layout(), doc.render_backend())?;
-    let activated = render_backend.activate_cached_group(cached.cache_group())?;
-    let mut activated_iter = activated.into_iter();
-
-    for tile_index in 0..cached.tile_count() {
-        if cached.tile_key(tile_index).unwrap_or(atlas::TileKey::EMPTY) == atlas::TileKey::EMPTY {
-            continue;
-        }
-
-        let tile_owner = activated_iter.next().ok_or(AtlasError::InvalidState)?;
-        image.replace_tile_owner(tile_index, tile_owner)?;
-    }
-
-    if activated_iter.next().is_some() {
-        return Err(AtlasError::InvalidState.into());
-    }
-
-    Ok(image)
-}
-
-fn ensure_active_target_tile(
-    image: &mut GlaImage,
-    tile_index: usize,
-    render_backend: &AtlasBackend,
-) -> Result<atlas::TileKey, GlaDocRendererError> {
-    let tile_key = image
-        .tile_key(tile_index)
-        .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-    if tile_key != atlas::TileKey::EMPTY {
-        return Ok(tile_key);
-    }
-
-    let tile_owner = render_backend.alloc_active()?;
-    let previous = image.replace_tile_owner(tile_index, tile_owner)?;
-    if previous.tile_key() != atlas::TileKey::EMPTY {
-        return Err(AtlasError::InvalidState.into());
-    }
-
-    image
-        .tile_key(tile_index)
-        .ok_or(GlaImageTileAccessError::OutOfBounds.into())
 }
 
 impl NodeRenderResource {
@@ -962,8 +936,8 @@ mod tests {
     fn new_doc() -> GlaDoc {
         GlaDoc::new(
             GlaImageLayout::new(64, 64),
-            BackendId::new(3),
-            BackendId::new(7),
+            AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(3)),
+            AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(7)),
             AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(11)),
         )
         .expect("document should build")
@@ -1041,7 +1015,8 @@ mod tests {
         assert_eq!(without_preview[0].tile_key, active_tile_key);
 
         renderer.brush_preview_image = Some(
-            GlaImage::new(doc.layout(), doc.render_backend()).expect("preview image should build"),
+            GlaImage::new(doc.layout(), doc.render_backend_ref().clone())
+                .expect("preview image should build"),
         );
         let with_empty_preview = renderer
             .collect_tile_sources(&doc, &inputs, 0, layer_id)
@@ -1276,11 +1251,14 @@ mod tests {
         let left_group = doc
             .append_group(doc.root_id())
             .expect("left group should append");
+        let left_nested = doc
+            .append_group(left_group)
+            .expect("left nested should append");
         let right_group = doc
             .append_group(doc.root_id())
             .expect("right group should append");
         let left_layer = doc
-            .append_layer(left_group)
+            .append_layer(left_nested)
             .expect("left layer should append");
         let right_layer = doc
             .append_layer(right_group)
@@ -1293,11 +1271,31 @@ mod tests {
         renderer
             .prepare_active_plan(&doc, &mut executor)
             .expect("left plan should build");
+        let cached_tile = renderer
+            .render_backend
+            .alloc_active()
+            .expect("cached tile should allocate");
+        let cached_tile_key = cached_tile.tile_key();
+        let left_entry = renderer
+            .node_resources
+            .iter_mut()
+            .find(|entry| entry.node_id == left_nested)
+            .expect("left nested should exist");
+        let RenderImageState::Active(left_image) = &mut left_entry.state else {
+            panic!("left group should be active");
+        };
+        left_image
+            .replace_tile_owner(0, cached_tile)
+            .expect("tile owner should install");
         doc.set_active_layer(right_layer)
             .expect("active layer should update");
         renderer
             .prepare_active_plan(&doc, &mut executor)
             .expect("right plan should build");
+        assert_eq!(
+            renderer.render_backend.tile_state(cached_tile_key),
+            Ok(atlas::TileState::Cached)
+        );
         doc.set_active_layer(left_layer)
             .expect("active layer should update");
         renderer
@@ -1307,10 +1305,17 @@ mod tests {
         let left_state = renderer
             .node_resources()
             .iter()
-            .find(|entry| entry.node_id() == left_group)
-            .expect("left group should exist");
+            .find(|entry| entry.node_id() == left_nested)
+            .expect("left nested should exist");
 
-        assert!(matches!(left_state.state(), RenderImageState::Active(_)));
+        let RenderImageState::Active(left_image) = left_state.state() else {
+            panic!("left group should be active");
+        };
+        assert_eq!(left_image.tile_key(0), Some(cached_tile_key));
+        assert_eq!(
+            renderer.render_backend.tile_state(cached_tile_key),
+            Ok(atlas::TileState::Active)
+        );
     }
 
     #[test]

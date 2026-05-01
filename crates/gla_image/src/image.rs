@@ -4,22 +4,30 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasError, Backend, BackendId, TileKey, TileOwner};
 use glaphica_core::CanvasVec2;
 
-use crate::{ImageId, ImageTileSlot, layout::GlaImageLayout};
+use crate::{AtlasTileMap, ImageId, ImageTileSlot, TileGrid, layout::GlaImageLayout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlaImageCreateError {
     TooManyTiles,
+    Backend(AtlasError),
 }
 
 impl Display for GlaImageCreateError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooManyTiles => write!(f, "image has too many tiles for this platform"),
+            Self::Backend(error) => Display::fmt(error, f),
         }
     }
 }
 
 impl Error for GlaImageCreateError {}
+
+impl From<AtlasError> for GlaImageCreateError {
+    fn from(error: AtlasError) -> Self {
+        Self::Backend(error)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlaImageTileAccessError {
@@ -87,26 +95,33 @@ pub struct GlaImageTileRecBounds {
 pub struct GlaImage {
     layout: GlaImageLayout,
     tile_owners: Box<[TileOwner]>,
-    backend: BackendId,
+    backend: Backend,
+    backend_id: BackendId,
 }
 
 impl GlaImage {
-    pub fn new(layout: GlaImageLayout, backend: BackendId) -> Result<Self, GlaImageCreateError> {
+    pub fn new(layout: GlaImageLayout, backend: Backend) -> Result<Self, GlaImageCreateError> {
         let total_tiles =
             usize::try_from(layout.total_tiles()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let tile_owners = std::iter::repeat_with(TileOwner::empty)
             .take(total_tiles)
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let backend_id = backend.backend_id();
         Ok(Self {
             layout,
             tile_owners,
             backend,
+            backend_id,
         })
     }
 
-    pub const fn backend(&self) -> BackendId {
-        self.backend
+    pub const fn backend_id(&self) -> BackendId {
+        self.backend_id
+    }
+
+    pub fn backend(&self) -> &Backend {
+        &self.backend
     }
 
     pub const fn layout(&self) -> &GlaImageLayout {
@@ -125,6 +140,10 @@ impl GlaImage {
         self.tile_owners.get(tile_index)
     }
 
+    pub fn into_tile_owners(self) -> (GlaImageLayout, Box<[TileOwner]>) {
+        (self.layout, self.tile_owners)
+    }
+
     pub fn tile_canvas_origin(&self, tile_index: usize) -> Option<CanvasVec2> {
         self.layout.tile_canvas_origin(tile_index)
     }
@@ -135,9 +154,9 @@ impl GlaImage {
         tile_owner: TileOwner,
     ) -> Result<TileOwner, GlaImageTileAccessError> {
         let actual_backend = tile_owner.backend_id();
-        if actual_backend != self.backend {
+        if actual_backend != self.backend_id {
             return Err(GlaImageTileAccessError::WrongBackend {
-                expected: self.backend,
+                expected: self.backend_id,
                 actual: actual_backend,
             });
         }
@@ -159,17 +178,7 @@ impl GlaImage {
     pub fn ensure_active_tile_key(
         &mut self,
         tile_index: usize,
-        backend: &Backend,
     ) -> Result<TileKey, GlaImageEnsureActiveTileError> {
-        let actual_backend = backend.backend_id()?;
-        if actual_backend != self.backend {
-            return Err(GlaImageTileAccessError::WrongBackend {
-                expected: self.backend,
-                actual: actual_backend,
-            }
-            .into());
-        }
-
         let existing_tile_key = self
             .tile_key(tile_index)
             .ok_or(GlaImageTileAccessError::OutOfBounds)?;
@@ -177,7 +186,7 @@ impl GlaImage {
             return Ok(existing_tile_key);
         }
 
-        let tile_owner = backend.alloc_active()?;
+        let tile_owner = self.backend.alloc_active()?;
         let tile_key = tile_owner.tile_key();
         self.replace_tile_owner(tile_index, tile_owner)?;
         Ok(tile_key)
@@ -300,6 +309,22 @@ impl GlaImage {
     }
 }
 
+impl TileGrid for GlaImage {
+    fn layout(&self) -> GlaImageLayout {
+        *GlaImage::layout(self)
+    }
+
+    fn tile_count(&self) -> usize {
+        GlaImage::tile_count(self)
+    }
+}
+
+impl AtlasTileMap for GlaImage {
+    fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
+        GlaImage::tile_key(self, tile_index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use atlas::{AtlasLayout, Backend, BackendId, TileKey};
@@ -312,7 +337,8 @@ mod tests {
     #[test]
     fn replace_and_get_tile_key_use_index_mapping() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
-        let mut image = GlaImage::new(layout, BackendId::new(1)).unwrap();
+        let mut image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let tile_owner = backend.alloc_active().unwrap();
         let key = tile_owner.tile_key();
@@ -325,7 +351,8 @@ mod tests {
     #[test]
     fn replace_tile_owner_rejects_out_of_bounds_index() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
-        let mut image = GlaImage::new(layout, BackendId::new(1)).unwrap();
+        let mut image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let tile_owner = backend.alloc_active().unwrap();
 
@@ -336,7 +363,8 @@ mod tests {
     #[test]
     fn replace_tile_owner_rejects_wrong_backend() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE);
-        let mut image = GlaImage::new(layout, BackendId::new(1)).unwrap();
+        let mut image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
         let tile_owner = backend.alloc_active().unwrap();
 
@@ -353,7 +381,8 @@ mod tests {
     #[test]
     fn collect_affected_tile_keys_uses_layout_addressing() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
-        let mut image = GlaImage::new(layout, BackendId::new(1)).unwrap();
+        let mut image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let tile_owner = backend.alloc_active().unwrap();
         let expected = tile_owner.tile_key();
@@ -372,7 +401,8 @@ mod tests {
     #[test]
     fn collect_affected_tile_slots_returns_logical_slots() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
-        let image = GlaImage::new(layout, BackendId::new(1)).unwrap();
+        let image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
 
         let mut slots = Vec::new();
         image.collect_affected_tile_slots(
@@ -394,7 +424,8 @@ mod tests {
     #[test]
     fn non_empty_tile_bounds_cover_non_empty_keys() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
-        let mut image = GlaImage::new(layout, BackendId::new(1)).unwrap();
+        let mut image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         assert!(
             image
@@ -422,7 +453,11 @@ mod tests {
     fn resize_anchored_top_left_drops_removed_tile_owners() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let old_layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2);
-        let mut image = GlaImage::new(old_layout, BackendId::new(1)).unwrap();
+        let mut image = GlaImage::new(
+            old_layout,
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(1)),
+        )
+        .unwrap();
         let kept_top_left = backend.alloc_active().unwrap();
         let removed_top_right = backend.alloc_active().unwrap();
         let kept_bottom_left = backend.alloc_active().unwrap();
@@ -460,7 +495,7 @@ mod tests {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let mut image = GlaImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
-            BackendId::new(1),
+            backend.clone(),
         )
         .unwrap();
         let tile_owner = backend.alloc_active().unwrap();

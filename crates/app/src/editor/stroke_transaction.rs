@@ -201,7 +201,7 @@ impl StrokeTransaction {
         let brush_backend = brushes
             .brush_backend_mut(brush_id)
             .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
-        brush_backend.archive_stroke(self.stroke)?;
+        let _cached_group = brush_backend.archive_stroke(self.stroke)?;
         doc_renderer.clear_brush_preview_image();
 
         Ok(Some(tile_indices))

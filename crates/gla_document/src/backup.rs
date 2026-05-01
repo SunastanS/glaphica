@@ -48,7 +48,7 @@ pub enum GlaDocUndoTileAction {
 
 impl DocumentBackupStore {
     pub fn new(backend: Backend) -> Result<Self, AtlasError> {
-        let backend_id = backend.backend_id()?;
+        let backend_id = backend.backend_id();
         Ok(Self {
             backend,
             backend_id,

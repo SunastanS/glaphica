@@ -1,14 +1,28 @@
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{CachedTileGroup, TileKey};
+use atlas::{AtlasError, Backend, CachedTileGroup, TileKey};
 
-use crate::{GlaImage, layout::GlaImageLayout};
+use crate::{
+    AtlasTileMap, GlaImage, GlaImageCreateError, GlaImageTileAccessError, TileGrid,
+    layout::GlaImageLayout,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GlaCachedImageCreateError {
     WrongTileCount { expected: usize, actual: usize },
     WrongCachedTileCount { expected: usize, actual: usize },
+    WrongTileKeys,
+    DuplicateTileKeys,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlaCachedImageActivateError {
+    Atlas(AtlasError),
+    ImageCreate(GlaImageCreateError),
+    TileAccess(GlaImageTileAccessError),
+    TileKeyNotFound(TileKey),
 }
 
 impl Display for GlaCachedImageCreateError {
@@ -22,11 +36,52 @@ impl Display for GlaCachedImageCreateError {
                 f,
                 "cached image non-empty tile count mismatch: expected {expected} cached tiles, got {actual}"
             ),
+            Self::WrongTileKeys => write!(
+                f,
+                "cached image has non-empty tile keys that are not present in the cached group"
+            ),
+            Self::DuplicateTileKeys => write!(f, "cached image has duplicate non-empty tile keys"),
         }
     }
 }
 
 impl Error for GlaCachedImageCreateError {}
+
+impl Display for GlaCachedImageActivateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Atlas(e) => Display::fmt(e, f),
+            Self::ImageCreate(e) => Display::fmt(e, f),
+            Self::TileAccess(e) => Display::fmt(e, f),
+            Self::TileKeyNotFound(key) => {
+                write!(
+                    f,
+                    "activated tile key {key:?} not found in cached image tile map"
+                )
+            }
+        }
+    }
+}
+
+impl Error for GlaCachedImageActivateError {}
+
+impl From<AtlasError> for GlaCachedImageActivateError {
+    fn from(e: AtlasError) -> Self {
+        Self::Atlas(e)
+    }
+}
+
+impl From<GlaImageCreateError> for GlaCachedImageActivateError {
+    fn from(e: GlaImageCreateError) -> Self {
+        Self::ImageCreate(e)
+    }
+}
+
+impl From<GlaImageTileAccessError> for GlaCachedImageActivateError {
+    fn from(e: GlaImageTileAccessError) -> Self {
+        Self::TileAccess(e)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlaCachedImage {
@@ -60,16 +115,24 @@ impl GlaCachedImage {
             });
         }
 
-        let non_empty_tiles = tile_keys
-            .iter()
-            .copied()
-            .filter(|key| *key != TileKey::EMPTY)
-            .count();
-        let cached_tiles = cache_group.keys().len();
-        if non_empty_tiles != cached_tiles {
+        let cached_set: HashSet<TileKey> = cache_group.keys().iter().copied().collect();
+        let mut non_empty_set = HashSet::with_capacity(cached_set.len());
+        for &key in &tile_keys {
+            if key == TileKey::EMPTY {
+                continue;
+            }
+            if !cached_set.contains(&key) {
+                return Err(GlaCachedImageCreateError::WrongTileKeys);
+            }
+            if !non_empty_set.insert(key) {
+                return Err(GlaCachedImageCreateError::DuplicateTileKeys);
+            }
+        }
+
+        if non_empty_set != cached_set {
             return Err(GlaCachedImageCreateError::WrongCachedTileCount {
-                expected: non_empty_tiles,
-                actual: cached_tiles,
+                expected: non_empty_set.len(),
+                actual: cached_set.len(),
             });
         }
 
@@ -107,6 +170,42 @@ impl GlaCachedImage {
                 output.push(tile_index);
             }
         }
+    }
+
+    pub fn activate(self, backend: &Backend) -> Result<GlaImage, GlaCachedImageActivateError> {
+        let key_to_index: HashMap<TileKey, usize> = self
+            .tile_keys
+            .iter()
+            .enumerate()
+            .filter(|&(_, k)| *k != TileKey::EMPTY)
+            .map(|(i, k)| (*k, i))
+            .collect();
+        let mut image = GlaImage::new(self.layout, backend.clone())?;
+        let activated = backend.activate_cached_group(&self.cache_group)?;
+        for tile_owner in activated {
+            let tile_key = tile_owner.tile_key();
+            let &tile_index = key_to_index
+                .get(&tile_key)
+                .ok_or(GlaCachedImageActivateError::TileKeyNotFound(tile_key))?;
+            image.replace_tile_owner(tile_index, tile_owner)?;
+        }
+        Ok(image)
+    }
+}
+
+impl TileGrid for GlaCachedImage {
+    fn layout(&self) -> GlaImageLayout {
+        GlaCachedImage::layout(self)
+    }
+
+    fn tile_count(&self) -> usize {
+        GlaCachedImage::tile_count(self)
+    }
+}
+
+impl AtlasTileMap for GlaCachedImage {
+    fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
+        GlaCachedImage::tile_key(self, tile_index)
     }
 }
 
@@ -159,6 +258,85 @@ mod tests {
                 actual: 1,
             })
         );
+    }
+
+    #[test]
+    fn cached_image_rejects_keys_not_in_group() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
+        let group_a = backend.alloc_cached(1).expect("group a should allocate");
+        let group_b = backend.alloc_cached(1).expect("group b should allocate");
+        let key_from_b = group_b.keys()[0];
+
+        let image = GlaCachedImage::new(
+            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
+            group_a,
+            vec![key_from_b],
+        );
+
+        assert_eq!(image, Err(GlaCachedImageCreateError::WrongTileKeys));
+    }
+
+    #[test]
+    fn cached_image_rejects_duplicate_non_empty_keys() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
+        let cached = backend
+            .alloc_cached(2)
+            .expect("cached tiles should allocate");
+        let key_a = cached.keys()[0];
+        let key_b = cached.keys()[1];
+
+        let image = GlaCachedImage::new(
+            GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2),
+            cached,
+            vec![key_a, key_b, key_a, TileKey::EMPTY],
+        );
+
+        assert_eq!(image, Err(GlaCachedImageCreateError::DuplicateTileKeys));
+    }
+
+    #[test]
+    fn cached_image_rejects_missing_cached_group_key() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
+        let cached = backend
+            .alloc_cached(2)
+            .expect("cached tiles should allocate");
+        let key_a = cached.keys()[0];
+
+        let image = GlaCachedImage::new(
+            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
+            cached,
+            vec![key_a],
+        );
+
+        assert!(image.is_err());
+    }
+
+    #[test]
+    fn cached_image_activate_round_trip() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
+        let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2);
+        let cached = backend
+            .alloc_cached(2)
+            .expect("cached tiles should allocate");
+        let first = cached.keys()[0];
+        let second = cached.keys()[1];
+        let cached_image = GlaCachedImage::new(
+            layout,
+            cached,
+            vec![first, TileKey::EMPTY, second, TileKey::EMPTY],
+        )
+        .expect("cached image should build");
+
+        let active = cached_image
+            .activate(&backend)
+            .expect("activate should succeed");
+
+        assert_eq!(active.tile_key(0), Some(first));
+        assert_eq!(active.tile_key(1), Some(TileKey::EMPTY));
+        assert_eq!(active.tile_key(2), Some(second));
+        assert_eq!(active.tile_key(3), Some(TileKey::EMPTY));
+        assert_eq!(backend.tile_state(first), Ok(atlas::TileState::Active));
+        assert_eq!(backend.tile_state(second), Ok(atlas::TileState::Active));
     }
 
     #[test]

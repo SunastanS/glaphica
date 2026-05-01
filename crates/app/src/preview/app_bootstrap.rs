@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Instant;
 
-use atlas::{AtlasLayout, Backend, BackendId, BackendManager};
+use atlas::{AtlasLayout, Backend, BackendManager};
 use brush::round::{ROUND_BRUSH_ID, ROUND_SHADER_SPEC, RoundBrushSettings};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageCreateError, GlaImageLayout};
@@ -40,8 +40,6 @@ impl PreviewState {
         let size = window.inner_size();
         let (gpu, surface) = create_gpu_runtime(window.clone(), size.width, size.height)?;
         let (
-            image_backend_id,
-            render_backend_id,
             image_backend,
             render_backend,
             backup_backend,
@@ -52,8 +50,8 @@ impl PreviewState {
 
         let mut doc = GlaDoc::new(
             GlaImageLayout::new(DEFAULT_DOCUMENT_WIDTH, DEFAULT_DOCUMENT_HEIGHT),
-            image_backend_id,
-            render_backend_id,
+            image_backend.clone(),
+            render_backend.clone(),
             backup_backend,
         )?;
         let active_layer = doc.append_layer(doc.root_id())?;
@@ -176,8 +174,6 @@ fn create_render_resources(
     surface: &crate::SurfaceRuntime,
 ) -> Result<
     (
-        BackendId,
-        BackendId,
         Backend,
         Backend,
         Backend,
@@ -226,8 +222,6 @@ fn create_render_resources(
     )?;
 
     Ok((
-        image_backend_id,
-        render_backend_id,
         image_backend,
         render_backend,
         backup_backend,

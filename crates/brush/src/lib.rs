@@ -424,7 +424,7 @@ impl BrushBackend {
         intermediate_backend: Backend,
         intermediate_format: BrushIntermediateFormat,
     ) -> Result<Self, BrushStrokeError> {
-        let intermediate_backend_id = intermediate_backend.backend_id()?;
+        let intermediate_backend_id = intermediate_backend.backend_id();
         Ok(Self {
             brush_id,
             intermediate_backend,
@@ -495,7 +495,7 @@ pub struct BrushStrokeState {
 
 impl BrushStrokeState {
     pub fn new(brush_id: BrushId, intermediate_backend: Backend) -> Result<Self, BrushStrokeError> {
-        let intermediate_backend_id = intermediate_backend.backend_id()?;
+        let intermediate_backend_id = intermediate_backend.backend_id();
         Ok(Self {
             brush_id,
             intermediate_backend,
@@ -605,11 +605,12 @@ impl BrushStrokeState {
         tile_indices: &[usize],
         brush_payload: Vec<u8>,
     ) -> Result<StrokeCommitBatch, BrushStrokeError> {
-        let image_backend_id = image_backend.backend_id()?;
-        if image.backend() != image_backend_id {
+        let image_backend_id = image_backend.backend_id();
+        let actual_backend_id = image.backend_id();
+        if actual_backend_id != image_backend_id {
             return Err(BrushStrokeError::WrongImageBackend {
                 expected: image_backend_id,
-                actual: image.backend(),
+                actual: actual_backend_id,
             });
         }
 
@@ -645,7 +646,7 @@ impl BrushStrokeState {
             let origin_tile_key = image
                 .tile_key(tile_index)
                 .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-            let destination_tile_key = image.ensure_active_tile_key(tile_index, image_backend)?;
+            let destination_tile_key = image.ensure_active_tile_key(tile_index)?;
             let backup_tile_key = if origin_tile_key != TileKey::EMPTY {
                 let backup_tile_key = backup_tile_keys
                     .get(backup_key_cursor)
@@ -961,7 +962,7 @@ mod tests {
         let backup_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(5));
         let mut image = GlaImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE),
-            BackendId::new(3),
+            image_backend.clone(),
         )
         .expect("image should create");
         let first_active = image_backend.alloc_active().expect("first active");

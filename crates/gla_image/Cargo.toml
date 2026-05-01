@@ -7,3 +7,6 @@ edition = "2024"
 atlas = { path = "../atlas" }
 glaphica_core = { package = "core", path = "../core" }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

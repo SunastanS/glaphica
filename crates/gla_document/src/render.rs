@@ -389,8 +389,8 @@ mod tests {
     fn new_doc(layout: GlaImageLayout) -> GlaDoc {
         GlaDoc::new(
             layout,
-            BackendId::new(3),
-            BackendId::new(7),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(3)),
+            Backend::new(AtlasLayout::Tiny8, BackendId::new(7)),
             Backend::new(AtlasLayout::Tiny8, BackendId::new(11)),
         )
         .expect("document should build")

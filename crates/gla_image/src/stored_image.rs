@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 use glaphica_core::IMAGE_TILE_SIZE;
 use serde::{Deserialize, Serialize};
 
-use crate::layout::GlaImageLayout;
+use crate::{PixelTileSource, TileGrid, layout::GlaImageLayout};
 
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 
@@ -31,10 +31,38 @@ impl Display for GlaStoredImageError {
 impl Error for GlaStoredImageError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "GlaStoredImageRaw", into = "GlaStoredImageRaw")]
 pub struct GlaStoredImage {
     width: u32,
     height: u32,
     pixels_rgba8: Vec<u8>,
+    #[serde(skip)]
+    layout: GlaImageLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GlaStoredImageRaw {
+    width: u32,
+    height: u32,
+    pixels_rgba8: Vec<u8>,
+}
+
+impl From<GlaStoredImage> for GlaStoredImageRaw {
+    fn from(image: GlaStoredImage) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            pixels_rgba8: image.pixels_rgba8,
+        }
+    }
+}
+
+impl TryFrom<GlaStoredImageRaw> for GlaStoredImage {
+    type Error = GlaStoredImageError;
+
+    fn try_from(raw: GlaStoredImageRaw) -> Result<Self, Self::Error> {
+        GlaStoredImage::new_rgba8(raw.width, raw.height, raw.pixels_rgba8)
+    }
 }
 
 impl GlaStoredImage {
@@ -51,10 +79,12 @@ impl GlaStoredImage {
             });
         }
 
+        let layout = GlaImageLayout::new(width, height);
         Ok(Self {
             width,
             height,
             pixels_rgba8,
+            layout,
         })
     }
 
@@ -76,8 +106,7 @@ impl GlaStoredImage {
 
     pub fn collect_non_empty_tile_indices(&self, output: &mut Vec<usize>) {
         output.clear();
-        let layout = self.layout();
-        for tile_index in 0..layout.total_tiles() as usize {
+        for tile_index in 0..self.layout.total_tiles() as usize {
             if self.tile_has_non_zero_pixel(tile_index) {
                 output.push(tile_index);
             }
@@ -89,8 +118,8 @@ impl GlaStoredImage {
         tile_index: usize,
         output: &mut Vec<u8>,
     ) -> Result<(), GlaStoredImageError> {
-        let layout = self.layout();
-        let tile_origin = layout
+        let tile_origin = self
+            .layout
             .tile_canvas_origin(tile_index)
             .ok_or(GlaStoredImageError::TileOutOfBounds)?;
         let tile_width = IMAGE_TILE_SIZE as usize;
@@ -121,8 +150,7 @@ impl GlaStoredImage {
     }
 
     fn tile_has_non_zero_pixel(&self, tile_index: usize) -> bool {
-        let layout = self.layout();
-        let Some(tile_origin) = layout.tile_canvas_origin(tile_index) else {
+        let Some(tile_origin) = self.layout.tile_canvas_origin(tile_index) else {
             return false;
         };
 
@@ -149,6 +177,24 @@ impl GlaStoredImage {
     }
 }
 
+impl TileGrid for GlaStoredImage {
+    fn layout(&self) -> GlaImageLayout {
+        GlaStoredImage::layout(self)
+    }
+
+    fn tile_count(&self) -> usize {
+        self.layout.total_tiles() as usize
+    }
+}
+
+impl PixelTileSource for GlaStoredImage {
+    type Error = GlaStoredImageError;
+
+    fn copy_tile_rgba8(&self, tile_index: usize, output: &mut Vec<u8>) -> Result<(), Self::Error> {
+        GlaStoredImage::copy_tile_rgba8(self, tile_index, output)
+    }
+}
+
 fn expected_rgba8_len(width: u32, height: u32) -> Result<usize, GlaStoredImageError> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
@@ -163,7 +209,16 @@ fn expected_rgba8_len(width: u32, height: u32) -> Result<usize, GlaStoredImageEr
 mod tests {
     use glaphica_core::IMAGE_TILE_SIZE;
 
+    use crate::{GlaImageLayout, TileGrid};
+
     use super::{GlaStoredImage, GlaStoredImageError};
+
+    #[test]
+    fn tile_grid_reports_logical_tiles() {
+        let image = GlaStoredImage::new_rgba8(2, 2, vec![0; 16]).unwrap();
+        assert_eq!(image.tile_count(), 1);
+        assert_eq!(TileGrid::layout(&image), GlaImageLayout::new(2, 2));
+    }
 
     #[test]
     fn rejects_invalid_rgba8_len() {
@@ -175,6 +230,41 @@ mod tests {
                 actual: 15,
             })
         );
+    }
+
+    #[test]
+    fn serde_round_trip_rebuilds_layout() {
+        let width = IMAGE_TILE_SIZE + 1;
+        let height = IMAGE_TILE_SIZE + 1;
+        let image =
+            GlaStoredImage::new_rgba8(width, height, vec![0; (width * height * 4) as usize])
+                .unwrap();
+
+        let json = serde_json::to_string(&image).unwrap();
+        let decoded: GlaStoredImage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.layout(), GlaImageLayout::new(width, height));
+        assert_eq!(decoded.tile_count(), 4);
+    }
+
+    #[test]
+    fn serde_does_not_emit_cached_layout() {
+        let image = GlaStoredImage::new_rgba8(2, 2, vec![0; 16]).unwrap();
+        let json = serde_json::to_string(&image).unwrap();
+
+        assert!(!json.contains("layout"));
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_pixel_count() {
+        let decoded = serde_json::from_str::<GlaStoredImage>(
+            r#"{"width":2,"height":2,"pixels_rgba8":[0,0,0]}"#,
+        );
+
+        assert!(matches!(
+            decoded,
+            Err(error) if error.to_string().contains("stored image pixel count mismatch")
+        ));
     }
 
     #[test]

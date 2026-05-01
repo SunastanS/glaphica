@@ -214,7 +214,7 @@ impl TileRenderer {
             if let Some(backend) = backends
                 .iter()
                 .copied()
-                .find(|backend| backend.backend_id().ok() == Some(backend_id))
+                .find(|backend| backend.backend_id() == backend_id)
             {
                 self.ensure_backend_with_format(device, backend, shader_spec.intermediate_format)?;
             }

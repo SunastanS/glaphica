@@ -39,7 +39,7 @@ impl AtlasTextureSet {
         backend: &atlas::Backend,
         format: BrushIntermediateFormat,
     ) -> Result<&AtlasBackendTexture, TileRendererError> {
-        let backend_id = backend.backend_id()?;
+        let backend_id = backend.backend_id();
         let index = backend_id.raw() as usize;
         if self.backends.len() <= index {
             self.backends.resize_with(index + 1, || None);
@@ -82,7 +82,7 @@ impl AtlasTextureSet {
         device: &wgpu::Device,
         backend: &atlas::Backend,
     ) -> Result<&AtlasBackendTexture, TileRendererError> {
-        let backend_id = backend.backend_id()?;
+        let backend_id = backend.backend_id();
         let index = backend_id.raw() as usize;
         if self.backends.len() <= index || self.backends[index].is_none() {
             return self.ensure_backend_texture(

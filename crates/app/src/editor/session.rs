@@ -343,7 +343,7 @@ impl EditorSession {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<Option<EditorRenderUpdate>, EditorSessionError> {
-        let Some(restore) = self.doc.restore_last_undo(image_backend)? else {
+        let Some(restore) = self.doc.restore_last_undo()? else {
             return Ok(None);
         };
 
