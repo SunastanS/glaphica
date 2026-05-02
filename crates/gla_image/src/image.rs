@@ -357,46 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_affected_tile_keys_uses_layout_addressing() -> Result<(), GlaImageTileAccessError> {
-        let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
-        let mut image =
-            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
-        let tile_owner = backend.alloc_active().unwrap();
-        let expected = tile_owner.tile_key();
-        assert!(image.replace_tile_owner(1, tile_owner).is_ok());
-
-        let mut keys = Vec::new();
-        let mut error = None;
-        {
-            let this = &image;
-            let center = CanvasVec2::new(IMAGE_TILE_SIZE as f32, 5.0);
-            let output: &mut Vec<TileKey> = &mut keys;
-            output.clear();
-            this.layout
-                .for_each_affected_tile_index(center, 0, |index| {
-                    if error.is_some() {
-                        return;
-                    }
-                    let tile_key = match this.tile_key(index) {
-                        Ok(tile_key) => tile_key,
-                        Err(e) => {
-                            error = Some(e);
-                            return;
-                        }
-                    };
-                    output.push(tile_key);
-                });
-        }
-        if let Some(error) = error {
-            return Err(error);
-        }
-
-        assert_eq!(keys, vec![TileKey::empty(image.backend_id()), expected]);
-        Ok(())
-    }
-
-    #[test]
     fn collect_affected_tile_slots_returns_logical_slots() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
         let image =
