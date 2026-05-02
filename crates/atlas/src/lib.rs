@@ -791,6 +791,12 @@ impl Backend {
         self.with_inner(|inner| inner.cache_active_tiles(keys))
     }
 
+    // TODO(backend-identity):
+    // TileOwner ownership is currently validated by BackendId.
+    // This relies on the architectural invariant that live Backend instances have unique BackendId.
+    // Long term, BackendId should be separated from backend instance identity, likely using an
+    // internal capability token / manager-owned registry.
+
     pub fn cache_active_owners(
         &self,
         owners: impl IntoIterator<Item = TileOwner>,
@@ -805,15 +811,26 @@ impl Backend {
         let mut inner = self.lock_inner()?;
         self.drain_owned_reclaims(&mut inner)?;
 
-        let mut keys = Vec::with_capacity(owners.len());
         if owners.is_empty() {
             return Ok(CachedTileGroup {
                 group_id: u32::MAX,
-                keys,
+                keys: Vec::new(),
             });
         }
 
+        // Validate every key is live and active before mutating any slot state.
+        for owner in &owners {
+            if owner.key.is_empty() {
+                continue;
+            }
+            let slot = inner.validate_key(owner.key)?;
+            if inner.slot_owners[slot as usize] != SlotOwner::Active {
+                return Err(AtlasError::InvalidState);
+            }
+        }
+
         let group_id = inner.cache_manager.acquire_vacant_group();
+        let mut keys = Vec::with_capacity(owners.len());
         for mut owner in owners {
             if !owner.key.is_empty() {
                 inner.cache_owned_active_into_group(owner.key, group_id)?;
