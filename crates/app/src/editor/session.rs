@@ -4,8 +4,8 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasError, Backend};
 use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError};
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
-use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaDocUndoTileAction};
-use renderer::{CopyTileCommand, RenderCommand, TileRenderer, TileRendererError};
+use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoTileAction};
+use renderer::{RenderCommand, TileRenderer, TileRendererError};
 
 use crate::AppBrushRegistry;
 use crate::editor::stroke_transaction::StrokeTransaction;
@@ -338,7 +338,7 @@ impl EditorSession {
 
     pub fn undo_last_stroke(
         &mut self,
-        image_backend: &Backend,
+        _image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -347,40 +347,37 @@ impl EditorSession {
             return Ok(None);
         };
 
-        let backup_backend = self.doc.undo_stack().backup_store().backend();
-        tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend(device, backup_backend)?;
+        let backends = self.doc.image_undo().backends();
 
         let commands = restore
+            .image_restore()
             .tile_actions()
             .iter()
             .filter_map(|action| match action {
-                GlaDocUndoTileAction::RestoreFromBackup {
-                    source_tile_key,
-                    destination_tile_key,
-                    ..
-                } => Some(RenderCommand::CopyTile(CopyTileCommand {
-                    source_tile_key: *source_tile_key,
-                    destination_tile_key: *destination_tile_key,
-                })),
-                GlaDocUndoTileAction::Clear { .. } => None,
+                GlaImageUndoTileAction::RestoreFromBackup { copy_command, .. } => {
+                    Some(RenderCommand::CopyTile(*copy_command))
+                }
+                GlaImageUndoTileAction::Clear { .. } => None,
             })
             .collect::<Vec<_>>();
         let dirty_tile_indices = restore
+            .image_restore()
             .tile_actions()
             .iter()
             .map(|action| match action {
-                GlaDocUndoTileAction::RestoreFromBackup { tile_index, .. }
-                | GlaDocUndoTileAction::Clear { tile_index } => *tile_index,
+                GlaImageUndoTileAction::RestoreFromBackup { tile_index, .. }
+                | GlaImageUndoTileAction::Clear { tile_index } => *tile_index,
             })
             .collect::<Vec<_>>();
 
-        let mut clear_batches = image_backend.take_pending_clear_batches()?;
-        clear_batches.extend(backup_backend.take_pending_clear_batches()?);
+        let mut clear_batches = Vec::new();
+        for backend in backends {
+            clear_batches.extend(backend.take_pending_clear_batches()?);
+        }
         tile_renderer.execute_commands(
             device,
             queue,
-            &[image_backend, backup_backend],
+            &backends,
             &clear_batches,
             &commands,
             None,

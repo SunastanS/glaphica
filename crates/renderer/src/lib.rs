@@ -17,6 +17,7 @@ pub use crate::tile_renderer::{
     ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
     AtlasTextureStage, BrushCommandExecutor, BrushEncodeStage, BrushIntermediateFormat,
     BrushShaderProvider, BrushShaderSource, BrushShaderSpec, BrushShaderStage,
-    CompositeTileCommand, CopyTileCommand, MergeTileCommand, PresentTileCommand, PresentTileParams,
-    RenderCommand, RenderTarget2d, TileCompositeSource, TileRenderer, TileRendererError,
+    CompositeTileCommand, MergeTileCommand, PresentTileCommand, PresentTileParams, RenderCommand,
+    RenderTarget2d, TileCompositeSource, TileRenderer, TileRendererError,
 };
+pub use glaphica_core::CopyTileCommand;

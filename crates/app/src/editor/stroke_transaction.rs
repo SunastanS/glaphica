@@ -1,7 +1,7 @@
 use atlas::Backend;
 use brush::{BrushInput, BrushStrokeState};
 use gla_doc_renderer::GlaDocRenderer;
-use gla_document::{DocumentUndoTileRecord, GlaDoc, GlaDocError};
+use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
 use renderer::{RenderCommand, TileRenderer};
 
 use crate::AppBrushRegistry;
@@ -145,18 +145,14 @@ impl StrokeTransaction {
         let intermediate_backend = brush_backend.intermediate_backend().clone();
         let intermediate_format = brush_backend.intermediate_format();
         let active_layer_id = doc.active_layer_id();
+        let image_undo = doc.image_undo().clone();
         let batch = {
-            let (image, backup_store) = doc.active_layer_image_and_backup_store_mut()?;
-            self.stroke.build_commit_batch(
-                image,
-                image_backend,
-                backup_store,
-                &tile_indices,
-                merge_payload,
-            )?
+            let image = doc.active_layer_image_mut()?;
+            self.stroke
+                .build_commit_batch(image, &image_undo, &tile_indices, merge_payload)?
         };
 
-        let backup_backend = doc.undo_stack().backup_store().backend();
+        let [_, backup_backend] = image_undo.backends();
         let render_backend = doc_renderer.render_backend();
         tile_renderer.ensure_backend(device, image_backend)?;
         tile_renderer.ensure_backend_with_format(
@@ -193,7 +189,7 @@ impl StrokeTransaction {
                 .tile_records
                 .into_iter()
                 .map(|record| {
-                    DocumentUndoTileRecord::new(record.tile_index, record.backup_tile_key)
+                    GlaImageUndoTileRecord::new(record.tile_index, record.backup_tile_key)
                 })
                 .collect(),
         )?;

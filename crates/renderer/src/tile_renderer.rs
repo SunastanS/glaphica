@@ -9,9 +9,8 @@ pub use brush_encode::BrushEncodeStage;
 pub use types::{
     ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
     BrushCommandExecutor, BrushIntermediateFormat, BrushShaderProvider, BrushShaderSource,
-    BrushShaderSpec, BrushShaderStage, CompositeTileCommand, CopyTileCommand, MergeTileCommand,
-    PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource,
-    TileRendererError,
+    BrushShaderSpec, BrushShaderStage, CompositeTileCommand, MergeTileCommand, PresentTileCommand,
+    PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource, TileRendererError,
 };
 
 use atlas::TileKey;

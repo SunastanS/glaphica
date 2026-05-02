@@ -2,14 +2,13 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileKey, TileOwner};
-use gla_document::DocumentBackupStore;
 use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
+use gla_undo::{GlaImageUndo, GlaImageUndoError};
 pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
 use renderer::{
-    ApplyDabCommand, BrushIntermediateFormat, BrushShaderSpec, CopyTileCommand, MergeTileCommand,
-    RenderCommand,
+    ApplyDabCommand, BrushIntermediateFormat, BrushShaderSpec, MergeTileCommand, RenderCommand,
 };
 use smoother::BrushLatencyTraceState;
 
@@ -356,6 +355,7 @@ pub struct StrokeTileRecord {
 pub enum BrushStrokeError {
     Atlas(AtlasError),
     Image(GlaImageTileAccessError),
+    ImageUndo(GlaImageUndoError),
     WrongImageBackend {
         expected: BackendId,
         actual: BackendId,
@@ -367,6 +367,7 @@ impl Display for BrushStrokeError {
         match self {
             Self::Atlas(error) => Display::fmt(error, f),
             Self::Image(error) => Display::fmt(error, f),
+            Self::ImageUndo(error) => Display::fmt(error, f),
             Self::WrongImageBackend { expected, actual } => write!(
                 f,
                 "commit image backend is {}, but provided backend is {}",
@@ -388,6 +389,12 @@ impl From<AtlasError> for BrushStrokeError {
 impl From<GlaImageTileAccessError> for BrushStrokeError {
     fn from(error: GlaImageTileAccessError) -> Self {
         Self::Image(error)
+    }
+}
+
+impl From<GlaImageUndoError> for BrushStrokeError {
+    fn from(error: GlaImageUndoError) -> Self {
+        Self::ImageUndo(error)
     }
 }
 
@@ -600,12 +607,11 @@ impl BrushStrokeState {
     pub fn build_commit_batch(
         &mut self,
         image: &mut GlaImage,
-        image_backend: &Backend,
-        backup_store: &mut DocumentBackupStore,
+        image_undo: &GlaImageUndo,
         tile_indices: &[usize],
         brush_payload: Vec<u8>,
     ) -> Result<StrokeCommitBatch, BrushStrokeError> {
-        let image_backend_id = image_backend.backend_id();
+        let image_backend_id = image_undo.image_backend_id();
         let actual_backend_id = image.backend_id();
         if actual_backend_id != image_backend_id {
             return Err(BrushStrokeError::WrongImageBackend {
@@ -614,54 +620,30 @@ impl BrushStrokeState {
             });
         }
 
-        let mut affected_tiles = tile_indices.to_vec();
-        affected_tiles.sort_unstable();
-        affected_tiles.dedup();
-
+        let backup = image_undo.backup_tiles(image, tile_indices)?;
+        let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
+        let mut commands = copy_commands
+            .into_iter()
+            .map(RenderCommand::CopyTile)
+            .collect::<Vec<_>>();
         let mut touched_tile_indexes = Vec::new();
-        let mut backup_tile_indices = Vec::new();
-        for &tile_index in &affected_tiles {
+        for undo_record in &undo_tile_records {
+            let tile_index = undo_record.tile_index();
             let Some(record_index) = self.touched_tile_index(tile_index) else {
                 continue;
             };
             touched_tile_indexes.push(record_index);
-            if !image.is_tile_empty(tile_index)? {
-                backup_tile_indices.push(tile_index);
-            }
-        }
-
-        let backup_group = backup_store.retain_cached_group(backup_tile_indices.len())?;
-        let backup_tile_keys = backup_group.keys().to_vec();
-        let mut commands = Vec::new();
-        let mut backup_key_cursor = 0usize;
-        for &record_index in &touched_tile_indexes {
             let record = self
                 .touched_tiles
                 .get_mut(record_index)
                 .ok_or(AtlasError::InvalidState)?;
-            let tile_index = record.tile_index;
-            let origin_tile_key = image.tile_key(tile_index)?;
             let destination_tile_key = image.ensure_active_tile_key(tile_index)?;
-            let backup_tile_key = if !origin_tile_key.is_empty() {
-                let backup_tile_key = backup_tile_keys
-                    .get(backup_key_cursor)
-                    .copied()
-                    .ok_or(AtlasError::InvalidState)?;
-                commands.push(RenderCommand::CopyTile(CopyTileCommand {
-                    source_tile_key: origin_tile_key,
-                    destination_tile_key: backup_tile_key,
-                }));
-                backup_key_cursor += 1;
-                record.backup_tile_key = Some(backup_tile_key);
-                Some(backup_tile_key)
-            } else {
-                record.backup_tile_key = None;
-                None
-            };
+            record.backup_tile_key = undo_record.backup_tile_key();
 
             commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: self.brush_id,
-                origin_tile_key: backup_tile_key
+                origin_tile_key: undo_record
+                    .backup_tile_key()
                     .unwrap_or_else(|| TileKey::empty(image_backend_id)),
                 intermediate_tile_key: record.intermediate_tile_key,
                 destination_tile_key,
@@ -669,14 +651,17 @@ impl BrushStrokeState {
             }));
         }
 
-        if backup_key_cursor != backup_tile_keys.len() {
-            return Err(AtlasError::InvalidState.into());
-        }
-
         Ok(StrokeCommitBatch {
             backup_group,
-            backup_tile_indices,
-            backup_tile_keys,
+            backup_tile_indices: undo_tile_records
+                .iter()
+                .filter(|record| record.backup_tile_key().is_some())
+                .map(|record| record.tile_index())
+                .collect(),
+            backup_tile_keys: undo_tile_records
+                .iter()
+                .filter_map(|record| record.backup_tile_key())
+                .collect(),
             tile_records: touched_tile_indexes
                 .into_iter()
                 .map(|record_index| self.touched_tiles[record_index])
@@ -856,8 +841,8 @@ mod tests {
         CanvasInput,
     };
     use atlas::{Backend, TileKey};
-    use gla_document::DocumentBackupStore;
     use gla_image::{GlaImage, GlaImageLayout};
+    use gla_undo::GlaImageUndo;
 
     #[test]
     fn apply_dab_allocates_intermediate_tile_once() {
@@ -969,8 +954,7 @@ mod tests {
 
         let mut state =
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
-        let mut backup_store =
-            DocumentBackupStore::new(backup_backend).expect("backup store should build");
+        let image_undo = GlaImageUndo::new(image_backend.clone(), backup_backend);
         let mut draw_commands = Vec::new();
         let first_intermediate = state
             .push_apply_dab(
@@ -997,13 +981,7 @@ mod tests {
         });
 
         let batch = state
-            .build_commit_batch(
-                &mut image,
-                &image_backend,
-                &mut backup_store,
-                &[1, 0],
-                merge_payload.clone(),
-            )
+            .build_commit_batch(&mut image, &image_undo, &[1, 0], merge_payload.clone())
             .expect("commit batch should build");
 
         let second_active_key = image.tile_key(1).expect("tile key should exist");

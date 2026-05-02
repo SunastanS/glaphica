@@ -2,17 +2,13 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend, BackendId};
-use gla_image::{
-    GlaImage, GlaImageCreateError, GlaImageEnsureActiveTileError, GlaImageLayout,
-    GlaImageTileAccessError,
-};
+use gla_image::{GlaImage, GlaImageCreateError, GlaImageLayout, GlaImageTileAccessError};
+use gla_undo::{GlaImageUndo, GlaImageUndoError, GlaImageUndoTileRecord};
 use glaphica_core::BlendMode;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
 
-use crate::backup::{
-    DocumentUndoStack, DocumentUndoTileRecord, GlaDocUndoRestore, GlaDocUndoTileAction,
-};
+use crate::backup::{DocumentUndoStack, GlaDocUndoRestore};
 use crate::node::{GlaNode, GlaNodeId};
 
 pub struct GlaDoc {
@@ -21,6 +17,7 @@ pub struct GlaDoc {
     image_backend_id: BackendId,
     render_backend: Backend,
     render_backend_id: BackendId,
+    image_undo: GlaImageUndo,
     undo_stack: DocumentUndoStack,
     root_id: GlaNodeId,
     active_layer_id: GlaNodeId,
@@ -61,7 +58,7 @@ pub enum GlaDocUndoError {
     Document(GlaDocError),
     Atlas(AtlasError),
     Image(GlaImageTileAccessError),
-    ImageEnsureActive(GlaImageEnsureActiveTileError),
+    ImageUndo(GlaImageUndoError),
 }
 
 impl Display for GlaDocError {
@@ -128,7 +125,7 @@ impl Display for GlaDocUndoError {
             Self::Document(error) => Display::fmt(error, f),
             Self::Atlas(error) => Display::fmt(error, f),
             Self::Image(error) => Display::fmt(error, f),
-            Self::ImageEnsureActive(error) => Display::fmt(error, f),
+            Self::ImageUndo(error) => Display::fmt(error, f),
         }
     }
 }
@@ -153,9 +150,9 @@ impl From<GlaImageTileAccessError> for GlaDocUndoError {
     }
 }
 
-impl From<GlaImageEnsureActiveTileError> for GlaDocUndoError {
-    fn from(error: GlaImageEnsureActiveTileError) -> Self {
-        Self::ImageEnsureActive(error)
+impl From<GlaImageUndoError> for GlaDocUndoError {
+    fn from(error: GlaImageUndoError) -> Self {
+        Self::ImageUndo(error)
     }
 }
 
@@ -173,7 +170,8 @@ impl GlaDoc {
         let root_id = nodes.insert(GlaNode::new_root(root_image, 1.0, BlendMode::Normal));
         let mut active_layer_ancestor_chain = SmallVec::new();
         active_layer_ancestor_chain.push(root_id);
-        let undo_stack = DocumentUndoStack::new(backup_backend)?;
+        let image_undo = GlaImageUndo::new(image_backend.clone(), backup_backend);
+        let undo_stack = DocumentUndoStack::new();
 
         Ok(Self {
             layout,
@@ -181,6 +179,7 @@ impl GlaDoc {
             image_backend_id,
             render_backend,
             render_backend_id,
+            image_undo,
             undo_stack,
             root_id,
             active_layer_id: root_id,
@@ -209,6 +208,10 @@ impl GlaDoc {
         &self.render_backend
     }
 
+    pub fn image_undo(&self) -> &GlaImageUndo {
+        &self.image_undo
+    }
+
     pub fn undo_stack(&self) -> &DocumentUndoStack {
         &self.undo_stack
     }
@@ -235,18 +238,6 @@ impl GlaDoc {
 
     pub fn active_layer_image_mut(&mut self) -> Result<&mut GlaImage, GlaDocError> {
         self.node_image_mut(self.active_layer_id)
-    }
-
-    pub fn active_layer_image_and_backup_store_mut(
-        &mut self,
-    ) -> Result<(&mut GlaImage, &mut crate::backup::DocumentBackupStore), GlaDocError> {
-        let active_layer_id = self.active_layer_id;
-        let undo_stack = &mut self.undo_stack;
-        let node = self
-            .nodes
-            .get_mut(active_layer_id)
-            .ok_or(GlaDocError::InvalidNodeId(active_layer_id))?;
-        Ok((node.image_mut(), undo_stack.backup_store_mut()))
     }
 
     pub fn active_layer_ancestor_chain(&self) -> &[GlaNodeId] {
@@ -483,7 +474,7 @@ impl GlaDoc {
         &mut self,
         node_id: GlaNodeId,
         backup_group: atlas::CachedTileGroup,
-        tile_records: Vec<DocumentUndoTileRecord>,
+        tile_records: Vec<GlaImageUndoTileRecord>,
     ) -> Result<(), GlaDocError> {
         self.node(node_id)?;
         self.undo_stack
@@ -494,7 +485,7 @@ impl GlaDoc {
     pub fn push_active_layer_undo_entry(
         &mut self,
         backup_group: atlas::CachedTileGroup,
-        tile_records: Vec<DocumentUndoTileRecord>,
+        tile_records: Vec<GlaImageUndoTileRecord>,
     ) {
         self.undo_stack
             .push_entry(self.active_layer_id, backup_group, tile_records);
@@ -505,30 +496,16 @@ impl GlaDoc {
             return Ok(None);
         };
 
-        let mut tile_actions = Vec::with_capacity(entry.tile_records().len());
-        for record in entry.tile_records() {
-            if let Some(source_tile_key) = record.backup_tile_key() {
-                let image = self.node_image_mut(entry.node_id())?;
-                let destination_tile_key = image.ensure_active_tile_key(record.tile_index())?;
-                tile_actions.push(GlaDocUndoTileAction::RestoreFromBackup {
-                    tile_index: record.tile_index(),
-                    source_tile_key,
-                    destination_tile_key,
-                });
-                continue;
-            }
-
-            self.node_image_mut(entry.node_id())?
-                .clear_tile(record.tile_index())?;
-            tile_actions.push(GlaDocUndoTileAction::Clear {
-                tile_index: record.tile_index(),
-            });
-        }
+        let image_undo = self.image_undo.clone();
+        let image_restore = image_undo.restore_tiles(
+            self.node_image_mut(entry.node_id())?,
+            entry.backup_group().clone(),
+            entry.tile_records(),
+        )?;
 
         Ok(Some(GlaDocUndoRestore {
             node_id: entry.node_id(),
-            backup_group: entry.backup_group().clone(),
-            tile_actions,
+            image_restore,
         }))
     }
 
@@ -663,10 +640,10 @@ fn validate_opacity(opacity: f32) -> Result<f32, GlaDocError> {
 #[cfg(test)]
 mod tests {
     use atlas::{AtlasLayout, Backend, BackendId, TileKey};
-    use glaphica_core::IMAGE_TILE_SIZE;
+    use glaphica_core::{CopyTileCommand, IMAGE_TILE_SIZE};
 
     use crate::{
-        DocumentUndoTileRecord, GlaDoc, GlaDocError, GlaDocUndoTileAction, GlaImageLayout,
+        GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileAction, GlaImageUndoTileRecord,
         GlaNodeKind,
     };
     use glaphica_core::BlendMode;
@@ -1004,14 +981,14 @@ mod tests {
             .expect("tile owner should install");
 
         let backup_group = doc
-            .undo_stack_mut()
-            .backup_store_mut()
-            .retain_cached_group(1)
+            .image_undo()
+            .backup_backend()
+            .alloc_cached(1)
             .expect("backup group should allocate");
         let backup_tile_key = backup_group.keys()[0];
         doc.push_active_layer_undo_entry(
             backup_group,
-            vec![DocumentUndoTileRecord::new(0, Some(backup_tile_key))],
+            vec![GlaImageUndoTileRecord::new(0, Some(backup_tile_key))],
         );
 
         let restore = doc
@@ -1021,11 +998,13 @@ mod tests {
 
         assert_eq!(restore.node_id(), layer_id);
         assert_eq!(
-            restore.tile_actions(),
-            &[GlaDocUndoTileAction::RestoreFromBackup {
+            restore.image_restore().tile_actions(),
+            &[GlaImageUndoTileAction::RestoreFromBackup {
                 tile_index: 0,
-                source_tile_key: backup_tile_key,
-                destination_tile_key: current_tile_key,
+                copy_command: CopyTileCommand {
+                    source_tile_key: backup_tile_key,
+                    destination_tile_key: current_tile_key,
+                },
             }]
         );
     }
@@ -1056,13 +1035,13 @@ mod tests {
             .replace_tile_owner(0, current_tile)
             .expect("tile owner should install");
         let empty_backup_group = doc
-            .undo_stack_mut()
-            .backup_store_mut()
-            .retain_cached_group(0)
+            .image_undo()
+            .backup_backend()
+            .create_cached_group()
             .expect("empty backup group should allocate");
         doc.push_active_layer_undo_entry(
             empty_backup_group,
-            vec![DocumentUndoTileRecord::new(0, None)],
+            vec![GlaImageUndoTileRecord::new(0, None)],
         );
 
         let restore = doc
@@ -1071,8 +1050,8 @@ mod tests {
             .expect("undo entry should exist");
 
         assert_eq!(
-            restore.tile_actions(),
-            &[GlaDocUndoTileAction::Clear { tile_index: 0 }]
+            restore.image_restore().tile_actions(),
+            &[GlaImageUndoTileAction::Clear { tile_index: 0 }]
         );
         assert_eq!(
             doc.active_layer_image()

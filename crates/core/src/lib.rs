@@ -27,6 +27,7 @@ pub struct CanvasInput {
 
 mod color;
 mod color_management;
+pub mod tile_command;
 mod vec2;
 
 pub use crate::color::Color;
@@ -35,4 +36,5 @@ pub use crate::color_management::{
     CpuColorTransform, CpuTransformOptions, CustomRgbProfile, GpuColorSpace, GpuColorTransform,
     GpuColorTransformUniform, GpuTransferCurve, RenderingIntent, RgbPrimaries, SimpleTransferCurve,
 };
+pub use crate::tile_command::CopyTileCommand;
 pub use crate::vec2::{CanvasVec2, RadianVec2, ScreenVec2, Vec2};

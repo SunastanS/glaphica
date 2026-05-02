@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, BackendId, TileKey};
-use glaphica_core::{BlendMode, BrushId};
+use glaphica_core::{BlendMode, BrushId, CopyTileCommand};
 
 use super::atlas_texture_set::AtlasTextureStage;
 use super::brush_encode::BrushEncodeStage;
@@ -105,12 +105,6 @@ pub struct PresentTileParams {
     pub target_max_px: [f32; 2],
     pub source_width: u32,
     pub source_height: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CopyTileCommand {
-    pub source_tile_key: TileKey,
-    pub destination_tile_key: TileKey,
 }
 
 #[derive(Debug, Clone, PartialEq)]

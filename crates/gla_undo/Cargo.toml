@@ -1,13 +1,9 @@
 [package]
-name = "brush"
+name = "gla_undo"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 atlas = { path = "../atlas" }
 gla_image = { path = "../gla_image" }
-gla_undo = { path = "../gla_undo" }
 glaphica_core = { package = "core", path = "../core" }
-renderer = { path = "../renderer" }
-bytemuck = { version = "1", features = ["derive"] }
-puffin = "0.20.0"

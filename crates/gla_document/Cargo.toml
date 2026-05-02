@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 atlas = { path = "../atlas" }
 gla_image = { path = "../gla_image" }
+gla_undo = { path = "../gla_undo" }
 glaphica_core = { package = "core", path = "../core" }
 slotmap = "1"
 smallvec = "1.15.1"
