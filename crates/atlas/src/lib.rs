@@ -796,7 +796,6 @@ impl Backend {
     // This relies on the architectural invariant that live Backend instances have unique BackendId.
     // Long term, BackendId should be separated from backend instance identity, likely using an
     // internal capability token / manager-owned registry.
-
     pub fn cache_active_owners(
         &self,
         owners: impl IntoIterator<Item = TileOwner>,
@@ -811,13 +810,6 @@ impl Backend {
         let mut inner = self.lock_inner()?;
         self.drain_owned_reclaims(&mut inner)?;
 
-        if owners.is_empty() {
-            return Ok(CachedTileGroup {
-                group_id: u32::MAX,
-                keys: Vec::new(),
-            });
-        }
-
         // Validate every key is live and active before mutating any slot state.
         for owner in &owners {
             if owner.key.is_empty() {
@@ -827,6 +819,13 @@ impl Backend {
             if inner.slot_owners[slot as usize] != SlotOwner::Active {
                 return Err(AtlasError::InvalidState);
             }
+        }
+
+        if !owners.iter().any(|o| !o.key.is_empty()) {
+            return Ok(CachedTileGroup {
+                group_id: u32::MAX,
+                keys: Vec::new(),
+            });
         }
 
         let group_id = inner.cache_manager.acquire_vacant_group();
@@ -974,7 +973,7 @@ fn decode_tile_key(key: TileKey) -> TileKeyParts {
 mod tests {
     use super::{
         AtlasError, AtlasLayout, Backend, BackendId, BackendManager, CacheManager, ClearBatch,
-        TileState, decode_tile_key,
+        TileOwner, TileState, decode_tile_key,
     };
 
     #[test]
@@ -1236,6 +1235,38 @@ mod tests {
         assert_eq!(backend.cached_group_alive(&cached), Ok(true));
         assert_eq!(backend.tile_state(first_key), Ok(TileState::Cached));
         assert_eq!(backend.tile_state(second_key), Ok(TileState::Cached));
+    }
+
+    #[test]
+    fn cache_active_owners_rejects_invalid_key_without_side_effects() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let first = backend.alloc_active().expect("first tile should allocate");
+        let second = backend.alloc_active().expect("second tile should allocate");
+        let third = backend.alloc_active().expect("third tile should allocate");
+        let first_key = first.tile_key();
+        let third_key = third.tile_key();
+
+        // Free first, bumping its generation so its TileOwner becomes stale.
+        backend.free(first_key).expect("free should succeed");
+
+        // first's key is now stale (generation mismatch), second is consumed on failure.
+        let result = backend.cache_active_owners([first, second]);
+        assert_eq!(result, Err(AtlasError::GenerationMismatch));
+
+        // third was never passed to cache_active_owners — must still be Active.
+        assert_eq!(backend.tile_state(third_key), Ok(TileState::Active));
+    }
+
+    #[test]
+    fn cache_active_owners_all_empty_keys_returns_empty_group() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let empty_owner = TileOwner::empty(BackendId::new(0));
+
+        let cached = backend
+            .cache_active_owners([empty_owner])
+            .expect("all-empty owners should succeed");
+
+        assert!(cached.keys().is_empty());
     }
 
     #[test]
