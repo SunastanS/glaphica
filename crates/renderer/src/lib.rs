@@ -20,4 +20,4 @@ pub use crate::tile_renderer::{
     CompositeTileCommand, MergeTileCommand, PresentTileCommand, PresentTileParams, RenderCommand,
     RenderTarget2d, TileCompositeSource, TileRenderer, TileRendererError,
 };
-pub use glaphica_core::CopyTileCommand;
+pub type CopyTileCommand = glaphica_core::CopyTileCommand<atlas::TileKey>;

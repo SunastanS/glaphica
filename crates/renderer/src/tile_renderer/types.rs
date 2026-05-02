@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, BackendId, TileKey};
-use glaphica_core::{BlendMode, BrushId, CopyTileCommand};
+use glaphica_core::{BlendMode, BrushId};
 
 use super::atlas_texture_set::AtlasTextureStage;
 use super::brush_encode::BrushEncodeStage;
@@ -176,7 +176,7 @@ pub struct BrushShaderSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderCommand {
-    CopyTile(CopyTileCommand),
+    CopyTile(glaphica_core::CopyTileCommand<TileKey>),
     ApplyDab(ApplyDabCommand),
     MergeTile(MergeTileCommand),
     CompositeTile(CompositeTileCommand),

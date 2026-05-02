@@ -642,6 +642,8 @@ mod tests {
     use atlas::{AtlasLayout, Backend, BackendId, TileKey};
     use glaphica_core::{CopyTileCommand, IMAGE_TILE_SIZE};
 
+    type TileCopyCommand = CopyTileCommand<TileKey>;
+
     use crate::{
         GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileAction, GlaImageUndoTileRecord,
         GlaNodeKind,
@@ -1001,7 +1003,7 @@ mod tests {
             restore.image_restore().tile_actions(),
             &[GlaImageUndoTileAction::RestoreFromBackup {
                 tile_index: 0,
-                copy_command: CopyTileCommand {
+                copy_command: TileCopyCommand {
                     source_tile_key: backup_tile_key,
                     destination_tile_key: current_tile_key,
                 },

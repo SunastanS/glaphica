@@ -5,6 +5,8 @@ use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileKey};
 use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 use glaphica_core::CopyTileCommand;
 
+type TileCopyCommand = CopyTileCommand<TileKey>;
+
 #[derive(Debug, Clone)]
 pub struct GlaImageUndo {
     image_backend: Backend,
@@ -23,7 +25,7 @@ pub struct GlaImageUndoTileRecord {
 pub struct GlaImageUndoBackup {
     backup_group: CachedTileGroup,
     tile_records: Vec<GlaImageUndoTileRecord>,
-    copy_commands: Vec<CopyTileCommand>,
+    copy_commands: Vec<TileCopyCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +38,7 @@ pub struct GlaImageUndoRestore {
 pub enum GlaImageUndoTileAction {
     RestoreFromBackup {
         tile_index: usize,
-        copy_command: CopyTileCommand,
+        copy_command: TileCopyCommand,
     },
     Clear {
         tile_index: usize,
@@ -160,7 +162,7 @@ impl GlaImageUndo {
                 .copied()
                 .ok_or(AtlasError::InvalidState)?;
             backup_key_cursor += 1;
-            copy_commands.push(CopyTileCommand {
+            copy_commands.push(TileCopyCommand {
                 source_tile_key,
                 destination_tile_key: backup_tile_key,
             });
@@ -195,7 +197,7 @@ impl GlaImageUndo {
                 let destination_tile_key = image.ensure_active_tile_key(record.tile_index())?;
                 tile_actions.push(GlaImageUndoTileAction::RestoreFromBackup {
                     tile_index: record.tile_index(),
-                    copy_command: CopyTileCommand {
+                    copy_command: TileCopyCommand {
                         source_tile_key,
                         destination_tile_key,
                     },
@@ -257,7 +259,7 @@ impl GlaImageUndoBackup {
         &self.tile_records
     }
 
-    pub fn copy_commands(&self) -> &[CopyTileCommand] {
+    pub fn copy_commands(&self) -> &[TileCopyCommand] {
         &self.copy_commands
     }
 
@@ -266,7 +268,7 @@ impl GlaImageUndoBackup {
     ) -> (
         CachedTileGroup,
         Vec<GlaImageUndoTileRecord>,
-        Vec<CopyTileCommand>,
+        Vec<TileCopyCommand>,
     ) {
         (self.backup_group, self.tile_records, self.copy_commands)
     }
