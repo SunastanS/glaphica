@@ -4,3 +4,4 @@ Cargo.lock
 .codex
 .claude/
 .code-review-graph/
+.rtk/

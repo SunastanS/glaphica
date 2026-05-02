@@ -36,3 +36,20 @@
 * `gla_document` owns document structure and document serialization format. If another crate needs document bytes or tile asset paths, prefer adding a small public API to `gla_document` instead of re-encoding the format elsewhere.
 * `app` is the orchestration layer. It may occupy the whole document during save/export and directly walk document state when needed. Favor simple straight-line orchestration over cached export plans.
 * Persistence is allowed to prioritize clarity over throughput. For save/export flows triggered by user actions or shutdown, prefer simpler full-document passes instead of incremental abstraction layers.
+
+<!-- rtk-instructions v2 -->
+# RTK (Rust Token Killer) - Token-Optimized Commands
+
+## Golden Rule
+
+**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+
+**Important**: Even in command chains with `&&`, use `rtk`:
+```bash
+# ❌ Wrong
+git add . && git commit -m "msg" && git push
+
+# ✅ Correct
+rtk git add . && rtk git commit -m "msg" && rtk git push
+```
+<!-- /rtk-instructions -->
