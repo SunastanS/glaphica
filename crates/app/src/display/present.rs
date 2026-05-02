@@ -1,9 +1,9 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::TileKey;
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
 use gla_document::{GlaDoc, GlaDocError};
+use gla_image::GlaImageTileAccessError;
 use glaphica_core::{CanvasVec2, IMAGE_TILE_SIZE};
 use renderer::{
     PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d, TileRenderer,
@@ -16,6 +16,7 @@ use crate::AppView;
 pub enum AppPresentError {
     Document(GlaDocError),
     DocRenderer(GlaDocRendererError),
+    Image(GlaImageTileAccessError),
     TileRenderer(TileRendererError),
 }
 
@@ -24,6 +25,7 @@ impl Display for AppPresentError {
         match self {
             Self::Document(error) => Display::fmt(error, f),
             Self::DocRenderer(error) => Display::fmt(error, f),
+            Self::Image(error) => Display::fmt(error, f),
             Self::TileRenderer(error) => Display::fmt(error, f),
         }
     }
@@ -40,6 +42,12 @@ impl From<GlaDocError> for AppPresentError {
 impl From<GlaDocRendererError> for AppPresentError {
     fn from(error: GlaDocRendererError) -> Self {
         Self::DocRenderer(error)
+    }
+}
+
+impl From<GlaImageTileAccessError> for AppPresentError {
+    fn from(error: GlaImageTileAccessError) -> Self {
+        Self::Image(error)
     }
 }
 
@@ -66,8 +74,8 @@ pub fn present_root_tiles(
     let mut commands = Vec::new();
 
     for &tile_index in tile_indices {
-        let tile_key = root_image.tile_key(tile_index).unwrap_or(TileKey::EMPTY);
-        if tile_key == TileKey::EMPTY {
+        let tile_key = root_image.tile_key(tile_index)?;
+        if tile_key.is_empty() {
             continue;
         }
 

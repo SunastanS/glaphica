@@ -1,4 +1,3 @@
-use atlas::TileKey;
 use glaphica_core::{ATLAS_TILE_SIZE, BrushId};
 
 use super::atlas_texture_set::AtlasTextureStage;
@@ -626,7 +625,7 @@ impl BrushEncodeStage {
         let intermediate = atlas_texture_set.resolve_tile(command.intermediate_tile_key)?;
         let destination = atlas_texture_set.resolve_tile(command.destination_tile_key)?;
         let (origin_texture_view, origin_origin, origin_layer) =
-            if command.origin_tile_key == TileKey::EMPTY {
+            if command.origin_tile_key.is_empty() {
                 self.encode_clear_scratch_texture(encoder, false, wgpu::Color::TRANSPARENT)?;
                 (&self.scratch_b.view, [0, 0], 0)
             } else {

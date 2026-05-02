@@ -209,7 +209,7 @@ impl CompositeStage {
         let mut read_from_a = true;
 
         for input in inputs {
-            if input.tile_key == TileKey::EMPTY || input.opacity <= 0.0 {
+            if input.tile_key.is_empty() || input.opacity <= 0.0 {
                 continue;
             }
             let source = atlas_texture_set.resolve_tile(input.tile_key)?;

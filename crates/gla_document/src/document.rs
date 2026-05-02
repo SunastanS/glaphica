@@ -1078,7 +1078,7 @@ mod tests {
             doc.active_layer_image()
                 .expect("active image should exist")
                 .tile_key(0),
-            Some(TileKey::EMPTY)
+            Ok(TileKey::empty(doc.image_backend()))
         );
     }
 }

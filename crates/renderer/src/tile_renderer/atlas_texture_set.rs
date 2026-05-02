@@ -103,7 +103,7 @@ impl AtlasTextureSet {
     }
 
     fn resolve_tile(&self, tile_key: TileKey) -> Result<ResolvedAtlasTile<'_>, TileRendererError> {
-        if tile_key == TileKey::EMPTY {
+        if tile_key.is_empty() {
             return Err(TileRendererError::InvalidTileKey);
         }
         let parts = tile_key.parts();

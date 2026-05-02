@@ -97,17 +97,18 @@ pub struct GlaImage {
     tile_owners: Box<[TileOwner]>,
     backend: Backend,
     backend_id: BackendId,
+    // TODO: we should come up with a better way to track backend, avoid passing handle and id separately
 }
 
 impl GlaImage {
     pub fn new(layout: GlaImageLayout, backend: Backend) -> Result<Self, GlaImageCreateError> {
         let total_tiles =
             usize::try_from(layout.total_tiles()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
-        let tile_owners = std::iter::repeat_with(TileOwner::empty)
+        let backend_id = backend.backend_id();
+        let tile_owners = std::iter::repeat_with(|| TileOwner::empty(backend_id))
             .take(total_tiles)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let backend_id = backend.backend_id();
         Ok(Self {
             layout,
             tile_owners,
@@ -132,8 +133,12 @@ impl GlaImage {
         self.tile_owners.len()
     }
 
-    pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        Some(self.tile_owners.get(tile_index)?.tile_key())
+    pub fn tile_key(&self, tile_index: usize) -> Result<TileKey, GlaImageTileAccessError> {
+        // TODO: This fn is call by toooooo many unrelated crates
+        let Some(tile_owner) = self.tile_owners.get(tile_index) else {
+            return Err(GlaImageTileAccessError::OutOfBounds);
+        };
+        Ok(tile_owner.tile_key())
     }
 
     pub fn tile_owner(&self, tile_index: usize) -> Option<&TileOwner> {
@@ -169,20 +174,22 @@ impl GlaImage {
     }
 
     pub fn clear_tile(&mut self, tile_index: usize) -> Result<TileOwner, GlaImageTileAccessError> {
+        // TODO: Evil's function, remove it immediately
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
-        Ok(std::mem::replace(slot, TileOwner::empty()))
+        Ok(std::mem::replace(slot, TileOwner::empty(self.backend_id)))
     }
 
     pub fn ensure_active_tile_key(
         &mut self,
         tile_index: usize,
     ) -> Result<TileKey, GlaImageEnsureActiveTileError> {
+        // TODO: we should make activation of empty key automatically step by step
         let existing_tile_key = self
             .tile_key(tile_index)
-            .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-        if existing_tile_key != TileKey::EMPTY {
+            .map_err(GlaImageEnsureActiveTileError::from)?;
+        if !existing_tile_key.is_empty() {
             return Ok(existing_tile_key);
         }
 
@@ -205,7 +212,7 @@ impl GlaImage {
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let mut old_tile_owners = std::mem::replace(
             &mut self.tile_owners,
-            std::iter::repeat_with(TileOwner::empty)
+            std::iter::repeat_with(|| TileOwner::empty(self.backend_id))
                 .take(new_total_tiles)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -223,8 +230,10 @@ impl GlaImage {
             }
 
             let new_index = tile_y * new_stride + tile_x;
-            self.tile_owners[new_index] =
-                std::mem::replace(&mut old_tile_owners[tile_index], TileOwner::empty());
+            self.tile_owners[new_index] = std::mem::replace(
+                &mut old_tile_owners[tile_index],
+                TileOwner::empty(self.backend_id),
+            );
         }
 
         self.layout = new_layout;
@@ -236,7 +245,7 @@ impl GlaImage {
         let mut bounds: Option<GlaImageTileRecBounds> = None;
 
         for (tile_index, tile_owner) in self.tile_owners.iter().enumerate() {
-            if tile_owner.tile_key() == TileKey::EMPTY {
+            if tile_owner.tile_key().is_empty() {
                 continue;
             }
 
@@ -263,25 +272,6 @@ impl GlaImage {
         bounds
     }
 
-    pub fn for_each_affected_tile_key<F>(
-        &self,
-        center: CanvasVec2,
-        max_affected_radius_px: u32,
-        mut visit: F,
-    ) where
-        F: FnMut(usize, TileKey),
-    {
-        self.layout
-            .for_each_affected_tile_index(center, max_affected_radius_px, |index| {
-                let tile_key = self
-                    .tile_owners
-                    .get(index)
-                    .map(TileOwner::tile_key)
-                    .unwrap_or(TileKey::EMPTY);
-                visit(index, tile_key);
-            });
-    }
-
     pub fn collect_affected_tile_slots(
         &self,
         image_id: ImageId,
@@ -301,11 +291,27 @@ impl GlaImage {
         center: CanvasVec2,
         max_affected_radius_px: u32,
         output: &mut Vec<TileKey>,
-    ) {
+    ) -> Result<(), GlaImageTileAccessError> {
         output.clear();
-        self.for_each_affected_tile_key(center, max_affected_radius_px, |_index, tile_key| {
-            output.push(tile_key);
-        });
+        let mut error = None;
+        self.layout
+            .for_each_affected_tile_index(center, max_affected_radius_px, |index| {
+                if error.is_some() {
+                    return;
+                }
+                let tile_key = match self.tile_key(index) {
+                    Ok(tile_key) => tile_key,
+                    Err(e) => {
+                        error = Some(e);
+                        return;
+                    }
+                };
+                output.push(tile_key);
+            });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -321,7 +327,7 @@ impl TileGrid for GlaImage {
 
 impl AtlasTileMap for GlaImage {
     fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        GlaImage::tile_key(self, tile_index)
+        GlaImage::tile_key(self, tile_index).ok()
     }
 }
 
@@ -344,8 +350,8 @@ mod tests {
         let key = tile_owner.tile_key();
 
         let replaced = image.replace_tile_owner(0, tile_owner);
-        assert!(matches!(replaced, Ok(previous) if previous.tile_key() == TileKey::EMPTY));
-        assert_eq!(image.tile_key(0), Some(key));
+        assert!(matches!(replaced, Ok(previous) if previous.tile_key().is_empty()));
+        assert_eq!(image.tile_key(0), Ok(key));
     }
 
     #[test]
@@ -389,13 +395,11 @@ mod tests {
         assert!(image.replace_tile_owner(1, tile_owner).is_ok());
 
         let mut keys = Vec::new();
-        image.collect_affected_tile_keys(
-            CanvasVec2::new(IMAGE_TILE_SIZE as f32, 5.0),
-            0,
-            &mut keys,
-        );
+        image
+            .collect_affected_tile_keys(CanvasVec2::new(IMAGE_TILE_SIZE as f32, 5.0), 0, &mut keys)
+            .expect("affected tile keys should collect");
 
-        assert_eq!(keys, vec![TileKey::EMPTY, expected]);
+        assert_eq!(keys, vec![TileKey::empty(image.backend_id()), expected]);
     }
 
     #[test]
@@ -478,8 +482,8 @@ mod tests {
                 .is_ok()
         );
 
-        assert_eq!(image.tile_key(0), Some(kept_top_left_key));
-        assert_eq!(image.tile_key(1), Some(kept_bottom_left_key));
+        assert_eq!(image.tile_key(0), Ok(kept_top_left_key));
+        assert_eq!(image.tile_key(1), Ok(kept_bottom_left_key));
         assert_eq!(
             backend.tile_state(removed_top_right_key),
             Err(atlas::AtlasError::GenerationMismatch)

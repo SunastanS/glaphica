@@ -26,7 +26,7 @@ impl TileImageExportRequest {
     ) -> Result<Self, TextureIoError> {
         let mut tiles = Vec::new();
         for &(tile_index, tile_key) in image_tiles {
-            if tile_key == TileKey::EMPTY {
+            if tile_key.is_empty() {
                 continue;
             }
 

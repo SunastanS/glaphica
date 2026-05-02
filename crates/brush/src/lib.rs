@@ -625,10 +625,8 @@ impl BrushStrokeState {
                 continue;
             };
             touched_tile_indexes.push(record_index);
-            let active_tile_key = image
-                .tile_key(tile_index)
-                .ok_or(GlaImageTileAccessError::OutOfBounds)?;
-            if active_tile_key != TileKey::EMPTY {
+            let active_tile_key = image.tile_key(tile_index)?;
+            if !active_tile_key.is_empty() {
                 backup_tile_indices.push(tile_index);
             }
         }
@@ -643,11 +641,9 @@ impl BrushStrokeState {
                 .get_mut(record_index)
                 .ok_or(AtlasError::InvalidState)?;
             let tile_index = record.tile_index;
-            let origin_tile_key = image
-                .tile_key(tile_index)
-                .ok_or(GlaImageTileAccessError::OutOfBounds)?;
+            let origin_tile_key = image.tile_key(tile_index)?;
             let destination_tile_key = image.ensure_active_tile_key(tile_index)?;
-            let backup_tile_key = if origin_tile_key != TileKey::EMPTY {
+            let backup_tile_key = if !origin_tile_key.is_empty() {
                 let backup_tile_key = backup_tile_keys
                     .get(backup_key_cursor)
                     .copied()
@@ -666,7 +662,8 @@ impl BrushStrokeState {
 
             commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: self.brush_id,
-                origin_tile_key: backup_tile_key.unwrap_or(TileKey::EMPTY),
+                origin_tile_key: backup_tile_key
+                    .unwrap_or_else(|| TileKey::empty(image_backend_id)),
                 intermediate_tile_key: record.intermediate_tile_key,
                 destination_tile_key,
                 brush_payload: brush_payload.clone(),
@@ -1011,7 +1008,7 @@ mod tests {
             .expect("commit batch should build");
 
         let second_active_key = image.tile_key(1).expect("tile key should exist");
-        assert_ne!(second_active_key, TileKey::EMPTY);
+        assert!(!second_active_key.is_empty());
         assert_eq!(batch.backup_tile_indices, vec![0]);
         assert_eq!(batch.backup_tile_keys.len(), 1);
         assert_eq!(
@@ -1030,7 +1027,7 @@ mod tests {
                 }),
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
-                    origin_tile_key: TileKey::EMPTY,
+                    origin_tile_key: TileKey::empty(image_backend.backend_id()),
                     intermediate_tile_key: second_intermediate,
                     destination_tile_key: second_active_key,
                     brush_payload: merge_payload.clone(),

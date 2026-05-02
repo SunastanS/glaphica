@@ -72,12 +72,12 @@ mod tests {
     fn image_tile_binding_keeps_slot_and_tile_key_together() {
         let binding = ImageTileBinding {
             image_tile: ImageTileSlot::new(ImageId(3), 9),
-            tile_key: TileKey::EMPTY,
+            tile_key: TileKey::empty(atlas::BackendId::new(1)),
         };
 
         assert_eq!(binding.image_tile.image_id, ImageId(3));
         assert_eq!(binding.image_tile.tile_index, 9);
-        assert_eq!(binding.tile_key, TileKey::EMPTY);
+        assert!(binding.tile_key.is_empty());
     }
 
     #[test]

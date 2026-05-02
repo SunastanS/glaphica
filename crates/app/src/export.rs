@@ -3,11 +3,12 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::Path;
 
-use atlas::{AtlasLayout, TileKey};
+use atlas::AtlasLayout;
 use gla_document::{
     GlaDoc, GlaDocStorageError, GlaDocTileAsset, GlaImage, GlaNodeKind, tile_asset_relative_path,
     write_tile_asset_file,
 };
+use gla_image::GlaImageTileAccessError;
 use glaphica_core::{AlphaMode, ColorProfile};
 use renderer::{
     GpuContext, RendererTexture, TextureColorRuntime, TextureIoError,
@@ -21,6 +22,7 @@ const TILE_DIRECTORY_NAME: &str = "tiles";
 pub enum AppExportError {
     Renderer(TextureIoError),
     Document(GlaDocStorageError),
+    Image(GlaImageTileAccessError),
 }
 
 impl Display for AppExportError {
@@ -28,6 +30,7 @@ impl Display for AppExportError {
         match self {
             Self::Renderer(error) => Display::fmt(error, f),
             Self::Document(error) => Display::fmt(error, f),
+            Self::Image(error) => Display::fmt(error, f),
         }
     }
 }
@@ -37,6 +40,7 @@ impl Error for AppExportError {
         match self {
             Self::Renderer(error) => Some(error),
             Self::Document(error) => Some(error),
+            Self::Image(error) => Some(error),
         }
     }
 }
@@ -50,6 +54,12 @@ impl From<TextureIoError> for AppExportError {
 impl From<GlaDocStorageError> for AppExportError {
     fn from(error: GlaDocStorageError) -> Self {
         Self::Document(error)
+    }
+}
+
+impl From<GlaImageTileAccessError> for AppExportError {
+    fn from(error: GlaImageTileAccessError) -> Self {
+        Self::Image(error)
     }
 }
 
@@ -123,10 +133,8 @@ fn export_node_tiles(
     let mut image_tiles = Vec::new();
 
     for tile_index in 0..image.tile_count() {
-        let Some(tile_key) = image.tile_key(tile_index) else {
-            continue;
-        };
-        if tile_key == TileKey::EMPTY {
+        let tile_key = image.tile_key(tile_index)?;
+        if tile_key.is_empty() {
             continue;
         }
 

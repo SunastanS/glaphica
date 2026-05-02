@@ -33,7 +33,16 @@ impl BackendId {
 pub struct TileKey(u64);
 
 impl TileKey {
-    pub const EMPTY: Self = Self(u64::MAX);
+    pub const fn empty(backend_id: BackendId) -> Self {
+        // Slot max is outside every atlas layout, so the empty sentinel can still carry backend id.
+        encode_tile_key(backend_id, GENERATION_MASK as u32, SLOT_MASK as u32)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        let raw = self.raw();
+        ((raw >> GENERATION_SHIFT) & GENERATION_MASK) == GENERATION_MASK
+            && ((raw >> SLOT_SHIFT) & SLOT_MASK) == SLOT_MASK
+    }
 
     const fn from_raw(raw: u64) -> Self {
         Self(raw)
@@ -69,10 +78,10 @@ pub struct TileOwner {
 }
 
 impl TileOwner {
-    pub fn empty() -> Self {
+    pub fn empty(backend_id: BackendId) -> Self {
         Self {
             recycle: None,
-            key: TileKey::EMPTY,
+            key: TileKey::empty(backend_id),
         }
     }
 
@@ -86,7 +95,7 @@ impl TileOwner {
 
     pub fn into_tile_key(mut self) -> TileKey {
         let key = self.key;
-        self.key = TileKey::EMPTY;
+        self.key = TileKey::empty(key.parts().backend_id);
         key
     }
 
@@ -100,13 +109,13 @@ impl TileOwner {
 
 impl Drop for TileOwner {
     fn drop(&mut self) {
-        if self.key == TileKey::EMPTY {
+        if self.key.is_empty() {
             return;
         }
         if let Some(recycle) = &self.recycle {
             recycle.enqueue(self.key);
         }
-        self.key = TileKey::EMPTY;
+        self.key = TileKey::empty(self.key.parts().backend_id);
     }
 }
 
@@ -196,7 +205,7 @@ impl AtlasLayout {
     }
 
     pub fn tile_key_address(self, tile_key: TileKey) -> Option<AtlasSlotAddress> {
-        if tile_key == TileKey::EMPTY {
+        if tile_key.is_empty() {
             return None;
         }
         self.slot_address(tile_key.parts().slot_index)
@@ -628,6 +637,10 @@ impl BackendInner {
     }
 
     fn validate_key(&self, key: TileKey) -> Result<u32, AtlasError> {
+        if key.is_empty() {
+            return Err(AtlasError::InvalidSlot);
+        }
+
         let decoded = decode_tile_key(key);
         if decoded.backend_id != self.backend_id {
             return Err(AtlasError::WrongBackend);
@@ -875,7 +888,7 @@ impl BackendManager {
     }
 }
 
-fn encode_tile_key(backend_id: BackendId, generation: u32, slot_index: u32) -> TileKey {
+const fn encode_tile_key(backend_id: BackendId, generation: u32, slot_index: u32) -> TileKey {
     let raw = ((backend_id.raw() as u64 & BACKEND_MASK) << BACKEND_SHIFT)
         | ((generation as u64 & GENERATION_MASK) << GENERATION_SHIFT)
         | ((slot_index as u64 & SLOT_MASK) << SLOT_SHIFT);

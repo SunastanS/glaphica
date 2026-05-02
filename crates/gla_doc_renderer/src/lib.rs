@@ -296,10 +296,7 @@ impl GlaDocRenderer {
         doc: &GlaDoc,
         tile_index: usize,
     ) -> Result<(atlas::TileKey, atlas::TileKey), GlaDocRendererError> {
-        let origin_tile_key = doc
-            .active_layer_image()?
-            .tile_key(tile_index)
-            .ok_or(GlaImageTileAccessError::OutOfBounds)?;
+        let origin_tile_key = doc.active_layer_image()?.tile_key(tile_index)?;
         let preview_tile_key = self.ensure_brush_preview_tile(doc, tile_index)?;
         Ok((origin_tile_key, preview_tile_key))
     }
@@ -547,7 +544,7 @@ impl GlaDocRenderer {
             for tile_owner in tile_owners {
                 let tile_key = tile_owner.tile_key();
                 tile_keys.push(tile_key);
-                if tile_key != atlas::TileKey::EMPTY {
+                if !tile_key.is_empty() {
                     non_empty_owners.push(tile_owner);
                 }
             }
@@ -675,13 +672,10 @@ impl GlaDocRenderer {
             };
 
             if sources.is_empty() {
-                if target_image
-                    .tile_key(tile_index)
-                    .unwrap_or(atlas::TileKey::EMPTY)
-                    != atlas::TileKey::EMPTY
-                {
-                    target_image.clear_tile(tile_index)?;
+                if target_image.tile_key(tile_index)?.is_empty() {
+                    continue;
                 }
+                target_image.clear_tile(tile_index)?;
                 continue;
             }
 
@@ -704,37 +698,43 @@ impl GlaDocRenderer {
     ) -> Result<Vec<TileCompositeSource>, GlaDocRendererError> {
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let tile_key = match input.source_kind {
-                RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
-                    let preview_tile_key = self
-                        .brush_preview_image
-                        .as_ref()
-                        .and_then(|preview_node| preview_node.tile_key(tile_index))
-                        .unwrap_or(atlas::TileKey::EMPTY);
-                    if preview_tile_key != atlas::TileKey::EMPTY {
-                        preview_tile_key
-                    } else {
-                        doc.node_image(input.node_id)?
-                            .tile_key(tile_index)
-                            .unwrap_or(atlas::TileKey::EMPTY)
+            let tile_key =
+                match input.source_kind {
+                    RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
+                        let preview_tile_key = match self.brush_preview_image.as_ref() {
+                            Some(preview_node) => preview_node.tile_key(tile_index)?,
+                            None => atlas::TileKey::empty(self.render_backend.backend_id()),
+                        };
+                        if !preview_tile_key.is_empty() {
+                            preview_tile_key
+                        } else {
+                            doc.node_image(input.node_id)?.tile_key(tile_index)?
+                        }
                     }
-                }
-                RenderProgramSourceKind::Truth => doc
-                    .node_image(input.node_id)?
-                    .tile_key(tile_index)
-                    .unwrap_or(atlas::TileKey::EMPTY),
-                RenderProgramSourceKind::Result => self
-                    .node_resources
-                    .iter()
-                    .find(|entry| entry.node_id == input.node_id)
-                    .and_then(|entry| match &entry.state {
-                        RenderImageState::Active(image) => image.tile_key(tile_index),
-                        RenderImageState::Cached(cached) => cached.tile_key(tile_index),
-                        RenderImageState::Empty => Some(atlas::TileKey::EMPTY),
-                    })
-                    .unwrap_or(atlas::TileKey::EMPTY),
-            };
-            if tile_key == atlas::TileKey::EMPTY {
+                    RenderProgramSourceKind::Truth => {
+                        doc.node_image(input.node_id)?.tile_key(tile_index)?
+                    }
+                    RenderProgramSourceKind::Result => {
+                        let entry = self
+                            .node_resources
+                            .iter()
+                            .find(|entry| entry.node_id == input.node_id)
+                            .ok_or(GlaDocError::InvalidNodeId(input.node_id))?;
+                        match &entry.state {
+                            RenderImageState::Active(image) => image.tile_key(tile_index)?,
+                            RenderImageState::Cached(cached) => cached.tile_key(tile_index).ok_or(
+                                GlaDocError::InvalidTileIndex {
+                                    tile_index,
+                                    tile_count: cached.tile_count(),
+                                },
+                            )?,
+                            RenderImageState::Empty => {
+                                atlas::TileKey::empty(self.render_backend.backend_id())
+                            }
+                        }
+                    }
+                };
+            if tile_key.is_empty() {
                 continue;
             }
             sources.push(TileCompositeSource {
@@ -972,12 +972,12 @@ mod tests {
             .expect("preview target should build");
 
         assert_eq!(origin_tile_key, active_tile_key);
-        assert_ne!(preview_tile_key, TileKey::EMPTY);
+        assert!(!preview_tile_key.is_empty());
         assert_eq!(
             renderer
                 .brush_preview_image()
-                .and_then(|image| image.tile_key(0)),
-            Some(preview_tile_key)
+                .map(|image| image.tile_key(0)),
+            Some(Ok(preview_tile_key))
         );
     }
 
@@ -1311,7 +1311,7 @@ mod tests {
         let RenderImageState::Active(left_image) = left_state.state() else {
             panic!("left group should be active");
         };
-        assert_eq!(left_image.tile_key(0), Some(cached_tile_key));
+        assert_eq!(left_image.tile_key(0), Ok(cached_tile_key));
         assert_eq!(
             renderer.render_backend.tile_state(cached_tile_key),
             Ok(atlas::TileState::Active)

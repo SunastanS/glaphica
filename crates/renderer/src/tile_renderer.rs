@@ -368,7 +368,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use atlas::TileKey;
+    use atlas::{BackendId, TileKey};
     use bytemuck::bytes_of;
 
     use super::{PresentTileParams, TileCompositeSource, present::PresentUniforms};
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn composite_source_keeps_opacity_and_blend_mode() {
         let source = TileCompositeSource {
-            tile_key: TileKey::EMPTY,
+            tile_key: TileKey::empty(BackendId::new(1)),
             opacity: 0.5,
             blend_mode: BlendMode::Multiply,
         };
