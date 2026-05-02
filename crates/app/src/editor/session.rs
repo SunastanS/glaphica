@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend};
+use atlas::AtlasError;
 use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError};
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
 use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoTileAction};
@@ -244,20 +244,13 @@ impl EditorSession {
 
     pub fn process_brush_input_gpu(
         &mut self,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         input: &BrushInput,
     ) -> Result<EditorRenderUpdate, EditorSessionError> {
         Ok(self
-            .process_brush_inputs_gpu(
-                image_backend,
-                tile_renderer,
-                device,
-                queue,
-                std::slice::from_ref(input),
-            )?
+            .process_brush_inputs_gpu(tile_renderer, device, queue, std::slice::from_ref(input))?
             .unwrap_or(EditorRenderUpdate {
                 tile_indices: Vec::new(),
                 prepared_active_plan: false,
@@ -267,7 +260,6 @@ impl EditorSession {
 
     pub fn process_brush_inputs_gpu(
         &mut self,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -286,7 +278,6 @@ impl EditorSession {
                 &self.doc,
                 &mut self.doc_renderer,
                 &self.brushes,
-                image_backend,
                 tile_renderer,
                 device,
                 queue,
@@ -307,7 +298,6 @@ impl EditorSession {
 
     pub fn commit_active_stroke(
         &mut self,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -319,7 +309,6 @@ impl EditorSession {
             &mut self.doc,
             &mut self.doc_renderer,
             &mut self.brushes,
-            image_backend,
             tile_renderer,
             device,
             queue,
@@ -338,7 +327,6 @@ impl EditorSession {
 
     pub fn undo_last_stroke(
         &mut self,
-        _image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,

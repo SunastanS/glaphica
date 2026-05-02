@@ -80,7 +80,6 @@ impl PreviewState {
                     if self.stroke_active {
                         if let Some(runtime) = self.runtime.as_mut() {
                             runtime.end_active_tool_stroke_gpu(
-                                &self.image_backend,
                                 &mut self.tile_renderer,
                                 &self.gpu.device,
                                 &self.gpu.queue,
@@ -116,7 +115,6 @@ impl PreviewState {
                 {
                     if let Some(runtime) = self.runtime.as_mut() {
                         runtime.undo_last_stroke_gpu(
-                            &self.image_backend,
                             &mut self.tile_renderer,
                             &self.gpu.device,
                             &self.gpu.queue,

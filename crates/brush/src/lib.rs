@@ -620,7 +620,13 @@ impl BrushStrokeState {
             });
         }
 
-        let backup = image_undo.backup_tiles(image, tile_indices)?;
+        let touched_tile_indices = tile_indices
+            .iter()
+            .copied()
+            .filter(|&tile_index| self.touched_tile_index(tile_index).is_some())
+            .collect::<Vec<_>>();
+
+        let backup = image_undo.backup_tiles(image, &touched_tile_indices)?;
         let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
         let mut commands = copy_commands
             .into_iter()

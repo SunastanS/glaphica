@@ -29,7 +29,6 @@ impl StrokeTransaction {
         doc: &GlaDoc,
         doc_renderer: &mut GlaDocRenderer,
         brushes: &AppBrushRegistry,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -38,6 +37,8 @@ impl StrokeTransaction {
         if inputs.is_empty() {
             return Ok(None);
         }
+
+        let [image_backend, _] = doc.image_undo().backends();
 
         let active_image = doc.active_layer_image()?;
         let mut dirty_tile_indices = Vec::new();
@@ -117,7 +118,6 @@ impl StrokeTransaction {
         doc: &mut GlaDoc,
         doc_renderer: &mut GlaDocRenderer,
         brushes: &mut AppBrushRegistry,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -152,7 +152,7 @@ impl StrokeTransaction {
                 .build_commit_batch(image, &image_undo, &tile_indices, merge_payload)?
         };
 
-        let [_, backup_backend] = image_undo.backends();
+        let [image_backend, backup_backend] = image_undo.backends();
         let render_backend = doc_renderer.render_backend();
         tile_renderer.ensure_backend(device, image_backend)?;
         tile_renderer.ensure_backend_with_format(

@@ -2,7 +2,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use atlas::Backend;
 use brush::round::RoundBrushSettings;
 use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
@@ -191,7 +190,6 @@ impl AppRuntime {
 
     pub fn process_pending_brush_input_gpu(
         &mut self,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -207,7 +205,6 @@ impl AppRuntime {
             return Ok(None);
         }
         let update = self.session.process_brush_inputs_gpu(
-            image_backend,
             tile_renderer,
             device,
             queue,
@@ -222,23 +219,16 @@ impl AppRuntime {
 
     pub fn end_active_tool_stroke_gpu(
         &mut self,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         max_pending_inputs: usize,
     ) -> Result<Option<EditorRenderUpdate>, AppRuntimeError> {
         self.brush_thread.finish_active_stroke_processing()?;
-        self.process_pending_brush_input_gpu(
-            image_backend,
-            tile_renderer,
-            device,
-            queue,
-            max_pending_inputs,
-        )?;
-        let update =
-            self.session
-                .commit_active_stroke(image_backend, tile_renderer, device, queue)?;
+        self.process_pending_brush_input_gpu(tile_renderer, device, queue, max_pending_inputs)?;
+        let update = self
+            .session
+            .commit_active_stroke(tile_renderer, device, queue)?;
         self.brush_thread.reset_active_stroke_processing();
         if let Some(update) = update.as_ref() {
             self.frame_scheduler.schedule_render_update(update);
@@ -248,14 +238,13 @@ impl AppRuntime {
 
     pub fn undo_last_stroke_gpu(
         &mut self,
-        image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<Option<EditorRenderUpdate>, AppRuntimeError> {
         let update = self
             .session
-            .undo_last_stroke(image_backend, tile_renderer, device, queue)?;
+            .undo_last_stroke(tile_renderer, device, queue)?;
         if let Some(update) = update.as_ref() {
             self.frame_scheduler.schedule_render_update(update);
         }

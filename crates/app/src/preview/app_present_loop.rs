@@ -76,7 +76,6 @@ impl PreviewState {
             };
             puffin::profile_scope!("process_pending_brush_input_gpu");
             runtime.process_pending_brush_input_gpu(
-                &self.image_backend,
                 &mut self.tile_renderer,
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -225,7 +224,6 @@ impl PreviewState {
                 UiAction::UndoRequested => {
                     if let Some(runtime) = self.runtime.as_mut() {
                         runtime.undo_last_stroke_gpu(
-                            &self.image_backend,
                             &mut self.tile_renderer,
                             &self.gpu.device,
                             &self.gpu.queue,
