@@ -94,7 +94,7 @@ impl TileOwner {
     }
 
     pub fn drop_tile(&mut self) {
-        self.release(BackendRecycleActionKind::DropTile);
+        self.release();
     }
 
     #[deprecated(note = "moving a TileKey out of TileOwner bypasses backend ownership tracking")]
@@ -104,23 +104,12 @@ impl TileOwner {
         key
     }
 
-    fn cache_tile(&mut self, request: BackendCacheRecycleRequest) {
-        if self.key.is_empty() {
-            return;
-        }
-
-        self.release(BackendRecycleActionKind::CacheTile { request });
-    }
-
-    fn release(&mut self, kind: BackendRecycleActionKind) {
+    fn release(&mut self) {
         if self.key.is_empty() {
             return;
         }
         if let Some(recycle) = &self.recycle {
-            recycle.enqueue(BackendRecycleAction {
-                key: self.key,
-                kind,
-            });
+            recycle.enqueue(self.key);
         }
         self.key = TileKey::empty(self.key.parts().backend_id);
     }
@@ -141,85 +130,31 @@ impl Drop for TileOwner {
 
 #[derive(Debug, Clone)]
 struct BackendRecycleHandle {
-    pending_actions: Arc<Mutex<Vec<BackendRecycleAction>>>,
+    pending_keys: Arc<Mutex<Vec<TileKey>>>,
 }
 
 impl BackendRecycleHandle {
     fn new() -> Self {
         Self {
-            pending_actions: Arc::new(Mutex::new(Vec::new())),
+            pending_keys: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn enqueue(&self, action: BackendRecycleAction) {
-        let Ok(mut pending_actions) = self.pending_actions.lock() else {
+    fn enqueue(&self, key: TileKey) {
+        let Ok(mut pending_keys) = self.pending_keys.lock() else {
             eprintln!("atlas: failed to lock recycle queue while releasing tile owner");
             return;
         };
-        pending_actions.push(action);
+        pending_keys.push(key);
     }
 
-    fn drain(&self) -> Result<Vec<BackendRecycleAction>, AtlasError> {
-        let mut pending_actions = self
-            .pending_actions
+    fn drain(&self) -> Result<Vec<TileKey>, AtlasError> {
+        let mut pending_keys = self
+            .pending_keys
             .lock()
             .map_err(|_| AtlasError::BackendPoisoned)?;
-        Ok(std::mem::take(&mut *pending_actions))
+        Ok(std::mem::take(&mut *pending_keys))
     }
-}
-
-#[derive(Debug)]
-struct BackendRecycleAction {
-    key: TileKey,
-    kind: BackendRecycleActionKind,
-}
-
-#[derive(Debug, Clone)]
-enum BackendRecycleActionKind {
-    DropTile,
-    CacheTile { request: BackendCacheRecycleRequest },
-}
-
-#[derive(Debug, Clone)]
-struct BackendCacheRecycleRequest {
-    result: Arc<Mutex<BackendCacheRecycleRequestResult>>,
-}
-
-impl BackendCacheRecycleRequest {
-    fn new() -> Self {
-        Self {
-            result: Arc::new(Mutex::new(BackendCacheRecycleRequestResult::default())),
-        }
-    }
-
-    fn append(&self, group_id: CacheGroupId, key: TileKey) -> Result<(), AtlasError> {
-        let mut result = self
-            .result
-            .lock()
-            .map_err(|_| AtlasError::BackendPoisoned)?;
-        if result.group_id.is_none() {
-            result.group_id = Some(group_id);
-        }
-        result.keys.push(key);
-        Ok(())
-    }
-
-    fn finish(self) -> Result<CachedTileGroup, AtlasError> {
-        let result = self
-            .result
-            .lock()
-            .map_err(|_| AtlasError::BackendPoisoned)?;
-        Ok(CachedTileGroup {
-            group_id: result.group_id.map_or(u32::MAX, |group_id| group_id.0),
-            keys: result.keys.clone(),
-        })
-    }
-}
-
-#[derive(Debug, Default)]
-struct BackendCacheRecycleRequestResult {
-    group_id: Option<CacheGroupId>,
-    keys: Vec<TileKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -860,20 +795,37 @@ impl Backend {
         &self,
         owners: impl IntoIterator<Item = TileOwner>,
     ) -> Result<CachedTileGroup, AtlasError> {
-        let mut owners: Vec<TileOwner> = owners.into_iter().collect();
+        let owners: Vec<TileOwner> = owners.into_iter().collect();
         for owner in &owners {
             if owner.backend_id() != self.backend_id {
                 return Err(AtlasError::WrongBackend);
             }
         }
 
-        let request = BackendCacheRecycleRequest::new();
-        for owner in &mut owners {
-            owner.cache_tile(request.clone());
+        let mut inner = self.lock_inner()?;
+        self.drain_owned_reclaims(&mut inner)?;
+
+        let mut keys = Vec::with_capacity(owners.len());
+        if owners.is_empty() {
+            return Ok(CachedTileGroup {
+                group_id: u32::MAX,
+                keys,
+            });
         }
 
-        self.with_inner(|_| Ok(()))?;
-        request.finish()
+        let group_id = inner.cache_manager.acquire_vacant_group();
+        for mut owner in owners {
+            if !owner.key.is_empty() {
+                inner.cache_owned_active_into_group(owner.key, group_id)?;
+                keys.push(owner.key);
+                owner.key = TileKey::empty(owner.key.parts().backend_id);
+            }
+        }
+        inner.cache_manager.push_group_queue(group_id);
+        Ok(CachedTileGroup {
+            group_id: group_id.0,
+            keys,
+        })
     }
 
     pub fn activate_cached_tile(&self, key: TileKey) -> Result<TileOwner, AtlasError> {
@@ -927,45 +879,12 @@ impl Backend {
 
     fn drain_owned_reclaims(&self, inner: &mut BackendInner) -> Result<(), AtlasError> {
         let mut first_error = None;
-        for action in self.recycle.drain()? {
-            match action.kind {
-                BackendRecycleActionKind::DropTile => match inner.free_owned_active(action.key) {
-                    Ok(()) | Err(AtlasError::GenerationMismatch) | Err(AtlasError::InvalidSlot) => {
-                    }
-                    Err(error) => {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    }
-                },
-                BackendRecycleActionKind::CacheTile { request } => {
-                    let group_id = match request
-                        .result
-                        .lock()
-                        .map_err(|_| AtlasError::BackendPoisoned)?
-                        .group_id
-                    {
-                        Some(group_id) => group_id,
-                        None => {
-                            let group_id = inner.cache_manager.acquire_vacant_group();
-                            inner.cache_manager.push_group_queue(group_id);
-                            group_id
-                        }
-                    };
-
-                    match inner.cache_owned_active_into_group(action.key, group_id) {
-                        Ok(()) => {
-                            if let Err(error) = request.append(group_id, action.key)
-                                && first_error.is_none()
-                            {
-                                first_error = Some(error);
-                            }
-                        }
-                        Err(error) => {
-                            if first_error.is_none() {
-                                first_error = Some(error);
-                            }
-                        }
+        for key in self.recycle.drain()? {
+            match inner.free_owned_active(key) {
+                Ok(()) | Err(AtlasError::GenerationMismatch) | Err(AtlasError::InvalidSlot) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
                     }
                 }
             }
