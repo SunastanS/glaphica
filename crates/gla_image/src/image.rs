@@ -84,6 +84,35 @@ impl From<GlaImageTileAccessError> for GlaImageEnsureActiveTileError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlaImageCacheTileError {
+    Atlas(AtlasError),
+    TileAccess(GlaImageTileAccessError),
+}
+
+impl Display for GlaImageCacheTileError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Atlas(error) => Display::fmt(error, f),
+            Self::TileAccess(error) => Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for GlaImageCacheTileError {}
+
+impl From<AtlasError> for GlaImageCacheTileError {
+    fn from(error: AtlasError) -> Self {
+        Self::Atlas(error)
+    }
+}
+
+impl From<GlaImageTileAccessError> for GlaImageCacheTileError {
+    fn from(error: GlaImageTileAccessError) -> Self {
+        Self::TileAccess(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlaImageTileRecBounds {
     pub min_tile_x: u32,
     pub min_tile_y: u32,
@@ -173,12 +202,25 @@ impl GlaImage {
         Ok(std::mem::replace(slot, tile_owner))
     }
 
-    pub fn clear_tile(&mut self, tile_index: usize) -> Result<TileOwner, GlaImageTileAccessError> {
-        // TODO: Evil's function, remove it immediately
+    pub fn clear_tile(&mut self, tile_index: usize) -> Result<(), GlaImageTileAccessError> {
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
-        Ok(std::mem::replace(slot, TileOwner::empty(self.backend_id)))
+        slot.drop_tile();
+        Ok(())
+    }
+
+    pub fn cache_tile(&mut self, tile_index: usize) -> Result<(), GlaImageCacheTileError> {
+        let Some(slot) = self.tile_owners.get_mut(tile_index) else {
+            return Err(GlaImageTileAccessError::OutOfBounds.into());
+        };
+        if slot.tile_key().is_empty() {
+            return Ok(());
+        }
+
+        let tile_owner = std::mem::replace(slot, TileOwner::empty(self.backend_id));
+        let _cached_group = self.backend.cache_active_owners([tile_owner])?;
+        Ok(())
     }
 
     pub fn ensure_active_tile_key(
@@ -305,7 +347,7 @@ impl AtlasTileMap for GlaImage {
 
 #[cfg(test)]
 mod tests {
-    use atlas::{AtlasLayout, Backend, BackendId, TileKey};
+    use atlas::{AtlasLayout, Backend, BackendId};
     use glaphica_core::{CanvasVec2, IMAGE_TILE_SIZE};
 
     use crate::{ImageId, ImageTileSlot, layout::GlaImageLayout};
@@ -449,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_tile_releases_owner_when_dropped() {
+    fn clear_tile_releases_owner_immediately() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let mut image = GlaImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
@@ -462,11 +504,28 @@ mod tests {
 
         let removed = image.clear_tile(0);
         assert!(removed.is_ok());
-        drop(removed.unwrap());
 
         assert_eq!(
             backend.tile_state(key),
             Err(atlas::AtlasError::GenerationMismatch)
         );
+    }
+
+    #[test]
+    fn cache_tile_moves_owner_to_backend_cache() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
+        let mut image = GlaImage::new(
+            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
+            backend.clone(),
+        )
+        .unwrap();
+        let tile_owner = backend.alloc_active().unwrap();
+        let key = tile_owner.tile_key();
+        assert!(image.replace_tile_owner(0, tile_owner).is_ok());
+
+        assert!(image.cache_tile(0).is_ok());
+
+        assert!(image.tile_key(0).is_ok_and(|key| key.is_empty()));
+        assert_eq!(backend.tile_state(key), Ok(atlas::TileState::Cached));
     }
 }

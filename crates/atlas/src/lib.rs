@@ -93,10 +93,36 @@ impl TileOwner {
         decode_tile_key(self.key).backend_id
     }
 
+    pub fn drop_tile(&mut self) {
+        self.release(BackendRecycleActionKind::DropTile);
+    }
+
+    #[deprecated(note = "moving a TileKey out of TileOwner bypasses backend ownership tracking")]
     pub fn into_tile_key(mut self) -> TileKey {
         let key = self.key;
         self.key = TileKey::empty(key.parts().backend_id);
         key
+    }
+
+    fn cache_tile(&mut self, request: BackendCacheRecycleRequest) {
+        if self.key.is_empty() {
+            return;
+        }
+
+        self.release(BackendRecycleActionKind::CacheTile { request });
+    }
+
+    fn release(&mut self, kind: BackendRecycleActionKind) {
+        if self.key.is_empty() {
+            return;
+        }
+        if let Some(recycle) = &self.recycle {
+            recycle.enqueue(BackendRecycleAction {
+                key: self.key,
+                kind,
+            });
+        }
+        self.key = TileKey::empty(self.key.parts().backend_id);
     }
 
     fn new(recycle: BackendRecycleHandle, key: TileKey) -> Self {
@@ -109,43 +135,91 @@ impl TileOwner {
 
 impl Drop for TileOwner {
     fn drop(&mut self) {
-        if self.key.is_empty() {
-            return;
-        }
-        if let Some(recycle) = &self.recycle {
-            recycle.enqueue(self.key);
-        }
-        self.key = TileKey::empty(self.key.parts().backend_id);
+        self.drop_tile();
     }
 }
 
 #[derive(Debug, Clone)]
 struct BackendRecycleHandle {
-    pending_keys: Arc<Mutex<Vec<TileKey>>>,
+    pending_actions: Arc<Mutex<Vec<BackendRecycleAction>>>,
 }
 
 impl BackendRecycleHandle {
     fn new() -> Self {
         Self {
-            pending_keys: Arc::new(Mutex::new(Vec::new())),
+            pending_actions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn enqueue(&self, key: TileKey) {
-        let Ok(mut pending_keys) = self.pending_keys.lock() else {
-            eprintln!("atlas: failed to lock recycle queue while dropping tile owner");
+    fn enqueue(&self, action: BackendRecycleAction) {
+        let Ok(mut pending_actions) = self.pending_actions.lock() else {
+            eprintln!("atlas: failed to lock recycle queue while releasing tile owner");
             return;
         };
-        pending_keys.push(key);
+        pending_actions.push(action);
     }
 
-    fn drain(&self) -> Result<Vec<TileKey>, AtlasError> {
-        let mut pending_keys = self
-            .pending_keys
+    fn drain(&self) -> Result<Vec<BackendRecycleAction>, AtlasError> {
+        let mut pending_actions = self
+            .pending_actions
             .lock()
             .map_err(|_| AtlasError::BackendPoisoned)?;
-        Ok(std::mem::take(&mut *pending_keys))
+        Ok(std::mem::take(&mut *pending_actions))
     }
+}
+
+#[derive(Debug)]
+struct BackendRecycleAction {
+    key: TileKey,
+    kind: BackendRecycleActionKind,
+}
+
+#[derive(Debug, Clone)]
+enum BackendRecycleActionKind {
+    DropTile,
+    CacheTile { request: BackendCacheRecycleRequest },
+}
+
+#[derive(Debug, Clone)]
+struct BackendCacheRecycleRequest {
+    result: Arc<Mutex<BackendCacheRecycleRequestResult>>,
+}
+
+impl BackendCacheRecycleRequest {
+    fn new() -> Self {
+        Self {
+            result: Arc::new(Mutex::new(BackendCacheRecycleRequestResult::default())),
+        }
+    }
+
+    fn append(&self, group_id: CacheGroupId, key: TileKey) -> Result<(), AtlasError> {
+        let mut result = self
+            .result
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        if result.group_id.is_none() {
+            result.group_id = Some(group_id);
+        }
+        result.keys.push(key);
+        Ok(())
+    }
+
+    fn finish(self) -> Result<CachedTileGroup, AtlasError> {
+        let result = self
+            .result
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        Ok(CachedTileGroup {
+            group_id: result.group_id.map_or(u32::MAX, |group_id| group_id.0),
+            keys: result.keys.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct BackendCacheRecycleRequestResult {
+    group_id: Option<CacheGroupId>,
+    keys: Vec<TileKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -501,12 +575,7 @@ impl BackendInner {
         let group_id = self.cache_manager.acquire_vacant_group();
         let mut cached_keys = Vec::with_capacity(keys.len());
         for &key in keys {
-            let slot = self.validate_key(key)?;
-            if self.slot_owners[slot as usize] != SlotOwner::Active {
-                return Err(AtlasError::InvalidState);
-            }
-            self.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
-            self.cache_manager.group_mut(group_id)?.slots.push(slot);
+            self.cache_owned_active_into_group(key, group_id)?;
             cached_keys.push(key);
         }
 
@@ -571,6 +640,20 @@ impl BackendInner {
         let mut cleared_slots = Vec::with_capacity(1);
         self.release_slot(slot, &mut cleared_slots)?;
         self.push_clear_batch(cleared_slots);
+        Ok(())
+    }
+
+    fn cache_owned_active_into_group(
+        &mut self,
+        key: TileKey,
+        group_id: CacheGroupId,
+    ) -> Result<(), AtlasError> {
+        let slot = self.validate_key(key)?;
+        if self.slot_owners[slot as usize] != SlotOwner::Active {
+            return Err(AtlasError::InvalidState);
+        }
+        self.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
+        self.cache_manager.group_mut(group_id)?.slots.push(slot);
         Ok(())
     }
 
@@ -777,14 +860,20 @@ impl Backend {
         &self,
         owners: impl IntoIterator<Item = TileOwner>,
     ) -> Result<CachedTileGroup, AtlasError> {
-        let mut keys = Vec::new();
-        for owner in owners {
+        let mut owners: Vec<TileOwner> = owners.into_iter().collect();
+        for owner in &owners {
             if owner.backend_id() != self.backend_id {
                 return Err(AtlasError::WrongBackend);
             }
-            keys.push(owner.into_tile_key());
         }
-        self.cache_active_tiles(&keys)
+
+        let request = BackendCacheRecycleRequest::new();
+        for owner in &mut owners {
+            owner.cache_tile(request.clone());
+        }
+
+        self.with_inner(|_| Ok(()))?;
+        request.finish()
     }
 
     pub fn activate_cached_tile(&self, key: TileKey) -> Result<TileOwner, AtlasError> {
@@ -837,11 +926,52 @@ impl Backend {
     }
 
     fn drain_owned_reclaims(&self, inner: &mut BackendInner) -> Result<(), AtlasError> {
-        for key in self.recycle.drain()? {
-            match inner.free_owned_active(key) {
-                Ok(()) | Err(AtlasError::GenerationMismatch) | Err(AtlasError::InvalidSlot) => {}
-                Err(error) => return Err(error),
+        let mut first_error = None;
+        for action in self.recycle.drain()? {
+            match action.kind {
+                BackendRecycleActionKind::DropTile => match inner.free_owned_active(action.key) {
+                    Ok(()) | Err(AtlasError::GenerationMismatch) | Err(AtlasError::InvalidSlot) => {
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                },
+                BackendRecycleActionKind::CacheTile { request } => {
+                    let group_id = match request
+                        .result
+                        .lock()
+                        .map_err(|_| AtlasError::BackendPoisoned)?
+                        .group_id
+                    {
+                        Some(group_id) => group_id,
+                        None => {
+                            let group_id = inner.cache_manager.acquire_vacant_group();
+                            inner.cache_manager.push_group_queue(group_id);
+                            group_id
+                        }
+                    };
+
+                    match inner.cache_owned_active_into_group(action.key, group_id) {
+                        Ok(()) => {
+                            if let Err(error) = request.append(group_id, action.key)
+                                && first_error.is_none()
+                            {
+                                first_error = Some(error);
+                            }
+                        }
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    }
+                }
             }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -907,8 +1037,8 @@ fn decode_tile_key(key: TileKey) -> TileKeyParts {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasError, AtlasLayout, Backend, BackendId, BackendManager, CacheGroupId, CacheManager,
-        ClearBatch, TileState, decode_tile_key,
+        AtlasError, AtlasLayout, Backend, BackendId, BackendManager, CacheManager, ClearBatch,
+        TileState, decode_tile_key,
     };
 
     #[test]
@@ -1152,6 +1282,24 @@ mod tests {
         assert_eq!(reactivated[1].tile_key(), cached.keys()[1]);
         assert_eq!(backend.tile_state(cached.keys()[0]), Ok(TileState::Active));
         assert_eq!(backend.tile_state(cached.keys()[1]), Ok(TileState::Active));
+    }
+
+    #[test]
+    fn cache_active_owners_allocates_group_from_recycle_request() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
+        let first = backend.alloc_active().expect("first tile should allocate");
+        let second = backend.alloc_active().expect("second tile should allocate");
+        let first_key = first.tile_key();
+        let second_key = second.tile_key();
+
+        let cached = backend
+            .cache_active_owners([first, second])
+            .expect("active owners should cache");
+
+        assert_eq!(cached.keys(), &[first_key, second_key]);
+        assert_eq!(backend.cached_group_alive(&cached), Ok(true));
+        assert_eq!(backend.tile_state(first_key), Ok(TileState::Cached));
+        assert_eq!(backend.tile_state(second_key), Ok(TileState::Cached));
     }
 
     #[test]

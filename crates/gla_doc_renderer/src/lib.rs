@@ -5,7 +5,8 @@ use atlas::{AtlasError, Backend as AtlasBackend};
 use gla_document::{GlaDoc, GlaDocError, GlaNodeId, GlaNodeKind};
 use gla_image::{
     GlaCachedImage, GlaCachedImageActivateError, GlaCachedImageCreateError, GlaImage,
-    GlaImageCreateError, GlaImageEnsureActiveTileError, GlaImageTileAccessError,
+    GlaImageCacheTileError, GlaImageCreateError, GlaImageEnsureActiveTileError,
+    GlaImageTileAccessError,
 };
 use glaphica_core::BlendMode;
 use renderer::{
@@ -170,6 +171,15 @@ impl From<GlaImageEnsureActiveTileError> for GlaDocRendererError {
         match error {
             GlaImageEnsureActiveTileError::Atlas(e) => Self::Atlas(e),
             GlaImageEnsureActiveTileError::TileAccess(e) => Self::ImageTileAccess(e),
+        }
+    }
+}
+
+impl From<GlaImageCacheTileError> for GlaDocRendererError {
+    fn from(error: GlaImageCacheTileError) -> Self {
+        match error {
+            GlaImageCacheTileError::Atlas(e) => Self::Atlas(e),
+            GlaImageCacheTileError::TileAccess(e) => Self::ImageTileAccess(e),
         }
     }
 }
@@ -675,7 +685,7 @@ impl GlaDocRenderer {
                 if target_image.tile_key(tile_index)?.is_empty() {
                     continue;
                 }
-                target_image.clear_tile(tile_index)?;
+                target_image.cache_tile(tile_index)?;
                 continue;
             }
 

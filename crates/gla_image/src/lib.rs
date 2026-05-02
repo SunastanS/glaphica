@@ -9,8 +9,8 @@ pub use crate::cached_image::{
     GlaCachedImage, GlaCachedImageActivateError, GlaCachedImageCreateError,
 };
 pub use crate::image::{
-    GlaImage, GlaImageCreateError, GlaImageEnsureActiveTileError, GlaImageTileAccessError,
-    GlaImageTileRecBounds,
+    GlaImage, GlaImageCacheTileError, GlaImageCreateError, GlaImageEnsureActiveTileError,
+    GlaImageTileAccessError, GlaImageTileRecBounds,
 };
 pub use crate::layout::{GlaImageLayout, GlaImageLayoutError};
 pub use crate::stored_image::{GlaStoredImage, GlaStoredImageError};
