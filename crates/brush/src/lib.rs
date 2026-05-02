@@ -625,8 +625,7 @@ impl BrushStrokeState {
                 continue;
             };
             touched_tile_indexes.push(record_index);
-            let active_tile_key = image.tile_key(tile_index)?;
-            if !active_tile_key.is_empty() {
+            if !image.is_tile_empty(tile_index)? {
                 backup_tile_indices.push(tile_index);
             }
         }

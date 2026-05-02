@@ -174,6 +174,13 @@ impl GlaImage {
         self.tile_owners.get(tile_index)
     }
 
+    pub fn is_tile_empty(&self, tile_index: usize) -> Result<bool, GlaImageTileAccessError> {
+        let Some(tile_owner) = self.tile_owners.get(tile_index) else {
+            return Err(GlaImageTileAccessError::OutOfBounds);
+        };
+        Ok(tile_owner.is_empty())
+    }
+
     pub fn into_tile_owners(self) -> (GlaImageLayout, Box<[TileOwner]>) {
         (self.layout, self.tile_owners)
     }

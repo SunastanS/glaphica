@@ -89,6 +89,10 @@ impl TileOwner {
         self.key
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.key.is_empty()
+    }
+
     pub fn backend_id(&self) -> BackendId {
         decode_tile_key(self.key).backend_id
     }
