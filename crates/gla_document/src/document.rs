@@ -1016,7 +1016,6 @@ mod tests {
         let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
         let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let backup_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(11));
-        let backup_backend_id = backup_backend.backend_id();
         let mut doc = GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
             image_backend.clone(),
@@ -1046,7 +1045,7 @@ mod tests {
             empty_backup_group,
             vec![GlaImageUndoTileRecord::new(
                 0,
-                TileKey::empty(backup_backend_id),
+                doc.image_undo().backup_backend().empty_tile_key(),
             )],
         );
 
@@ -1063,7 +1062,7 @@ mod tests {
             doc.active_layer_image()
                 .expect("active image should exist")
                 .tile_key(0),
-            Ok(TileKey::empty(doc.image_backend()))
+            Ok(doc.image_backend_ref().empty_tile_key())
         );
     }
 }

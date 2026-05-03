@@ -134,7 +134,7 @@ impl GlaImage {
         let total_tiles =
             usize::try_from(layout.total_tiles()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let backend_id = backend.backend_id();
-        let tile_owners = std::iter::repeat_with(|| TileOwner::empty(backend_id))
+        let tile_owners = std::iter::repeat_with(|| backend.empty_owner())
             .take(total_tiles)
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -225,7 +225,7 @@ impl GlaImage {
             return Ok(());
         }
 
-        let tile_owner = std::mem::replace(slot, TileOwner::empty(self.backend_id));
+        let tile_owner = std::mem::replace(slot, self.backend.empty_owner());
         let _cached_group = self.backend.cache_active_owners([tile_owner])?;
         Ok(())
     }
@@ -261,7 +261,7 @@ impl GlaImage {
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let mut old_tile_owners = std::mem::replace(
             &mut self.tile_owners,
-            std::iter::repeat_with(|| TileOwner::empty(self.backend_id))
+            std::iter::repeat_with(|| self.backend.empty_owner())
                 .take(new_total_tiles)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -279,10 +279,8 @@ impl GlaImage {
             }
 
             let new_index = tile_y * new_stride + tile_x;
-            self.tile_owners[new_index] = std::mem::replace(
-                &mut old_tile_owners[tile_index],
-                TileOwner::empty(self.backend_id),
-            );
+            self.tile_owners[new_index] =
+                std::mem::replace(&mut old_tile_owners[tile_index], self.backend.empty_owner());
         }
 
         self.layout = new_layout;

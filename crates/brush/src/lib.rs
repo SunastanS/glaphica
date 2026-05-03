@@ -993,7 +993,7 @@ mod tests {
                 }),
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
-                    origin_tile_key: TileKey::empty(image_undo.backup_backend_id()),
+                    origin_tile_key: image_undo.backup_backend().empty_tile_key(),
                     intermediate_tile_key: second_intermediate,
                     destination_tile_key: second_active_key,
                     brush_payload: merge_payload.clone(),

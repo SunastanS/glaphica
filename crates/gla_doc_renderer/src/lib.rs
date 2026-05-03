@@ -713,7 +713,7 @@ impl GlaDocRenderer {
                     RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
                         let preview_tile_key = match self.brush_preview_image.as_ref() {
                             Some(preview_node) => preview_node.tile_key(tile_index)?,
-                            None => atlas::TileKey::empty(self.render_backend.backend_id()),
+                            None => self.render_backend.empty_tile_key(),
                         };
                         if !preview_tile_key.is_empty() {
                             preview_tile_key
@@ -738,9 +738,7 @@ impl GlaDocRenderer {
                                     tile_count: cached.tile_count(),
                                 },
                             )?,
-                            RenderImageState::Empty => {
-                                atlas::TileKey::empty(self.render_backend.backend_id())
-                            }
+                            RenderImageState::Empty => self.render_backend.empty_tile_key(),
                         }
                     }
                 };

@@ -367,7 +367,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use atlas::{BackendId, TileKey};
+    use atlas::{AtlasLayout, Backend, BackendId};
     use bytemuck::bytes_of;
 
     use super::{PresentTileParams, TileCompositeSource, present::PresentUniforms};
@@ -375,8 +375,9 @@ mod tests {
 
     #[test]
     fn composite_source_keeps_opacity_and_blend_mode() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let source = TileCompositeSource {
-            tile_key: TileKey::empty(BackendId::new(1)),
+            tile_key: backend.empty_tile_key(),
             opacity: 0.5,
             blend_mode: BlendMode::Multiply,
         };

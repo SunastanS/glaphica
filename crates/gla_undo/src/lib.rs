@@ -155,7 +155,7 @@ impl GlaImageUndo {
             if source_tile_key.is_empty() {
                 tile_records.push(GlaImageUndoTileRecord::new(
                     tile_index,
-                    TileKey::empty(self.backup_backend_id),
+                    self.backup_backend.empty_tile_key(),
                 ));
                 continue;
             }

@@ -219,13 +219,13 @@ impl AtlasTileMap for GlaCachedImage {
 
 #[cfg(test)]
 mod tests {
-    use atlas::{AtlasLayout, Backend, BackendId, TileKey};
+    use atlas::{AtlasLayout, Backend, BackendId};
     use glaphica_core::IMAGE_TILE_SIZE;
 
     use crate::{GlaCachedImage, GlaCachedImageCreateError, GlaImageLayout};
 
-    fn empty_key_with_backend_1() -> TileKey {
-        TileKey::empty(BackendId::new(1))
+    fn empty_key_with_backend(backend: &Backend) -> atlas::TileKey {
+        backend.empty_tile_key()
     }
 
     #[test]
@@ -238,7 +238,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE),
             cached,
-            vec![empty_key_with_backend_1()],
+            vec![empty_key_with_backend(&backend)],
         );
 
         assert_eq!(
@@ -260,7 +260,10 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE),
             cached,
-            vec![empty_key_with_backend_1(), empty_key_with_backend_1()],
+            vec![
+                empty_key_with_backend(&backend),
+                empty_key_with_backend(&backend),
+            ],
         );
 
         assert_eq!(
@@ -300,7 +303,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2),
             cached,
-            vec![key_a, key_b, key_a, empty_key_with_backend_1()],
+            vec![key_a, key_b, key_a, empty_key_with_backend(&backend)],
         );
 
         assert_eq!(image, Err(GlaCachedImageCreateError::DuplicateTileKeys));
@@ -337,9 +340,9 @@ mod tests {
             cached,
             vec![
                 first,
-                empty_key_with_backend_1(),
+                empty_key_with_backend(&backend),
                 second,
-                empty_key_with_backend_1(),
+                empty_key_with_backend(&backend),
             ],
         )
         .expect("cached image should build");
@@ -349,9 +352,9 @@ mod tests {
             .expect("activate should succeed");
 
         assert_eq!(active.tile_key(0), Ok(first));
-        assert_eq!(active.tile_key(1), Ok(empty_key_with_backend_1()));
+        assert_eq!(active.tile_key(1), Ok(empty_key_with_backend(&backend)));
         assert_eq!(active.tile_key(2), Ok(second));
-        assert_eq!(active.tile_key(3), Ok(empty_key_with_backend_1()));
+        assert_eq!(active.tile_key(3), Ok(empty_key_with_backend(&backend)));
         assert_eq!(backend.tile_state(first), Ok(atlas::TileState::Active));
         assert_eq!(backend.tile_state(second), Ok(atlas::TileState::Active));
     }
@@ -369,16 +372,16 @@ mod tests {
             cached,
             vec![
                 first,
-                empty_key_with_backend_1(),
+                empty_key_with_backend(&backend),
                 second,
-                empty_key_with_backend_1(),
+                empty_key_with_backend(&backend),
             ],
         );
         let image = image.expect("cached image should build");
 
         assert_eq!(image.tile_key(0), Some(first));
-        assert_eq!(image.tile_key(1), Some(empty_key_with_backend_1()));
+        assert_eq!(image.tile_key(1), Some(empty_key_with_backend(&backend)));
         assert_eq!(image.tile_key(2), Some(second));
-        assert_eq!(image.tile_key(3), Some(empty_key_with_backend_1()));
+        assert_eq!(image.tile_key(3), Some(empty_key_with_backend(&backend)));
     }
 }

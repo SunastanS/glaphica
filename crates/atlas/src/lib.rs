@@ -33,7 +33,7 @@ impl BackendId {
 pub struct TileKey(u64);
 
 impl TileKey {
-    pub const fn empty(backend_id: BackendId) -> Self {
+    pub(crate) const fn empty(backend_id: BackendId) -> Self {
         // Slot max is outside every atlas layout, so the empty sentinel can still carry backend id.
         encode_tile_key(backend_id, GENERATION_MASK as u32, SLOT_MASK as u32)
     }
@@ -78,7 +78,7 @@ pub struct TileOwner {
 }
 
 impl TileOwner {
-    pub fn empty(backend_id: BackendId) -> Self {
+    pub(crate) fn empty(backend_id: BackendId) -> Self {
         Self {
             recycle: None,
             key: TileKey::empty(backend_id),
@@ -764,6 +764,14 @@ impl Backend {
         self.backend_id
     }
 
+    pub fn empty_tile_key(&self) -> TileKey {
+        encode_tile_key(self.backend_id, GENERATION_MASK as u32, SLOT_MASK as u32)
+    }
+
+    pub fn empty_owner(&self) -> TileOwner {
+        TileOwner::empty(self.backend_id)
+    }
+
     pub fn layout(&self) -> Result<AtlasLayout, AtlasError> {
         self.with_inner(|inner| Ok(inner.layout))
     }
@@ -1264,7 +1272,7 @@ mod tests {
     #[test]
     fn cache_active_owners_all_empty_keys_returns_empty_group() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
-        let empty_owner = TileOwner::empty(BackendId::new(0));
+        let empty_owner = backend.empty_owner();
 
         let cached = backend
             .cache_active_owners([empty_owner])
