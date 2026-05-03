@@ -747,6 +747,10 @@ pub struct Backend {
 }
 
 impl Backend {
+    // BackendId is not a globally safe identity unless all Backend instances
+    // are created by BackendManager. Do not create two live Backend values
+    // with the same BackendId.
+    // TODO: We need a better way to manage backends
     pub fn new(layout: AtlasLayout, backend_id: BackendId) -> Self {
         Self {
             backend_id,
