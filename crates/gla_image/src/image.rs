@@ -213,7 +213,9 @@ impl GlaImage {
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
-        slot.drop_tile();
+        let vacant = self.backend.empty_owner();
+        let old = std::mem::replace(slot, vacant);
+        drop(old);
         Ok(())
     }
 

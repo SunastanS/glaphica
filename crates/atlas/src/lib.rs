@@ -97,10 +97,6 @@ impl TileOwner {
         decode_tile_key(self.key).backend_id
     }
 
-    pub fn drop_tile(&mut self) {
-        self.release();
-    }
-
     #[deprecated(note = "moving a TileKey out of TileOwner bypasses backend ownership tracking")]
     pub fn into_tile_key(mut self) -> TileKey {
         let key = self.key;
@@ -115,7 +111,6 @@ impl TileOwner {
         if let Some(recycle) = &self.recycle {
             recycle.enqueue(self.key);
         }
-        self.key = TileKey::empty(self.key.parts().backend_id);
     }
 
     fn new(recycle: BackendRecycleHandle, key: TileKey) -> Self {
@@ -128,7 +123,7 @@ impl TileOwner {
 
 impl Drop for TileOwner {
     fn drop(&mut self) {
-        self.drop_tile();
+        self.release();
     }
 }
 
@@ -803,16 +798,13 @@ impl Backend {
         self.with_inner(|inner| inner.cache_active_tiles(keys))
     }
 
-    // TODO(backend-identity):
-    // TileOwner ownership is currently validated by BackendId.
-    // This relies on the architectural invariant that live Backend instances have unique BackendId.
-    // Long term, BackendId should be separated from backend instance identity, likely using an
-    // internal capability token / manager-owned registry.
     pub fn cache_active_owners(
         &self,
         owners: impl IntoIterator<Item = TileOwner>,
     ) -> Result<CachedTileGroup, AtlasError> {
         let owners: Vec<TileOwner> = owners.into_iter().collect();
+
+        // Phase 0: validate backend identity (no lock needed).
         for owner in &owners {
             if owner.backend_id() != self.backend_id {
                 return Err(AtlasError::WrongBackend);
@@ -822,7 +814,9 @@ impl Backend {
         let mut inner = self.lock_inner()?;
         self.drain_owned_reclaims(&mut inner)?;
 
-        // Validate every key is live and active before mutating any slot state.
+        // Phase 1: pure validation — collect slot indices, no mutations.
+        // Any ? here returns with all slots still Active, owners drop cleanly.
+        let mut slot_indices = Vec::with_capacity(owners.len());
         for owner in &owners {
             if owner.key.is_empty() {
                 continue;
@@ -831,25 +825,38 @@ impl Backend {
             if inner.slot_owners[slot as usize] != SlotOwner::Active {
                 return Err(AtlasError::InvalidState);
             }
+            slot_indices.push(slot);
         }
 
-        if !owners.iter().any(|o| !o.key.is_empty()) {
+        if slot_indices.is_empty() {
             return Ok(CachedTileGroup {
                 group_id: u32::MAX,
                 keys: Vec::new(),
             });
         }
 
+        // Phase 2: infallible commit. All fallible checks done in Phase 1.
         let group_id = inner.cache_manager.acquire_vacant_group();
-        let mut keys = Vec::with_capacity(owners.len());
-        for mut owner in owners {
-            if !owner.key.is_empty() {
-                inner.cache_owned_active_into_group(owner.key, group_id)?;
-                keys.push(owner.key);
-                owner.key = TileKey::empty(owner.key.parts().backend_id);
-            }
+        for &slot in &slot_indices {
+            inner.slot_owners[slot as usize] = SlotOwner::Cached(group_id);
+            inner.cache_manager.groups[group_id.0 as usize]
+                .slots
+                .push(slot);
         }
         inner.cache_manager.push_group_queue(group_id);
+
+        // Phase 3: collect keys, then disarm owners so Drop does not recycle
+        // slots that are now Cached.
+        let keys: Vec<TileKey> = owners
+            .iter()
+            .filter(|o| !o.key.is_empty())
+            .map(|o| o.key)
+            .collect();
+
+        for owner in owners {
+            let _disarmed = std::mem::ManuallyDrop::new(owner);
+        }
+
         Ok(CachedTileGroup {
             group_id: group_id.0,
             keys,
