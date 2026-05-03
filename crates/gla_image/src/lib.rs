@@ -10,14 +10,14 @@ pub use crate::cached_image::{
 };
 pub use crate::image::{
     GlaImage, GlaImageCacheTileError, GlaImageCreateError, GlaImageEnsureActiveTileError,
-    GlaImageTileAccessError, GlaImageTileRecBounds,
+    GlaImageSlotRecBounds, GlaImageTileAccessError,
 };
 pub use crate::layout::{GlaImageLayout, GlaImageLayoutError};
 pub use crate::stored_image::{GlaStoredImage, GlaStoredImageError};
 
 pub trait TileGrid {
     fn layout(&self) -> GlaImageLayout;
-    fn tile_count(&self) -> usize;
+    fn slot_count(&self) -> usize;
 }
 
 pub trait AtlasTileMap: TileGrid {
@@ -85,8 +85,8 @@ mod tests {
     fn gla_image_layout_reports_total_tiles() {
         let layout = GlaImageLayout::new(63, 125);
 
-        assert_eq!(layout.tile_x(), 2);
-        assert_eq!(layout.tile_y(), 3);
-        assert_eq!(layout.total_tiles(), 6);
+        assert_eq!(layout.slot_x(), 2);
+        assert_eq!(layout.slot_y(), 3);
+        assert_eq!(layout.total_slots(), 6);
     }
 }

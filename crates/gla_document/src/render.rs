@@ -53,7 +53,7 @@ struct LoweredInput {
 
 impl GlaDoc {
     pub fn build_full_render_refresh(&self) -> Result<GlaRenderRefresh, GlaDocError> {
-        let tile_indices = (0..self.node(self.root_id())?.image().tile_count()).collect::<Vec<_>>();
+        let tile_indices = (0..self.node(self.root_id())?.image().slot_count()).collect::<Vec<_>>();
         self.build_render_refresh(GlaRenderRefreshKind::Full, tile_indices, None)
     }
 
@@ -339,16 +339,16 @@ impl GlaDoc {
     }
 
     fn normalize_tile_indices(&self, tile_indices: &[usize]) -> Result<Vec<usize>, GlaDocError> {
-        let tile_count = self.node(self.root_id())?.image().tile_count();
+        let slot_count = self.node(self.root_id())?.image().slot_count();
         let mut normalized = tile_indices.to_vec();
         normalized.sort_unstable();
         normalized.dedup();
 
         for &tile_index in &normalized {
-            if tile_index >= tile_count {
-                return Err(GlaDocError::InvalidTileIndex {
-                    tile_index,
-                    tile_count,
+            if tile_index >= slot_count {
+                return Err(GlaDocError::InvalidSlotIndex {
+                    slot_index: tile_index,
+                    slot_count,
                 });
             }
         }
@@ -524,9 +524,9 @@ mod tests {
 
         assert_eq!(
             refresh,
-            Err(crate::GlaDocError::InvalidTileIndex {
-                tile_index: 7,
-                tile_count: 1,
+            Err(crate::GlaDocError::InvalidSlotIndex {
+                slot_index: 7,
+                slot_count: 1,
             })
         );
     }

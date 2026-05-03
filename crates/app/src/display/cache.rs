@@ -3,16 +3,16 @@ use std::fmt::{Display, Formatter};
 
 use renderer::{RendererTexture, RendererTextureDescriptor, TextureIoError};
 
-pub struct ScreenPresentCache {
+pub struct ScreenPresentTile {
     texture: RendererTexture,
 }
 
 #[derive(Debug)]
-pub enum ScreenPresentCacheError {
+pub enum ScreenPresentTileError {
     TextureIo(TextureIoError),
 }
 
-impl Display for ScreenPresentCacheError {
+impl Display for ScreenPresentTileError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TextureIo(error) => Display::fmt(error, f),
@@ -20,21 +20,21 @@ impl Display for ScreenPresentCacheError {
     }
 }
 
-impl Error for ScreenPresentCacheError {}
+impl Error for ScreenPresentTileError {}
 
-impl From<TextureIoError> for ScreenPresentCacheError {
+impl From<TextureIoError> for ScreenPresentTileError {
     fn from(error: TextureIoError) -> Self {
         Self::TextureIo(error)
     }
 }
 
-impl ScreenPresentCache {
+impl ScreenPresentTile {
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
-    ) -> Result<Self, ScreenPresentCacheError> {
+    ) -> Result<Self, ScreenPresentTileError> {
         Ok(Self {
             texture: RendererTexture::new(
                 device,
@@ -59,7 +59,7 @@ impl ScreenPresentCache {
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
-    ) -> Result<(), ScreenPresentCacheError> {
+    ) -> Result<(), ScreenPresentTileError> {
         if self.texture.width == width
             && self.texture.height == height
             && self.texture.format == format

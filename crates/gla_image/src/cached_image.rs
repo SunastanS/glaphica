@@ -103,8 +103,8 @@ impl GlaCachedImage {
         image: &GlaImage,
         cache_group: CachedTileGroup,
     ) -> Result<Self, GlaCachedImageCreateError> {
-        let mut tile_keys = Vec::with_capacity(image.tile_count());
-        for tile_index in 0..image.tile_count() {
+        let mut tile_keys = Vec::with_capacity(image.slot_count());
+        for tile_index in 0..image.slot_count() {
             tile_keys.push(image.tile_key(tile_index)?);
         }
         Self::new(*image.layout(), cache_group, tile_keys)
@@ -115,7 +115,7 @@ impl GlaCachedImage {
         cache_group: CachedTileGroup,
         tile_keys: Vec<TileKey>,
     ) -> Result<Self, GlaCachedImageCreateError> {
-        let expected_tiles = layout.total_tiles() as usize;
+        let expected_tiles = layout.total_slots() as usize;
         if tile_keys.len() != expected_tiles {
             return Err(GlaCachedImageCreateError::WrongTileCount {
                 expected: expected_tiles,
@@ -159,7 +159,7 @@ impl GlaCachedImage {
         &self.cache_group
     }
 
-    pub fn tile_count(&self) -> usize {
+    pub fn slot_count(&self) -> usize {
         self.tile_keys.len()
     }
 
@@ -171,7 +171,7 @@ impl GlaCachedImage {
         &self.tile_keys
     }
 
-    pub fn collect_non_empty_tile_indices(&self, output: &mut Vec<usize>) {
+    pub fn collect_non_empty_slot_indices(&self, output: &mut Vec<usize>) {
         output.clear();
         for (tile_index, &tile_key) in self.tile_keys.iter().enumerate() {
             if !tile_key.is_empty() {
@@ -206,8 +206,8 @@ impl TileGrid for GlaCachedImage {
         GlaCachedImage::layout(self)
     }
 
-    fn tile_count(&self) -> usize {
-        GlaCachedImage::tile_count(self)
+    fn slot_count(&self) -> usize {
+        GlaCachedImage::slot_count(self)
     }
 }
 
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_image_requires_group_to_match_non_empty_tiles() {
+    fn cached_image_requires_group_to_match_non_empty_slots() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let cached = backend
             .alloc_cached(1)

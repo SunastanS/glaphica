@@ -58,12 +58,12 @@ impl StrokeTransaction {
                 );
                 for tile_index in affected_tiles {
                     let tile_origin = active_image.tile_canvas_origin(tile_index).ok_or(
-                        EditorSessionError::Document(GlaDocError::InvalidTileIndex {
-                            tile_index,
-                            tile_count: active_image.tile_count(),
+                        EditorSessionError::Document(GlaDocError::InvalidSlotIndex {
+                            slot_index: tile_index,
+                            slot_count: active_image.slot_count(),
                         }),
                     )?;
-                    let source_tile_key = self.stroke.intermediate().tile_key(tile_index);
+                    let source_tile_key = self.stroke.brush_tiles().tile_key(tile_index);
                     let apply_payload =
                         brushes.encode_apply_dab_payload(input, block_index, tile_origin)?;
                     self.stroke.push_apply_dab(
@@ -142,8 +142,9 @@ impl StrokeTransaction {
         let brush_backend = brushes
             .brush_backend(brush_id)
             .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
-        let intermediate_backend = brush_backend.intermediate_backend().clone();
-        let intermediate_format = brush_backend.intermediate_format();
+        let brush_tiles_format = brush_backend.brush_tile_format();
+        let brush_backend = brush_backend.brush_backend().clone();
+
         let active_layer_id = doc.active_layer_id();
         let image_undo = doc.image_undo().clone();
         let batch = {
@@ -155,16 +156,12 @@ impl StrokeTransaction {
         let [image_backend, backup_backend] = image_undo.backends();
         let render_backend = doc_renderer.render_backend();
         tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend_with_format(
-            device,
-            &intermediate_backend,
-            intermediate_format,
-        )?;
+        tile_renderer.ensure_backend_with_format(device, &brush_backend, brush_tiles_format)?;
         tile_renderer.ensure_backend(device, backup_backend)?;
         tile_renderer.ensure_backend(device, render_backend)?;
 
         let mut clear_batches = image_backend.take_pending_clear_batches()?;
-        clear_batches.extend(intermediate_backend.take_pending_clear_batches()?);
+        clear_batches.extend(brush_backend.take_pending_clear_batches()?);
         clear_batches.extend(render_backend.take_pending_clear_batches()?);
         clear_batches.extend(backup_backend.take_pending_clear_batches()?);
         tile_renderer.execute_commands_with_shader_provider(
@@ -172,7 +169,7 @@ impl StrokeTransaction {
             queue,
             &[
                 image_backend,
-                &intermediate_backend,
+                &brush_backend,
                 render_backend,
                 backup_backend,
             ],
@@ -210,23 +207,20 @@ impl StrokeTransaction {
         let brush_backend = brushes.brush_backend(self.stroke.brush_id()).ok_or(
             EditorSessionError::BrushNotRegistered(self.stroke.brush_id()),
         )?;
-        let intermediate_backend = brush_backend.intermediate_backend();
+        let brush_tile_fmt = brush_backend.brush_tile_format();
+        let brush_backend = brush_backend.brush_backend();
         let render_backend = doc_renderer.render_backend();
 
         tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend_with_format(
-            device,
-            intermediate_backend,
-            brush_backend.intermediate_format(),
-        )?;
+        tile_renderer.ensure_backend_with_format(device, brush_backend, brush_tile_fmt)?;
         tile_renderer.ensure_backend(device, render_backend)?;
 
-        let mut clear_batches = intermediate_backend.take_pending_clear_batches()?;
+        let mut clear_batches = brush_backend.take_pending_clear_batches()?;
         clear_batches.extend(render_backend.take_pending_clear_batches()?);
         tile_renderer.execute_commands_with_shader_provider(
             device,
             queue,
-            &[image_backend, intermediate_backend, render_backend],
+            &[image_backend, brush_backend, render_backend],
             &clear_batches,
             commands,
             None,

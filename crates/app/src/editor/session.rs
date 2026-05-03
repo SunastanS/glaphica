@@ -21,7 +21,7 @@ pub struct EditorSession {
 pub struct EditorRenderUpdate {
     tile_indices: Vec<usize>,
     prepared_active_plan: bool,
-    rendered_active_tiles: bool,
+    rendered_active_slots: bool,
 }
 
 #[derive(Debug)]
@@ -110,14 +110,14 @@ impl EditorRenderUpdate {
         self.prepared_active_plan
     }
 
-    pub fn rendered_active_tiles(&self) -> bool {
-        self.rendered_active_tiles
+    pub fn rendered_active_slots(&self) -> bool {
+        self.rendered_active_slots
     }
 
-    pub fn merge(&mut self, other: &EditorRenderUpdate) {
+    pub fn combine(&mut self, other: &EditorRenderUpdate) {
         self.tile_indices.extend_from_slice(other.tile_indices());
         self.prepared_active_plan |= other.prepared_active_plan();
-        self.rendered_active_tiles |= other.rendered_active_tiles();
+        self.rendered_active_slots |= other.rendered_active_slots();
     }
 
     pub fn normalize(&mut self) {
@@ -202,7 +202,7 @@ impl EditorSession {
         Ok(EditorRenderUpdate {
             tile_indices: refresh.tile_indices,
             prepared_active_plan: true,
-            rendered_active_tiles: true,
+            rendered_active_slots: true,
         })
     }
 
@@ -218,7 +218,7 @@ impl EditorSession {
             return Ok(EditorRenderUpdate {
                 tile_indices,
                 prepared_active_plan: false,
-                rendered_active_tiles: false,
+                rendered_active_slots: false,
             });
         }
 
@@ -238,7 +238,7 @@ impl EditorSession {
         Ok(EditorRenderUpdate {
             tile_indices,
             prepared_active_plan,
-            rendered_active_tiles: true,
+            rendered_active_slots: true,
         })
     }
 
@@ -254,7 +254,7 @@ impl EditorSession {
             .unwrap_or(EditorRenderUpdate {
                 tile_indices: Vec::new(),
                 prepared_active_plan: false,
-                rendered_active_tiles: false,
+                rendered_active_slots: false,
             }))
     }
 

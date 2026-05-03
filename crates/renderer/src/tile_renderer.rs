@@ -8,8 +8,8 @@ pub use atlas_texture_set::AtlasTextureStage;
 pub use brush_encode::BrushEncodeStage;
 pub use types::{
     ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
-    BrushCommandExecutor, BrushIntermediateFormat, BrushShaderProvider, BrushShaderSource,
-    BrushShaderSpec, BrushShaderStage, CompositeTileCommand, MergeTileCommand, PresentTileCommand,
+    BrushCommandExecutor, BrushShaderProvider, BrushShaderSource, BrushShaderSpec,
+    BrushShaderStage, BrushTileFormat, CompositeTileCommand, MergeTileCommand, PresentTileCommand,
     PresentTileParams, RenderCommand, RenderTarget2d, TileCompositeSource, TileRendererError,
 };
 
@@ -47,7 +47,7 @@ impl TileRenderer {
         &mut self,
         device: &wgpu::Device,
         backend: &atlas::Backend,
-        format: BrushIntermediateFormat,
+        format: BrushTileFormat,
     ) -> Result<(), TileRendererError> {
         self.atlas_texture_set
             .ensure_backend_with_format(device, backend, format)
@@ -197,9 +197,7 @@ impl TileRenderer {
                 RenderCommand::ApplyDab(command) => {
                     (command.brush_id, command.destination_tile_key)
                 }
-                RenderCommand::MergeTile(command) => {
-                    (command.brush_id, command.intermediate_tile_key)
-                }
+                RenderCommand::MergeTile(command) => (command.brush_id, command.brush_tile_key),
                 _ => continue,
             };
             let shader_spec =
@@ -215,7 +213,7 @@ impl TileRenderer {
                 .copied()
                 .find(|backend| backend.backend_id() == backend_id)
             {
-                self.ensure_backend_with_format(device, backend, shader_spec.intermediate_format)?;
+                self.ensure_backend_with_format(device, backend, shader_spec.brush_tile_format)?;
             }
         }
         let mut executor = RegisteredBrushExecutor { provider };

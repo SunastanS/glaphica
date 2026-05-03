@@ -65,7 +65,7 @@ impl BrushLatencyTraceState {
         });
     }
 
-    pub(crate) fn record_current_draw(&mut self, sample: CommittedCanvasSample) {
+    pub(crate) fn record_current_draw(&mut self, sample: FrozenCanvasSample) {
         self.latest_draw = Some(BrushLatencyPoint {
             time_ns: sample.time_ns,
             position: sample.position,
@@ -83,7 +83,7 @@ impl BrushLatencyTraceState {
         })
     }
 
-    pub(crate) fn trace_drain(&mut self, committed_spans: usize, emitted_dabs: usize) {
+    pub(crate) fn trace_drain(&mut self, frozen_spans: usize, emitted_dabs: usize) {
         let Some(snapshot) = self.snapshot() else {
             return;
         };
@@ -100,7 +100,7 @@ impl BrushLatencyTraceState {
             duration_ms(Duration::from_nanos(snapshot.time_ns)),
             snapshot.distance,
             emitted_dabs,
-            committed_spans,
+            frozen_spans,
             snapshot.draw.position.x,
             snapshot.draw.position.y,
             snapshot.input.position.x,
@@ -122,13 +122,13 @@ pub struct CurveKnot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CommittedCanvasSpan {
+pub struct FrozenCanvasSpan {
     pub start: CurveKnot,
     pub end: CurveKnot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CommittedCanvasSample {
+pub struct FrozenCanvasSample {
     pub time_ns: u64,
     pub position: CanvasVec2,
     pub pressure: f32,
@@ -187,11 +187,11 @@ pub trait StrokeSmoother: Send {
 
     fn finish_stroke(&mut self);
 
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample>;
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample>;
 
-    fn pop_committed_spans(
+    fn pop_frozen_spans(
         &mut self,
-        output: &mut CommittedCanvasSpanBuffer,
+        output: &mut FrozenCanvasSpanBuffer,
     ) -> Result<usize, StrokeSmootherError>;
 }
 
@@ -205,7 +205,7 @@ pub struct PassthroughStrokeSmoother {
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
-pub struct CommittedCanvasSpanBuffer {
+pub struct FrozenCanvasSpanBuffer {
     knots: Vec<CurveKnot>,
     global_s_start: f32,
 }
@@ -231,7 +231,7 @@ pub struct StrokeCurveBuffer {
     finished: bool,
 }
 
-impl CommittedCanvasSpan {
+impl FrozenCanvasSpan {
     pub fn duration_ns(&self) -> u64 {
         self.end.time_ns.saturating_sub(self.start.time_ns)
     }
@@ -244,7 +244,7 @@ impl CommittedCanvasSpan {
         self.arclength() <= f32::EPSILON
     }
 
-    pub fn sample(&self, t: f32) -> CommittedCanvasSample {
+    pub fn sample(&self, t: f32) -> FrozenCanvasSample {
         let clamped_t = t.clamp(0.0, 1.0);
         let lerp_f32 = |start: f32, end: f32| start * (1.0 - clamped_t) + end * clamped_t;
         let lerp_vec2 = |start: CanvasVec2, end: CanvasVec2| {
@@ -286,7 +286,7 @@ impl CommittedCanvasSpan {
             )
         };
 
-        CommittedCanvasSample {
+        FrozenCanvasSample {
             time_ns: lerp_u64(self.start.time_ns, self.end.time_ns, clamped_t),
             position,
             pressure: lerp_f32(self.start.pressure, self.end.pressure),
@@ -312,7 +312,7 @@ impl CommittedCanvasSpan {
     }
 }
 
-impl CommittedCanvasSpanBuffer {
+impl FrozenCanvasSpanBuffer {
     pub fn new() -> Self {
         Self::default()
     }
@@ -346,21 +346,21 @@ impl CommittedCanvasSpanBuffer {
         self.knots.push(knot);
     }
 
-    pub fn span_at(&self, index: usize) -> Option<CommittedCanvasSpan> {
-        Some(CommittedCanvasSpan {
+    pub fn span_at(&self, index: usize) -> Option<FrozenCanvasSpan> {
+        Some(FrozenCanvasSpan {
             start: *self.knots.get(index)?,
             end: *self.knots.get(index + 1)?,
         })
     }
 
-    pub fn spans_iter(&self) -> impl Iterator<Item = CommittedCanvasSpan> + '_ {
-        self.knots.windows(2).map(|w| CommittedCanvasSpan {
+    pub fn spans_iter(&self) -> impl Iterator<Item = FrozenCanvasSpan> + '_ {
+        self.knots.windows(2).map(|w| FrozenCanvasSpan {
             start: w[0],
             end: w[1],
         })
     }
 
-    pub fn collect_spans(&self) -> Vec<CommittedCanvasSpan> {
+    pub fn collect_spans(&self) -> Vec<FrozenCanvasSpan> {
         self.spans_iter().collect()
     }
 
@@ -393,7 +393,7 @@ impl StrokeCurveBuffer {
         self.advance_stable_end();
     }
 
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample> {
         if self.knots.is_empty() {
             return None;
         }
@@ -402,7 +402,7 @@ impl StrokeCurveBuffer {
                 .knots
                 .back()
                 .copied()
-                .map(committed_sample_from_curve_knot);
+                .map(frozen_sample_from_curve_knot);
         }
         let index = if self.stable_end == 0 {
             0
@@ -412,7 +412,7 @@ impl StrokeCurveBuffer {
         self.knots
             .get(index)
             .copied()
-            .map(committed_sample_from_curve_knot)
+            .map(frozen_sample_from_curve_knot)
     }
 
     fn push_input(&mut self, input: CanvasInput) -> Result<(), StrokeSmootherError> {
@@ -438,7 +438,7 @@ impl StrokeCurveBuffer {
         Ok(())
     }
 
-    fn pop_stable_spans(&mut self, output: &mut CommittedCanvasSpanBuffer) -> usize {
+    fn pop_stable_spans(&mut self, output: &mut FrozenCanvasSpanBuffer) -> usize {
         puffin::profile_scope!("stroke_smoother_pop_stable_spans");
         output.clear();
         if self.knots.is_empty() {
@@ -466,7 +466,7 @@ impl StrokeCurveBuffer {
         for index in knot_start..self.stable_end {
             output.push_knot(self.knots[index]);
             if index > knot_start {
-                let span = CommittedCanvasSpan {
+                let span = FrozenCanvasSpan {
                     start: self.knots[index - 1],
                     end: self.knots[index],
                 };
@@ -701,16 +701,16 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
 
     fn finish_stroke(&mut self) {}
 
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample> {
         self.knots
             .back()
             .copied()
-            .map(committed_sample_from_curve_knot)
+            .map(frozen_sample_from_curve_knot)
     }
 
-    fn pop_committed_spans(
+    fn pop_frozen_spans(
         &mut self,
-        output: &mut CommittedCanvasSpanBuffer,
+        output: &mut FrozenCanvasSpanBuffer,
     ) -> Result<usize, StrokeSmootherError> {
         output.clear();
         if self.knots.is_empty() {
@@ -737,7 +737,7 @@ impl StrokeSmoother for PassthroughStrokeSmoother {
         for index in knot_start..end_index {
             output.push_knot(self.knots[index]);
             if index > knot_start {
-                let span = CommittedCanvasSpan {
+                let span = FrozenCanvasSpan {
                     start: self.knots[index - 1],
                     end: self.knots[index],
                 };
@@ -779,13 +779,13 @@ impl StrokeSmoother for DistanceOrTimeStrokeSmoother {
         self.curve.finish_stroke();
     }
 
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample> {
         self.curve.current_drawing_sample()
     }
 
-    fn pop_committed_spans(
+    fn pop_frozen_spans(
         &mut self,
-        output: &mut CommittedCanvasSpanBuffer,
+        output: &mut FrozenCanvasSpanBuffer,
     ) -> Result<usize, StrokeSmootherError> {
         Ok(self.curve.pop_stable_spans(output))
     }
@@ -835,8 +835,8 @@ fn curve_knot_from_input(previous_knot: Option<CurveKnot>, input: CanvasInput) -
     }
 }
 
-fn committed_sample_from_curve_knot(knot: CurveKnot) -> CommittedCanvasSample {
-    CommittedCanvasSample {
+fn frozen_sample_from_curve_knot(knot: CurveKnot) -> FrozenCanvasSample {
+    FrozenCanvasSample {
         time_ns: knot.time_ns,
         position: knot.position,
         pressure: knot.pressure,
@@ -1052,7 +1052,7 @@ pub(crate) fn clamp_canvas_vec2_length(value: CanvasVec2, max_length: f32) -> Ca
 #[cfg(test)]
 mod tests {
     use super::{
-        CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot, DistanceOrTimeStrokeSmoother,
+        CurveKnot, DistanceOrTimeStrokeSmoother, FrozenCanvasSpan, FrozenCanvasSpanBuffer,
         PassthroughStrokeSmoother, StrokeSmoother, StrokeSmootherError,
     };
     use crate::sampler::{EquidistantCurveSampler, EquidistantSamplerCursor};
@@ -1092,7 +1092,7 @@ mod tests {
     #[test]
     fn distance_smoother_current_drawing_sample_tracks_stable_point() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1131,7 +1131,7 @@ mod tests {
         let sample = smoother
             .current_drawing_sample()
             .expect("finished drawing sample");
-        smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        smoother.pop_frozen_spans(&mut spans).expect("pop spans");
         let last_span = spans
             .span_at(spans.span_count().saturating_sub(1))
             .expect("last span");
@@ -1174,7 +1174,7 @@ mod tests {
     #[test]
     fn smoother_stabilizes_after_distance_window() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1202,7 +1202,7 @@ mod tests {
             ])
             .expect("push inputs");
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
@@ -1212,7 +1212,7 @@ mod tests {
     #[test]
     fn smoother_reestimates_mutable_tail_positions() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1247,13 +1247,13 @@ mod tests {
             ])
             .expect("push inputs");
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         assert!(count >= 1);
         let smoothed_middle = spans
             .knots()
             .last()
-            .expect("at least one committed knot")
+            .expect("at least one frozen knot")
             .position;
         assert!(smoothed_middle.x > 2.0);
         assert!(smoothed_middle.y < 6.0);
@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn smoother_stabilizes_stationary_point_after_time_window() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(f32::MAX, 10);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1283,7 +1283,7 @@ mod tests {
             ])
             .expect("push inputs");
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
@@ -1293,7 +1293,7 @@ mod tests {
     #[test]
     fn finish_stroke_flushes_remaining_tail() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(f32::MAX, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1313,13 +1313,10 @@ mod tests {
                 },
             ])
             .expect("push inputs");
-        assert_eq!(
-            smoother.pop_committed_spans(&mut spans).expect("pop spans"),
-            1
-        );
+        assert_eq!(smoother.pop_frozen_spans(&mut spans).expect("pop spans"), 1);
 
         smoother.finish_stroke();
-        let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         assert_eq!(count, 2);
         let first_span = spans.span_at(0).expect("first span");
@@ -1330,7 +1327,7 @@ mod tests {
     #[test]
     fn finish_stroke_smooths_terminal_knot_with_one_sided_window() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(f32::MAX, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1366,11 +1363,11 @@ mod tests {
             .expect("push inputs");
 
         smoother.finish_stroke();
-        smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         let end = spans
             .span_at(spans.span_count().saturating_sub(1))
-            .expect("committed span after finish")
+            .expect("frozen span after finish")
             .end
             .position;
         assert!(end.x < 100.0);
@@ -1380,7 +1377,7 @@ mod tests {
     #[test]
     fn multi_point_stroke_does_not_emit_initial_zero_length_span() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(f32::MAX, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1402,7 +1399,7 @@ mod tests {
             .expect("push inputs");
 
         smoother.finish_stroke();
-        let count = smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         assert_eq!(count, 2);
         let first_span = spans.span_at(0).expect("first span");
@@ -1411,7 +1408,7 @@ mod tests {
 
     #[test]
     fn span_sample_uses_cubic_hermite_position_and_derivatives() {
-        let span = CommittedCanvasSpan {
+        let span = FrozenCanvasSpan {
             start: CurveKnot {
                 time_ns: 0,
                 position: CanvasVec2::new(0.0, 0.0),
@@ -1448,7 +1445,7 @@ mod tests {
 
     #[test]
     fn span_sample_clamps_runaway_tangents_to_local_chord_scale() {
-        let span = CommittedCanvasSpan {
+        let span = FrozenCanvasSpan {
             start: CurveKnot {
                 time_ns: 0,
                 position: CanvasVec2::new(0.0, 0.0),
@@ -1481,7 +1478,7 @@ mod tests {
     #[test]
     fn invalid_input_index_tracks_global_input_order_across_drains() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(0.0, 0);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1509,7 +1506,7 @@ mod tests {
             ])
             .expect("push inputs");
 
-        smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         let error = smoother
             .push_canvas_input(CanvasInput {
@@ -1533,7 +1530,7 @@ mod tests {
     #[test]
     fn smooth_pop_does_not_emit_boundary_knot_without_new_spans() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_inputs(&[
@@ -1561,13 +1558,11 @@ mod tests {
             ])
             .expect("push inputs");
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("first pop");
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
 
-        let count = smoother
-            .pop_committed_spans(&mut spans)
-            .expect("second pop");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
     }
@@ -1575,7 +1570,7 @@ mod tests {
     #[test]
     fn passthrough_pop_does_not_re_emit_initial_knot() {
         let mut smoother = PassthroughStrokeSmoother::default();
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_input(CanvasInput {
@@ -1587,13 +1582,11 @@ mod tests {
             })
             .expect("push input");
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("first pop");
         assert_eq!(count, 1);
         assert_eq!(spans.knot_count(), 1);
 
-        let count = smoother
-            .pop_committed_spans(&mut spans)
-            .expect("second pop");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
     }
@@ -1601,7 +1594,7 @@ mod tests {
     #[test]
     fn passthrough_first_pop_with_two_knots_marks_initial_as_emitted() {
         let mut smoother = PassthroughStrokeSmoother::default();
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
 
         smoother
             .push_canvas_input(CanvasInput {
@@ -1622,13 +1615,11 @@ mod tests {
             })
             .expect("push second");
 
-        let count = smoother.pop_committed_spans(&mut spans).expect("first pop");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("first pop");
         assert_eq!(count, 2);
         assert_eq!(spans.span_count(), 1);
 
-        let count = smoother
-            .pop_committed_spans(&mut spans)
-            .expect("second pop");
+        let count = smoother.pop_frozen_spans(&mut spans).expect("second pop");
         assert_eq!(count, 0);
         assert!(spans.is_empty());
     }
@@ -1636,7 +1627,7 @@ mod tests {
     #[test]
     fn passthrough_initial_knot_does_not_skip_first_span_samples() {
         let mut smoother = PassthroughStrokeSmoother::default();
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
         let sampler = EquidistantCurveSampler::new(5.0);
         let mut cursor = EquidistantSamplerCursor::default();
         let mut samples = Vec::new();
@@ -1645,9 +1636,7 @@ mod tests {
             .push_canvas_input(straight_input(0, 0.0))
             .expect("push initial");
         assert_eq!(
-            smoother
-                .pop_committed_spans(&mut spans)
-                .expect("initial pop"),
+            smoother.pop_frozen_spans(&mut spans).expect("initial pop"),
             1
         );
         sampler.sample_spans(&spans, &mut cursor, &mut samples);
@@ -1659,9 +1648,7 @@ mod tests {
             ])
             .expect("push motion");
         assert_eq!(
-            smoother
-                .pop_committed_spans(&mut spans)
-                .expect("motion pop"),
+            smoother.pop_frozen_spans(&mut spans).expect("motion pop"),
             3
         );
         assert_eq!(spans.global_s_start(), 0.0);
@@ -1674,7 +1661,7 @@ mod tests {
     #[test]
     fn passthrough_global_s_start_does_not_double_count_batch_boundary() {
         let mut smoother = PassthroughStrokeSmoother::default();
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
         let sampler = EquidistantCurveSampler::new(10.0);
         let mut cursor = EquidistantSamplerCursor::default();
         let mut samples = Vec::new();
@@ -1686,10 +1673,7 @@ mod tests {
                 straight_input(2_000_000_000, 20.0),
             ])
             .expect("push first batch");
-        assert_eq!(
-            smoother.pop_committed_spans(&mut spans).expect("first pop"),
-            3
-        );
+        assert_eq!(smoother.pop_frozen_spans(&mut spans).expect("first pop"), 3);
         assert_eq!(spans.global_s_start(), 0.0);
         sampler.sample_spans(&spans, &mut cursor, &mut samples);
 
@@ -1700,9 +1684,7 @@ mod tests {
             ])
             .expect("push second batch");
         assert_eq!(
-            smoother
-                .pop_committed_spans(&mut spans)
-                .expect("second pop"),
+            smoother.pop_frozen_spans(&mut spans).expect("second pop"),
             3
         );
         assert_eq!(spans.global_s_start(), 20.0);
@@ -1722,7 +1704,7 @@ mod tests {
         }
     }
 
-    fn assert_sample_xs(samples: &[super::CommittedCanvasSample], expected_xs: &[f32]) {
+    fn assert_sample_xs(samples: &[super::FrozenCanvasSample], expected_xs: &[f32]) {
         let actual_xs = samples
             .iter()
             .map(|sample| sample.position.x)

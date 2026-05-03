@@ -1,14 +1,14 @@
 use crate::{
     BrushId, BrushInput, BrushInputBlockList, BrushInputError, BrushInputProcessor,
-    BrushShaderRegistration, BrushStrokeInputProcessor, BrushStrokeSampler, CommittedCanvasSample,
-    CommittedCanvasSpanBuffer, DistanceOrTimeStrokeSmoother, EquidistantStrokeSampler,
-    SmoothedBrushStrokeInputProcessor, StrokeSampler, StrokeSmoother,
+    BrushShaderRegistration, BrushStrokeInputProcessor, BrushStrokeSampler,
+    DistanceOrTimeStrokeSmoother, EquidistantStrokeSampler, FrozenCanvasSample,
+    FrozenCanvasSpanBuffer, SmoothedBrushStrokeInputProcessor, StrokeSampler, StrokeSmoother,
 };
 use bytemuck::{Pod, Zeroable};
 use glaphica_core::CanvasVec2;
 use renderer::{
-    ApplyDabBlend, ApplyDabShaderValidation, ApplyDabShaderVariant, BrushIntermediateFormat,
-    BrushShaderSource, BrushShaderSpec,
+    ApplyDabBlend, ApplyDabShaderValidation, ApplyDabShaderVariant, BrushShaderSource,
+    BrushShaderSpec, BrushTileFormat,
 };
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -79,7 +79,7 @@ pub const ROUND_APPLY_DAB_SHADER_VARIANTS: &[ApplyDabShaderVariant] =
     round_apply_dab_shader_variants_for_mode(ROUND_APPLY_DAB_BLEND_MODE);
 
 pub const ROUND_SHADER_SPEC: BrushShaderSpec = BrushShaderSpec {
-    intermediate_format: BrushIntermediateFormat::R16Float,
+    brush_tile_format: BrushTileFormat::R16Float,
     apply_dab_variants: ROUND_APPLY_DAB_SHADER_VARIANTS,
     merge_tile: BrushShaderSource {
         wgsl: ROUND_MERGE_TILE_WGSL,
@@ -403,7 +403,7 @@ impl RoundBrushVariableModulation {
         }
     }
 
-    fn sample_factor(&self, sample: CommittedCanvasSample) -> f32 {
+    fn sample_factor(&self, sample: FrozenCanvasSample) -> f32 {
         self.pressure.sample(normalized_round_input_feature(
             RoundBrushInputFeature::Pressure,
             sample,
@@ -457,7 +457,7 @@ impl RoundBrushModulationSet {
         }
     }
 
-    fn sample_factor(&self, variable: RoundBrushDabVariable, sample: CommittedCanvasSample) -> f32 {
+    fn sample_factor(&self, variable: RoundBrushDabVariable, sample: FrozenCanvasSample) -> f32 {
         self.variable(variable).sample_factor(sample)
     }
 }
@@ -594,7 +594,7 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
         &self,
         input: &BrushInput,
         block_index: usize,
-        tile_canvas_origin: CanvasVec2,
+        slot_canvas_origin: CanvasVec2,
     ) -> Result<Vec<u8>, BrushInputError> {
         if input.brush_id != ROUND_BRUSH_ID {
             return Err(BrushInputError::WrongBrush {
@@ -630,8 +630,8 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
         }
         let center = CanvasVec2::new(values[0], values[1]);
         let local_center = [
-            center.x - tile_canvas_origin.x,
-            center.y - tile_canvas_origin.y,
+            center.x - slot_canvas_origin.x,
+            center.y - slot_canvas_origin.y,
         ];
         Ok(encode_round_apply_payload(
             local_center,
@@ -659,11 +659,11 @@ impl BrushStrokeSampler for RoundBrushStrokeSampler {
 
     fn sample_brush_input(
         &mut self,
-        spans: &CommittedCanvasSpanBuffer,
+        spans: &FrozenCanvasSpanBuffer,
     ) -> Result<Option<BrushInput>, BrushInputError> {
         self.sampler.set_spacing(self.dab_spacing_px());
         let mut samples = Vec::new();
-        self.sampler.sample_committed_spans(spans, &mut samples);
+        self.sampler.sample_frozen_spans(spans, &mut samples);
         let mut blocks = BrushInputBlockList::new(ROUND_BRUSH_ID);
         for (block_index, sample) in samples.iter().copied().enumerate() {
             if self
@@ -711,7 +711,7 @@ fn same_canvas_position(lhs: CanvasVec2, rhs: CanvasVec2) -> bool {
 fn push_round_block(
     blocks: &mut BrushInputBlockList,
     block_index: usize,
-    sample: CommittedCanvasSample,
+    sample: FrozenCanvasSample,
     base_radius_px: f32,
     spacing_ratio: f32,
     base_hardness: f32,
@@ -760,7 +760,7 @@ fn push_round_block(
 }
 
 fn round_dab_parameters(
-    sample: CommittedCanvasSample,
+    sample: FrozenCanvasSample,
     base_radius_px: f32,
     base_flow: f32,
     modulations: &RoundBrushModulationSet,
@@ -778,7 +778,7 @@ fn round_dab_parameters(
 
 fn normalized_round_input_feature(
     feature: RoundBrushInputFeature,
-    sample: CommittedCanvasSample,
+    sample: FrozenCanvasSample,
 ) -> f32 {
     match feature {
         RoundBrushInputFeature::Pressure => sample.pressure.clamp(0.0, 1.0),
@@ -894,18 +894,14 @@ fn round_stroke_source_at_offset_for_mode(
         }
         let previous_dab_source = round_dab_kernel(previous_dab_distance) * stroke_flow;
         let next_dab_source = round_dab_kernel(next_dab_distance) * stroke_flow;
-        source = blend_round_intermediate_sources(mode, source, previous_dab_source);
-        source = blend_round_intermediate_sources(mode, source, next_dab_source);
+        source = blend_round_brush_sources(mode, source, previous_dab_source);
+        source = blend_round_brush_sources(mode, source, next_dab_source);
         offset += spacing_ratio;
     }
     source
 }
 
-fn blend_round_intermediate_sources(
-    mode: RoundApplyDabBlendMode,
-    source: f32,
-    dab_source: f32,
-) -> f32 {
+fn blend_round_brush_sources(mode: RoundApplyDabBlendMode, source: f32, dab_source: f32) -> f32 {
     match mode {
         RoundApplyDabBlendMode::LinearAdd => source + dab_source,
         RoundApplyDabBlendMode::Max => source.max(dab_source),
@@ -1812,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn max_blend_dab_sequence_never_reduces_intermediate_source() {
+    fn max_blend_dab_sequence_never_reduces_brush_source() {
         let stroke_flow = 1.0;
         let spacing_ratio = 1.0;
         let sample_offsets = [-0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25];
@@ -1821,7 +1817,7 @@ mod tests {
             let second_dab_distance = (sample_offset - spacing_ratio).abs();
             let first_source = super::round_dab_kernel(first_dab_distance) * stroke_flow;
             let second_dab_source = super::round_dab_kernel(second_dab_distance) * stroke_flow;
-            let second_source = super::blend_round_intermediate_sources(
+            let second_source = super::blend_round_brush_sources(
                 RoundApplyDabBlendMode::Max,
                 first_source,
                 second_dab_source,

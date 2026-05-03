@@ -28,9 +28,9 @@ pub struct GlaDoc {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GlaDocError {
     InvalidNodeId(GlaNodeId),
-    InvalidTileIndex {
-        tile_index: usize,
-        tile_count: usize,
+    InvalidSlotIndex {
+        slot_index: usize,
+        slot_count: usize,
     },
     CannotInsertIntoLeaf(GlaNodeId),
     ChildIndexOutOfBounds {
@@ -65,12 +65,12 @@ impl Display for GlaDocError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidNodeId(node_id) => write!(f, "invalid node id {node_id:?}"),
-            Self::InvalidTileIndex {
-                tile_index,
-                tile_count,
+            Self::InvalidSlotIndex {
+                slot_index,
+                slot_count,
             } => write!(
                 f,
-                "tile index {tile_index} is out of bounds for image with {tile_count} tiles"
+                "slot index {slot_index} is out of bounds for image with {slot_count} slots"
             ),
             Self::CannotInsertIntoLeaf(node_id) => {
                 write!(f, "cannot insert children into leaf node {node_id:?}")

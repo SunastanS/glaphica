@@ -9,7 +9,7 @@ mod runtime;
 
 pub use crate::brush_registry::AppBrushRegistry;
 pub use crate::display::{
-    AppPresentError, AppView, AppViewMatrixError, ScreenPresentCache, ScreenPresentCacheError,
+    AppPresentError, AppView, AppViewMatrixError, ScreenPresentTile, ScreenPresentTileError,
     SurfaceError, SurfaceFrame, SurfaceRuntime, present_root_tiles,
 };
 pub use crate::editor::{EditorRenderUpdate, EditorSession, EditorSessionError};

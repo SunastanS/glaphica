@@ -15,8 +15,8 @@ pub enum TileRendererError {
     MissingBackendTexture(BackendId),
     BackendTextureFormatMismatch {
         backend_id: BackendId,
-        expected: BrushIntermediateFormat,
-        actual: BrushIntermediateFormat,
+        expected: BrushTileFormat,
+        actual: BrushTileFormat,
     },
     InvalidTileKey,
     MissingPresentTarget,
@@ -79,7 +79,7 @@ impl From<TextureIoError> for TileRendererError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrushIntermediateFormat {
+pub enum BrushTileFormat {
     Rgba8Unorm,
     R16Float,
 }
@@ -119,7 +119,7 @@ pub struct ApplyDabCommand {
 pub struct MergeTileCommand {
     pub brush_id: BrushId,
     pub origin_tile_key: TileKey,
-    pub intermediate_tile_key: TileKey,
+    pub brush_tile_key: TileKey,
     pub destination_tile_key: TileKey,
     pub brush_payload: Vec<u8>,
 }
@@ -169,7 +169,7 @@ pub struct ApplyDabShaderVariant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushShaderSpec {
-    pub intermediate_format: BrushIntermediateFormat,
+    pub brush_tile_format: BrushTileFormat,
     pub apply_dab_variants: &'static [ApplyDabShaderVariant],
     pub merge_tile: BrushShaderSource,
 }

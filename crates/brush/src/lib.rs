@@ -8,7 +8,7 @@ pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
 use renderer::{
-    ApplyDabCommand, BrushIntermediateFormat, BrushShaderSpec, MergeTileCommand, RenderCommand,
+    ApplyDabCommand, BrushShaderSpec, BrushTileFormat, MergeTileCommand, RenderCommand,
 };
 use smoother::BrushLatencyTraceState;
 
@@ -20,8 +20,8 @@ pub use crate::sampler::{
     EquidistantCurveSampler, EquidistantSamplerCursor, EquidistantStrokeSampler, StrokeSampler,
 };
 pub use crate::smoother::{
-    CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot,
-    DistanceOrTimeStrokeSmoother, PassthroughStrokeSmoother, StrokeCurveBuffer, StrokeSmoother,
+    CurveKnot, DistanceOrTimeStrokeSmoother, FrozenCanvasSample, FrozenCanvasSpan,
+    FrozenCanvasSpanBuffer, PassthroughStrokeSmoother, StrokeCurveBuffer, StrokeSmoother,
     StrokeSmootherError,
 };
 
@@ -77,7 +77,7 @@ pub trait BrushInputProcessor: Send + Sync {
         &self,
         input: &BrushInput,
         block_index: usize,
-        tile_canvas_origin: CanvasVec2,
+        slot_canvas_origin: CanvasVec2,
     ) -> Result<Vec<u8>, BrushInputError>;
 
     fn merge_payload(&self) -> Vec<u8>;
@@ -90,7 +90,7 @@ pub trait BrushStrokeInputProcessor: Send {
 
     fn finish_stroke(&mut self) -> Result<(), BrushInputError>;
 
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample>;
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample>;
 
     fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError>;
 }
@@ -100,14 +100,14 @@ pub(crate) trait BrushStrokeSampler: Send {
 
     fn sample_brush_input(
         &mut self,
-        spans: &CommittedCanvasSpanBuffer,
+        spans: &FrozenCanvasSpanBuffer,
     ) -> Result<Option<BrushInput>, BrushInputError>;
 }
 
 pub(crate) struct SmoothedBrushStrokeInputProcessor {
     smoother: Box<dyn StrokeSmoother>,
     brush_sampler: Box<dyn BrushStrokeSampler>,
-    committed_spans: CommittedCanvasSpanBuffer,
+    frozen_spans: FrozenCanvasSpanBuffer,
     latency_trace: BrushLatencyTraceState,
 }
 
@@ -119,7 +119,7 @@ impl SmoothedBrushStrokeInputProcessor {
         Self {
             smoother,
             brush_sampler,
-            committed_spans: CommittedCanvasSpanBuffer::new(),
+            frozen_spans: FrozenCanvasSpanBuffer::new(),
             latency_trace: BrushLatencyTraceState::default(),
         }
     }
@@ -129,7 +129,7 @@ impl BrushStrokeInputProcessor for SmoothedBrushStrokeInputProcessor {
     fn reset(&mut self) {
         self.smoother.clear();
         self.brush_sampler.reset();
-        self.committed_spans.clear();
+        self.frozen_spans.clear();
         self.latency_trace.clear();
     }
 
@@ -146,15 +146,14 @@ impl BrushStrokeInputProcessor for SmoothedBrushStrokeInputProcessor {
         Ok(())
     }
 
-    fn current_drawing_sample(&self) -> Option<CommittedCanvasSample> {
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample> {
         self.smoother.current_drawing_sample()
     }
 
     fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError> {
-        self.committed_spans.clear();
-        self.smoother
-            .pop_committed_spans(&mut self.committed_spans)?;
-        if self.committed_spans.is_empty() {
+        self.frozen_spans.clear();
+        self.smoother.pop_frozen_spans(&mut self.frozen_spans)?;
+        if self.frozen_spans.is_empty() {
             self.latency_trace.trace_drain(0, 0);
             return Ok(None);
         }
@@ -163,21 +162,19 @@ impl BrushStrokeInputProcessor for SmoothedBrushStrokeInputProcessor {
             self.latency_trace.record_current_draw(sample);
         }
 
-        let encoded = self
-            .brush_sampler
-            .sample_brush_input(&self.committed_spans)?;
+        let encoded = self.brush_sampler.sample_brush_input(&self.frozen_spans)?;
         let emitted_blocks = encoded
             .as_ref()
             .map(|input| input.blocks.blocks().len())
             .unwrap_or(0);
         self.latency_trace
-            .trace_drain(self.committed_spans.knot_count(), emitted_blocks);
+            .trace_drain(self.frozen_spans.knot_count(), emitted_blocks);
         Ok(encoded)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BrushIntermediateTile {
+pub struct BrushTile {
     pub tile_index: usize,
     pub tile_key: TileKey,
 }
@@ -235,11 +232,11 @@ impl SparseTileOwners {
 }
 
 #[derive(Debug)]
-pub struct BrushIntermediate {
+pub struct BrushTileSet {
     tiles: SparseTileOwners,
 }
 
-impl BrushIntermediate {
+impl BrushTileSet {
     pub fn backend_id(&self) -> BackendId {
         self.tiles.backend_id()
     }
@@ -248,13 +245,11 @@ impl BrushIntermediate {
         self.tiles.tile_key(tile_index)
     }
 
-    pub fn tiles(&self) -> impl Iterator<Item = BrushIntermediateTile> + '_ {
-        self.tiles
-            .tiles()
-            .map(|(tile_index, tile_key)| BrushIntermediateTile {
-                tile_index,
-                tile_key,
-            })
+    pub fn tiles(&self) -> impl Iterator<Item = BrushTile> + '_ {
+        self.tiles.tiles().map(|(tile_index, tile_key)| BrushTile {
+            tile_index,
+            tile_key,
+        })
     }
 
     pub fn into_tile_owners(self) -> Vec<TileOwner> {
@@ -345,9 +340,9 @@ impl From<BrushStrokeError> for BrushInputError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StrokeTileRecord {
+pub struct StrokeSlotRecord {
     pub tile_index: usize,
-    pub intermediate_tile_key: TileKey,
+    pub brush_tile_key: TileKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,24 +411,24 @@ pub struct StrokeCommitBatch {
 #[derive(Debug)]
 pub struct BrushBackend {
     brush_id: BrushId,
-    intermediate_backend: Backend,
-    intermediate_backend_id: BackendId,
-    intermediate_format: BrushIntermediateFormat,
+    brush_backend: Backend,
+    brush_backend_id: BackendId,
+    brush_format: BrushTileFormat,
     stroke_history_groups: Vec<CachedTileGroup>,
 }
 
 impl BrushBackend {
     pub fn new(
         brush_id: BrushId,
-        intermediate_backend: Backend,
-        intermediate_format: BrushIntermediateFormat,
+        brush_backend: Backend,
+        brush_format: BrushTileFormat,
     ) -> Result<Self, BrushStrokeError> {
-        let intermediate_backend_id = intermediate_backend.backend_id();
+        let brush_backend_id = brush_backend.backend_id();
         Ok(Self {
             brush_id,
-            intermediate_backend,
-            intermediate_backend_id,
-            intermediate_format,
+            brush_backend,
+            brush_backend_id,
+            brush_format,
             stroke_history_groups: Vec::new(),
         })
     }
@@ -442,16 +437,16 @@ impl BrushBackend {
         self.brush_id
     }
 
-    pub fn intermediate_backend(&self) -> &Backend {
-        &self.intermediate_backend
+    pub fn brush_backend(&self) -> &Backend {
+        &self.brush_backend
     }
 
-    pub fn intermediate_backend_id(&self) -> BackendId {
-        self.intermediate_backend_id
+    pub fn brush_backend_id(&self) -> BackendId {
+        self.brush_backend_id
     }
 
-    pub fn intermediate_format(&self) -> BrushIntermediateFormat {
-        self.intermediate_format
+    pub fn brush_tile_format(&self) -> BrushTileFormat {
+        self.brush_format
     }
 
     pub fn stroke_history_groups(&self) -> &[CachedTileGroup] {
@@ -461,10 +456,10 @@ impl BrushBackend {
     pub fn begin_stroke(&self) -> BrushStrokeState {
         BrushStrokeState {
             brush_id: self.brush_id,
-            intermediate_backend: self.intermediate_backend.clone(),
-            intermediate_backend_id: self.intermediate_backend_id,
-            intermediate: BrushIntermediate {
-                tiles: SparseTileOwners::new(self.intermediate_backend_id),
+            brush_backend: self.brush_backend.clone(),
+            brush_backend_id: self.brush_backend_id,
+            brush_tile_set: BrushTileSet {
+                tiles: SparseTileOwners::new(self.brush_backend_id),
             },
             touched_tiles: Vec::new(),
         }
@@ -474,15 +469,13 @@ impl BrushBackend {
         &mut self,
         stroke: BrushStrokeState,
     ) -> Result<CachedTileGroup, BrushStrokeError> {
-        if stroke.brush_id != self.brush_id
-            || stroke.intermediate_backend_id != self.intermediate_backend_id
-        {
+        if stroke.brush_id != self.brush_id || stroke.brush_backend_id != self.brush_backend_id {
             return Err(AtlasError::WrongBackend.into());
         }
 
         let cached_group = self
-            .intermediate_backend
-            .cache_active_owners(stroke.into_intermediate().into_tile_owners())?;
+            .brush_backend
+            .cache_active_owners(stroke.into_brush_tiles().into_tile_owners())?;
         self.stroke_history_groups.push(cached_group.clone());
         Ok(cached_group)
     }
@@ -491,21 +484,21 @@ impl BrushBackend {
 #[derive(Debug)]
 pub struct BrushStrokeState {
     brush_id: BrushId,
-    intermediate_backend: Backend,
-    intermediate_backend_id: BackendId,
-    intermediate: BrushIntermediate,
-    touched_tiles: Vec<StrokeTileRecord>,
+    brush_backend: Backend,
+    brush_backend_id: BackendId,
+    brush_tile_set: BrushTileSet,
+    touched_tiles: Vec<StrokeSlotRecord>,
 }
 
 impl BrushStrokeState {
-    pub fn new(brush_id: BrushId, intermediate_backend: Backend) -> Result<Self, BrushStrokeError> {
-        let intermediate_backend_id = intermediate_backend.backend_id();
+    pub fn new(brush_id: BrushId, brush_backend: Backend) -> Result<Self, BrushStrokeError> {
+        let brush_backend_id = brush_backend.backend_id();
         Ok(Self {
             brush_id,
-            intermediate_backend,
-            intermediate_backend_id,
-            intermediate: BrushIntermediate {
-                tiles: SparseTileOwners::new(intermediate_backend_id),
+            brush_backend,
+            brush_backend_id,
+            brush_tile_set: BrushTileSet {
+                tiles: SparseTileOwners::new(brush_backend_id),
             },
             touched_tiles: Vec::new(),
         })
@@ -515,19 +508,19 @@ impl BrushStrokeState {
         self.brush_id
     }
 
-    pub fn intermediate_backend_id(&self) -> BackendId {
-        self.intermediate_backend_id
+    pub fn brush_backend_id(&self) -> BackendId {
+        self.brush_backend_id
     }
 
-    pub fn intermediate(&self) -> &BrushIntermediate {
-        &self.intermediate
+    pub fn brush_tiles(&self) -> &BrushTileSet {
+        &self.brush_tile_set
     }
 
-    pub fn into_intermediate(self) -> BrushIntermediate {
-        self.intermediate
+    pub fn into_brush_tiles(self) -> BrushTileSet {
+        self.brush_tile_set
     }
 
-    pub fn touched_tiles(&self) -> &[StrokeTileRecord] {
+    pub fn touched_tiles(&self) -> &[StrokeSlotRecord] {
         &self.touched_tiles
     }
 
@@ -540,7 +533,7 @@ impl BrushStrokeState {
     fn ensure_touched_tile(
         &mut self,
         tile_index: usize,
-    ) -> Result<&mut StrokeTileRecord, BrushStrokeError> {
+    ) -> Result<&mut StrokeSlotRecord, BrushStrokeError> {
         if let Some(index) = self.touched_tile_index(tile_index) {
             return self
                 .touched_tiles
@@ -548,13 +541,13 @@ impl BrushStrokeState {
                 .ok_or(AtlasError::InvalidState.into());
         }
 
-        let intermediate_tile_key = self
-            .intermediate
+        let brush_tile_key = self
+            .brush_tile_set
             .tiles
-            .ensure_tile(tile_index, &self.intermediate_backend)?;
-        self.touched_tiles.push(StrokeTileRecord {
+            .ensure_tile(tile_index, &self.brush_backend)?;
+        self.touched_tiles.push(StrokeSlotRecord {
             tile_index,
-            intermediate_tile_key,
+            brush_tile_key,
         });
         self.touched_tiles
             .last_mut()
@@ -568,7 +561,7 @@ impl BrushStrokeState {
         brush_payload: Vec<u8>,
         output: &mut Vec<RenderCommand>,
     ) -> Result<TileKey, BrushStrokeError> {
-        let destination_tile_key = self.ensure_touched_tile(tile_index)?.intermediate_tile_key;
+        let destination_tile_key = self.ensure_touched_tile(tile_index)?.brush_tile_key;
         output.push(RenderCommand::ApplyDab(ApplyDabCommand {
             brush_id: self.brush_id,
             destination_tile_key,
@@ -589,11 +582,11 @@ impl BrushStrokeState {
         let Some(record_index) = self.touched_tile_index(tile_index) else {
             return None;
         };
-        let intermediate_tile_key = self.touched_tiles.get(record_index)?.intermediate_tile_key;
+        let brush_tile_key = self.touched_tiles.get(record_index)?.brush_tile_key;
         output.push(RenderCommand::MergeTile(MergeTileCommand {
             brush_id: self.brush_id,
             origin_tile_key,
-            intermediate_tile_key,
+            brush_tile_key,
             destination_tile_key: preview_tile_key,
             brush_payload,
         }));
@@ -645,7 +638,7 @@ impl BrushStrokeState {
             commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: self.brush_id,
                 origin_tile_key: undo_record.backup_tile_key(),
-                intermediate_tile_key: record.intermediate_tile_key,
+                brush_tile_key: record.brush_tile_key,
                 destination_tile_key,
                 // Each MergeTileCommand holds an identical copy of the payload. The number of tiles
                 // per stroke is small (10–100) and the payload is a shader uniform (hundreds of
@@ -689,7 +682,7 @@ impl BrushRegistry {
     pub fn register(
         &mut self,
         shader_registration: BrushShaderRegistration,
-        intermediate_backend: Backend,
+        brush_backend: Backend,
         input_processor: Box<dyn BrushInputProcessor>,
     ) -> Result<(), BrushStrokeError> {
         let registration = BrushRegistration {
@@ -697,8 +690,8 @@ impl BrushRegistry {
             shader_spec: shader_registration.shader_spec,
             backend: BrushBackend::new(
                 shader_registration.brush_id,
-                intermediate_backend,
-                shader_registration.shader_spec.intermediate_format,
+                brush_backend,
+                shader_registration.shader_spec.brush_tile_format,
             )?,
             input_processor,
         };
@@ -800,7 +793,7 @@ impl BrushRegistry {
         &self,
         input: &BrushInput,
         block_index: usize,
-        tile_canvas_origin: CanvasVec2,
+        slot_canvas_origin: CanvasVec2,
     ) -> Result<Vec<u8>, BrushInputError> {
         let processor =
             self.input_processor(input.brush_id)
@@ -808,7 +801,7 @@ impl BrushRegistry {
                     expected: input.brush_id,
                     actual: input.brush_id,
                 })?;
-        processor.encode_apply_dab_payload(input, block_index, tile_canvas_origin)
+        processor.encode_apply_dab_payload(input, block_index, slot_canvas_origin)
     }
 
     pub fn merge_payload(&self, brush_id: BrushId) -> Option<Vec<u8>> {
@@ -837,7 +830,7 @@ mod tests {
     use gla_undo::GlaImageUndo;
 
     #[test]
-    fn apply_dab_allocates_intermediate_tile_once() {
+    fn apply_dab_allocates_brush_tile_once() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let mut state =
             BrushStrokeState::new(BrushId::new(5), backend.clone()).expect("state should build");
@@ -853,7 +846,7 @@ mod tests {
             .expect("dab should build");
 
         assert_eq!(first, second);
-        assert_eq!(state.intermediate().tile_key(4), Some(first));
+        assert_eq!(state.brush_tiles().tile_key(4), Some(first));
         assert_eq!(
             commands,
             vec![
@@ -883,7 +876,7 @@ mod tests {
         let mut state =
             BrushStrokeState::new(BrushId::new(9), backend).expect("state should build");
         let mut commands = Vec::new();
-        let intermediate_tile_key = state
+        let brush_tile_key = state
             .push_apply_dab(
                 0,
                 None,
@@ -921,7 +914,7 @@ mod tests {
             vec![RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: BrushId::new(9),
                 origin_tile_key: active_tile_key,
-                intermediate_tile_key,
+                brush_tile_key,
                 destination_tile_key: preview_tile_key,
                 brush_payload: merge_payload,
             })]
@@ -948,7 +941,7 @@ mod tests {
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let image_undo = GlaImageUndo::new(image_backend.clone(), backup_backend);
         let mut draw_commands = Vec::new();
-        let first_intermediate = state
+        let first_brush_tile = state
             .push_apply_dab(
                 0,
                 None,
@@ -956,7 +949,7 @@ mod tests {
                 &mut draw_commands,
             )
             .expect("dab");
-        let second_intermediate = state
+        let second_brush_tile = state
             .push_apply_dab(
                 1,
                 None,
@@ -994,14 +987,14 @@ mod tests {
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
                     origin_tile_key: image_undo.backup_backend().empty_tile_key(),
-                    intermediate_tile_key: second_intermediate,
+                    brush_tile_key: second_brush_tile,
                     destination_tile_key: second_active_key,
                     brush_payload: merge_payload.clone(),
                 }),
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
                     origin_tile_key: tile_0_backup_key,
-                    intermediate_tile_key: first_intermediate,
+                    brush_tile_key: first_brush_tile,
                     destination_tile_key: first_active_key,
                     brush_payload: merge_payload.clone(),
                 }),
@@ -1029,7 +1022,7 @@ mod tests {
         let mut state =
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let mut commands = Vec::new();
-        let intermediate_tile_key = state
+        let brush_tile_key = state
             .push_apply_dab(
                 0,
                 None,
@@ -1067,7 +1060,7 @@ mod tests {
             vec![RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: BrushId::new(11),
                 origin_tile_key: active_tile_key,
-                intermediate_tile_key,
+                brush_tile_key,
                 destination_tile_key: preview_tile_key,
                 brush_payload: merge_payload,
             })]
@@ -1075,12 +1068,12 @@ mod tests {
     }
 
     #[test]
-    fn atlas_backend_retires_stroke_intermediate_as_cached_group() {
+    fn atlas_backend_retires_stroke_brush_tiles_as_cached_group() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let mut brush_backend = BrushBackend::new(
             BrushId::new(17),
             backend.clone(),
-            renderer::BrushIntermediateFormat::Rgba8Unorm,
+            renderer::BrushTileFormat::Rgba8Unorm,
         )
         .expect("backend should build");
         let mut state = brush_backend.begin_stroke();

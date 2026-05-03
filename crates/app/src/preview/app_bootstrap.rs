@@ -13,8 +13,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 use crate::{
-    ActiveTool, AppBrushRegistry, AppRuntime, AppView, AppViewMatrixError, ScreenPresentCache,
-    Tool, ToolSet,
+    ActiveTool, AppBrushRegistry, AppRuntime, AppView, AppViewMatrixError, ScreenPresentTile, Tool,
+    ToolSet,
 };
 
 use super::{
@@ -45,7 +45,7 @@ impl PreviewState {
             backup_backend,
             brush_backend,
             mut tile_renderer,
-            screen_cache,
+            screen_present,
         ) = create_render_resources(&gpu, &surface)?;
 
         let mut doc = GlaDoc::new(
@@ -99,9 +99,9 @@ impl PreviewState {
         )?;
         runtime.prepare_document_gpu(&mut tile_renderer, &gpu.device, &gpu.queue)?;
 
-        let full_tile_count = usize::try_from(runtime.session().doc().layout().total_tiles())
+        let full_slot_count = usize::try_from(runtime.session().doc().layout().total_slots())
             .map_err(|_| GlaDocError::ImageCreate(GlaImageCreateError::TooManyTiles))?;
-        let full_tile_indices = (0..full_tile_count).collect::<Vec<_>>();
+        let full_tile_indices = (0..full_slot_count).collect::<Vec<_>>();
         let ui = AppUi::new(event_loop, &window, round_brush_settings);
         let ui_renderer = EguiRenderer::new(&gpu.device, surface.format());
 
@@ -109,7 +109,7 @@ impl PreviewState {
             window,
             gpu,
             surface,
-            screen_cache,
+            screen_present,
             runtime: Some(runtime),
             tile_renderer,
             ui_renderer,
@@ -179,7 +179,7 @@ fn create_render_resources(
         Backend,
         Backend,
         TileRenderer,
-        ScreenPresentCache,
+        ScreenPresentTile,
     ),
     PreviewInitError,
 > {
@@ -206,7 +206,7 @@ fn create_render_resources(
         .clone();
 
     let mut tile_renderer = TileRenderer::new(&gpu.device)?;
-    let screen_cache = ScreenPresentCache::new(
+    let screen_present = ScreenPresentTile::new(
         &gpu.device,
         surface.format(),
         surface.width(),
@@ -218,7 +218,7 @@ fn create_render_resources(
     tile_renderer.ensure_backend_with_format(
         &gpu.device,
         &brush_backend,
-        ROUND_SHADER_SPEC.intermediate_format,
+        ROUND_SHADER_SPEC.brush_tile_format,
     )?;
 
     Ok((
@@ -227,7 +227,7 @@ fn create_render_resources(
         backup_backend,
         brush_backend,
         tile_renderer,
-        screen_cache,
+        screen_present,
     ))
 }
 
@@ -240,18 +240,18 @@ fn initialize_default_canvas_white(
 ) -> Result<(), PreviewInitError> {
     tile_renderer.ensure_backend(device, image_backend)?;
 
-    let tile_count = doc.active_layer_image()?.tile_count();
+    let slot_count = doc.active_layer_image()?.slot_count();
     let white_tile = vec![255; (ATLAS_TILE_SIZE * ATLAS_TILE_SIZE * 4) as usize];
-    for tile_index in 0..tile_count {
+    for tile_index in 0..slot_count {
         let tile_owner = image_backend.alloc_active()?;
         let tile_key = tile_owner.tile_key();
         doc.active_layer_image_mut()?
             .replace_tile_owner(tile_index, tile_owner)
             .map_err(|error| match error {
                 GlaImageTileAccessError::OutOfBounds => {
-                    PreviewInitError::Document(GlaDocError::InvalidTileIndex {
-                        tile_index,
-                        tile_count,
+                    PreviewInitError::Document(GlaDocError::InvalidSlotIndex {
+                        slot_index: tile_index,
+                        slot_count,
                     })
                 }
                 GlaImageTileAccessError::WrongBackend { .. } => {

@@ -132,7 +132,7 @@ fn export_node_tiles(
     let mut tile_keys = Vec::new();
     let mut image_tiles = Vec::new();
 
-    for tile_index in 0..image.tile_count() {
+    for tile_index in 0..image.slot_count() {
         let tile_key = image.tile_key(tile_index)?;
         if tile_key.is_empty() {
             continue;

@@ -20,7 +20,7 @@ impl PreviewState {
             WindowEvent::Resized(size) => {
                 self.surface
                     .resize(&self.gpu.device, size.width.max(1), size.height.max(1));
-                self.screen_cache.resize(
+                self.screen_present.resize(
                     &self.gpu.device,
                     self.surface.format(),
                     self.surface.width(),
@@ -32,14 +32,14 @@ impl PreviewState {
                         .frame_scheduler_mut()
                         .schedule_tile_indices(&self.full_tile_indices);
                 }
-                Ok(merge_redraw_request(
+                Ok(coalesce_redraw(
                     PreviewEventAction::RequestRedraw,
                     ui_requested_repaint,
                 ))
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                Ok(merge_redraw_request(
+                Ok(coalesce_redraw(
                     PreviewEventAction::None,
                     ui_requested_repaint,
                 ))
@@ -50,7 +50,7 @@ impl PreviewState {
                     self.push_cursor_input();
                     return Ok(PreviewEventAction::RequestRedraw);
                 }
-                Ok(merge_redraw_request(
+                Ok(coalesce_redraw(
                     PreviewEventAction::None,
                     ui_requested_repaint,
                 ))
@@ -62,7 +62,7 @@ impl PreviewState {
             } => match state {
                 ElementState::Pressed => {
                     if ui_event_consumed {
-                        return Ok(merge_redraw_request(
+                        return Ok(coalesce_redraw(
                             PreviewEventAction::None,
                             ui_requested_repaint,
                         ));
@@ -102,7 +102,7 @@ impl PreviewState {
                 ..
             } => {
                 if ui_event_consumed {
-                    return Ok(merge_redraw_request(
+                    return Ok(coalesce_redraw(
                         PreviewEventAction::None,
                         ui_requested_repaint,
                     ));
@@ -122,7 +122,7 @@ impl PreviewState {
                     }
                     return Ok(PreviewEventAction::RequestRedraw);
                 }
-                Ok(merge_redraw_request(
+                Ok(coalesce_redraw(
                     PreviewEventAction::None,
                     ui_requested_repaint,
                 ))
@@ -131,7 +131,7 @@ impl PreviewState {
                 self.redraw()?;
                 Ok(PreviewEventAction::None)
             }
-            _ => Ok(merge_redraw_request(
+            _ => Ok(coalesce_redraw(
                 PreviewEventAction::None,
                 ui_requested_repaint,
             )),
@@ -179,10 +179,7 @@ impl PreviewState {
     }
 }
 
-fn merge_redraw_request(
-    action: PreviewEventAction,
-    ui_requested_repaint: bool,
-) -> PreviewEventAction {
+fn coalesce_redraw(action: PreviewEventAction, ui_requested_repaint: bool) -> PreviewEventAction {
     if ui_requested_repaint && matches!(action, PreviewEventAction::None) {
         return PreviewEventAction::RequestRedraw;
     }

@@ -38,52 +38,43 @@ impl AppBrushRegistry {
         }
     }
 
-    pub fn with_builtin_round(intermediate_backend: Backend) -> Self {
-        Self::with_builtin_round_processor(
-            intermediate_backend,
-            RoundBrushInputProcessor::default(),
-        )
+    pub fn with_builtin_round(brush_backend: Backend) -> Self {
+        Self::with_builtin_round_processor(brush_backend, RoundBrushInputProcessor::default())
     }
 
     pub fn with_builtin_round_settings(
-        intermediate_backend: Backend,
+        brush_backend: Backend,
         settings: RoundBrushSettings,
     ) -> Self {
-        Self::with_builtin_round_processor(
-            intermediate_backend,
-            RoundBrushInputProcessor::from(settings),
-        )
+        Self::with_builtin_round_processor(brush_backend, RoundBrushInputProcessor::from(settings))
     }
 
     pub fn with_builtin_round_processor(
-        intermediate_backend: Backend,
+        brush_backend: Backend,
         input_processor: RoundBrushInputProcessor,
     ) -> Self {
         let mut registry = Self::new();
         registry
-            .register_round_with_processor(intermediate_backend, input_processor)
+            .register_round_with_processor(brush_backend, input_processor)
             .expect("builtin round backend should register");
         registry
     }
 
     pub fn register_round(
         &mut self,
-        intermediate_backend: Backend,
+        brush_backend: Backend,
     ) -> Result<(), brush::BrushStrokeError> {
-        self.register_round_with_processor(
-            intermediate_backend,
-            RoundBrushInputProcessor::default(),
-        )
+        self.register_round_with_processor(brush_backend, RoundBrushInputProcessor::default())
     }
 
     pub fn register_round_with_processor(
         &mut self,
-        intermediate_backend: Backend,
+        brush_backend: Backend,
         input_processor: RoundBrushInputProcessor,
     ) -> Result<(), brush::BrushStrokeError> {
         self.brushes.register(
             ROUND_SHADER_REGISTRATION,
-            intermediate_backend,
+            brush_backend,
             Box::new(input_processor),
         )
     }
@@ -127,10 +118,10 @@ impl AppBrushRegistry {
         &self,
         input: &BrushInput,
         block_index: usize,
-        tile_canvas_origin: glaphica_core::CanvasVec2,
+        slot_canvas_origin: glaphica_core::CanvasVec2,
     ) -> Result<Vec<u8>, BrushInputError> {
         self.brushes
-            .encode_apply_dab_payload(input, block_index, tile_canvas_origin)
+            .encode_apply_dab_payload(input, block_index, slot_canvas_origin)
     }
 
     pub fn merge_payload(&self, brush_id: BrushId) -> Option<Vec<u8>> {
@@ -163,7 +154,7 @@ impl BrushShaderProvider for AppBrushRegistry {
 mod tests {
     use atlas::{AtlasLayout, Backend, BackendId};
     use brush::round::{ROUND_BRUSH_ID, ROUND_SHADER_SPEC};
-    use renderer::BrushIntermediateFormat;
+    use renderer::BrushTileFormat;
 
     use crate::brush_registry::AppBrushRegistry;
 
@@ -179,9 +170,6 @@ mod tests {
         let brush_backend = registry
             .brush_backend(ROUND_BRUSH_ID)
             .expect("round backend should be registered");
-        assert_eq!(
-            brush_backend.intermediate_format(),
-            BrushIntermediateFormat::R16Float
-        );
+        assert_eq!(brush_backend.brush_tile_format(), BrushTileFormat::R16Float);
     }
 }

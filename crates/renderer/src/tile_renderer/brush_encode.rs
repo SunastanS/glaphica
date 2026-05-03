@@ -3,8 +3,8 @@ use glaphica_core::{ATLAS_TILE_SIZE, BrushId};
 use super::atlas_texture_set::AtlasTextureStage;
 use super::types::{
     ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
-    BrushIntermediateFormat, BrushShaderProvider, BrushShaderSource, BrushShaderSpec,
-    BrushShaderStage, MergeTileCommand, TileRendererError,
+    BrushShaderProvider, BrushShaderSource, BrushShaderSpec, BrushShaderStage, BrushTileFormat,
+    MergeTileCommand, TileRendererError,
 };
 
 #[repr(C)]
@@ -24,8 +24,8 @@ struct MergeTileUniformHeader {
     origin_origin: [u32; 2],
     origin_layer: u32,
     _pad0: u32,
-    intermediate_origin: [u32; 2],
-    intermediate_layer: u32,
+    brush_tile_origin: [u32; 2],
+    brush_tile_layer: u32,
     _pad1: u32,
 }
 
@@ -97,25 +97,25 @@ impl BrushEncodeStage {
             scratch_a: create_scratch_texture(
                 device,
                 "glaphica-brush-scratch-a",
-                BrushIntermediateFormat::Rgba8Unorm,
+                BrushTileFormat::Rgba8Unorm,
             )?,
             scratch_b: create_scratch_texture(
                 device,
                 "glaphica-brush-scratch-b",
-                BrushIntermediateFormat::Rgba8Unorm,
+                BrushTileFormat::Rgba8Unorm,
             )?,
             scratch_r16: create_scratch_texture(
                 device,
                 "glaphica-brush-scratch-r16",
-                BrushIntermediateFormat::R16Float,
+                BrushTileFormat::R16Float,
             )?,
         })
     }
 
-    fn apply_scratch(&self, format: BrushIntermediateFormat) -> &crate::RendererTexture {
+    fn apply_scratch(&self, format: BrushTileFormat) -> &crate::RendererTexture {
         match format {
-            BrushIntermediateFormat::Rgba8Unorm => &self.scratch_b,
-            BrushIntermediateFormat::R16Float => &self.scratch_r16,
+            BrushTileFormat::Rgba8Unorm => &self.scratch_b,
+            BrushTileFormat::R16Float => &self.scratch_r16,
         }
     }
 
@@ -221,7 +221,7 @@ impl BrushEncodeStage {
         if pipeline_slots[variant_index].is_some() {
             return Ok(());
         }
-        let target_format = map_intermediate_format(shader_spec.intermediate_format);
+        let target_format = map_brush_tile_format(shader_spec.brush_tile_format);
         let pipeline = Self::create_brush_pipeline(
             device,
             &self.bind_group_layout,
@@ -394,7 +394,7 @@ impl BrushEncodeStage {
         destination: &super::atlas_texture_set::ResolvedAtlasTile<'_>,
         command: &ApplyDabCommand,
     ) -> Result<(), TileRendererError> {
-        let scratch = self.apply_scratch(shader_spec.intermediate_format);
+        let scratch = self.apply_scratch(shader_spec.brush_tile_format);
         let source_tile_key = command
             .source_tile_key
             .unwrap_or(command.destination_tile_key);
@@ -514,7 +514,7 @@ impl BrushEncodeStage {
                     return false;
                 }
 
-                let format = map_intermediate_format(shader_spec.intermediate_format);
+                let format = map_brush_tile_format(shader_spec.brush_tile_format);
                 format
                     .guaranteed_format_features(device.features())
                     .flags
@@ -622,7 +622,7 @@ impl BrushEncodeStage {
             command.brush_id,
             BrushShaderStage::MergeTile,
         )?;
-        let intermediate = atlas_texture_set.resolve_tile(command.intermediate_tile_key)?;
+        let brush_tiles = atlas_texture_set.resolve_tile(command.brush_tile_key)?;
         let destination = atlas_texture_set.resolve_tile(command.destination_tile_key)?;
         let (origin_texture_view, origin_origin, origin_layer) =
             if command.origin_tile_key.is_empty() {
@@ -643,11 +643,11 @@ impl BrushEncodeStage {
             origin_origin,
             origin_layer,
             _pad0: 0,
-            intermediate_origin: [
-                intermediate.tile_x * ATLAS_TILE_SIZE,
-                intermediate.tile_y * ATLAS_TILE_SIZE,
+            brush_tile_origin: [
+                brush_tiles.tile_x * ATLAS_TILE_SIZE,
+                brush_tiles.tile_y * ATLAS_TILE_SIZE,
             ],
-            intermediate_layer: intermediate.layer,
+            brush_tile_layer: brush_tiles.layer,
             _pad1: 0,
         };
         let uniform_buffer = Self::build_brush_buffer(
@@ -675,7 +675,7 @@ impl BrushEncodeStage {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&intermediate.texture.view),
+                    resource: wgpu::BindingResource::TextureView(&brush_tiles.texture.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -771,14 +771,14 @@ impl BrushEncodeStage {
 fn create_scratch_texture(
     device: &wgpu::Device,
     label: &'static str,
-    format: BrushIntermediateFormat,
+    format: BrushTileFormat,
 ) -> Result<crate::RendererTexture, TileRendererError> {
     let descriptor = crate::RendererTextureDescriptor {
         label: Some(label),
         width: ATLAS_TILE_SIZE,
         height: ATLAS_TILE_SIZE,
         layers: 1,
-        format: map_intermediate_format(format),
+        format: map_brush_tile_format(format),
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST
@@ -787,10 +787,10 @@ fn create_scratch_texture(
     Ok(crate::RendererTexture::new(device, &descriptor)?)
 }
 
-fn map_intermediate_format(format: BrushIntermediateFormat) -> wgpu::TextureFormat {
+fn map_brush_tile_format(format: BrushTileFormat) -> wgpu::TextureFormat {
     match format {
-        BrushIntermediateFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
-        BrushIntermediateFormat::R16Float => wgpu::TextureFormat::R16Float,
+        BrushTileFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        BrushTileFormat::R16Float => wgpu::TextureFormat::R16Float,
     }
 }
 

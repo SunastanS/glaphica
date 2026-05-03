@@ -113,11 +113,11 @@ impl From<GlaImageTileAccessError> for GlaImageCacheTileError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GlaImageTileRecBounds {
-    pub min_tile_x: u32,
-    pub min_tile_y: u32,
-    pub max_tile_x: u32,
-    pub max_tile_y: u32,
+pub struct GlaImageSlotRecBounds {
+    pub min_slot_x: u32,
+    pub min_slot_y: u32,
+    pub max_slot_x: u32,
+    pub max_slot_y: u32,
 }
 
 #[derive(Debug)]
@@ -132,7 +132,7 @@ pub struct GlaImage {
 impl GlaImage {
     pub fn new(layout: GlaImageLayout, backend: Backend) -> Result<Self, GlaImageCreateError> {
         let total_tiles =
-            usize::try_from(layout.total_tiles()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
+            usize::try_from(layout.total_slots()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let backend_id = backend.backend_id();
         let tile_owners = std::iter::repeat_with(|| backend.empty_owner())
             .take(total_tiles)
@@ -158,7 +158,7 @@ impl GlaImage {
         &self.layout
     }
 
-    pub fn tile_count(&self) -> usize {
+    pub fn slot_count(&self) -> usize {
         self.tile_owners.len()
     }
 
@@ -259,7 +259,7 @@ impl GlaImage {
         }
 
         let old_layout = self.layout;
-        let new_total_tiles = usize::try_from(new_layout.total_tiles())
+        let new_total_tiles = usize::try_from(new_layout.total_slots())
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let mut old_tile_owners = std::mem::replace(
             &mut self.tile_owners,
@@ -268,10 +268,10 @@ impl GlaImage {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
-        let overlap_tile_x = old_layout.tile_x().min(new_layout.tile_x()) as usize;
-        let overlap_tile_y = old_layout.tile_y().min(new_layout.tile_y()) as usize;
-        let old_stride = old_layout.tile_x() as usize;
-        let new_stride = new_layout.tile_x() as usize;
+        let overlap_tile_x = old_layout.slot_x().min(new_layout.slot_x()) as usize;
+        let overlap_tile_y = old_layout.slot_y().min(new_layout.slot_y()) as usize;
+        let old_stride = old_layout.slot_x() as usize;
+        let new_stride = new_layout.slot_x() as usize;
 
         for tile_index in 0..old_tile_owners.len() {
             let tile_x = tile_index % old_stride;
@@ -289,9 +289,9 @@ impl GlaImage {
         Ok(())
     }
 
-    pub fn non_empty_tile_bounds(&self) -> Option<GlaImageTileRecBounds> {
-        let tile_x = self.layout.tile_x() as usize;
-        let mut bounds: Option<GlaImageTileRecBounds> = None;
+    pub fn non_empty_slot_bounds(&self) -> Option<GlaImageSlotRecBounds> {
+        let tile_x = self.layout.slot_x() as usize;
+        let mut bounds: Option<GlaImageSlotRecBounds> = None;
 
         for (tile_index, tile_owner) in self.tile_owners.iter().enumerate() {
             if tile_owner.tile_key().is_empty() {
@@ -302,17 +302,17 @@ impl GlaImage {
             let tile_coord_y = (tile_index / tile_x) as u32;
             match &mut bounds {
                 Some(bounds) => {
-                    bounds.min_tile_x = bounds.min_tile_x.min(tile_coord_x);
-                    bounds.min_tile_y = bounds.min_tile_y.min(tile_coord_y);
-                    bounds.max_tile_x = bounds.max_tile_x.max(tile_coord_x);
-                    bounds.max_tile_y = bounds.max_tile_y.max(tile_coord_y);
+                    bounds.min_slot_x = bounds.min_slot_x.min(tile_coord_x);
+                    bounds.min_slot_y = bounds.min_slot_y.min(tile_coord_y);
+                    bounds.max_slot_x = bounds.max_slot_x.max(tile_coord_x);
+                    bounds.max_slot_y = bounds.max_slot_y.max(tile_coord_y);
                 }
                 None => {
-                    bounds = Some(GlaImageTileRecBounds {
-                        min_tile_x: tile_coord_x,
-                        min_tile_y: tile_coord_y,
-                        max_tile_x: tile_coord_x,
-                        max_tile_y: tile_coord_y,
+                    bounds = Some(GlaImageSlotRecBounds {
+                        min_slot_x: tile_coord_x,
+                        min_slot_y: tile_coord_y,
+                        max_slot_x: tile_coord_x,
+                        max_slot_y: tile_coord_y,
                     });
                 }
             }
@@ -341,8 +341,8 @@ impl TileGrid for GlaImage {
         *GlaImage::layout(self)
     }
 
-    fn tile_count(&self) -> usize {
-        GlaImage::tile_count(self)
+    fn slot_count(&self) -> usize {
+        GlaImage::slot_count(self)
     }
 }
 
@@ -359,7 +359,7 @@ mod tests {
 
     use crate::{ImageId, ImageTileSlot, layout::GlaImageLayout};
 
-    use super::{GlaImage, GlaImageTileAccessError, GlaImageTileRecBounds};
+    use super::{GlaImage, GlaImageSlotRecBounds, GlaImageTileAccessError};
 
     #[test]
     fn replace_and_get_tile_key_use_index_mapping() {
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_tile_bounds_cover_non_empty_keys() {
+    fn non_empty_slot_bounds_cover_non_empty_keys() {
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2);
         let mut image =
             GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
@@ -446,12 +446,12 @@ mod tests {
         );
 
         assert_eq!(
-            image.non_empty_tile_bounds(),
-            Some(GlaImageTileRecBounds {
-                min_tile_x: 1,
-                min_tile_y: 0,
-                max_tile_x: 2,
-                max_tile_y: 1,
+            image.non_empty_slot_bounds(),
+            Some(GlaImageSlotRecBounds {
+                min_slot_x: 1,
+                min_slot_y: 0,
+                max_slot_x: 2,
+                max_slot_y: 1,
             })
         );
     }

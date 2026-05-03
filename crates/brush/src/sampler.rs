@@ -1,7 +1,7 @@
 use glaphica_core::CanvasVec2;
 
 use crate::smoother::{
-    CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer, add_canvas_vec2,
+    FrozenCanvasSample, FrozenCanvasSpan, FrozenCanvasSpanBuffer, add_canvas_vec2,
     distance_between, scale_canvas_vec2, span_hermite_tangents, subtract_canvas_vec2,
     vector_length,
 };
@@ -9,10 +9,10 @@ use crate::smoother::{
 pub trait StrokeSampler: Send {
     fn reset(&mut self);
 
-    fn sample_committed_spans(
+    fn sample_frozen_spans(
         &mut self,
-        spans: &CommittedCanvasSpanBuffer,
-        output: &mut Vec<CommittedCanvasSample>,
+        spans: &FrozenCanvasSpanBuffer,
+        output: &mut Vec<FrozenCanvasSample>,
     );
 }
 
@@ -51,9 +51,9 @@ impl EquidistantCurveSampler {
 
     pub fn sample_spans(
         &self,
-        spans: &CommittedCanvasSpanBuffer,
+        spans: &FrozenCanvasSpanBuffer,
         cursor: &mut EquidistantSamplerCursor,
-        output: &mut Vec<CommittedCanvasSample>,
+        output: &mut Vec<FrozenCanvasSample>,
     ) {
         if spans.is_empty() {
             return;
@@ -62,7 +62,7 @@ impl EquidistantCurveSampler {
         if spans.span_count() == 0 {
             let knot = spans.knots()[0];
             if cursor.next_sample_s <= spans.global_s_start() {
-                output.push(CommittedCanvasSample {
+                output.push(FrozenCanvasSample {
                     time_ns: knot.time_ns,
                     position: knot.position,
                     pressure: knot.pressure,
@@ -76,10 +76,10 @@ impl EquidistantCurveSampler {
             return;
         }
 
-        let committed_spans = spans.collect_spans();
-        let committed_spans_slice = committed_spans.as_slice();
+        let frozen_spans = spans.collect_spans();
+        let frozen_spans_slice = frozen_spans.as_slice();
 
-        let arclength_tables = committed_spans_slice
+        let arclength_tables = frozen_spans_slice
             .iter()
             .map(SpanArcTable::from_span)
             .collect::<Vec<_>>();
@@ -91,7 +91,7 @@ impl EquidistantCurveSampler {
         );
         while cursor.next_sample_s <= batch_end_s {
             output.push(sample_at_global_s(
-                committed_spans_slice,
+                frozen_spans_slice,
                 &arclength_tables,
                 &span_global_starts,
                 cursor.next_sample_s,
@@ -129,17 +129,17 @@ impl StrokeSampler for EquidistantStrokeSampler {
         self.cursor = EquidistantSamplerCursor::default();
     }
 
-    fn sample_committed_spans(
+    fn sample_frozen_spans(
         &mut self,
-        spans: &CommittedCanvasSpanBuffer,
-        output: &mut Vec<CommittedCanvasSample>,
+        spans: &FrozenCanvasSpanBuffer,
+        output: &mut Vec<FrozenCanvasSample>,
     ) {
         self.curve_sampler
             .sample_spans(spans, &mut self.cursor, output);
     }
 }
 
-pub(crate) fn span_arclength(span: &CommittedCanvasSpan) -> f32 {
+pub(crate) fn span_arclength(span: &FrozenCanvasSpan) -> f32 {
     SpanArcTable::from_span(span).total_length()
 }
 
@@ -156,7 +156,7 @@ struct SpanArcTable {
 }
 
 impl SpanArcTable {
-    fn from_span(span: &CommittedCanvasSpan) -> Self {
+    fn from_span(span: &FrozenCanvasSpan) -> Self {
         const FLATNESS_TOLERANCE_PX: f32 = 0.25;
         const MAX_SUBDIVISION_DEPTH: u8 = 8;
         const MAX_ARCLENGTH_SAMPLE_T_STEP: f32 = 1.0 / 32.0;
@@ -296,11 +296,11 @@ fn batch_end_s(
 }
 
 fn sample_at_global_s(
-    spans: &[CommittedCanvasSpan],
+    spans: &[FrozenCanvasSpan],
     arclength_tables: &[SpanArcTable],
     span_global_starts: &[f32],
     global_s: f32,
-) -> CommittedCanvasSample {
+) -> FrozenCanvasSample {
     let span_index = span_index_for_global_s(spans.len(), span_global_starts, global_s);
     let span = spans
         .get(span_index)
@@ -323,7 +323,7 @@ fn span_index_for_global_s(span_count: usize, span_global_starts: &[f32], global
 }
 
 fn densify_arclength_samples(
-    span: &CommittedCanvasSpan,
+    span: &FrozenCanvasSpan,
     coarse_samples: &[ArcLengthSample],
     max_t_step: f32,
 ) -> Vec<ArcLengthSample> {
@@ -419,10 +419,7 @@ impl BezierSegment {
     }
 }
 
-fn hermite_to_bezier_control_points(
-    span: &CommittedCanvasSpan,
-    duration_s: f32,
-) -> [CanvasVec2; 4] {
+fn hermite_to_bezier_control_points(span: &FrozenCanvasSpan, duration_s: f32) -> [CanvasVec2; 4] {
     let tangents = span_hermite_tangents(
         span.start.position,
         span.start.velocity,
@@ -504,15 +501,15 @@ mod tests {
 
     use super::{EquidistantCurveSampler, EquidistantSamplerCursor, SpanArcTable, span_arclength};
     use crate::{
-        CommittedCanvasSample, CommittedCanvasSpan, CommittedCanvasSpanBuffer, CurveKnot,
-        DistanceOrTimeStrokeSmoother, StrokeSmoother,
+        CurveKnot, DistanceOrTimeStrokeSmoother, FrozenCanvasSample, FrozenCanvasSpan,
+        FrozenCanvasSpanBuffer, StrokeSmoother,
     };
     use glaphica_core::{CanvasInput, CanvasVec2};
 
     #[test]
     fn span_buffer_samples_by_arclength() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(5.0, u64::MAX);
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
         let mut output = Vec::new();
         let sampler = EquidistantCurveSampler::new(4.0);
         let mut cursor = EquidistantSamplerCursor::default();
@@ -536,10 +533,10 @@ mod tests {
             ])
             .expect("push inputs");
         smoother.finish_stroke();
-        smoother.pop_committed_spans(&mut spans).expect("pop spans");
+        smoother.pop_frozen_spans(&mut spans).expect("pop spans");
 
         let knot = spans.knots()[0];
-        output.push(CommittedCanvasSample {
+        output.push(FrozenCanvasSample {
             time_ns: knot.time_ns,
             position: knot.position,
             pressure: knot.pressure,
@@ -559,7 +556,7 @@ mod tests {
 
     #[test]
     fn curved_span_arclength_sampling_advances_along_curve() {
-        let mut spans = CommittedCanvasSpanBuffer::new();
+        let mut spans = FrozenCanvasSpanBuffer::new();
         let mut output = Vec::new();
         let sampler = EquidistantCurveSampler::new(4.0);
         let mut cursor = EquidistantSamplerCursor::new(4.0);
@@ -602,7 +599,7 @@ mod tests {
 
     #[test]
     fn global_arclength_cursor_stays_uniform_across_batches() {
-        let make_span = |start_x: f32, end_x: f32, start_s: f32, end_s: f32| CommittedCanvasSpan {
+        let make_span = |start_x: f32, end_x: f32, start_s: f32, end_s: f32| FrozenCanvasSpan {
             start: CurveKnot {
                 time_ns: start_x as u64,
                 position: CanvasVec2::new(start_x, 0.0),
@@ -626,12 +623,12 @@ mod tests {
         };
 
         let sampler = EquidistantCurveSampler::new(4.0);
-        let mut first_batch = CommittedCanvasSpanBuffer::new();
+        let mut first_batch = FrozenCanvasSpanBuffer::new();
         let span0 = make_span(0.0, 6.0, 0.0, 6.0);
         first_batch.push_knot(span0.start);
         first_batch.push_knot(span0.end);
 
-        let mut second_batch = CommittedCanvasSpanBuffer::new();
+        let mut second_batch = FrozenCanvasSpanBuffer::new();
         second_batch.set_global_s_start(6.0);
         let span1 = make_span(6.0, 12.0, 6.0, 12.0);
         second_batch.push_knot(span1.start);
@@ -651,7 +648,7 @@ mod tests {
 
     #[test]
     fn arclength_lookup_stays_close_to_requested_distance_for_parametrically_uneven_line_span() {
-        let span = CommittedCanvasSpan {
+        let span = FrozenCanvasSpan {
             start: CurveKnot {
                 time_ns: 0,
                 position: CanvasVec2::new(249.09917, 359.9114),
@@ -691,8 +688,8 @@ mod tests {
     fn arclength_cursor_does_not_resample_origin_after_initial_press_batch() {
         let mut smoother = DistanceOrTimeStrokeSmoother::new(0.0, 0);
         let sampler = EquidistantCurveSampler::new(5.0);
-        let mut first_batch = CommittedCanvasSpanBuffer::new();
-        let mut next_batch = CommittedCanvasSpanBuffer::new();
+        let mut first_batch = FrozenCanvasSpanBuffer::new();
+        let mut next_batch = FrozenCanvasSpanBuffer::new();
         let mut output = Vec::new();
         let mut cursor = EquidistantSamplerCursor::default();
 
@@ -706,7 +703,7 @@ mod tests {
             })
             .expect("press input");
         smoother
-            .pop_committed_spans(&mut first_batch)
+            .pop_frozen_spans(&mut first_batch)
             .expect("first batch");
         sampler.sample_spans(&first_batch, &mut cursor, &mut output);
 
@@ -736,13 +733,13 @@ mod tests {
             ])
             .expect("motion inputs");
         smoother
-            .pop_committed_spans(&mut next_batch)
+            .pop_frozen_spans(&mut next_batch)
             .expect("second batch");
         sampler.sample_spans(&next_batch, &mut cursor, &mut output);
 
         smoother.finish_stroke();
         smoother
-            .pop_committed_spans(&mut next_batch)
+            .pop_frozen_spans(&mut next_batch)
             .expect("finish batch");
         sampler.sample_spans(&next_batch, &mut cursor, &mut output);
 
@@ -755,7 +752,7 @@ mod tests {
 
     #[test]
     fn span_arclength_matches_sampler_batch_progress() {
-        let span = CommittedCanvasSpan {
+        let span = FrozenCanvasSpan {
             start: CurveKnot {
                 time_ns: 0,
                 position: CanvasVec2::new(0.0, 0.0),

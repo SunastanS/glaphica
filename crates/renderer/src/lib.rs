@@ -15,9 +15,9 @@ pub use crate::texture_io::{
 pub use crate::tile_renderer::present::PresentUniforms;
 pub use crate::tile_renderer::{
     ApplyDabBlend, ApplyDabCommand, ApplyDabShaderValidation, ApplyDabShaderVariant,
-    AtlasTextureStage, BrushCommandExecutor, BrushEncodeStage, BrushIntermediateFormat,
-    BrushShaderProvider, BrushShaderSource, BrushShaderSpec, BrushShaderStage,
-    CompositeTileCommand, MergeTileCommand, PresentTileCommand, PresentTileParams, RenderCommand,
-    RenderTarget2d, TileCompositeSource, TileRenderer, TileRendererError,
+    AtlasTextureStage, BrushCommandExecutor, BrushEncodeStage, BrushShaderProvider,
+    BrushShaderSource, BrushShaderSpec, BrushShaderStage, BrushTileFormat, CompositeTileCommand,
+    MergeTileCommand, PresentTileCommand, PresentTileParams, RenderCommand, RenderTarget2d,
+    TileCompositeSource, TileRenderer, TileRendererError,
 };
 pub type CopyTileCommand = glaphica_core::CopyTileCommand<atlas::TileKey>;

@@ -325,7 +325,7 @@ impl<'a> RendererTextureDescriptor<'a> {
             width,
             height,
             layers,
-            crate::tile_renderer::types::BrushIntermediateFormat::Rgba8Unorm,
+            crate::tile_renderer::types::BrushTileFormat::Rgba8Unorm,
         )
     }
 
@@ -334,7 +334,7 @@ impl<'a> RendererTextureDescriptor<'a> {
         width: u32,
         height: u32,
         layers: u32,
-        format: crate::tile_renderer::types::BrushIntermediateFormat,
+        format: crate::tile_renderer::types::BrushTileFormat,
     ) -> Self {
         Self {
             label,
@@ -342,10 +342,10 @@ impl<'a> RendererTextureDescriptor<'a> {
             height,
             layers,
             format: match format {
-                crate::tile_renderer::types::BrushIntermediateFormat::Rgba8Unorm => {
+                crate::tile_renderer::types::BrushTileFormat::Rgba8Unorm => {
                     wgpu::TextureFormat::Rgba8Unorm
                 }
-                crate::tile_renderer::types::BrushIntermediateFormat::R16Float => {
+                crate::tile_renderer::types::BrushTileFormat::R16Float => {
                     wgpu::TextureFormat::R16Float
                 }
             },

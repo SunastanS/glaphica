@@ -3,7 +3,7 @@ use std::time::Duration;
 use renderer::RenderTarget2d;
 use ui::UiAction;
 
-use crate::{AppPresentError, ScreenPresentCacheError, SurfaceRuntime, present_root_tiles};
+use crate::{AppPresentError, ScreenPresentTileError, SurfaceRuntime, present_root_tiles};
 
 use super::{
     MAX_PENDING_BRUSH_INPUTS_PER_FRAME, PreviewRuntimeError, PreviewState,
@@ -56,7 +56,7 @@ struct PreviewFramePerf {
     update_cache: Duration,
     acquire_frame: Duration,
     present_surface: Duration,
-    dirty_tile_count: usize,
+    dirty_slot_count: usize,
 }
 
 impl PreviewState {
@@ -112,27 +112,27 @@ impl PreviewState {
             .as_mut()
             .map(|runtime| runtime.frame_scheduler_mut().take_scheduled_tile_indices())
             .unwrap_or_default();
-        perf.dirty_tile_count = dirty_tile_indices.len();
+        perf.dirty_slot_count = dirty_tile_indices.len();
         if !dirty_tile_indices.is_empty() {
             let update_cache_started = std::time::Instant::now();
             {
-                puffin::profile_scope!("update_screen_cache");
-                let screen_cache_view = self
-                    .screen_cache
+                puffin::profile_scope!("update_screen_presence");
+                let screen_present_view = self
+                    .screen_present
                     .texture()
                     .create_layer_view(0)
-                    .map_err(ScreenPresentCacheError::from)?;
-                let screen_cache_target = RenderTarget2d {
-                    view: &screen_cache_view,
-                    format: self.screen_cache.texture().format,
-                    width: self.screen_cache.texture().width,
-                    height: self.screen_cache.texture().height,
+                    .map_err(ScreenPresentTileError::from)?;
+                let screen_present_target = RenderTarget2d {
+                    view: &screen_present_view,
+                    format: self.screen_present.texture().format,
+                    width: self.screen_present.texture().width,
+                    height: self.screen_present.texture().height,
                 };
                 if dirty_tile_indices.len() == self.full_tile_indices.len() {
                     self.tile_renderer.clear_render_target(
                         &self.gpu.device,
                         &self.gpu.queue,
-                        screen_cache_target,
+                        screen_present_target,
                         DEFAULT_BACKGROUND_COLOR,
                     );
                 }
@@ -146,7 +146,7 @@ impl PreviewState {
                     &self.gpu.device,
                     &self.gpu.queue,
                     runtime.view(),
-                    screen_cache_target,
+                    screen_present_target,
                     &dirty_tile_indices,
                 )?;
             }
@@ -179,7 +179,7 @@ impl PreviewState {
                 self.tile_renderer.present_texture_2d(
                     &self.gpu.device,
                     &self.gpu.queue,
-                    self.screen_cache.texture(),
+                    self.screen_present.texture(),
                     target,
                 )?;
                 let mut encoder =
@@ -263,7 +263,7 @@ impl PreviewState {
             duration_ms(total),
             bottleneck,
             duration_ms(*bottleneck_duration),
-            perf.dirty_tile_count,
+            perf.dirty_slot_count,
             duration_ms(perf.process_inputs),
             duration_ms(perf.update_cache),
             duration_ms(perf.acquire_frame),

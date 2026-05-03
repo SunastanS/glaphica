@@ -4,8 +4,8 @@ use glaphica_core::{CanvasVec2, GUTTER_SIZE, IMAGE_TILE_SIZE};
 pub struct GlaImageLayout {
     size_x: u32,
     size_y: u32,
-    tile_x: u32,
-    tile_y: u32,
+    slot_x: u32,
+    slot_y: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,8 +20,8 @@ impl GlaImageLayout {
         Self {
             size_x,
             size_y,
-            tile_x,
-            tile_y,
+            slot_x: tile_x,
+            slot_y: tile_y,
         }
     }
 
@@ -33,16 +33,16 @@ impl GlaImageLayout {
         self.size_y
     }
 
-    pub const fn tile_x(&self) -> u32 {
-        self.tile_x
+    pub const fn slot_x(&self) -> u32 {
+        self.slot_x
     }
 
-    pub const fn tile_y(&self) -> u32 {
-        self.tile_y
+    pub const fn slot_y(&self) -> u32 {
+        self.slot_y
     }
 
-    pub const fn total_tiles(&self) -> u32 {
-        self.tile_x * self.tile_y
+    pub const fn total_slots(&self) -> u32 {
+        self.slot_x * self.slot_y
     }
 
     pub fn pixel_to_index(&self, x: u32, y: u32) -> Result<usize, GlaImageLayoutError> {
@@ -91,8 +91,8 @@ impl GlaImageLayout {
     }
 
     pub fn tile_canvas_origin(&self, tile_index: usize) -> Option<CanvasVec2> {
-        let tile_x = self.tile_x as usize;
-        if tile_index >= tile_x * self.tile_y as usize {
+        let tile_x = self.slot_x as usize;
+        if tile_index >= tile_x * self.slot_y as usize {
             return None;
         }
 
@@ -105,7 +105,7 @@ impl GlaImageLayout {
     }
 
     fn tile_coords_to_index(&self, tile_x: u32, tile_y: u32) -> Option<usize> {
-        let index = tile_y.checked_mul(self.tile_x)?.checked_add(tile_x)?;
+        let index = tile_y.checked_mul(self.slot_x)?.checked_add(tile_x)?;
         usize::try_from(index).ok()
     }
 

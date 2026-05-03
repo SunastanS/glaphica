@@ -436,9 +436,9 @@ impl GlaDocRenderer {
             .as_ref()
             .map(|plan| plan.prepare_steps.clone())
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        let tile_count = usize::try_from(doc.layout().total_tiles())
+        let slot_count = usize::try_from(doc.layout().total_slots())
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
-        let tile_indices = (0..tile_count).collect::<Vec<_>>();
+        let tile_indices = (0..slot_count).collect::<Vec<_>>();
         let active_layer_id = self
             .active_plan
             .as_ref()
@@ -733,9 +733,9 @@ impl GlaDocRenderer {
                         match &entry.state {
                             RenderImageState::Active(image) => image.tile_key(tile_index)?,
                             RenderImageState::Cached(cached) => cached.tile_key(tile_index).ok_or(
-                                GlaDocError::InvalidTileIndex {
-                                    tile_index,
-                                    tile_count: cached.tile_count(),
+                                GlaDocError::InvalidSlotIndex {
+                                    slot_index: tile_index,
+                                    slot_count: cached.slot_count(),
                                 },
                             )?,
                             RenderImageState::Empty => self.render_backend.empty_tile_key(),

@@ -104,9 +104,9 @@ impl GlaStoredImage {
         &self.pixels_rgba8
     }
 
-    pub fn collect_non_empty_tile_indices(&self, output: &mut Vec<usize>) {
+    pub fn collect_non_empty_slot_indices(&self, output: &mut Vec<usize>) {
         output.clear();
-        for tile_index in 0..self.layout.total_tiles() as usize {
+        for tile_index in 0..self.layout.total_slots() as usize {
             if self.tile_has_non_zero_pixel(tile_index) {
                 output.push(tile_index);
             }
@@ -182,8 +182,8 @@ impl TileGrid for GlaStoredImage {
         GlaStoredImage::layout(self)
     }
 
-    fn tile_count(&self) -> usize {
-        self.layout.total_tiles() as usize
+    fn slot_count(&self) -> usize {
+        self.layout.total_slots() as usize
     }
 }
 
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn tile_grid_reports_logical_tiles() {
         let image = GlaStoredImage::new_rgba8(2, 2, vec![0; 16]).unwrap();
-        assert_eq!(image.tile_count(), 1);
+        assert_eq!(image.slot_count(), 1);
         assert_eq!(TileGrid::layout(&image), GlaImageLayout::new(2, 2));
     }
 
@@ -244,7 +244,7 @@ mod tests {
         let decoded: GlaStoredImage = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.layout(), GlaImageLayout::new(width, height));
-        assert_eq!(decoded.tile_count(), 4);
+        assert_eq!(decoded.slot_count(), 4);
     }
 
     #[test]
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn collects_non_empty_tiles_from_rgba_content() {
+    fn collects_non_empty_slots_from_rgba_content() {
         let width = IMAGE_TILE_SIZE + 4;
         let height = IMAGE_TILE_SIZE;
         let mut pixels = vec![0; (width * height * 4) as usize];
@@ -277,7 +277,7 @@ mod tests {
         let image = GlaStoredImage::new_rgba8(width, height, pixels).unwrap();
 
         let mut indices = Vec::new();
-        image.collect_non_empty_tile_indices(&mut indices);
+        image.collect_non_empty_slot_indices(&mut indices);
 
         assert_eq!(indices, vec![0, 1]);
     }

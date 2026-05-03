@@ -17,8 +17,8 @@ use winit::window::{Window, WindowId};
 
 use crate::display::{SurfaceError, SurfaceRuntime};
 use crate::{
-    AppPresentError, AppRuntime, AppRuntimeError, AppViewMatrixError, ScreenPresentCache,
-    ScreenPresentCacheError,
+    AppPresentError, AppRuntime, AppRuntimeError, AppViewMatrixError, ScreenPresentTile,
+    ScreenPresentTileError,
 };
 
 const DEFAULT_DOCUMENT_WIDTH: u32 = 1024;
@@ -61,7 +61,7 @@ enum PreviewInitError {
     AtlasManager(atlas::AtlasManagerError),
     Document(gla_document::GlaDocError),
     Runtime(AppRuntimeError),
-    ScreenPresentCache(ScreenPresentCacheError),
+    ScreenPresentTile(ScreenPresentTileError),
     TileRenderer(renderer::TileRendererError),
     View(AppViewMatrixError),
     PuffinHttpServer(String),
@@ -77,7 +77,7 @@ impl Display for PreviewInitError {
             Self::AtlasManager(error) => write!(f, "atlas backend manager failed: {error:?}"),
             Self::Document(error) => Display::fmt(error, f),
             Self::Runtime(error) => Display::fmt(error, f),
-            Self::ScreenPresentCache(error) => Display::fmt(error, f),
+            Self::ScreenPresentTile(error) => Display::fmt(error, f),
             Self::TileRenderer(error) => Display::fmt(error, f),
             Self::View(error) => Display::fmt(error, f),
             Self::PuffinHttpServer(error) => {
@@ -125,9 +125,9 @@ impl From<AppRuntimeError> for PreviewInitError {
     }
 }
 
-impl From<ScreenPresentCacheError> for PreviewInitError {
-    fn from(error: ScreenPresentCacheError) -> Self {
-        Self::ScreenPresentCache(error)
+impl From<ScreenPresentTileError> for PreviewInitError {
+    fn from(error: ScreenPresentTileError) -> Self {
+        Self::ScreenPresentTile(error)
     }
 }
 
@@ -153,7 +153,7 @@ impl From<winit::error::OsError> for PreviewInitError {
 enum PreviewRuntimeError {
     Runtime(AppRuntimeError),
     Present(AppPresentError),
-    ScreenPresentCache(ScreenPresentCacheError),
+    ScreenPresentTile(ScreenPresentTileError),
     View(AppViewMatrixError),
 }
 
@@ -162,7 +162,7 @@ impl Display for PreviewRuntimeError {
         match self {
             Self::Runtime(error) => Display::fmt(error, f),
             Self::Present(error) => Display::fmt(error, f),
-            Self::ScreenPresentCache(error) => Display::fmt(error, f),
+            Self::ScreenPresentTile(error) => Display::fmt(error, f),
             Self::View(error) => Display::fmt(error, f),
         }
     }
@@ -188,9 +188,9 @@ impl From<AppViewMatrixError> for PreviewRuntimeError {
     }
 }
 
-impl From<ScreenPresentCacheError> for PreviewRuntimeError {
-    fn from(error: ScreenPresentCacheError) -> Self {
-        Self::ScreenPresentCache(error)
+impl From<ScreenPresentTileError> for PreviewRuntimeError {
+    fn from(error: ScreenPresentTileError) -> Self {
+        Self::ScreenPresentTile(error)
     }
 }
 
@@ -203,7 +203,7 @@ struct PreviewState {
     window: Arc<Window>,
     gpu: GpuContext,
     surface: SurfaceRuntime,
-    screen_cache: ScreenPresentCache,
+    screen_present: ScreenPresentTile,
     runtime: Option<AppRuntime>,
     tile_renderer: TileRenderer,
     ui_renderer: EguiRenderer,

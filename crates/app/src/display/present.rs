@@ -82,9 +82,9 @@ pub fn present_root_tiles(
         let origin =
             layout
                 .tile_canvas_origin(tile_index)
-                .ok_or(GlaDocError::InvalidTileIndex {
-                    tile_index,
-                    tile_count: root_image.tile_count(),
+                .ok_or(GlaDocError::InvalidSlotIndex {
+                    slot_index: tile_index,
+                    slot_count: root_image.slot_count(),
                 })?;
         let source_size = tile_source_extent(layout, origin);
         let target_min = view.document_to_screen_point(origin);
