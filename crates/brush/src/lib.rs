@@ -348,7 +348,6 @@ impl From<BrushStrokeError> for BrushInputError {
 pub struct StrokeTileRecord {
     pub tile_index: usize,
     pub intermediate_tile_key: TileKey,
-    pub backup_tile_key: TileKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -556,7 +555,6 @@ impl BrushStrokeState {
         self.touched_tiles.push(StrokeTileRecord {
             tile_index,
             intermediate_tile_key,
-            backup_tile_key: TileKey::empty(self.intermediate_backend_id),
         });
         self.touched_tiles
             .last_mut()
@@ -639,11 +637,10 @@ impl BrushStrokeState {
             let tile_index = undo_record.tile_index();
             let record = self
                 .touched_tiles
-                .iter_mut()
+                .iter()
                 .find(|r| r.tile_index == tile_index)
                 .ok_or(AtlasError::InvalidState)?;
             let destination_tile_key = image.ensure_active_tile_key(tile_index)?;
-            record.backup_tile_key = undo_record.backup_tile_key();
 
             commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: self.brush_id,
@@ -1010,8 +1007,17 @@ mod tests {
                 }),
             ]
         );
-        assert_eq!(state.touched_tiles()[0].backup_tile_key, tile_0_backup_key);
-        assert!(state.touched_tiles()[1].backup_tile_key.is_empty());
+        // Verify backup keys via batch.tile_records (the authoritative source from undo)
+        let tile_1_backup_key = batch
+            .tile_records
+            .iter()
+            .find(|r| r.tile_index() == 1)
+            .map(|r| r.backup_tile_key())
+            .expect("tile 1 should be in tile_records");
+        assert!(
+            tile_1_backup_key.is_empty(),
+            "tile 1 was empty in image, should have empty backup key"
+        );
     }
 
     #[test]
