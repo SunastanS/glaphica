@@ -990,7 +990,7 @@ mod tests {
         let backup_tile_key = backup_group.keys()[0];
         doc.push_active_layer_undo_entry(
             backup_group,
-            vec![GlaImageUndoTileRecord::new(0, Some(backup_tile_key))],
+            vec![GlaImageUndoTileRecord::new(0, backup_tile_key)],
         );
 
         let restore = doc
@@ -1016,6 +1016,7 @@ mod tests {
         let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
         let render_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let backup_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(11));
+        let backup_backend_id = backup_backend.backend_id();
         let mut doc = GlaDoc::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
             image_backend.clone(),
@@ -1043,7 +1044,10 @@ mod tests {
             .expect("empty backup group should allocate");
         doc.push_active_layer_undo_entry(
             empty_backup_group,
-            vec![GlaImageUndoTileRecord::new(0, None)],
+            vec![GlaImageUndoTileRecord::new(
+                0,
+                TileKey::empty(backup_backend_id),
+            )],
         );
 
         let restore = doc

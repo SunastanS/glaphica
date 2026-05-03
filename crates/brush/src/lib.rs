@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileKey, TileOwner};
 use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
-use gla_undo::{GlaImageUndo, GlaImageUndoError};
+use gla_undo::{GlaImageUndo, GlaImageUndoError, GlaImageUndoTileRecord};
 pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
@@ -348,7 +348,7 @@ impl From<BrushStrokeError> for BrushInputError {
 pub struct StrokeTileRecord {
     pub tile_index: usize,
     pub intermediate_tile_key: TileKey,
-    pub backup_tile_key: Option<TileKey>,
+    pub backup_tile_key: TileKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,9 +410,7 @@ impl From<GlaImageEnsureActiveTileError> for BrushStrokeError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrokeCommitBatch {
     pub backup_group: CachedTileGroup,
-    pub backup_tile_indices: Vec<usize>,
-    pub backup_tile_keys: Vec<TileKey>,
-    pub tile_records: Vec<StrokeTileRecord>,
+    pub tile_records: Vec<GlaImageUndoTileRecord>,
     pub commands: Vec<RenderCommand>,
 }
 
@@ -558,7 +556,7 @@ impl BrushStrokeState {
         self.touched_tiles.push(StrokeTileRecord {
             tile_index,
             intermediate_tile_key,
-            backup_tile_key: None,
+            backup_tile_key: TileKey::empty(self.intermediate_backend_id),
         });
         self.touched_tiles
             .last_mut()
@@ -623,7 +621,11 @@ impl BrushStrokeState {
         let touched_tile_indices = tile_indices
             .iter()
             .copied()
-            .filter(|&tile_index| self.touched_tile_index(tile_index).is_some())
+            .filter(|&tile_index| {
+                self.touched_tiles
+                    .iter()
+                    .any(|r| r.tile_index == tile_index)
+            })
             .collect::<Vec<_>>();
 
         let backup = image_undo.backup_tiles(image, &touched_tile_indices)?;
@@ -632,46 +634,33 @@ impl BrushStrokeState {
             .into_iter()
             .map(RenderCommand::CopyTile)
             .collect::<Vec<_>>();
-        let mut touched_tile_indexes = Vec::new();
+
         for undo_record in &undo_tile_records {
             let tile_index = undo_record.tile_index();
-            let Some(record_index) = self.touched_tile_index(tile_index) else {
-                continue;
-            };
-            touched_tile_indexes.push(record_index);
             let record = self
                 .touched_tiles
-                .get_mut(record_index)
+                .iter_mut()
+                .find(|r| r.tile_index == tile_index)
                 .ok_or(AtlasError::InvalidState)?;
             let destination_tile_key = image.ensure_active_tile_key(tile_index)?;
             record.backup_tile_key = undo_record.backup_tile_key();
 
             commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: self.brush_id,
-                origin_tile_key: undo_record
-                    .backup_tile_key()
-                    .unwrap_or_else(|| TileKey::empty(image_backend_id)),
+                origin_tile_key: undo_record.backup_tile_key(),
                 intermediate_tile_key: record.intermediate_tile_key,
                 destination_tile_key,
+                // Each MergeTileCommand holds an identical copy of the payload. The number of tiles
+                // per stroke is small (10–100) and the payload is a shader uniform (hundreds of
+                // bytes). Moving to Arc<Vec<u8>> would make MergeTileCommand asymmetric with
+                // ApplyDabCommand (which carries per-dab unique payloads) for negligible gain.
                 brush_payload: brush_payload.clone(),
             }));
         }
 
         Ok(StrokeCommitBatch {
             backup_group,
-            backup_tile_indices: undo_tile_records
-                .iter()
-                .filter(|record| record.backup_tile_key().is_some())
-                .map(|record| record.tile_index())
-                .collect(),
-            backup_tile_keys: undo_tile_records
-                .iter()
-                .filter_map(|record| record.backup_tile_key())
-                .collect(),
-            tile_records: touched_tile_indexes
-                .into_iter()
-                .map(|record_index| self.touched_tiles[record_index])
-                .collect(),
+            tile_records: undo_tile_records,
             commands,
         })
     }
@@ -992,36 +981,37 @@ mod tests {
 
         let second_active_key = image.tile_key(1).expect("tile key should exist");
         assert!(!second_active_key.is_empty());
-        assert_eq!(batch.backup_tile_indices, vec![0]);
-        assert_eq!(batch.backup_tile_keys.len(), 1);
+        let tile_0_backup_key = batch
+            .tile_records
+            .iter()
+            .find(|r| r.tile_index() == 0)
+            .map(|r| r.backup_tile_key())
+            .expect("tile 0 should have a backup key");
         assert_eq!(
             batch.commands,
             vec![
                 RenderCommand::CopyTile(CopyTileCommand {
                     source_tile_key: first_active_key,
-                    destination_tile_key: batch.backup_tile_keys[0],
+                    destination_tile_key: tile_0_backup_key,
                 }),
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
-                    origin_tile_key: batch.backup_tile_keys[0],
-                    intermediate_tile_key: first_intermediate,
-                    destination_tile_key: first_active_key,
-                    brush_payload: merge_payload.clone(),
-                }),
-                RenderCommand::MergeTile(MergeTileCommand {
-                    brush_id: BrushId::new(11),
-                    origin_tile_key: TileKey::empty(image_backend.backend_id()),
+                    origin_tile_key: TileKey::empty(image_undo.backup_backend_id()),
                     intermediate_tile_key: second_intermediate,
                     destination_tile_key: second_active_key,
                     brush_payload: merge_payload.clone(),
                 }),
+                RenderCommand::MergeTile(MergeTileCommand {
+                    brush_id: BrushId::new(11),
+                    origin_tile_key: tile_0_backup_key,
+                    intermediate_tile_key: first_intermediate,
+                    destination_tile_key: first_active_key,
+                    brush_payload: merge_payload.clone(),
+                }),
             ]
         );
-        assert_eq!(
-            state.touched_tiles()[0].backup_tile_key,
-            Some(batch.backup_tile_keys[0])
-        );
-        assert_eq!(state.touched_tiles()[1].backup_tile_key, None);
+        assert_eq!(state.touched_tiles()[0].backup_tile_key, tile_0_backup_key);
+        assert!(state.touched_tiles()[1].backup_tile_key.is_empty());
     }
 
     #[test]

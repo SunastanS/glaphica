@@ -1,7 +1,7 @@
 use atlas::Backend;
 use brush::{BrushInput, BrushStrokeState};
 use gla_doc_renderer::GlaDocRenderer;
-use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
+use gla_document::{GlaDoc, GlaDocError};
 use renderer::{RenderCommand, TileRenderer};
 
 use crate::AppBrushRegistry;
@@ -182,17 +182,7 @@ impl StrokeTransaction {
             brushes,
         )?;
 
-        doc.push_undo_entry(
-            active_layer_id,
-            batch.backup_group,
-            batch
-                .tile_records
-                .into_iter()
-                .map(|record| {
-                    GlaImageUndoTileRecord::new(record.tile_index, record.backup_tile_key)
-                })
-                .collect(),
-        )?;
+        doc.push_undo_entry(active_layer_id, batch.backup_group, batch.tile_records)?;
 
         let brush_backend = brushes
             .brush_backend_mut(brush_id)
