@@ -6,3 +6,5 @@ Cargo.lock
 .code-review-graph/
 .rtk/
 docs/
+.agents/
+.ai-jail
