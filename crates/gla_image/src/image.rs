@@ -137,10 +137,11 @@ impl GlaImage {
             usize::try_from(layout.total_slots()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let tile_manager = tile_manager.into();
         let backend_id = tile_manager.backend_id();
-        let tile_owners = std::iter::repeat_with(|| tile_manager.empty_owner())
-            .take(total_tiles)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let mut tile_owners = Vec::with_capacity(total_tiles);
+        for _ in 0..total_tiles {
+            tile_owners.push(tile_manager.try_empty_owner()?);
+        }
+        let tile_owners = tile_owners.into_boxed_slice();
         Ok(Self {
             layout,
             tile_owners,
@@ -280,13 +281,13 @@ impl GlaImage {
         let old_layout = self.layout;
         let new_total_tiles = usize::try_from(new_layout.total_slots())
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
-        let mut old_tile_owners = std::mem::replace(
-            &mut self.tile_owners,
-            std::iter::repeat_with(|| self.tile_manager.empty_owner())
-                .take(new_total_tiles)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
+        let mut old_tile_owners = std::mem::replace(&mut self.tile_owners, {
+            let mut tile_owners = Vec::with_capacity(new_total_tiles);
+            for _ in 0..new_total_tiles {
+                tile_owners.push(self.tile_manager.try_empty_owner()?);
+            }
+            tile_owners.into_boxed_slice()
+        });
         let overlap_tile_x = old_layout.slot_x().min(new_layout.slot_x()) as usize;
         let overlap_tile_y = old_layout.slot_y().min(new_layout.slot_y()) as usize;
         let old_stride = old_layout.slot_x() as usize;
@@ -300,8 +301,10 @@ impl GlaImage {
             }
 
             let new_index = tile_y * new_stride + tile_x;
-            self.tile_owners[new_index] =
-                std::mem::replace(&mut old_tile_owners[tile_index], self.tile_manager.empty_owner());
+            self.tile_owners[new_index] = std::mem::replace(
+                &mut old_tile_owners[tile_index],
+                self.tile_manager.try_empty_owner()?,
+            );
         }
 
         self.layout = new_layout;
@@ -470,8 +473,11 @@ mod tests {
     #[test]
     fn ensure_active_tile_binds_existing_slot_credential() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
-        let mut image =
-            GlaImage::new(GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE), backend).unwrap();
+        let mut image = GlaImage::new(
+            GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
+            backend,
+        )
+        .unwrap();
         let credential = image
             .tile_credential(0)
             .expect("slot credential should exist");

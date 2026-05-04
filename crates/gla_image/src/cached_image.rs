@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend, CachedTileGroup, TileCredential, TileKey};
+use atlas::{AtlasError, Backend, CachedTileGroup, TileKey};
 
 use crate::{
     AtlasTileMap, GlaImage, GlaImageCreateError, GlaImageTileAccessError, TileGrid,
@@ -95,7 +95,7 @@ impl From<GlaImageTileAccessError> for GlaCachedImageActivateError {
 pub struct GlaCachedImage {
     layout: GlaImageLayout,
     cache_group: CachedTileGroup,
-    tile_credentials: Box<[TileCredential]>,
+    cached_tile_indices: Box<[usize]>,
     tile_keys: Box<[TileKey]>,
 }
 
@@ -105,12 +105,10 @@ impl GlaCachedImage {
         cache_group: CachedTileGroup,
     ) -> Result<Self, GlaCachedImageCreateError> {
         let mut tile_keys = Vec::with_capacity(image.slot_count());
-        let mut tile_credentials = Vec::with_capacity(image.slot_count());
         for tile_index in 0..image.slot_count() {
             tile_keys.push(image.tile_key(tile_index)?);
-            tile_credentials.push(image.tile_credential(tile_index)?);
         }
-        Self::with_tile_credentials(*image.layout(), cache_group, tile_credentials, tile_keys)
+        Self::new(*image.layout(), cache_group, tile_keys)
     }
 
     pub fn new(
@@ -118,36 +116,11 @@ impl GlaCachedImage {
         cache_group: CachedTileGroup,
         tile_keys: Vec<TileKey>,
     ) -> Result<Self, GlaCachedImageCreateError> {
-        let tile_credentials = Vec::new();
-        Self::validate_and_build(layout, cache_group, tile_credentials, tile_keys)
-    }
-
-    pub fn with_tile_credentials(
-        layout: GlaImageLayout,
-        cache_group: CachedTileGroup,
-        tile_credentials: Vec<TileCredential>,
-        tile_keys: Vec<TileKey>,
-    ) -> Result<Self, GlaCachedImageCreateError> {
-        Self::validate_and_build(layout, cache_group, tile_credentials, tile_keys)
-    }
-
-    fn validate_and_build(
-        layout: GlaImageLayout,
-        cache_group: CachedTileGroup,
-        tile_credentials: Vec<TileCredential>,
-        tile_keys: Vec<TileKey>,
-    ) -> Result<Self, GlaCachedImageCreateError> {
         let expected_tiles = layout.total_slots() as usize;
         if tile_keys.len() != expected_tiles {
             return Err(GlaCachedImageCreateError::WrongTileCount {
                 expected: expected_tiles,
                 actual: tile_keys.len(),
-            });
-        }
-        if !tile_credentials.is_empty() && tile_credentials.len() != expected_tiles {
-            return Err(GlaCachedImageCreateError::WrongTileCount {
-                expected: expected_tiles,
-                actual: tile_credentials.len(),
             });
         }
 
@@ -172,10 +145,18 @@ impl GlaCachedImage {
             });
         }
 
+        let mut cached_tile_indices = Vec::with_capacity(cache_group.keys().len());
+        for &cached_key in cache_group.keys() {
+            let Some(tile_index) = tile_keys.iter().position(|&key| key == cached_key) else {
+                return Err(GlaCachedImageCreateError::WrongTileKeys);
+            };
+            cached_tile_indices.push(tile_index);
+        }
+
         Ok(Self {
             layout,
             cache_group,
-            tile_credentials: tile_credentials.into_boxed_slice(),
+            cached_tile_indices: cached_tile_indices.into_boxed_slice(),
             tile_keys: tile_keys.into_boxed_slice(),
         })
     }
@@ -196,16 +177,8 @@ impl GlaCachedImage {
         self.tile_keys.get(tile_index).copied()
     }
 
-    pub fn tile_credential(&self, tile_index: usize) -> Option<TileCredential> {
-        self.tile_credentials.get(tile_index).copied()
-    }
-
     pub fn tile_keys(&self) -> &[TileKey] {
         &self.tile_keys
-    }
-
-    pub fn tile_credentials(&self) -> &[TileCredential] {
-        &self.tile_credentials
     }
 
     pub fn collect_non_empty_slot_indices(&self, output: &mut Vec<usize>) {
@@ -220,13 +193,8 @@ impl GlaCachedImage {
     pub fn activate(self, backend: &Backend) -> Result<GlaImage, GlaCachedImageActivateError> {
         let mut image = GlaImage::new(self.layout, backend.clone())?;
         let activated = backend.activate_cached_group(&self.cache_group)?;
-        for tile_owner in activated {
-            let tile_key = tile_owner.tile_key();
-            let tile_index = self
-                .tile_keys
-                .iter()
-                .position(|&candidate| candidate == tile_key)
-                .ok_or(GlaCachedImageActivateError::TileKeyNotFound(tile_key))?;
+        for (tile_owner, &tile_index) in activated.into_iter().zip(self.cached_tile_indices.iter())
+        {
             image.replace_tile_owner(tile_index, tile_owner)?;
         }
         Ok(image)
@@ -259,7 +227,7 @@ mod tests {
     use atlas::{AtlasLayout, Backend, BackendId};
     use glaphica_core::IMAGE_TILE_SIZE;
 
-    use crate::{GlaCachedImage, GlaCachedImageCreateError, GlaImage, GlaImageLayout};
+    use crate::{GlaCachedImage, GlaCachedImageCreateError, GlaImageLayout};
 
     fn empty_key_with_backend(backend: &Backend) -> atlas::TileKey {
         backend.empty_tile_key()
@@ -397,46 +365,23 @@ mod tests {
     }
 
     #[test]
-    fn cached_image_from_active_image_preserves_slot_credentials() {
+    fn cached_image_activate_uses_cached_group_order_index_mapping() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
-        let mut active = GlaImage::new(layout, backend.clone()).expect("image should build");
-        let first_credential = active
-            .tile_credential(0)
-            .expect("first credential should exist");
-        let second_credential = active
-            .tile_credential(1)
-            .expect("second credential should exist");
-        active
-            .ensure_active_tile_key(0)
-            .expect("active tile should allocate");
-        let (layout, tile_owners) = active.into_tile_owners();
-        let mut tile_keys = Vec::with_capacity(tile_owners.len());
-        let mut non_empty_owners = Vec::new();
-        for tile_owner in tile_owners {
-            let tile_key = tile_owner.tile_key();
-            tile_keys.push(tile_key);
-            if !tile_key.is_empty() {
-                non_empty_owners.push(tile_owner);
-            }
-        }
-        let cached_group = backend
-            .cache_active_owners(non_empty_owners)
-            .expect("active owner should cache");
-        let cached = GlaCachedImage::with_tile_credentials(
-            layout,
-            cached_group,
-            vec![first_credential, second_credential],
-            tile_keys,
-        )
-        .expect("cached image should build");
+        let cached = backend
+            .alloc_cached(2)
+            .expect("cached tiles should allocate");
+        let first = cached.keys()[0];
+        let second = cached.keys()[1];
+        let cached_image = GlaCachedImage::new(layout, cached, vec![second, first])
+            .expect("cached image should build");
 
-        assert_eq!(cached.tile_credential(0), Some(first_credential));
-        assert_eq!(cached.tile_credential(1), Some(second_credential));
-        assert_eq!(
-            cached.tile_credentials(),
-            &[first_credential, second_credential]
-        );
+        let active = cached_image
+            .activate(&backend)
+            .expect("activate should succeed");
+
+        assert_eq!(active.tile_key(0), Ok(second));
+        assert_eq!(active.tile_key(1), Ok(first));
     }
 
     #[test]

@@ -556,11 +556,9 @@ impl GlaDocRenderer {
 
             let (layout, tile_owners) = active_image.into_tile_owners();
             let mut tile_keys = Vec::with_capacity(tile_owners.len());
-            let mut tile_credentials = Vec::with_capacity(tile_owners.len());
             let mut non_empty_owners = Vec::new();
             for tile_owner in tile_owners {
                 let tile_key = tile_owner.tile_key();
-                tile_credentials.push(tile_owner.credential());
                 tile_keys.push(tile_key);
                 if !tile_key.is_empty() {
                     non_empty_owners.push(tile_owner);
@@ -568,12 +566,8 @@ impl GlaDocRenderer {
             }
 
             let cached_group = self.render_backend.cache_active_owners(non_empty_owners)?;
-            entry.state = RenderImageState::Cached(GlaCachedImage::with_tile_credentials(
-                layout,
-                cached_group,
-                tile_credentials,
-                tile_keys,
-            )?);
+            entry.state =
+                RenderImageState::Cached(GlaCachedImage::new(layout, cached_group, tile_keys)?);
         }
 
         Ok(())
@@ -695,9 +689,9 @@ impl GlaDocRenderer {
 
             match prepare_target_tile(target_image, tile_index, &sources)? {
                 TargetTileAction::Noop => {}
-                TargetTileAction::Composite(target_key) => output.push(RenderCommand::CompositeTile(
-                    build_composite_command(target_key, &sources),
-                )),
+                TargetTileAction::Composite(target_key) => output.push(
+                    RenderCommand::CompositeTile(build_composite_command(target_key, &sources)),
+                ),
             }
         }
 
@@ -1010,8 +1004,8 @@ mod tests {
     fn prepare_target_tile_allocates_target_when_sources_exist() {
         let backend = new_render_backend();
         let source = backend.alloc_active().expect("source tile should allocate");
-        let mut image = GlaImage::new(GlaImageLayout::new(64, 64), backend)
-            .expect("image should build");
+        let mut image =
+            GlaImage::new(GlaImageLayout::new(64, 64), backend).expect("image should build");
         let sources = [TileCompositeSource {
             tile_key: source.tile_key(),
             opacity: 0.5,
