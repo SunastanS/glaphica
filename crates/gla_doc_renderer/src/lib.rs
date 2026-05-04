@@ -70,6 +70,12 @@ pub struct RenderProgramInput {
     blend_mode: BlendMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetTileAction {
+    Noop,
+    Composite(atlas::TileKey),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrepareExecutionError {
     message: String,
@@ -687,19 +693,12 @@ impl GlaDocRenderer {
                 }
             };
 
-            if sources.is_empty() {
-                if target_image.tile_key(tile_index)?.is_empty() {
-                    continue;
-                }
-                target_image.cache_tile(tile_index)?;
-                continue;
+            match prepare_target_tile(target_image, tile_index, &sources)? {
+                TargetTileAction::Noop => {}
+                TargetTileAction::Composite(target_key) => output.push(RenderCommand::CompositeTile(
+                    build_composite_command(target_key, &sources),
+                )),
             }
-
-            let target_key = target_image.ensure_active_tile_key(tile_index)?;
-            output.push(RenderCommand::CompositeTile(CompositeTileCommand {
-                target_tile_key: target_key,
-                inputs: sources,
-            }));
         }
 
         Ok(())
@@ -758,6 +757,33 @@ impl GlaDocRenderer {
             });
         }
         Ok(sources)
+    }
+}
+
+fn prepare_target_tile(
+    target_image: &mut GlaImage,
+    tile_index: usize,
+    sources: &[TileCompositeSource],
+) -> Result<TargetTileAction, GlaDocRendererError> {
+    if sources.is_empty() {
+        if target_image.physical_tile_key(tile_index)?.is_some() {
+            target_image.cache_tile(tile_index)?;
+        }
+        return Ok(TargetTileAction::Noop);
+    }
+
+    Ok(TargetTileAction::Composite(
+        target_image.ensure_active_tile_key(tile_index)?,
+    ))
+}
+
+fn build_composite_command(
+    target_tile_key: atlas::TileKey,
+    sources: &[TileCompositeSource],
+) -> CompositeTileCommand {
+    CompositeTileCommand {
+        target_tile_key,
+        inputs: sources.to_vec(),
     }
 }
 
@@ -880,10 +906,13 @@ mod tests {
     use atlas::{AtlasLayout, Backend as AtlasBackend, TileKey};
     use gla_document::{BackendId, GlaDoc, GlaImageLayout};
     use gla_image::GlaImage;
+    use glaphica_core::BlendMode;
+    use renderer::TileCompositeSource;
 
     use crate::{
         GlaDocRenderer, PrepareExecutionError, PrepareExecutor, RenderExecutionError,
-        RenderExecutor, RenderImageState, RenderProgramSourceKind,
+        RenderExecutor, RenderImageState, RenderProgramSourceKind, TargetTileAction,
+        build_composite_command, prepare_target_tile,
     };
 
     #[derive(Default)]
@@ -959,6 +988,62 @@ mod tests {
 
     fn new_render_backend() -> AtlasBackend {
         AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(7))
+    }
+
+    #[test]
+    fn prepare_target_tile_caches_existing_target_when_sources_are_empty() {
+        let backend = new_render_backend();
+        let mut image = GlaImage::new(GlaImageLayout::new(64, 64), backend.clone())
+            .expect("image should build");
+        let tile_key = image
+            .ensure_active_tile_key(0)
+            .expect("target tile should allocate");
+
+        let action = prepare_target_tile(&mut image, 0, &[]).expect("target should prepare");
+
+        assert_eq!(action, TargetTileAction::Noop);
+        assert!(image.tile_key(0).is_ok_and(|key| key.is_empty()));
+        assert_eq!(backend.tile_state(tile_key), Ok(atlas::TileState::Cached));
+    }
+
+    #[test]
+    fn prepare_target_tile_allocates_target_when_sources_exist() {
+        let backend = new_render_backend();
+        let source = backend.alloc_active().expect("source tile should allocate");
+        let mut image = GlaImage::new(GlaImageLayout::new(64, 64), backend)
+            .expect("image should build");
+        let sources = [TileCompositeSource {
+            tile_key: source.tile_key(),
+            opacity: 0.5,
+            blend_mode: BlendMode::Normal,
+        }];
+
+        let action = prepare_target_tile(&mut image, 0, &sources).expect("target should prepare");
+
+        assert!(matches!(action, TargetTileAction::Composite(key) if !key.is_empty()));
+    }
+
+    #[test]
+    fn build_composite_command_keeps_physical_target_and_inputs() {
+        let backend = new_render_backend();
+        let target = backend
+            .alloc_active()
+            .expect("target tile should allocate")
+            .tile_key();
+        let source = backend
+            .alloc_active()
+            .expect("source tile should allocate")
+            .tile_key();
+        let sources = [TileCompositeSource {
+            tile_key: source,
+            opacity: 0.5,
+            blend_mode: BlendMode::Normal,
+        }];
+
+        let command = build_composite_command(target, &sources);
+
+        assert_eq!(command.target_tile_key, target);
+        assert_eq!(command.inputs, sources);
     }
 
     #[test]
