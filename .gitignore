@@ -8,3 +8,4 @@ Cargo.lock
 docs/
 .agents/
 .ai-jail
+skills-lock.json
