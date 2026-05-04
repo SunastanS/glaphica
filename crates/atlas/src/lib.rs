@@ -909,6 +909,7 @@ impl Backend {
             .expect("tile credential record space is exhausted")
     }
 
+    /// Prefer this in fallible constructors; `empty_owner` panics if a credential cannot allocate.
     pub fn try_empty_owner(&self) -> Result<TileOwner, AtlasError> {
         self.with_inner(|_| Ok(()))?;
         let credential = self.alloc_credential()?;
@@ -1036,13 +1037,22 @@ impl Backend {
         Ok(TileOwner::new(self.recycle.clone(), credential, key))
     }
 
+    /// Returns owners in the same order as `cached.keys()`.
     pub fn activate_cached_group(
         &self,
         cached: &CachedTileGroup,
     ) -> Result<Vec<TileOwner>, AtlasError> {
         let mut credentials = Vec::with_capacity(cached.keys().len());
         for _ in cached.keys() {
-            credentials.push(self.alloc_credential()?);
+            match self.alloc_credential() {
+                Ok(credential) => credentials.push(credential),
+                Err(error) => {
+                    for credential in credentials {
+                        self.release_credential_after_owner_error(credential);
+                    }
+                    return Err(error);
+                }
+            }
         }
         let keys = match self.with_inner(|inner| inner.activate_cached_group(cached)) {
             Ok(keys) => keys,
@@ -1055,6 +1065,8 @@ impl Backend {
         };
         for (&credential, &key) in credentials.iter().zip(keys.iter()) {
             if let Err(error) = self.bind_credential(credential, key) {
+                // The cached group has already been activated. If credential binding fails here,
+                // discard those active tiles so they do not leak without TileOwner RAII.
                 for key in keys {
                     self.free_active_tile_after_owner_error(key);
                 }
@@ -1225,6 +1237,8 @@ impl TileManager {
             return Ok(tile_key);
         }
 
+        // TileOwner uniquely owns its credential while alive; resolving then binding is safe under
+        // that ownership invariant.
         self.resolve(owner.credential())?;
         let tile_key = self.backend.with_inner(|inner| inner.alloc_active())?;
         if let Err(error) = self.backend.bind_credential(owner.credential(), tile_key) {
@@ -1694,21 +1708,22 @@ mod tests {
     }
 
     #[test]
-    fn activate_cached_group_returns_all_active_owners() {
+    fn activate_cached_group_returns_owners_in_cached_key_order() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(0));
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
+        let cached_keys = cached.keys().to_vec();
 
         let reactivated = backend
             .activate_cached_group(&cached)
             .expect("cached group should reactivate");
 
         assert_eq!(reactivated.len(), 2);
-        assert_eq!(reactivated[0].tile_key(), cached.keys()[0]);
-        assert_eq!(reactivated[1].tile_key(), cached.keys()[1]);
-        assert_eq!(backend.tile_state(cached.keys()[0]), Ok(TileState::Active));
-        assert_eq!(backend.tile_state(cached.keys()[1]), Ok(TileState::Active));
+        assert_eq!(reactivated[0].tile_key(), cached_keys[0]);
+        assert_eq!(reactivated[1].tile_key(), cached_keys[1]);
+        assert_eq!(backend.tile_state(cached_keys[0]), Ok(TileState::Active));
+        assert_eq!(backend.tile_state(cached_keys[1]), Ok(TileState::Active));
     }
 
     #[test]
