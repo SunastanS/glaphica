@@ -437,11 +437,6 @@ impl GlaDocRenderer {
         let mut executor = NoopPrepareExecutor;
         self.prepare_active_plan(doc, &mut executor)?;
 
-        let prepare_steps = self
-            .active_plan
-            .as_ref()
-            .map(|plan| plan.prepare_steps.clone())
-            .ok_or(GlaDocRendererError::MissingActivePlan)?;
         let slot_count = usize::try_from(doc.layout().total_slots())
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let tile_indices = (0..slot_count).collect::<Vec<_>>();
@@ -450,18 +445,25 @@ impl GlaDocRenderer {
             .as_ref()
             .map(|plan| plan.active_layer_id())
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        let mut commands = Vec::new();
+        let prepare_steps = self
+            .active_plan
+            .as_ref()
+            .map(|plan| {
+                plan.prepare_steps
+                    .iter()
+                    .map(|step| (step.node_id, step.inputs.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .ok_or(GlaDocRendererError::MissingActivePlan)?;
 
-        for step in &prepare_steps {
-            self.compose_node_commands(
-                doc,
-                step.node_id,
-                &tile_indices,
-                &step.inputs,
-                active_layer_id,
-                &mut commands,
-            )?;
-        }
+        let commands = self.build_render_commands(
+            doc,
+            &prepare_steps
+                .iter()
+                .map(|(nid, inp)| (*nid, &tile_indices[..], inp.as_slice()))
+                .collect::<Vec<_>>(),
+            active_layer_id,
+        )?;
         let clear_batches = self.render_backend.take_pending_clear_batches()?;
         tile_renderer.execute_commands(
             device,
@@ -486,28 +488,27 @@ impl GlaDocRenderer {
         tile_indices: &[usize],
     ) -> Result<(), GlaDocRendererError> {
         tile_renderer.ensure_backend(device, &self.render_backend)?;
-        let passes = self
-            .active_plan
-            .as_ref()
-            .map(|plan| plan.passes.clone())
-            .ok_or(GlaDocRendererError::MissingActivePlan)?;
         let active_layer_id = self
             .active_plan
             .as_ref()
             .map(|plan| plan.active_layer_id())
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        let mut commands = Vec::new();
+        let passes = self
+            .active_plan
+            .as_ref()
+            .map(|plan| {
+                plan.passes
+                    .iter()
+                    .map(|pass| (pass.node_id, pass.inputs.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .ok_or(GlaDocRendererError::MissingActivePlan)?;
 
-        for pass in &passes {
-            self.compose_node_commands(
-                doc,
-                pass.node_id,
-                tile_indices,
-                &pass.inputs,
-                active_layer_id,
-                &mut commands,
-            )?;
-        }
+        let commands = self.build_render_commands(
+            doc,
+            &passes.iter().map(|(nid, inp)| (*nid, tile_indices, inp.as_slice())).collect::<Vec<_>>(),
+            active_layer_id,
+        )?;
         let clear_batches = self.render_backend.take_pending_clear_batches()?;
         tile_renderer.execute_commands(
             device,
@@ -518,6 +519,26 @@ impl GlaDocRenderer {
             None,
         )?;
         Ok(())
+    }
+
+    fn build_render_commands(
+        &mut self,
+        doc: &GlaDoc,
+        steps: &[(GlaNodeId, &[usize], &[RenderProgramInput])],
+        active_layer_id: GlaNodeId,
+    ) -> Result<Vec<RenderCommand>, GlaDocRendererError> {
+        let mut commands = Vec::new();
+        for &(node_id, tile_indices, inputs) in steps {
+            self.compose_node_commands(
+                doc,
+                node_id,
+                tile_indices,
+                inputs,
+                active_layer_id,
+                &mut commands,
+            )?;
+        }
+        Ok(commands)
     }
 
     fn collect_render_nodes(
@@ -897,11 +918,11 @@ fn execute_prepare_steps(
 
 #[cfg(test)]
 mod tests {
-    use atlas::{AtlasLayout, Backend as AtlasBackend, TileKey};
+    use atlas::{AtlasLayout, Backend as AtlasBackend};
     use gla_document::{BackendId, GlaDoc, GlaImageLayout};
     use gla_image::GlaImage;
     use glaphica_core::BlendMode;
-    use renderer::TileCompositeSource;
+    use renderer::{RenderCommand, TileCompositeSource};
 
     use crate::{
         GlaDocRenderer, PrepareExecutionError, PrepareExecutor, RenderExecutionError,
@@ -1439,5 +1460,66 @@ mod tests {
         assert_eq!(render_executor.composites[0].2[1].node_id(), second);
         assert_eq!(render_executor.composites[1].0, doc.root_id());
         assert_eq!(render_executor.presents, vec![(doc.root_id(), vec![3])]);
+    }
+
+    #[test]
+    fn build_render_commands_composes_all_passes_with_active_layer_truth_fallback() {
+        let image_backend = AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(3));
+        let mut doc = new_doc();
+        let group = doc
+            .append_group(doc.root_id())
+            .expect("group should append");
+        let first = doc.append_layer(group).expect("first should append");
+        let second = doc.append_layer(group).expect("second should append");
+        let active_tile = image_backend
+            .alloc_active()
+            .expect("active tile should allocate");
+        let _ = active_tile.tile_key();
+        doc.node_image_mut(first)
+            .expect("first image should exist")
+            .replace_tile_owner(0, active_tile)
+            .expect("tile owner should install");
+        let second_tile = image_backend
+            .alloc_active()
+            .expect("second tile should allocate");
+        let _ = second_tile.tile_key();
+        doc.node_image_mut(second)
+            .expect("second image should exist")
+            .replace_tile_owner(0, second_tile)
+            .expect("tile owner should install");
+        doc.set_active_layer(second)
+            .expect("active layer should update");
+        let mut renderer = GlaDocRenderer::new(new_render_backend());
+        let mut executor = NoopPrepareExecutor;
+
+        let plan = renderer
+            .prepare_active_plan(&doc, &mut executor)
+            .expect("active plan should build");
+        let active_layer_id = plan.active_layer_id();
+        let passes: Vec<_> = plan
+            .passes()
+            .iter()
+            .map(|pass| (pass.node_id(), pass.inputs.clone()))
+            .collect();
+
+        let commands = renderer
+            .build_render_commands(
+                &doc,
+                &passes
+                    .iter()
+                    .map(|(nid, inp)| (*nid, &[0][..], inp.as_slice()))
+                    .collect::<Vec<_>>(),
+                active_layer_id,
+            )
+            .expect("render commands should build");
+
+        assert_eq!(commands.len(), 2);
+        for command in &commands {
+            let RenderCommand::CompositeTile(composite) = command else {
+                panic!("expected CompositeTile command");
+            };
+            assert!(!composite.target_tile_key.is_empty());
+            assert!(!composite.inputs.is_empty());
+        }
     }
 }
