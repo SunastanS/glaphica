@@ -244,6 +244,11 @@ impl TileGrid for GlaCachedImage {
 }
 
 impl AtlasTileMap for GlaCachedImage {
+    fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
+        let tile_key = GlaCachedImage::tile_key(self, tile_index)?;
+        (!tile_key.is_empty()).then_some(tile_key)
+    }
+
     fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
         GlaCachedImage::tile_key(self, tile_index)
     }

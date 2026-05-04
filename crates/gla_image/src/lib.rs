@@ -21,6 +21,9 @@ pub trait TileGrid {
 }
 
 pub trait AtlasTileMap: TileGrid {
+    fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey>;
+
+    #[deprecated(note = "use physical_tile_key; TileKey::empty is a backend sentinel")]
     fn tile_key(&self, tile_index: usize) -> Option<TileKey>;
 }
 

@@ -366,6 +366,10 @@ impl TileGrid for GlaImage {
 }
 
 impl AtlasTileMap for GlaImage {
+    fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
+        GlaImage::physical_tile_key(self, tile_index).ok().flatten()
+    }
+
     fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
         GlaImage::tile_key(self, tile_index).ok()
     }
