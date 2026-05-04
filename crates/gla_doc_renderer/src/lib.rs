@@ -76,6 +76,13 @@ enum TargetTileAction {
     Composite(atlas::TileKey),
 }
 
+#[derive(Debug, Clone)]
+struct RenderCommandBuildStep {
+    node_id: GlaNodeId,
+    tile_indices: Vec<usize>,
+    inputs: Vec<RenderProgramInput>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrepareExecutionError {
     message: String,
@@ -445,23 +452,24 @@ impl GlaDocRenderer {
             .as_ref()
             .map(|plan| plan.active_layer_id())
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        let prepare_steps = self
+        let prepare_steps: Vec<_> = self
             .active_plan
             .as_ref()
             .map(|plan| {
                 plan.prepare_steps
                     .iter()
-                    .map(|step| (step.node_id, step.inputs.clone()))
-                    .collect::<Vec<_>>()
+                    .map(|step| RenderCommandBuildStep {
+                        node_id: step.node_id,
+                        tile_indices: tile_indices.clone(),
+                        inputs: step.inputs.clone(),
+                    })
+                    .collect()
             })
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
 
         let commands = self.build_render_commands(
             doc,
-            &prepare_steps
-                .iter()
-                .map(|(nid, inp)| (*nid, &tile_indices[..], inp.as_slice()))
-                .collect::<Vec<_>>(),
+            &prepare_steps,
             active_layer_id,
         )?;
         let clear_batches = self.render_backend.take_pending_clear_batches()?;
@@ -493,20 +501,24 @@ impl GlaDocRenderer {
             .as_ref()
             .map(|plan| plan.active_layer_id())
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        let passes = self
+        let passes: Vec<_> = self
             .active_plan
             .as_ref()
             .map(|plan| {
                 plan.passes
                     .iter()
-                    .map(|pass| (pass.node_id, pass.inputs.clone()))
-                    .collect::<Vec<_>>()
+                    .map(|pass| RenderCommandBuildStep {
+                        node_id: pass.node_id,
+                        tile_indices: tile_indices.to_vec(),
+                        inputs: pass.inputs.clone(),
+                    })
+                    .collect()
             })
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
 
         let commands = self.build_render_commands(
             doc,
-            &passes.iter().map(|(nid, inp)| (*nid, tile_indices, inp.as_slice())).collect::<Vec<_>>(),
+            &passes,
             active_layer_id,
         )?;
         let clear_batches = self.render_backend.take_pending_clear_batches()?;
@@ -524,16 +536,16 @@ impl GlaDocRenderer {
     fn build_render_commands(
         &mut self,
         doc: &GlaDoc,
-        steps: &[(GlaNodeId, &[usize], &[RenderProgramInput])],
+        steps: &[RenderCommandBuildStep],
         active_layer_id: GlaNodeId,
     ) -> Result<Vec<RenderCommand>, GlaDocRendererError> {
         let mut commands = Vec::new();
-        for &(node_id, tile_indices, inputs) in steps {
+        for step in steps {
             self.compose_node_commands(
                 doc,
-                node_id,
-                tile_indices,
-                inputs,
+                step.node_id,
+                &step.tile_indices,
+                &step.inputs,
                 active_layer_id,
                 &mut commands,
             )?;
@@ -925,9 +937,9 @@ mod tests {
     use renderer::{RenderCommand, TileCompositeSource};
 
     use crate::{
-        GlaDocRenderer, PrepareExecutionError, PrepareExecutor, RenderExecutionError,
-        RenderExecutor, RenderImageState, RenderProgramSourceKind, TargetTileAction,
-        build_composite_command, prepare_target_tile,
+        GlaDocRenderer, PrepareExecutionError, PrepareExecutor, RenderCommandBuildStep,
+        RenderExecutionError, RenderExecutor, RenderImageState, RenderProgramSourceKind,
+        TargetTileAction, build_composite_command, prepare_target_tile,
     };
 
     #[derive(Default)]
@@ -1471,18 +1483,14 @@ mod tests {
             .expect("group should append");
         let first = doc.append_layer(group).expect("first should append");
         let second = doc.append_layer(group).expect("second should append");
-        let active_tile = image_backend
-            .alloc_active()
-            .expect("active tile should allocate");
-        let _ = active_tile.tile_key();
         doc.node_image_mut(first)
             .expect("first image should exist")
-            .replace_tile_owner(0, active_tile)
+            .replace_tile_owner(0, image_backend.alloc_active().expect("first tile"))
             .expect("tile owner should install");
         let second_tile = image_backend
             .alloc_active()
             .expect("second tile should allocate");
-        let _ = second_tile.tile_key();
+        let second_tile_key = second_tile.tile_key();
         doc.node_image_mut(second)
             .expect("second image should exist")
             .replace_tile_owner(0, second_tile)
@@ -1499,18 +1507,15 @@ mod tests {
         let passes: Vec<_> = plan
             .passes()
             .iter()
-            .map(|pass| (pass.node_id(), pass.inputs.clone()))
+            .map(|pass| RenderCommandBuildStep {
+                node_id: pass.node_id(),
+                tile_indices: vec![0],
+                inputs: pass.inputs().to_vec(),
+            })
             .collect();
 
         let commands = renderer
-            .build_render_commands(
-                &doc,
-                &passes
-                    .iter()
-                    .map(|(nid, inp)| (*nid, &[0][..], inp.as_slice()))
-                    .collect::<Vec<_>>(),
-                active_layer_id,
-            )
+            .build_render_commands(&doc, &passes, active_layer_id)
             .expect("render commands should build");
 
         assert_eq!(commands.len(), 2);
@@ -1521,5 +1526,15 @@ mod tests {
             assert!(!composite.target_tile_key.is_empty());
             assert!(!composite.inputs.is_empty());
         }
+        assert!(
+            commands.iter().any(|cmd| match cmd {
+                RenderCommand::CompositeTile(c) => c
+                    .inputs
+                    .iter()
+                    .any(|input| input.tile_key == second_tile_key),
+                _ => false,
+            }),
+            "composite command should contain active layer tile key through truth fallback"
+        );
     }
 }
