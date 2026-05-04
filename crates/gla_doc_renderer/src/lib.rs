@@ -550,9 +550,11 @@ impl GlaDocRenderer {
 
             let (layout, tile_owners) = active_image.into_tile_owners();
             let mut tile_keys = Vec::with_capacity(tile_owners.len());
+            let mut tile_credentials = Vec::with_capacity(tile_owners.len());
             let mut non_empty_owners = Vec::new();
             for tile_owner in tile_owners {
                 let tile_key = tile_owner.tile_key();
+                tile_credentials.push(tile_owner.credential());
                 tile_keys.push(tile_key);
                 if !tile_key.is_empty() {
                     non_empty_owners.push(tile_owner);
@@ -560,8 +562,12 @@ impl GlaDocRenderer {
             }
 
             let cached_group = self.render_backend.cache_active_owners(non_empty_owners)?;
-            entry.state =
-                RenderImageState::Cached(GlaCachedImage::new(layout, cached_group, tile_keys)?);
+            entry.state = RenderImageState::Cached(GlaCachedImage::with_tile_credentials(
+                layout,
+                cached_group,
+                tile_credentials,
+                tile_keys,
+            )?);
         }
 
         Ok(())
