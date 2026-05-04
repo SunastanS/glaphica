@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend, BackendId, TileKey, TileOwner};
+use atlas::{AtlasError, Backend, BackendId, TileCredential, TileKey, TileManager, TileOwner};
 use glaphica_core::CanvasVec2;
 
 use crate::{AtlasTileMap, ImageId, ImageTileSlot, TileGrid, layout::GlaImageLayout};
@@ -124,24 +124,27 @@ pub struct GlaImageSlotRecBounds {
 pub struct GlaImage {
     layout: GlaImageLayout,
     tile_owners: Box<[TileOwner]>,
-    backend: Backend,
+    tile_manager: TileManager,
     backend_id: BackendId,
-    // TODO: we should come up with a better way to track backend, avoid passing handle and id separately
 }
 
 impl GlaImage {
-    pub fn new(layout: GlaImageLayout, backend: Backend) -> Result<Self, GlaImageCreateError> {
+    pub fn new(
+        layout: GlaImageLayout,
+        tile_manager: impl Into<TileManager>,
+    ) -> Result<Self, GlaImageCreateError> {
         let total_tiles =
             usize::try_from(layout.total_slots()).map_err(|_| GlaImageCreateError::TooManyTiles)?;
-        let backend_id = backend.backend_id();
-        let tile_owners = std::iter::repeat_with(|| backend.empty_owner())
+        let tile_manager = tile_manager.into();
+        let backend_id = tile_manager.backend_id();
+        let tile_owners = std::iter::repeat_with(|| tile_manager.empty_owner())
             .take(total_tiles)
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Ok(Self {
             layout,
             tile_owners,
-            backend,
+            tile_manager,
             backend_id,
         })
     }
@@ -151,7 +154,11 @@ impl GlaImage {
     }
 
     pub fn backend(&self) -> &Backend {
-        &self.backend
+        self.tile_manager.backend()
+    }
+
+    pub fn tile_manager(&self) -> &TileManager {
+        &self.tile_manager
     }
 
     pub const fn layout(&self) -> &GlaImageLayout {
@@ -163,11 +170,30 @@ impl GlaImage {
     }
 
     pub fn tile_key(&self, tile_index: usize) -> Result<TileKey, GlaImageTileAccessError> {
-        // TODO: This fn is call by toooooo many unrelated crates
         let Some(tile_owner) = self.tile_owners.get(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
         Ok(tile_owner.tile_key())
+    }
+
+    pub fn physical_tile_key(
+        &self,
+        tile_index: usize,
+    ) -> Result<Option<TileKey>, GlaImageTileAccessError> {
+        let Some(tile_owner) = self.tile_owners.get(tile_index) else {
+            return Err(GlaImageTileAccessError::OutOfBounds);
+        };
+        Ok(tile_owner.physical_tile_key())
+    }
+
+    pub fn tile_credential(
+        &self,
+        tile_index: usize,
+    ) -> Result<TileCredential, GlaImageTileAccessError> {
+        let Some(tile_owner) = self.tile_owners.get(tile_index) else {
+            return Err(GlaImageTileAccessError::OutOfBounds);
+        };
+        Ok(tile_owner.credential())
     }
 
     pub fn tile_owner(&self, tile_index: usize) -> Option<&TileOwner> {
@@ -213,7 +239,7 @@ impl GlaImage {
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds);
         };
-        let vacant = self.backend.empty_owner();
+        let vacant = self.tile_manager.empty_owner();
         let old = std::mem::replace(slot, vacant);
         drop(old);
         Ok(())
@@ -223,12 +249,12 @@ impl GlaImage {
         let Some(slot) = self.tile_owners.get_mut(tile_index) else {
             return Err(GlaImageTileAccessError::OutOfBounds.into());
         };
-        if slot.tile_key().is_empty() {
+        if slot.physical_tile_key().is_none() {
             return Ok(());
         }
 
-        let tile_owner = std::mem::replace(slot, self.backend.empty_owner());
-        let _cached_group = self.backend.cache_active_owners([tile_owner])?;
+        let tile_owner = std::mem::replace(slot, self.tile_manager.empty_owner());
+        let _cached_group = self.tile_manager.cache_active_owners([tile_owner])?;
         Ok(())
     }
 
@@ -237,17 +263,10 @@ impl GlaImage {
         tile_index: usize,
     ) -> Result<TileKey, GlaImageEnsureActiveTileError> {
         // TODO: we should make activation of empty key automatically step by step
-        let existing_tile_key = self
-            .tile_key(tile_index)
-            .map_err(GlaImageEnsureActiveTileError::from)?;
-        if !existing_tile_key.is_empty() {
-            return Ok(existing_tile_key);
-        }
-
-        let tile_owner = self.backend.alloc_active()?;
-        let tile_key = tile_owner.tile_key();
-        self.replace_tile_owner(tile_index, tile_owner)?;
-        Ok(tile_key)
+        let Some(tile_owner) = self.tile_owners.get_mut(tile_index) else {
+            return Err(GlaImageTileAccessError::OutOfBounds.into());
+        };
+        Ok(self.tile_manager.ensure_active_tile(tile_owner)?)
     }
 
     pub fn resize_anchored_top_left(
@@ -263,7 +282,7 @@ impl GlaImage {
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
         let mut old_tile_owners = std::mem::replace(
             &mut self.tile_owners,
-            std::iter::repeat_with(|| self.backend.empty_owner())
+            std::iter::repeat_with(|| self.tile_manager.empty_owner())
                 .take(new_total_tiles)
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -282,7 +301,7 @@ impl GlaImage {
 
             let new_index = tile_y * new_stride + tile_x;
             self.tile_owners[new_index] =
-                std::mem::replace(&mut old_tile_owners[tile_index], self.backend.empty_owner());
+                std::mem::replace(&mut old_tile_owners[tile_index], self.tile_manager.empty_owner());
         }
 
         self.layout = new_layout;
@@ -294,7 +313,7 @@ impl GlaImage {
         let mut bounds: Option<GlaImageSlotRecBounds> = None;
 
         for (tile_index, tile_owner) in self.tile_owners.iter().enumerate() {
-            if tile_owner.tile_key().is_empty() {
+            if tile_owner.physical_tile_key().is_none() {
                 continue;
             }
 
@@ -426,6 +445,39 @@ mod tests {
                 ImageTileSlot::new(ImageId(9), 1)
             ]
         );
+    }
+
+    #[test]
+    fn new_image_assigns_distinct_credentials_to_empty_slots() {
+        let layout = GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE);
+        let image =
+            GlaImage::new(layout, Backend::new(AtlasLayout::Tiny8, BackendId::new(1))).unwrap();
+
+        let left = image.tile_credential(0).expect("left slot should exist");
+        let right = image.tile_credential(1).expect("right slot should exist");
+
+        assert_ne!(left, right);
+        assert_eq!(image.physical_tile_key(0), Ok(None));
+        assert_eq!(image.physical_tile_key(1), Ok(None));
+        assert!(image.tile_key(0).is_ok_and(|key| key.is_empty()));
+        assert!(image.tile_key(1).is_ok_and(|key| key.is_empty()));
+    }
+
+    #[test]
+    fn ensure_active_tile_binds_existing_slot_credential() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
+        let mut image =
+            GlaImage::new(GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE), backend).unwrap();
+        let credential = image
+            .tile_credential(0)
+            .expect("slot credential should exist");
+
+        let tile_key = image
+            .ensure_active_tile_key(0)
+            .expect("tile should allocate");
+
+        assert_eq!(image.physical_tile_key(0), Ok(Some(tile_key)));
+        assert_eq!(image.tile_manager().resolve(credential), Ok(Some(tile_key)));
     }
 
     #[test]
