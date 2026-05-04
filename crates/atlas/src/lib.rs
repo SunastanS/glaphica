@@ -64,6 +64,31 @@ pub struct TileKeyParts {
     pub slot_index: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct TileCredential(u64);
+
+impl TileCredential {
+    const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    const fn raw(self) -> u64 {
+        self.0
+    }
+
+    pub fn parts(self) -> TileCredentialParts {
+        decode_tile_credential(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileCredentialParts {
+    pub backend_id: BackendId,
+    pub generation: u32,
+    pub record_index: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasSlotAddress {
     pub layer: u32,
@@ -73,51 +98,64 @@ pub struct AtlasSlotAddress {
 
 #[derive(Debug)]
 pub struct TileOwner {
-    recycle: Option<BackendRecycleHandle>,
-    key: TileKey,
+    recycle: TileOwnerRecycleHandle,
+    credential: TileCredential,
+    tile_key: Option<TileKey>,
 }
 
 impl TileOwner {
-    pub(crate) fn empty(backend_id: BackendId) -> Self {
+    fn empty(recycle: TileOwnerRecycleHandle, credential: TileCredential) -> Self {
         Self {
-            recycle: None,
-            key: TileKey::empty(backend_id),
+            recycle,
+            credential,
+            tile_key: None,
         }
     }
 
-    pub const fn tile_key(&self) -> TileKey {
-        self.key
+    pub fn credential(&self) -> TileCredential {
+        self.credential
+    }
+
+    pub fn physical_tile_key(&self) -> Option<TileKey> {
+        self.tile_key
+    }
+
+    pub fn tile_key(&self) -> TileKey {
+        self.tile_key
+            .unwrap_or_else(|| TileKey::empty(self.backend_id()))
     }
 
     pub fn is_empty(&self) -> bool {
-        self.key.is_empty()
+        self.tile_key.is_none()
     }
 
     pub fn backend_id(&self) -> BackendId {
-        decode_tile_key(self.key).backend_id
+        decode_tile_credential(self.credential).backend_id
     }
 
     #[deprecated(note = "moving a TileKey out of TileOwner bypasses backend ownership tracking")]
     pub fn into_tile_key(mut self) -> TileKey {
-        let key = self.key;
-        self.key = TileKey::empty(key.parts().backend_id);
+        let key = self.tile_key.take().unwrap_or_else(|| TileKey::empty(self.backend_id()));
         key
     }
 
     fn release(&mut self) {
-        if self.key.is_empty() {
-            return;
-        }
-        if let Some(recycle) = &self.recycle {
-            recycle.enqueue(self.key);
+        self.recycle.enqueue(PendingOwnerReclaim {
+            credential: self.credential,
+            tile_key: self.tile_key.take(),
+        });
+    }
+
+    fn new(recycle: TileOwnerRecycleHandle, credential: TileCredential, tile_key: TileKey) -> Self {
+        Self {
+            recycle,
+            credential,
+            tile_key: Some(tile_key),
         }
     }
 
-    fn new(recycle: BackendRecycleHandle, key: TileKey) -> Self {
-        Self {
-            recycle: Some(recycle),
-            key,
-        }
+    fn clear_physical_tile_key(&mut self) -> Option<TileKey> {
+        self.tile_key.take()
     }
 }
 
@@ -127,32 +165,38 @@ impl Drop for TileOwner {
     }
 }
 
-#[derive(Debug, Clone)]
-struct BackendRecycleHandle {
-    pending_keys: Arc<Mutex<Vec<TileKey>>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingOwnerReclaim {
+    credential: TileCredential,
+    tile_key: Option<TileKey>,
 }
 
-impl BackendRecycleHandle {
+#[derive(Debug, Clone)]
+struct TileOwnerRecycleHandle {
+    pending_reclaims: Arc<Mutex<Vec<PendingOwnerReclaim>>>,
+}
+
+impl TileOwnerRecycleHandle {
     fn new() -> Self {
         Self {
-            pending_keys: Arc::new(Mutex::new(Vec::new())),
+            pending_reclaims: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn enqueue(&self, key: TileKey) {
-        let Ok(mut pending_keys) = self.pending_keys.lock() else {
+    fn enqueue(&self, reclaim: PendingOwnerReclaim) {
+        let Ok(mut pending_reclaims) = self.pending_reclaims.lock() else {
             eprintln!("atlas: failed to lock recycle queue while releasing tile owner");
             return;
         };
-        pending_keys.push(key);
+        pending_reclaims.push(reclaim);
     }
 
-    fn drain(&self) -> Result<Vec<TileKey>, AtlasError> {
-        let mut pending_keys = self
-            .pending_keys
+    fn drain(&self) -> Result<Vec<PendingOwnerReclaim>, AtlasError> {
+        let mut pending_reclaims = self
+            .pending_reclaims
             .lock()
             .map_err(|_| AtlasError::BackendPoisoned)?;
-        Ok(std::mem::take(&mut *pending_keys))
+        Ok(std::mem::take(&mut *pending_reclaims))
     }
 }
 
@@ -401,6 +445,94 @@ impl SlotPool {
 
     fn allocated(&self) -> usize {
         self.next_slot as usize - self.free_list.len()
+    }
+}
+
+#[derive(Debug, Default)]
+struct TileCredentialPool {
+    generations: Vec<u32>,
+    tile_keys: Vec<Option<TileKey>>,
+    free_records: Vec<u32>,
+}
+
+impl TileCredentialPool {
+    fn alloc(&mut self, backend_id: BackendId) -> Result<TileCredential, AtlasError> {
+        let record_index = if let Some(record_index) = self.free_records.pop() {
+            record_index
+        } else {
+            let record_index =
+                u32::try_from(self.generations.len()).map_err(|_| AtlasError::OutOfSlots)?;
+            self.generations.push(0);
+            self.tile_keys.push(None);
+            record_index
+        };
+
+        Ok(encode_tile_credential(
+            backend_id,
+            self.generations[record_index as usize],
+            record_index,
+        ))
+    }
+
+    fn bind(
+        &mut self,
+        credential: TileCredential,
+        backend_id: BackendId,
+        tile_key: TileKey,
+    ) -> Result<(), AtlasError> {
+        let record_index = self.validate_credential(credential, backend_id)?;
+        self.tile_keys[record_index as usize] = Some(tile_key);
+        Ok(())
+    }
+
+    fn clear(
+        &mut self,
+        credential: TileCredential,
+        backend_id: BackendId,
+    ) -> Result<(), AtlasError> {
+        let record_index = self.validate_credential(credential, backend_id)?;
+        self.tile_keys[record_index as usize] = None;
+        Ok(())
+    }
+
+    fn release(
+        &mut self,
+        credential: TileCredential,
+        backend_id: BackendId,
+    ) -> Result<(), AtlasError> {
+        let record_index = self.validate_credential(credential, backend_id)?;
+        self.tile_keys[record_index as usize] = None;
+        self.generations[record_index as usize] =
+            self.generations[record_index as usize].wrapping_add(1) & GENERATION_MASK as u32;
+        self.free_records.push(record_index);
+        Ok(())
+    }
+
+    fn tile_key(
+        &self,
+        credential: TileCredential,
+        backend_id: BackendId,
+    ) -> Result<Option<TileKey>, AtlasError> {
+        let record_index = self.validate_credential(credential, backend_id)?;
+        Ok(self.tile_keys[record_index as usize])
+    }
+
+    fn validate_credential(
+        &self,
+        credential: TileCredential,
+        backend_id: BackendId,
+    ) -> Result<u32, AtlasError> {
+        let parts = decode_tile_credential(credential);
+        if parts.backend_id != backend_id {
+            return Err(AtlasError::WrongBackend);
+        }
+        let Some(generation) = self.generations.get(parts.record_index as usize).copied() else {
+            return Err(AtlasError::InvalidSlot);
+        };
+        if generation != parts.generation {
+            return Err(AtlasError::GenerationMismatch);
+        }
+        Ok(parts.record_index)
     }
 }
 
@@ -743,7 +875,8 @@ impl BackendInner {
 pub struct Backend {
     backend_id: BackendId,
     inner: Arc<Mutex<BackendInner>>,
-    recycle: BackendRecycleHandle,
+    credential_pool: Arc<Mutex<TileCredentialPool>>,
+    recycle: TileOwnerRecycleHandle,
 }
 
 impl Backend {
@@ -755,7 +888,8 @@ impl Backend {
         Self {
             backend_id,
             inner: Arc::new(Mutex::new(BackendInner::new(layout, backend_id))),
-            recycle: BackendRecycleHandle::new(),
+            credential_pool: Arc::new(Mutex::new(TileCredentialPool::default())),
+            recycle: TileOwnerRecycleHandle::new(),
         }
     }
 
@@ -768,7 +902,8 @@ impl Backend {
     }
 
     pub fn empty_owner(&self) -> TileOwner {
-        TileOwner::empty(self.backend_id)
+        self.alloc_empty_owner()
+            .expect("tile credential record space is exhausted")
     }
 
     pub fn layout(&self) -> Result<AtlasLayout, AtlasError> {
@@ -777,7 +912,9 @@ impl Backend {
 
     pub fn alloc_active(&self) -> Result<TileOwner, AtlasError> {
         let key = self.with_inner(|inner| inner.alloc_active())?;
-        Ok(TileOwner::new(self.recycle.clone(), key))
+        let credential = self.alloc_credential()?;
+        self.bind_credential(credential, key)?;
+        Ok(TileOwner::new(self.recycle.clone(), credential, key))
     }
 
     pub fn alloc_cached(&self, count: usize) -> Result<CachedTileGroup, AtlasError> {
@@ -808,7 +945,6 @@ impl Backend {
     ) -> Result<CachedTileGroup, AtlasError> {
         let owners: Vec<TileOwner> = owners.into_iter().collect();
 
-        // Phase 0: validate backend identity (no lock needed).
         for owner in &owners {
             if owner.backend_id() != self.backend_id {
                 return Err(AtlasError::WrongBackend);
@@ -822,10 +958,10 @@ impl Backend {
         // Any ? here returns with all slots still Active, owners drop cleanly.
         let mut slot_indices = Vec::with_capacity(owners.len());
         for owner in &owners {
-            if owner.key.is_empty() {
+            let Some(key) = owner.physical_tile_key() else {
                 continue;
-            }
-            let slot = inner.validate_key(owner.key)?;
+            };
+            let slot = inner.validate_key(key)?;
             if inner.slot_owners[slot as usize] != SlotOwner::Active {
                 return Err(AtlasError::InvalidState);
             }
@@ -849,16 +985,13 @@ impl Backend {
         }
         inner.cache_manager.push_group_queue(group_id);
 
-        // Phase 3: collect keys, then disarm owners so Drop does not recycle
-        // slots that are now Cached.
         let keys: Vec<TileKey> = owners
             .iter()
-            .filter(|o| !o.key.is_empty())
-            .map(|o| o.key)
+            .filter_map(TileOwner::physical_tile_key)
             .collect();
 
-        for owner in owners {
-            let _disarmed = std::mem::ManuallyDrop::new(owner);
+        for mut owner in owners {
+            owner.clear_physical_tile_key();
         }
 
         Ok(CachedTileGroup {
@@ -869,7 +1002,9 @@ impl Backend {
 
     pub fn activate_cached_tile(&self, key: TileKey) -> Result<TileOwner, AtlasError> {
         let key = self.with_inner(|inner| inner.activate_cached_tile(key))?;
-        Ok(TileOwner::new(self.recycle.clone(), key))
+        let credential = self.alloc_credential()?;
+        self.bind_credential(credential, key)?;
+        Ok(TileOwner::new(self.recycle.clone(), credential, key))
     }
 
     pub fn activate_cached_group(
@@ -877,10 +1012,13 @@ impl Backend {
         cached: &CachedTileGroup,
     ) -> Result<Vec<TileOwner>, AtlasError> {
         let keys = self.with_inner(|inner| inner.activate_cached_group(cached))?;
-        Ok(keys
-            .into_iter()
-            .map(|key| TileOwner::new(self.recycle.clone(), key))
-            .collect())
+        let mut owners = Vec::with_capacity(keys.len());
+        for key in keys {
+            let credential = self.alloc_credential()?;
+            self.bind_credential(credential, key)?;
+            owners.push(TileOwner::new(self.recycle.clone(), credential, key));
+        }
+        Ok(owners)
     }
 
     pub fn free(&self, key: TileKey) -> Result<(), AtlasError> {
@@ -903,6 +1041,40 @@ impl Backend {
         self.with_inner(|inner| inner.cached_group_alive(cached))
     }
 
+    fn alloc_empty_owner(&self) -> Result<TileOwner, AtlasError> {
+        self.with_inner(|_| Ok(()))?;
+        let credential = self.alloc_credential()?;
+        Ok(TileOwner::empty(self.recycle.clone(), credential))
+    }
+
+    fn alloc_credential(&self) -> Result<TileCredential, AtlasError> {
+        let mut pool = self
+            .credential_pool
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        pool.alloc(self.backend_id)
+    }
+
+    fn bind_credential(
+        &self,
+        credential: TileCredential,
+        tile_key: TileKey,
+    ) -> Result<(), AtlasError> {
+        let mut pool = self
+            .credential_pool
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        pool.bind(credential, self.backend_id, tile_key)
+    }
+
+    fn clear_credential(&self, credential: TileCredential) -> Result<(), AtlasError> {
+        let mut pool = self
+            .credential_pool
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        pool.clear(credential, self.backend_id)
+    }
+
     fn with_inner<R>(
         &self,
         f: impl FnOnce(&mut BackendInner) -> Result<R, AtlasError>,
@@ -918,8 +1090,19 @@ impl Backend {
 
     fn drain_owned_reclaims(&self, inner: &mut BackendInner) -> Result<(), AtlasError> {
         let mut first_error = None;
-        for key in self.recycle.drain()? {
-            match inner.free_owned_active(key) {
+        for reclaim in self.recycle.drain()? {
+            if let Some(key) = reclaim.tile_key {
+                match inner.free_owned_active(key) {
+                    Ok(()) | Err(AtlasError::GenerationMismatch) | Err(AtlasError::InvalidSlot) => {
+                    }
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+            match self.release_credential(reclaim.credential) {
                 Ok(()) | Err(AtlasError::GenerationMismatch) | Err(AtlasError::InvalidSlot) => {}
                 Err(error) => {
                     if first_error.is_none() {
@@ -932,6 +1115,94 @@ impl Backend {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn release_credential(&self, credential: TileCredential) -> Result<(), AtlasError> {
+        let mut pool = self
+            .credential_pool
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        pool.release(credential, self.backend_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TileManager {
+    backend: Backend,
+}
+
+impl TileManager {
+    pub fn new(backend: Backend) -> Self {
+        Self { backend }
+    }
+
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
+    pub fn backend_id(&self) -> BackendId {
+        self.backend.backend_id()
+    }
+
+    pub fn empty_owner(&self) -> TileOwner {
+        self.backend.empty_owner()
+    }
+
+    pub fn alloc_active(&self) -> Result<TileOwner, AtlasError> {
+        self.backend.alloc_active()
+    }
+
+    pub fn ensure_active_tile(&self, owner: &mut TileOwner) -> Result<TileKey, AtlasError> {
+        if owner.backend_id() != self.backend_id() {
+            return Err(AtlasError::WrongBackend);
+        }
+        if let Some(tile_key) = owner.physical_tile_key() {
+            return Ok(tile_key);
+        }
+
+        let tile_key = self.backend.with_inner(|inner| inner.alloc_active())?;
+        self.backend.bind_credential(owner.credential(), tile_key)?;
+        owner.tile_key = Some(tile_key);
+        Ok(tile_key)
+    }
+
+    pub fn clear_owner(&self, owner: &mut TileOwner) -> Result<(), AtlasError> {
+        if owner.backend_id() != self.backend_id() {
+            return Err(AtlasError::WrongBackend);
+        }
+        if let Some(tile_key) = owner.clear_physical_tile_key() {
+            self.backend.free(tile_key)?;
+        }
+        self.backend.clear_credential(owner.credential())
+    }
+
+    pub fn cache_active_owners(
+        &self,
+        owners: impl IntoIterator<Item = TileOwner>,
+    ) -> Result<CachedTileGroup, AtlasError> {
+        self.backend.cache_active_owners(owners)
+    }
+
+    pub fn activate_cached_group(
+        &self,
+        cached: &CachedTileGroup,
+    ) -> Result<Vec<TileOwner>, AtlasError> {
+        self.backend.activate_cached_group(cached)
+    }
+
+    pub fn resolve(&self, credential: TileCredential) -> Result<Option<TileKey>, AtlasError> {
+        let pool = self
+            .backend
+            .credential_pool
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        pool.tile_key(credential, self.backend_id())
+    }
+}
+
+impl From<Backend> for TileManager {
+    fn from(backend: Backend) -> Self {
+        Self::new(backend)
     }
 }
 
@@ -983,6 +1254,17 @@ const fn encode_tile_key(backend_id: BackendId, generation: u32, slot_index: u32
     TileKey::from_raw(raw)
 }
 
+const fn encode_tile_credential(
+    backend_id: BackendId,
+    generation: u32,
+    record_index: u32,
+) -> TileCredential {
+    let raw = ((backend_id.raw() as u64 & BACKEND_MASK) << BACKEND_SHIFT)
+        | ((generation as u64 & GENERATION_MASK) << GENERATION_SHIFT)
+        | ((record_index as u64 & SLOT_MASK) << SLOT_SHIFT);
+    TileCredential::from_raw(raw)
+}
+
 fn decode_tile_key(key: TileKey) -> TileKeyParts {
     let raw = key.raw();
     TileKeyParts {
@@ -992,11 +1274,20 @@ fn decode_tile_key(key: TileKey) -> TileKeyParts {
     }
 }
 
+fn decode_tile_credential(credential: TileCredential) -> TileCredentialParts {
+    let raw = credential.raw();
+    TileCredentialParts {
+        backend_id: BackendId::new(((raw >> BACKEND_SHIFT) & BACKEND_MASK) as u8),
+        generation: ((raw >> GENERATION_SHIFT) & GENERATION_MASK) as u32,
+        record_index: ((raw >> SLOT_SHIFT) & SLOT_MASK) as u32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AtlasError, AtlasLayout, Backend, BackendId, BackendManager, CacheManager, ClearBatch,
-        TileOwner, TileState, decode_tile_key,
+        TileManager, TileOwner, TileState, decode_tile_credential, decode_tile_key,
     };
 
     #[test]
@@ -1022,6 +1313,58 @@ mod tests {
         );
         assert_eq!(decode_tile_key(first.tile_key()).slot_index, 0);
         assert_eq!(decode_tile_key(second.tile_key()).slot_index, 1);
+    }
+
+    #[test]
+    fn empty_owners_have_distinct_credentials() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
+        let first = backend.empty_owner();
+        let second = backend.empty_owner();
+
+        assert!(first.physical_tile_key().is_none());
+        assert!(second.physical_tile_key().is_none());
+        assert_ne!(first.credential(), second.credential());
+        assert_eq!(first.backend_id(), BackendId::new(2));
+        assert_eq!(second.backend_id(), BackendId::new(2));
+    }
+
+    #[test]
+    fn dropped_empty_owner_recycles_record_with_new_generation() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
+        let first = backend.empty_owner();
+        let first_credential = first.credential();
+        let first_parts = decode_tile_credential(first_credential);
+
+        drop(first);
+
+        let second = backend.empty_owner();
+        let second_parts = decode_tile_credential(second.credential());
+
+        assert_eq!(second_parts.record_index, first_parts.record_index);
+        assert_ne!(second.credential(), first_credential);
+        assert_eq!(
+            backend
+                .credential_pool
+                .lock()
+                .expect("credential pool should lock")
+                .tile_key(first_credential, backend.backend_id()),
+            Err(AtlasError::GenerationMismatch)
+        );
+    }
+
+    #[test]
+    fn tile_manager_resolves_owner_credential_to_physical_key() {
+        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(2));
+        let manager = TileManager::new(backend);
+        let mut owner = manager.empty_owner();
+
+        assert_eq!(manager.resolve(owner.credential()), Ok(None));
+        let tile_key = manager
+            .ensure_active_tile(&mut owner)
+            .expect("active tile should allocate");
+
+        assert_eq!(owner.physical_tile_key(), Some(tile_key));
+        assert_eq!(manager.resolve(owner.credential()), Ok(Some(tile_key)));
     }
 
     #[test]
