@@ -14,7 +14,9 @@ GPU 上的纹理数组（texture array），所有分片的物理载体。图集
 
 英文：backend
 
-图集内的一个独立分配域，由 `BackendId` 标识。每个后端有自己的 `AtlasLayout`（决定其容量和分片槽排布）和独立的 `TileKey` 命名空间。不同后端之间分片不可互相引用。
+图集内的物理分配器，负责分片槽的分配/释放/缓存/激活。由 `BackendId` 标识，每个后端有自己的 `AtlasLayout`。`Backend` 仅操作物理 `TileKey`，不管理逻辑身份。
+
+后端被 `TileManager` 持有，外部不直接调用其分配 API。不同后端之间分片不可互相引用。
 
 ### 笔刷后端
 
@@ -26,9 +28,9 @@ GPU 上的纹理数组（texture array），所有分片的物理载体。图集
 
 英文：atlas tile / tile
 
-图集中的一块 64×64 px 矩形区域（含 1px 双边 gutter），存储真实的像素数据。每个分片由 `TileKey`（= `backend_id` + `generation` + `slot_index`）全局唯一标识。
+图集中的一块 64×64 px 矩形区域（含 1px 双边 gutter），存储真实的像素数据。每个分片由 `TileKey`（= `backend_id` + `generation` + `slot_index`）唯一标识。
 
-分片是资源实体：它关心自己的生命周期状态（Active / Cached / Vacant），不关心"我被哪个槽位引用"。
+`TileKey` 是纯物理坐标，不携带逻辑身份。分片的空/非空状态由凭证层（`TileManager`）通过映射表查询，`TileKey::empty()` 作为未分配的哨兵值仅在后端内部使用。
 
 ### 槽位
 
@@ -37,6 +39,24 @@ GPU 上的纹理数组（texture array），所有分片的物理载体。图集
 文档图像按固定尺寸（62×62 px）规则切分后的一个网格位置。一幅图像的所有槽位构成行列矩阵，每个槽位由其在该图像内的 `tile_index`（`usize`，行优先）唯一确定。
 
 槽位的核心是位置关系——"图像的哪一格"，不持有像素数据。每个槽位引用一个分片作为其当前内容，这个引用由 `TileOwner` 维护，可以随时间变化（分片被淘汰后重新分配新分片，或 resize 后槽位网格本身改变）。
+
+### 凭证
+
+英文：credential / TileCredential
+
+槽位与物理分片之间的逻辑引用。64-bit 编码 `(backend_id, generation, record_index)`，每个槽位持有唯一凭证。凭证不携带物理分配状态 — 两个不同槽位的凭证总是不同的，即使它们都未分配物理分片。
+
+凭证由 `TileManager` 发放和回收，生命周期与 `TileOwner` 绑定（Drop 时回收 `record_index`）。
+
+_Avoid_: tile key (凭证是逻辑身份，TileKey 是物理地址)
+
+### 分片管理器
+
+英文：tile manager / TileManager
+
+后端之上的凭证管理层。1:1 持有 `Backend`，管理 `credential → TileKey` 的映射表（`Vec<TileKey>` 按 `record_index` 索引，empty 表示未分配）。提供统一的分配/缓存/激活 API，对外屏蔽物理分配细节。
+
+_Avoid_: backend manager (TileManager 是凭证层的入口，BackendManager 是后端集合管理器)
 
 ### 分片缓存
 
@@ -47,7 +67,7 @@ GPU 上的纹理数组（texture array），所有分片的物理载体。图集
 - **Active** — 分片正在被读写，不可回收
 - **Cached** — 分片保留像素内容但暂不活跃，LRU 可淘汰
 
-状态的切换通过 `atlas::Backend` 的原子 API 完成（`cache_active_owners`、`activate_cached_group` 等）。
+状态的切换通过 `TileManager` 的原子 API 完成（`cache_active_owners`、`activate_cached_group` 等），底层委托给 `Backend` 执行物理分片的调度。
 
 ### 缓存组
 
