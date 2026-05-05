@@ -160,20 +160,22 @@ impl StrokeTransaction {
 
         let mut commands: Vec<RenderCommand> = backup_result.commands;
         let image = doc.active_layer_image_mut()?;
-        for (entry, record) in plan.entries.iter().zip(self.stroke.touched_tiles()) {
-            let destination_tile_key = image.ensure_active_tile_key(entry.tile_index)?;
-            let origin_tile_key = backup_result
-                .origin_keys
-                .iter()
-                .find(|(idx, _)| *idx == entry.tile_index)
-                .map(|(_, key)| *key)
-                .ok_or(atlas::AtlasError::InvalidState)?;
+        let destination_tile_keys: Vec<_> = plan
+            .entries
+            .iter()
+            .map(|e| image.ensure_active_tile_key(e.tile_index))
+            .collect::<Result<_, _>>()?;
+
+        let touched_tiles = self.stroke.touched_tiles();
+        for i in 0..plan.entries.len() {
+            let record = &touched_tiles[i];
+            let (_, origin_tile_key) = backup_result.origin_keys[i];
             commands.push(RenderCommand::MergeTile(build_merge_command(
                 plan.brush_id,
                 &plan.brush_payload,
                 record.brush_tile_key,
                 origin_tile_key,
-                destination_tile_key,
+                destination_tile_keys[i],
             )));
         }
 
