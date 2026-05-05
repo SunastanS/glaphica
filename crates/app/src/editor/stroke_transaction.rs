@@ -2,7 +2,7 @@ use atlas::{Backend, TileCredential};
 use brush::{BrushInput, BrushStrokeState, build_merge_command};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
-use renderer::{RenderCommand, TileRenderer};
+use renderer::{BrushTileFormat, RenderCommand, TileRenderer};
 
 use crate::AppBrushRegistry;
 use crate::editor::session::EditorSessionError;
@@ -181,27 +181,16 @@ impl StrokeTransaction {
 
         let [image_backend, backup_backend] = image_undo.backends();
         let render_backend = doc_renderer.render_backend();
-        tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend_with_format(device, &brush_backend, brush_tiles_format)?;
-        tile_renderer.ensure_backend(device, backup_backend)?;
-        tile_renderer.ensure_backend(device, render_backend)?;
-
-        let mut clear_batches = image_backend.take_pending_clear_batches()?;
-        clear_batches.extend(brush_backend.take_pending_clear_batches()?);
-        clear_batches.extend(render_backend.take_pending_clear_batches()?);
-        clear_batches.extend(backup_backend.take_pending_clear_batches()?);
-        tile_renderer.execute_commands_with_shader_provider(
+        execute_stroke_commands(
+            tile_renderer,
             device,
             queue,
-            &[
-                image_backend,
-                &brush_backend,
-                render_backend,
-                backup_backend,
-            ],
-            &clear_batches,
+            image_backend,
+            &brush_backend,
+            brush_tiles_format,
+            render_backend,
+            Some(backup_backend),
             &commands,
-            None,
             brushes,
         )?;
 
@@ -241,25 +230,63 @@ impl StrokeTransaction {
             EditorSessionError::BrushNotRegistered(self.stroke.brush_id()),
         )?;
         let brush_tile_fmt = brush_backend.brush_tile_format();
-        let brush_backend = brush_backend.brush_backend();
         let render_backend = doc_renderer.render_backend();
-
-        tile_renderer.ensure_backend(device, image_backend)?;
-        tile_renderer.ensure_backend_with_format(device, brush_backend, brush_tile_fmt)?;
-        tile_renderer.ensure_backend(device, render_backend)?;
-
-        let mut clear_batches = brush_backend.take_pending_clear_batches()?;
-        clear_batches.extend(render_backend.take_pending_clear_batches()?);
-        tile_renderer.execute_commands_with_shader_provider(
+        execute_stroke_commands(
+            tile_renderer,
             device,
             queue,
-            &[image_backend, brush_backend, render_backend],
-            &clear_batches,
-            commands,
+            image_backend,
+            brush_backend.brush_backend(),
+            brush_tile_fmt,
+            render_backend,
             None,
+            commands,
             brushes,
-        )?;
-
-        Ok(())
+        )
     }
+}
+
+fn execute_stroke_commands(
+    tile_renderer: &mut TileRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image_backend: &Backend,
+    brush_backend: &Backend,
+    brush_tile_format: BrushTileFormat,
+    render_backend: &Backend,
+    backup_backend: Option<&Backend>,
+    commands: &[RenderCommand],
+    brushes: &AppBrushRegistry,
+) -> Result<(), EditorSessionError> {
+    tile_renderer.ensure_backend(device, image_backend)?;
+    tile_renderer.ensure_backend_with_format(device, brush_backend, brush_tile_format)?;
+    tile_renderer.ensure_backend(device, render_backend)?;
+    if let Some(backup) = backup_backend {
+        tile_renderer.ensure_backend(device, backup)?;
+    }
+
+    let mut clear_batches = image_backend.take_pending_clear_batches()?;
+    clear_batches.extend(brush_backend.take_pending_clear_batches()?);
+    clear_batches.extend(render_backend.take_pending_clear_batches()?);
+    if let Some(backup) = backup_backend {
+        clear_batches.extend(backup.take_pending_clear_batches()?);
+    }
+
+    let backends = if let Some(backup) = backup_backend {
+        vec![image_backend, brush_backend, render_backend, backup]
+    } else {
+        vec![image_backend, brush_backend, render_backend]
+    };
+
+    tile_renderer.execute_commands_with_shader_provider(
+        device,
+        queue,
+        &backends,
+        &clear_batches,
+        commands,
+        None,
+        brushes,
+    )?;
+
+    Ok(())
 }
