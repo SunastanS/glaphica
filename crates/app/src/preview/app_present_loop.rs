@@ -1,9 +1,13 @@
 use std::time::Duration;
 
 use renderer::RenderTarget2d;
-use ui::UiAction;
+use gla_document::{GlaDoc, GlaDocError, GlaNodeId};
+use ui::{UiAction, UiLayerItem};
 
-use crate::{AppPresentError, ScreenPresentTileError, SurfaceRuntime, present_root_tiles};
+use crate::{
+    AppPresentError, AppRuntimeError, EditorSessionError, ScreenPresentTileError, SurfaceRuntime,
+    present_root_tiles,
+};
 
 use super::{
     MAX_PENDING_BRUSH_INPUTS_PER_FRAME, PreviewRuntimeError, PreviewState,
@@ -92,9 +96,20 @@ impl PreviewState {
                 [layout.size_x(), layout.size_y()]
             })
             .unwrap_or([0, 0]);
+        let layers = self
+            .runtime
+            .as_ref()
+            .map(|runtime| collect_ui_layers(runtime.session().doc()))
+            .transpose()
+            .map_err(|error| {
+                PreviewRuntimeError::Runtime(AppRuntimeError::Session(
+                    EditorSessionError::Document(error),
+                ))
+            })?
+            .unwrap_or_default();
         let ui_output = self
             .ui
-            .paint(&self.window, document_size, self.stroke_active);
+            .paint(&self.window, document_size, &layers, self.stroke_active);
         self.apply_ui_actions(&ui_output.actions)?;
         self.ui_renderer.upload_textures(
             &self.gpu.device,
@@ -226,6 +241,66 @@ impl PreviewState {
                         )?;
                     }
                 }
+                UiAction::CreateLayerRequested => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.create_layer_above_active_gpu(
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                        )?;
+                    }
+                }
+                UiAction::CreateGroupRequested => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.create_group_above_active_gpu(
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                        )?;
+                    }
+                }
+                UiAction::DeleteActiveLayerRequested => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.delete_active_layer_gpu(
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                        )?;
+                    }
+                }
+                UiAction::ActiveLayerChanged(node_id) => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.set_active_layer(*node_id)?;
+                    }
+                }
+                UiAction::LayerOpacityChanged(node_id, opacity) => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.set_layer_opacity_gpu(
+                            *node_id,
+                            *opacity,
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                        )?;
+                    }
+                }
+                UiAction::LayerBlendModeChanged(node_id, blend_mode) => {
+                    self.stroke_active = false;
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.set_layer_blend_mode_gpu(
+                            *node_id,
+                            *blend_mode,
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                        )?;
+                    }
+                }
                 UiAction::RoundBrushSettingsChanged(settings) => {
                     self.stroke_active = false;
                     if let Some(runtime) = self.runtime.as_mut() {
@@ -270,4 +345,34 @@ impl PreviewState {
 
 fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn collect_ui_layers(doc: &GlaDoc) -> Result<Vec<UiLayerItem>, GlaDocError> {
+    let mut output = Vec::new();
+    collect_ui_layer_subtree(doc, doc.root_id(), 0, &mut output)?;
+    Ok(output)
+}
+
+fn collect_ui_layer_subtree(
+    doc: &GlaDoc,
+    node_id: GlaNodeId,
+    depth: usize,
+    output: &mut Vec<UiLayerItem>,
+) -> Result<(), GlaDocError> {
+    let node = doc.node(node_id)?;
+    output.push(UiLayerItem {
+        id: node_id,
+        kind: node.kind(),
+        depth,
+        active: node_id == doc.active_layer_id(),
+        opacity: node.opacity(),
+        blend_mode: node.blend_mode(),
+    });
+
+    if let Some(children) = node.children() {
+        for &child_id in children.iter().rev() {
+            collect_ui_layer_subtree(doc, child_id, depth + 1, output)?;
+        }
+    }
+    Ok(())
 }

@@ -7,5 +7,7 @@ edition = "2024"
 brush = { path = "../brush" }
 egui = "0.33.3"
 egui-winit = "0.33.3"
+gla_document = { path = "../gla_document" }
+glaphica_core = { package = "core", path = "../core" }
 ui_components = { path = "../ui_components" }
 winit = "0.30.13"

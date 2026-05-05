@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use brush::BrushRegistry;
 use brush::round::RoundBrushSettings;
+use gla_document::{GlaDocError, GlaNodeId};
+use glaphica_core::BlendMode;
 use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
 
@@ -45,6 +47,12 @@ impl From<EditorSessionError> for AppRuntimeError {
 impl From<BrushThreadRuntimeError> for AppRuntimeError {
     fn from(error: BrushThreadRuntimeError) -> Self {
         Self::BrushThread(error)
+    }
+}
+
+impl From<GlaDocError> for AppRuntimeError {
+    fn from(error: GlaDocError) -> Self {
+        Self::Session(EditorSessionError::Document(error))
     }
 }
 
@@ -130,6 +138,76 @@ impl AppRuntime {
         Ok(())
     }
 
+    pub fn set_active_layer(&mut self, node_id: GlaNodeId) -> Result<(), AppRuntimeError> {
+        self.cancel_stroke();
+        self.session.doc_mut().set_active_layer(node_id)?;
+        Ok(())
+    }
+
+    pub fn create_layer_above_active_gpu(
+        &mut self,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AppRuntimeError> {
+        self.insert_node_above_active_gpu(false, tile_renderer, device, queue)
+    }
+
+    pub fn create_group_above_active_gpu(
+        &mut self,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AppRuntimeError> {
+        self.insert_node_above_active_gpu(true, tile_renderer, device, queue)
+    }
+
+    pub fn delete_active_layer_gpu(
+        &mut self,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AppRuntimeError> {
+        self.cancel_stroke();
+        let active_id = self.session.doc().active_layer_id();
+        if active_id == self.session.doc().root_id() {
+            return Ok(());
+        }
+        self.session.doc_mut().delete_node(active_id)?;
+        self.refresh_document_gpu(tile_renderer, device, queue)?;
+        Ok(())
+    }
+
+    pub fn set_layer_opacity_gpu(
+        &mut self,
+        node_id: GlaNodeId,
+        opacity: f32,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AppRuntimeError> {
+        self.cancel_stroke();
+        self.session.doc_mut().set_opacity(node_id, opacity)?;
+        self.refresh_document_gpu(tile_renderer, device, queue)?;
+        Ok(())
+    }
+
+    pub fn set_layer_blend_mode_gpu(
+        &mut self,
+        node_id: GlaNodeId,
+        blend_mode: BlendMode,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AppRuntimeError> {
+        self.cancel_stroke();
+        self.session
+            .doc_mut()
+            .set_blend_mode(node_id, blend_mode)?;
+        self.refresh_document_gpu(tile_renderer, device, queue)?;
+        Ok(())
+    }
+
     pub fn begin_active_tool_stroke(&mut self) -> Result<(), AppRuntimeError> {
         self.discard_pending_brush_inputs();
         self.brush_thread.begin_active_stroke_processing();
@@ -157,6 +235,15 @@ impl AppRuntime {
             .prepare_document_gpu(tile_renderer, device, queue)?;
         self.frame_scheduler.schedule_render_update(&update);
         Ok(update)
+    }
+
+    pub fn refresh_document_gpu(
+        &mut self,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<EditorRenderUpdate, AppRuntimeError> {
+        self.prepare_document_gpu(tile_renderer, device, queue)
     }
 
     pub fn push_canvas_input(&self, input: CanvasInput) {
@@ -271,5 +358,36 @@ impl AppRuntime {
             self.frame_scheduler.clear_pending_brush_inputs();
         }
         self.frame_scheduler.clear_pending_brush_inputs();
+    }
+
+    fn insert_node_above_active_gpu(
+        &mut self,
+        group: bool,
+        tile_renderer: &mut TileRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AppRuntimeError> {
+        self.cancel_stroke();
+        let doc = self.session.doc_mut();
+        let active_id = doc.active_layer_id();
+        let (parent_id, insert_index) = match doc.node(active_id)?.parent() {
+            Some(parent_id) => {
+                let index = doc.child_index(parent_id, active_id)?;
+                (parent_id, index + 1)
+            }
+            None => {
+                let root_id = doc.root_id();
+                let index = doc.child_ids(root_id)?.len();
+                (root_id, index)
+            }
+        };
+        let new_id = if group {
+            doc.insert_group(parent_id, insert_index)?
+        } else {
+            doc.insert_layer(parent_id, insert_index)?
+        };
+        doc.set_active_layer(new_id)?;
+        self.refresh_document_gpu(tile_renderer, device, queue)?;
+        Ok(())
     }
 }

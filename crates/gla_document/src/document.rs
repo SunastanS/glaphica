@@ -283,6 +283,14 @@ impl GlaDoc {
             .ok_or(GlaDocError::CannotInsertIntoLeaf(parent_id))
     }
 
+    pub fn child_index(
+        &self,
+        parent_id: GlaNodeId,
+        child_id: GlaNodeId,
+    ) -> Result<usize, GlaDocError> {
+        self.find_child_index(parent_id, child_id)
+    }
+
     pub fn collect_path_to_root(
         &self,
         start_id: GlaNodeId,
