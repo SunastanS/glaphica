@@ -12,12 +12,15 @@ use renderer::{
 
 use crate::AppView;
 
+use crate::display::surface::SurfaceError;
+
 #[derive(Debug)]
 pub enum AppPresentError {
     Document(GlaDocError),
     DocRenderer(GlaDocRendererError),
     Image(GlaImageTileAccessError),
     TileRenderer(TileRendererError),
+    Surface(SurfaceError),
 }
 
 impl Display for AppPresentError {
@@ -27,6 +30,7 @@ impl Display for AppPresentError {
             Self::DocRenderer(error) => Display::fmt(error, f),
             Self::Image(error) => Display::fmt(error, f),
             Self::TileRenderer(error) => Display::fmt(error, f),
+            Self::Surface(error) => Display::fmt(error, f),
         }
     }
 }
@@ -54,6 +58,12 @@ impl From<GlaImageTileAccessError> for AppPresentError {
 impl From<TileRendererError> for AppPresentError {
     fn from(error: TileRendererError) -> Self {
         Self::TileRenderer(error)
+    }
+}
+
+impl From<SurfaceError> for AppPresentError {
+    fn from(error: SurfaceError) -> Self {
+        Self::Surface(error)
     }
 }
 

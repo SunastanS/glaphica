@@ -2,19 +2,18 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::AtlasError;
-use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError};
+use brush::{BrushId, BrushInput, BrushInputError, BrushRegistry, BrushStrokeError};
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
-use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoError, GlaImageUndoTileAction};
+use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoError};
 use gla_image::{GlaImageEnsureActiveTileError, GlaImageTileAccessError};
-use renderer::{RenderCommand, TileRenderer, TileRendererError};
+use renderer::{TileRenderer, TileRendererError};
 
-use crate::AppBrushRegistry;
 use crate::editor::stroke_transaction::StrokeTransaction;
 
 pub struct EditorSession {
     doc: GlaDoc,
     doc_renderer: GlaDocRenderer,
-    brushes: AppBrushRegistry,
+    brushes: BrushRegistry,
     active_stroke_transaction: Option<StrokeTransaction>,
 }
 
@@ -146,7 +145,7 @@ impl EditorRenderUpdate {
 }
 
 impl EditorSession {
-    pub fn new(doc: GlaDoc, doc_renderer: GlaDocRenderer, brushes: AppBrushRegistry) -> Self {
+    pub fn new(doc: GlaDoc, doc_renderer: GlaDocRenderer, brushes: BrushRegistry) -> Self {
         Self {
             doc,
             doc_renderer,
@@ -171,11 +170,11 @@ impl EditorSession {
         &mut self.doc_renderer
     }
 
-    pub fn brushes(&self) -> &AppBrushRegistry {
+    pub fn brushes(&self) -> &BrushRegistry {
         &self.brushes
     }
 
-    pub fn brushes_mut(&mut self) -> &mut AppBrushRegistry {
+    pub fn brushes_mut(&mut self) -> &mut BrushRegistry {
         &mut self.brushes
     }
 
@@ -356,26 +355,9 @@ impl EditorSession {
 
         let backends = self.doc.image_undo().backends();
 
-        let commands = restore
-            .image_restore()
-            .tile_actions()
-            .iter()
-            .filter_map(|action| match action {
-                GlaImageUndoTileAction::RestoreFromBackup { copy_command, .. } => {
-                    Some(RenderCommand::CopyTile(*copy_command))
-                }
-                GlaImageUndoTileAction::Clear { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        let dirty_tile_indices = restore
-            .image_restore()
-            .tile_actions()
-            .iter()
-            .map(|action| match action {
-                GlaImageUndoTileAction::RestoreFromBackup { tile_index, .. }
-                | GlaImageUndoTileAction::Clear { tile_index } => *tile_index,
-            })
-            .collect::<Vec<_>>();
+        let image_restore = restore.image_restore();
+        let commands = image_restore.commands.clone();
+        let dirty_tile_indices = image_restore.tile_indices.clone();
 
         let mut clear_batches = Vec::new();
         for backend in backends {

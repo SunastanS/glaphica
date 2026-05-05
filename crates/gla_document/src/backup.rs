@@ -1,5 +1,5 @@
 use atlas::CachedTileGroup;
-use gla_undo::{GlaImageUndoRestore, GlaImageUndoTileRecord};
+use gla_undo::{GlaImageUndoTileRecord, RestoreResult};
 
 use crate::node::GlaNodeId;
 
@@ -18,7 +18,7 @@ pub struct DocumentUndoStack {
 #[derive(Debug)]
 pub struct GlaDocUndoRestore {
     pub(crate) node_id: GlaNodeId,
-    pub(crate) image_restore: GlaImageUndoRestore,
+    pub(crate) image_restore: RestoreResult,
 }
 
 impl DocumentUndoEntry {
@@ -73,7 +73,7 @@ impl GlaDocUndoRestore {
         self.node_id
     }
 
-    pub fn image_restore(&self) -> &GlaImageUndoRestore {
+    pub fn image_restore(&self) -> &RestoreResult {
         &self.image_restore
     }
 }

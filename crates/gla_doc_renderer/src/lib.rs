@@ -83,39 +83,6 @@ struct RenderCommandBuildStep {
     inputs: Vec<RenderProgramInput>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrepareExecutionError {
-    message: String,
-}
-
-pub trait PrepareExecutor {
-    fn compose_node(
-        &mut self,
-        target_node_id: GlaNodeId,
-        inputs: &[RenderProgramInput],
-    ) -> Result<(), PrepareExecutionError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderExecutionError {
-    message: String,
-}
-
-pub trait RenderExecutor {
-    fn composite_node_tiles(
-        &mut self,
-        target_node_id: GlaNodeId,
-        tile_indices: &[usize],
-        inputs: &[RenderProgramInput],
-    ) -> Result<(), RenderExecutionError>;
-
-    fn present_root_tiles(
-        &mut self,
-        root_node_id: GlaNodeId,
-        tile_indices: &[usize],
-    ) -> Result<(), RenderExecutionError>;
-}
-
 #[derive(Debug)]
 pub enum GlaDocRendererError {
     Document(GlaDocError),
@@ -125,8 +92,6 @@ pub enum GlaDocRendererError {
     ImageCreate(GlaImageCreateError),
     ImageTileAccess(GlaImageTileAccessError),
     TileRenderer(TileRendererError),
-    PrepareExecution(PrepareExecutionError),
-    RenderExecution(RenderExecutionError),
     MissingActivePlan,
 }
 
@@ -140,8 +105,6 @@ impl Display for GlaDocRendererError {
             Self::ImageCreate(error) => Display::fmt(error, f),
             Self::ImageTileAccess(error) => Display::fmt(error, f),
             Self::TileRenderer(error) => Display::fmt(error, f),
-            Self::PrepareExecution(error) => Display::fmt(error, f),
-            Self::RenderExecution(error) => Display::fmt(error, f),
             Self::MissingActivePlan => f.write_str("missing active render plan"),
         }
     }
@@ -206,50 +169,6 @@ impl From<GlaImageTileAccessError> for GlaDocRendererError {
 impl From<TileRendererError> for GlaDocRendererError {
     fn from(error: TileRendererError) -> Self {
         Self::TileRenderer(error)
-    }
-}
-
-impl From<PrepareExecutionError> for GlaDocRendererError {
-    fn from(error: PrepareExecutionError) -> Self {
-        Self::PrepareExecution(error)
-    }
-}
-
-impl From<RenderExecutionError> for GlaDocRendererError {
-    fn from(error: RenderExecutionError) -> Self {
-        Self::RenderExecution(error)
-    }
-}
-
-impl Display for PrepareExecutionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl Error for PrepareExecutionError {}
-
-impl PrepareExecutionError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl Display for RenderExecutionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl Error for RenderExecutionError {}
-
-impl RenderExecutionError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
     }
 }
 
@@ -324,28 +243,6 @@ impl GlaDocRenderer {
         Ok((origin_tile_key, preview_tile_key))
     }
 
-    pub fn render_active_tiles(
-        &self,
-        tile_indices: &[usize],
-        executor: &mut impl RenderExecutor,
-    ) -> Result<(), GlaDocRendererError> {
-        let plan = self
-            .active_plan
-            .as_ref()
-            .ok_or(GlaDocRendererError::MissingActivePlan)?;
-
-        for pass in &plan.passes {
-            executor.composite_node_tiles(pass.node_id, tile_indices, &pass.inputs)?;
-        }
-
-        let root_node_id = *plan
-            .ancestor_chain
-            .last()
-            .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        executor.present_root_tiles(root_node_id, tile_indices)?;
-        Ok(())
-    }
-
     pub fn sync_document(&mut self, doc: &GlaDoc) -> Result<(), GlaDocRendererError> {
         let mut live_render_nodes = Vec::new();
         self.collect_render_nodes(doc, &mut live_render_nodes)?;
@@ -371,10 +268,9 @@ impl GlaDocRenderer {
         Ok(())
     }
 
-    pub fn prepare_active_plan(
+    pub(crate) fn build_active_plan(
         &mut self,
         doc: &GlaDoc,
-        executor: &mut impl PrepareExecutor,
     ) -> Result<&ActiveRenderPlan, GlaDocRendererError> {
         self.sync_document(doc)?;
 
@@ -408,7 +304,6 @@ impl GlaDocRenderer {
         let newly_allocated_nodes = self.promote_active_nodes(doc, &resource_group_nodes)?;
         let prepare_steps =
             self.build_prepare_steps(doc, &resource_group_nodes, &newly_allocated_nodes)?;
-        execute_prepare_steps(&prepare_steps, executor)?;
 
         self.active_plan = Some(ActiveRenderPlan {
             active_layer_id: doc.active_layer_id(),
@@ -428,21 +323,8 @@ impl GlaDocRenderer {
         queue: &wgpu::Queue,
         tile_renderer: &mut TileRenderer,
     ) -> Result<&ActiveRenderPlan, GlaDocRendererError> {
-        struct NoopPrepareExecutor;
-
-        impl PrepareExecutor for NoopPrepareExecutor {
-            fn compose_node(
-                &mut self,
-                _target_node_id: GlaNodeId,
-                _inputs: &[RenderProgramInput],
-            ) -> Result<(), PrepareExecutionError> {
-                Ok(())
-            }
-        }
-
         tile_renderer.ensure_backend(device, &self.render_backend)?;
-        let mut executor = NoopPrepareExecutor;
-        self.prepare_active_plan(doc, &mut executor)?;
+        self.build_active_plan(doc)?;
 
         let slot_count = usize::try_from(doc.layout().total_slots())
             .map_err(|_| GlaImageCreateError::TooManyTiles)?;
@@ -918,16 +800,6 @@ fn build_render_program_inputs(
     Ok(inputs)
 }
 
-fn execute_prepare_steps(
-    prepare_steps: &[PrepareRenderStep],
-    executor: &mut impl PrepareExecutor,
-) -> Result<(), GlaDocRendererError> {
-    for step in prepare_steps {
-        executor.compose_node(step.node_id, &step.inputs)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use atlas::{AtlasLayout, Backend as AtlasBackend};
@@ -937,71 +809,9 @@ mod tests {
     use renderer::{RenderCommand, TileCompositeSource};
 
     use crate::{
-        GlaDocRenderer, PrepareExecutionError, PrepareExecutor, RenderCommandBuildStep,
-        RenderExecutionError, RenderExecutor, RenderImageState, RenderProgramSourceKind,
+        GlaDocRenderer, RenderCommandBuildStep, RenderImageState, RenderProgramSourceKind,
         TargetTileAction, build_composite_command, prepare_target_tile,
     };
-
-    #[derive(Default)]
-    struct NoopPrepareExecutor;
-
-    impl PrepareExecutor for NoopPrepareExecutor {
-        fn compose_node(
-            &mut self,
-            _target_node_id: gla_document::GlaNodeId,
-            _inputs: &[crate::RenderProgramInput],
-        ) -> Result<(), PrepareExecutionError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingPrepareExecutor {
-        calls: Vec<gla_document::GlaNodeId>,
-    }
-
-    impl PrepareExecutor for RecordingPrepareExecutor {
-        fn compose_node(
-            &mut self,
-            target_node_id: gla_document::GlaNodeId,
-            _inputs: &[crate::RenderProgramInput],
-        ) -> Result<(), PrepareExecutionError> {
-            self.calls.push(target_node_id);
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingRenderExecutor {
-        composites: Vec<(
-            gla_document::GlaNodeId,
-            Vec<usize>,
-            Vec<crate::RenderProgramInput>,
-        )>,
-        presents: Vec<(gla_document::GlaNodeId, Vec<usize>)>,
-    }
-
-    impl RenderExecutor for RecordingRenderExecutor {
-        fn composite_node_tiles(
-            &mut self,
-            target_node_id: gla_document::GlaNodeId,
-            tile_indices: &[usize],
-            inputs: &[crate::RenderProgramInput],
-        ) -> Result<(), RenderExecutionError> {
-            self.composites
-                .push((target_node_id, tile_indices.to_vec(), inputs.to_vec()));
-            Ok(())
-        }
-
-        fn present_root_tiles(
-            &mut self,
-            root_node_id: gla_document::GlaNodeId,
-            tile_indices: &[usize],
-        ) -> Result<(), RenderExecutionError> {
-            self.presents.push((root_node_id, tile_indices.to_vec()));
-            Ok(())
-        }
-    }
 
     fn new_doc() -> GlaDoc {
         GlaDoc::new(
@@ -1187,10 +997,9 @@ mod tests {
         doc.set_active_layer(layer_id)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         let plan = renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("active plan should build");
 
         assert_eq!(plan.resource_group_nodes(), &[group_id, doc.root_id()]);
@@ -1223,15 +1032,14 @@ mod tests {
         doc.set_active_layer(left_layer)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("first active plan should build");
         doc.set_active_layer(right_layer)
             .expect("active layer should update");
         renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("second active plan should build");
 
         let left_state = renderer
@@ -1269,10 +1077,9 @@ mod tests {
         doc.set_active_layer(active_layer)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         let plan = renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("active plan should build");
 
         assert_eq!(
@@ -1298,10 +1105,9 @@ mod tests {
         doc.set_active_layer(second)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         let plan = renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("active plan should build");
 
         assert_eq!(plan.passes().len(), 2);
@@ -1328,10 +1134,9 @@ mod tests {
         doc.set_active_layer(layer)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         let plan = renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("active plan should build");
 
         assert_eq!(plan.prepare_steps().len(), 3);
@@ -1362,13 +1167,17 @@ mod tests {
         doc.set_active_layer(layer)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = RecordingPrepareExecutor::default();
 
-        renderer
-            .prepare_active_plan(&doc, &mut executor)
+        let plan = renderer
+            .build_active_plan(&doc)
             .expect("active plan should build");
 
-        assert_eq!(executor.calls, vec![nested, group, doc.root_id()]);
+        let step_ids: Vec<_> = plan
+            .prepare_steps()
+            .iter()
+            .map(|step| step.node_id())
+            .collect();
+        assert_eq!(step_ids, vec![nested, group, doc.root_id()]);
     }
 
     #[test]
@@ -1390,12 +1199,11 @@ mod tests {
             .append_layer(right_group)
             .expect("right layer should append");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         doc.set_active_layer(left_layer)
             .expect("active layer should update");
         renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("left plan should build");
         let cached_tile = renderer
             .render_backend
@@ -1416,7 +1224,7 @@ mod tests {
         doc.set_active_layer(right_layer)
             .expect("active layer should update");
         renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("right plan should build");
         assert_eq!(
             renderer.render_backend.tile_state(cached_tile_key),
@@ -1425,7 +1233,7 @@ mod tests {
         doc.set_active_layer(left_layer)
             .expect("active layer should update");
         renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("left plan should rebuild");
 
         let left_state = renderer
@@ -1455,23 +1263,20 @@ mod tests {
         doc.set_active_layer(second)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut prepare_executor = NoopPrepareExecutor;
-        let mut render_executor = RecordingRenderExecutor::default();
 
-        renderer
-            .prepare_active_plan(&doc, &mut prepare_executor)
+        let plan = renderer
+            .build_active_plan(&doc)
             .expect("active plan should build");
-        renderer
-            .render_active_tiles(&[3], &mut render_executor)
-            .expect("active tiles should render");
 
-        assert_eq!(render_executor.composites.len(), 2);
-        assert_eq!(render_executor.composites[0].0, group);
-        assert_eq!(render_executor.composites[0].1, vec![3]);
-        assert_eq!(render_executor.composites[0].2[0].node_id(), first);
-        assert_eq!(render_executor.composites[0].2[1].node_id(), second);
-        assert_eq!(render_executor.composites[1].0, doc.root_id());
-        assert_eq!(render_executor.presents, vec![(doc.root_id(), vec![3])]);
+        assert_eq!(plan.passes().len(), 2);
+        assert_eq!(plan.passes()[0].node_id(), group);
+        assert_eq!(plan.passes()[0].active_child_index(), 1);
+        assert_eq!(plan.passes()[0].inputs()[0].node_id(), first);
+        assert_eq!(plan.passes()[0].inputs()[1].node_id(), second);
+        assert_eq!(plan.passes()[1].node_id(), doc.root_id());
+        assert_eq!(plan.passes()[1].active_child_index(), 0);
+        let last_ancestor = plan.ancestor_chain().last().copied();
+        assert_eq!(last_ancestor, Some(doc.root_id()));
     }
 
     #[test]
@@ -1498,10 +1303,9 @@ mod tests {
         doc.set_active_layer(second)
             .expect("active layer should update");
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let mut executor = NoopPrepareExecutor;
 
         let plan = renderer
-            .prepare_active_plan(&doc, &mut executor)
+            .build_active_plan(&doc)
             .expect("active plan should build");
         let active_layer_id = plan.active_layer_id();
         let passes: Vec<_> = plan

@@ -1,10 +1,9 @@
 use atlas::{Backend, TileCredential};
-use brush::{BrushInput, BrushStrokeState, build_merge_command};
+use brush::{BrushInput, BrushRegistry, BrushStrokeState, build_merge_command};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
 use renderer::{ApplyDabCommand, BrushTileFormat, MergeTileCommand, RenderCommand, TileRenderer};
 
-use crate::AppBrushRegistry;
 use crate::editor::session::EditorSessionError;
 
 pub struct StrokeTransaction {
@@ -28,7 +27,7 @@ impl StrokeTransaction {
         &mut self,
         doc: &GlaDoc,
         doc_renderer: &mut GlaDocRenderer,
-        brushes: &AppBrushRegistry,
+        brushes: &BrushRegistry,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -120,7 +119,7 @@ impl StrokeTransaction {
         mut self,
         doc: &mut GlaDoc,
         doc_renderer: &mut GlaDocRenderer,
-        brushes: &mut AppBrushRegistry,
+        brushes: &mut BrushRegistry,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -143,7 +142,7 @@ impl StrokeTransaction {
         }
 
         let brush_backend = brushes
-            .brush_backend(brush_id)
+            .backend(brush_id)
             .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
         let brush_tiles_format = brush_backend.brush_tile_format();
         let brush_backend = brush_backend.brush_backend().clone();
@@ -207,7 +206,7 @@ impl StrokeTransaction {
         doc.push_undo_entry(active_layer_id, backup_result.backup_group, tile_records)?;
 
         let brush_backend = brushes
-            .brush_backend_mut(brush_id)
+            .backend_mut(brush_id)
             .ok_or(EditorSessionError::BrushNotRegistered(brush_id))?;
         let _cached_group = brush_backend.archive_stroke(self.stroke)?;
         doc_renderer.clear_brush_preview_image();
@@ -222,14 +221,14 @@ impl StrokeTransaction {
     fn execute_preview_commands_gpu(
         &self,
         doc_renderer: &GlaDocRenderer,
-        brushes: &AppBrushRegistry,
+        brushes: &BrushRegistry,
         image_backend: &Backend,
         tile_renderer: &mut TileRenderer,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         commands: &[RenderCommand],
     ) -> Result<(), EditorSessionError> {
-        let brush_backend = brushes.brush_backend(self.stroke.brush_id()).ok_or(
+        let brush_backend = brushes.backend(self.stroke.brush_id()).ok_or(
             EditorSessionError::BrushNotRegistered(self.stroke.brush_id()),
         )?;
         let brush_tile_fmt = brush_backend.brush_tile_format();
@@ -259,7 +258,7 @@ fn execute_stroke_commands(
     render_backend: &Backend,
     backup_backend: Option<&Backend>,
     commands: &[RenderCommand],
-    brushes: &AppBrushRegistry,
+    brushes: &BrushRegistry,
 ) -> Result<(), EditorSessionError> {
     tile_renderer.ensure_backend(device, image_backend)?;
     tile_renderer.ensure_backend_with_format(device, brush_backend, brush_tile_format)?;

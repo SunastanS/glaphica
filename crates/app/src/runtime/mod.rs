@@ -2,14 +2,14 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
+use brush::BrushRegistry;
 use brush::round::RoundBrushSettings;
 use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
 
 use crate::{
-    ActiveTool, AppBrushRegistry, AppFrameScheduler, AppView, BrushThreadRuntime,
+    ActiveTool, AppFrameScheduler, AppView, BrushThreadRuntime,
     BrushThreadRuntimeError, EditorRenderUpdate, EditorSession, EditorSessionError, ToolSet,
-    brush_registry::AppBrushRegistryUpdateError,
 };
 
 pub struct AppRuntime {
@@ -23,7 +23,6 @@ pub struct AppRuntime {
 pub enum AppRuntimeError {
     Session(EditorSessionError),
     BrushThread(BrushThreadRuntimeError),
-    BrushConfig(AppBrushRegistryUpdateError),
 }
 
 impl Display for AppRuntimeError {
@@ -31,7 +30,6 @@ impl Display for AppRuntimeError {
         match self {
             Self::Session(error) => Display::fmt(error, f),
             Self::BrushThread(error) => Display::fmt(error, f),
-            Self::BrushConfig(error) => Display::fmt(error, f),
         }
     }
 }
@@ -50,12 +48,6 @@ impl From<BrushThreadRuntimeError> for AppRuntimeError {
     }
 }
 
-impl From<AppBrushRegistryUpdateError> for AppRuntimeError {
-    fn from(error: AppBrushRegistryUpdateError) -> Self {
-        Self::BrushConfig(error)
-    }
-}
-
 impl AppRuntime {
     pub fn new(session: EditorSession, brush_thread: BrushThreadRuntime, view: AppView) -> Self {
         Self {
@@ -69,8 +61,8 @@ impl AppRuntime {
     pub fn spawn(
         doc: gla_document::GlaDoc,
         doc_renderer: gla_doc_renderer::GlaDocRenderer,
-        session_brushes: AppBrushRegistry,
-        worker_brushes: AppBrushRegistry,
+        session_brushes: BrushRegistry,
+        worker_brushes: BrushRegistry,
         tool_set: ToolSet,
         active_tool: ActiveTool,
         view: AppView,
@@ -133,7 +125,7 @@ impl AppRuntime {
         self.cancel_stroke();
         self.session
             .brushes_mut()
-            .update_round_brush_settings(settings.clone())?;
+            .update_round_brush_settings(settings.clone());
         self.brush_thread.update_round_brush_settings(settings);
         Ok(())
     }

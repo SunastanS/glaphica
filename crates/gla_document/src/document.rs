@@ -645,8 +645,7 @@ mod tests {
     type TileCopyCommand = CopyTileCommand<TileKey>;
 
     use crate::{
-        GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileAction, GlaImageUndoTileRecord,
-        GlaNodeKind,
+        GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileRecord, GlaNodeKind,
     };
     use glaphica_core::BlendMode;
 
@@ -999,16 +998,9 @@ mod tests {
             .expect("undo entry should exist");
 
         assert_eq!(restore.node_id(), layer_id);
-        assert_eq!(
-            restore.image_restore().tile_actions(),
-            &[GlaImageUndoTileAction::RestoreFromBackup {
-                tile_index: 0,
-                copy_command: TileCopyCommand {
-                    source_tile_key: backup_tile_key,
-                    destination_tile_key: current_tile_key,
-                },
-            }]
-        );
+        let image_restore = restore.image_restore();
+        assert_eq!(image_restore.tile_indices, vec![0]);
+        assert_eq!(image_restore.commands.len(), 1);
     }
 
     #[test]
@@ -1054,10 +1046,9 @@ mod tests {
             .expect("undo should restore")
             .expect("undo entry should exist");
 
-        assert_eq!(
-            restore.image_restore().tile_actions(),
-            &[GlaImageUndoTileAction::Clear { tile_index: 0 }]
-        );
+        let image_restore = restore.image_restore();
+        assert_eq!(image_restore.tile_indices, vec![0]);
+        assert!(image_restore.commands.is_empty());
         assert_eq!(
             doc.active_layer_image()
                 .expect("active image should exist")

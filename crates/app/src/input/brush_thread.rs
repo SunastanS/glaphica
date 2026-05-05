@@ -9,7 +9,8 @@ use std::time::Duration;
 use brush::BrushId;
 use brush::round::RoundBrushSettings;
 
-use crate::AppBrushRegistry;
+use brush::BrushRegistry;
+
 use crate::input::{
     ActiveTool, BrushThreadBrushInputProducer, BrushWorker, BrushWorkerError,
     MainBrushInputConsumer, ToolSet, create_brush_input_channels,
@@ -279,7 +280,7 @@ impl From<BrushWorkerError> for BrushThreadRuntimeError {
 
 impl BrushThreadRuntime {
     pub fn spawn(
-        brushes: AppBrushRegistry,
+        brushes: BrushRegistry,
         tool_set: ToolSet,
         active_tool: ActiveTool,
         canvas_input_capacity: usize,
@@ -547,10 +548,7 @@ fn run_brush_thread(
                         finish_state.store_worker_error(error);
                         return;
                     }
-                    if let Err(error) = worker.update_round_brush_settings(settings) {
-                        finish_state.store_worker_error(error);
-                        return;
-                    }
+                    worker.update_round_brush_settings(settings);
                     stroke_state = WorkerStrokeState::Idle;
                 }
             }
@@ -601,7 +599,7 @@ mod tests {
     #[test]
     fn spawned_runtime_processes_canvas_input_in_background() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(51));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
         let runtime = BrushThreadRuntime::spawn(
             brushes,
             ToolSet::new(vec![Tool::Brush(ROUND_BRUSH_ID)]),
@@ -647,7 +645,7 @@ mod tests {
     #[test]
     fn runtime_preserves_begin_input_finish_command_order() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(53));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
         let runtime = BrushThreadRuntime::spawn(
             brushes,
             ToolSet::new(vec![Tool::Brush(ROUND_BRUSH_ID)]),
@@ -689,7 +687,7 @@ mod tests {
     #[test]
     fn reset_and_cancel_ignore_old_epoch_inputs() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(54));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
         let worker = crate::BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
         let command_queue = std::sync::Arc::new(super::BrushThreadCommandQueue::new(16));
         let (brush_producer, brush_consumer) = crate::create_brush_input_channels(8);
@@ -821,7 +819,7 @@ mod tests {
     #[test]
     fn finish_transitions_worker_to_idle_and_rejects_same_epoch_input_before_reset() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(56));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
         let worker = crate::BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
         let command_queue = std::sync::Arc::new(super::BrushThreadCommandQueue::new(16));
         let (brush_producer, brush_consumer) = crate::create_brush_input_channels(8);
@@ -951,7 +949,7 @@ mod tests {
         worker_batch_capacity: usize,
     ) -> Vec<brush::BrushInput> {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(55));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
         let worker = crate::BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
         let command_queue = std::sync::Arc::new(super::BrushThreadCommandQueue::new(32));
         let (brush_producer, brush_consumer) = crate::create_brush_input_channels(8);
@@ -1014,7 +1012,7 @@ mod tests {
     #[test]
     fn runtime_rejects_active_tool_outside_tool_set() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(52));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
 
         let error = match BrushThreadRuntime::spawn(
             brushes,

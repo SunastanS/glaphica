@@ -1,12 +1,12 @@
-use brush::{BrushId, BrushInputError, BrushStrokeInputProcessor, round::RoundBrushSettings};
+use brush::{BrushId, BrushInputError, BrushRegistry, BrushStrokeInputProcessor, round::RoundBrushSettings};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use crate::input::BrushThreadBrushInputProducer;
-use crate::{AppBrushRegistry, CanvasInput, brush_registry::AppBrushRegistryUpdateError};
+use crate::CanvasInput;
 
 pub struct BrushWorker {
-    brushes: AppBrushRegistry,
+    brushes: BrushRegistry,
     active_brush_id: BrushId,
     active_input_stroke: Box<dyn BrushStrokeInputProcessor>,
 }
@@ -15,7 +15,6 @@ pub struct BrushWorker {
 pub enum BrushWorkerError {
     BrushInput(BrushInputError),
     BrushInit(BrushInputError),
-    BrushConfig(AppBrushRegistryUpdateError),
     BrushNotRegistered(BrushId),
 }
 
@@ -24,7 +23,6 @@ impl Display for BrushWorkerError {
         match self {
             Self::BrushInput(error) => Display::fmt(error, f),
             Self::BrushInit(error) => Display::fmt(error, f),
-            Self::BrushConfig(error) => Display::fmt(error, f),
             Self::BrushNotRegistered(brush_id) => {
                 write!(f, "brush {} is not registered", brush_id.raw())
             }
@@ -40,15 +38,9 @@ impl From<BrushInputError> for BrushWorkerError {
     }
 }
 
-impl From<AppBrushRegistryUpdateError> for BrushWorkerError {
-    fn from(error: AppBrushRegistryUpdateError) -> Self {
-        Self::BrushConfig(error)
-    }
-}
-
 impl BrushWorker {
     pub fn new(
-        brushes: AppBrushRegistry,
+        brushes: BrushRegistry,
         active_brush_id: BrushId,
         _batch_capacity: usize,
     ) -> Result<Self, BrushWorkerError> {
@@ -61,11 +53,11 @@ impl BrushWorker {
         })
     }
 
-    pub fn brushes(&self) -> &AppBrushRegistry {
+    pub fn brushes(&self) -> &BrushRegistry {
         &self.brushes
     }
 
-    pub fn brushes_mut(&mut self) -> &mut AppBrushRegistry {
+    pub fn brushes_mut(&mut self) -> &mut BrushRegistry {
         &mut self.brushes
     }
 
@@ -90,11 +82,11 @@ impl BrushWorker {
     pub fn update_round_brush_settings(
         &mut self,
         settings: RoundBrushSettings,
-    ) -> Result<(), BrushWorkerError> {
-        self.brushes.update_round_brush_settings(settings)?;
+    ) {
+        self.brushes.update_round_brush_settings(settings);
         self.active_input_stroke = begin_input_stroke(&self.brushes, self.active_brush_id)
-            .map_err(map_begin_input_stroke_error)?;
-        Ok(())
+            .map_err(map_begin_input_stroke_error)
+            .expect("existing brush should be re-creatable");
     }
 
     pub fn process_canvas_inputs(
@@ -135,7 +127,7 @@ impl BrushWorker {
 }
 
 fn begin_input_stroke(
-    brushes: &AppBrushRegistry,
+    brushes: &BrushRegistry,
     brush_id: BrushId,
 ) -> Result<Box<dyn BrushStrokeInputProcessor>, BrushInputError> {
     brushes.begin_input_stroke(brush_id)
@@ -164,7 +156,7 @@ mod tests {
     #[test]
     fn worker_process_and_finish_emit_distinct_brush_input_batches() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(41));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
         let (brush_producer, brush_consumer) = create_brush_input_channels(8);
         let mut worker = BrushWorker::new(brushes, ROUND_BRUSH_ID, 16).expect("worker");
         let mut processed_brush_inputs = Vec::new();
@@ -248,7 +240,7 @@ mod tests {
     #[test]
     fn worker_rejects_unknown_active_brush() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(42));
-        let brushes = crate::AppBrushRegistry::with_builtin_round(backend);
+        let brushes = brush::BrushRegistry::with_builtin_round(backend);
 
         let error = match BrushWorker::new(brushes, BrushId::new(999), 4) {
             Ok(_) => panic!("expected unknown brush to be rejected"),

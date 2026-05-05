@@ -156,13 +156,9 @@ impl PreviewState {
         let acquire_frame_started = std::time::Instant::now();
         let frame = {
             puffin::profile_scope!("surface_acquire_frame");
-            self.surface.acquire_frame().map_err(|error| {
-                AppPresentError::DocRenderer(
-                    gla_doc_renderer::GlaDocRendererError::RenderExecution(
-                        gla_doc_renderer::RenderExecutionError::new(error.to_string()),
-                    ),
-                )
-            })?
+            self.surface
+                .acquire_frame()
+                .map_err(AppPresentError::Surface)?
         };
         perf.acquire_frame = acquire_frame_started.elapsed();
 

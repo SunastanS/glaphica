@@ -8,7 +8,7 @@ pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
 use renderer::{
-    BrushShaderSpec, BrushTileFormat, MergeTileCommand,
+    BrushShaderProvider, BrushShaderSpec, BrushTileFormat, MergeTileCommand,
 };
 use smoother::BrushLatencyTraceState;
 
@@ -657,6 +657,48 @@ impl BrushRegistry {
         Self::default()
     }
 
+    pub fn with_builtin_round(brush_backend: Backend) -> Self {
+        Self::with_builtin_round_processor(
+            brush_backend,
+            round::RoundBrushInputProcessor::default(),
+        )
+    }
+
+    pub fn with_builtin_round_settings(
+        brush_backend: Backend,
+        settings: round::RoundBrushSettings,
+    ) -> Self {
+        Self::with_builtin_round_processor(
+            brush_backend,
+            round::RoundBrushInputProcessor::from(settings),
+        )
+    }
+
+    pub fn with_builtin_round_processor(
+        brush_backend: Backend,
+        input_processor: round::RoundBrushInputProcessor,
+    ) -> Self {
+        let mut registry = Self::new();
+        registry
+            .register(
+                round::ROUND_SHADER_REGISTRATION,
+                brush_backend,
+                Box::new(input_processor),
+            )
+            .expect("builtin round backend should register");
+        registry
+    }
+
+    pub fn update_round_brush_settings(
+        &mut self,
+        settings: round::RoundBrushSettings,
+    ) -> bool {
+        self.replace_input_processor(
+            round::ROUND_BRUSH_ID,
+            Box::new(round::RoundBrushInputProcessor::from(settings)),
+        )
+    }
+
     pub fn register(
         &mut self,
         shader_registration: BrushShaderRegistration,
@@ -785,6 +827,12 @@ impl BrushRegistry {
     pub fn merge_payload(&self, brush_id: BrushId) -> Option<Vec<u8>> {
         let processor = self.input_processor(brush_id)?;
         Some(processor.merge_payload())
+    }
+}
+
+impl BrushShaderProvider for BrushRegistry {
+    fn shader_spec(&self, brush_id: BrushId) -> Option<BrushShaderSpec> {
+        self.shader_spec(brush_id)
     }
 }
 

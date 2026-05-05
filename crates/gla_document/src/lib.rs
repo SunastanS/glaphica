@@ -9,8 +9,7 @@ pub use gla_image::{GlaImage, GlaImageCreateError, GlaImageLayout};
 pub use glaphica_core::BlendMode;
 
 pub use gla_undo::{
-    GlaImageUndo, GlaImageUndoBackup, GlaImageUndoError, GlaImageUndoRestore,
-    GlaImageUndoTileAction, GlaImageUndoTileRecord,
+    GlaImageUndo, GlaImageUndoBackup, GlaImageUndoError, GlaImageUndoTileRecord, RestoreResult,
 };
 
 pub use crate::backup::{DocumentUndoStack, GlaDocUndoRestore};

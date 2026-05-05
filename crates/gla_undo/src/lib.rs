@@ -36,21 +36,11 @@ pub struct BackupResult {
     pub origin_keys: Vec<(usize, TileKey)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlaImageUndoRestore {
-    backup_group: CachedTileGroup,
-    tile_actions: Vec<GlaImageUndoTileAction>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlaImageUndoTileAction {
-    RestoreFromBackup {
-        tile_index: usize,
-        copy_command: TileCopyCommand,
-    },
-    Clear {
-        tile_index: usize,
-    },
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoreResult {
+    pub commands: Vec<RenderCommand>,
+    pub backup_group: CachedTileGroup,
+    pub tile_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,33 +247,31 @@ impl GlaImageUndo {
         image: &mut GlaImage,
         backup_group: CachedTileGroup,
         tile_records: &[GlaImageUndoTileRecord],
-    ) -> Result<GlaImageUndoRestore, GlaImageUndoError> {
+    ) -> Result<RestoreResult, GlaImageUndoError> {
         self.validate_image_backend(image)?;
 
-        let mut tile_actions = Vec::with_capacity(tile_records.len());
+        let mut commands = Vec::with_capacity(tile_records.len());
+        let mut tile_indices = Vec::with_capacity(tile_records.len());
         for record in tile_records {
             let source_tile_key = record.backup_tile_key();
             if !source_tile_key.is_empty() {
                 let destination_tile_key = image.ensure_active_tile_key(record.tile_index())?;
-                tile_actions.push(GlaImageUndoTileAction::RestoreFromBackup {
-                    tile_index: record.tile_index(),
-                    copy_command: TileCopyCommand {
-                        source_tile_key,
-                        destination_tile_key,
-                    },
-                });
+                commands.push(RenderCommand::CopyTile(TileCopyCommand {
+                    source_tile_key,
+                    destination_tile_key,
+                }));
+                tile_indices.push(record.tile_index());
                 continue;
             }
 
             image.clear_tile(record.tile_index())?;
-            tile_actions.push(GlaImageUndoTileAction::Clear {
-                tile_index: record.tile_index(),
-            });
+            tile_indices.push(record.tile_index());
         }
 
-        Ok(GlaImageUndoRestore {
+        Ok(RestoreResult {
+            commands,
             backup_group,
-            tile_actions,
+            tile_indices,
         })
     }
 
@@ -341,16 +329,6 @@ impl GlaImageUndoBackup {
         Vec<TileCopyCommand>,
     ) {
         (self.backup_group, self.tile_records, self.copy_commands)
-    }
-}
-
-impl GlaImageUndoRestore {
-    pub fn backup_group(&self) -> &CachedTileGroup {
-        &self.backup_group
-    }
-
-    pub fn tile_actions(&self) -> &[GlaImageUndoTileAction] {
-        &self.tile_actions
     }
 }
 

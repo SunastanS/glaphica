@@ -1,4 +1,3 @@
-mod brush_registry;
 mod display;
 mod editor;
 mod export;
@@ -7,7 +6,6 @@ mod input;
 mod preview;
 mod runtime;
 
-pub use crate::brush_registry::AppBrushRegistry;
 pub use crate::display::{
     AppPresentError, AppView, AppViewMatrixError, ScreenPresentTile, ScreenPresentTileError,
     SurfaceError, SurfaceFrame, SurfaceRuntime, present_root_tiles,
