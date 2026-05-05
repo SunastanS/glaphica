@@ -1,8 +1,8 @@
 use atlas::Backend;
-use brush::{BrushInput, BrushStrokeState};
+use brush::{BrushInput, BrushStrokeError, BrushStrokeState};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError};
-use renderer::{RenderCommand, TileRenderer};
+use renderer::{MergeTileCommand, RenderCommand, TileRenderer};
 
 use crate::AppBrushRegistry;
 use crate::editor::session::EditorSessionError;
@@ -147,10 +147,38 @@ impl StrokeTransaction {
 
         let active_layer_id = doc.active_layer_id();
         let image_undo = doc.image_undo().clone();
-        let batch = {
+        let plan = self.stroke.build_commit_plan(merge_payload);
+
+        let (backup_group, undo_tile_records, commands) = {
             let image = doc.active_layer_image_mut()?;
-            self.stroke
-                .build_commit_batch(image, &image_undo, &tile_indices, merge_payload)?
+            let backup = image_undo
+                .backup_tiles(image, &tile_indices)
+                .map_err(BrushStrokeError::ImageUndo)?;
+            let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
+            let mut commands: Vec<RenderCommand> = copy_commands
+                .into_iter()
+                .map(RenderCommand::CopyTile)
+                .collect();
+
+            for (entry, record) in plan.entries.iter().zip(self.stroke.touched_tiles()) {
+                let destination_tile_key = image
+                    .ensure_active_tile_key(entry.tile_index)
+                    .map_err(BrushStrokeError::from)?;
+                let origin_tile_key = undo_tile_records
+                    .iter()
+                    .find(|r| r.tile_index() == entry.tile_index)
+                    .map(|r| r.backup_tile_key())
+                    .ok_or(atlas::AtlasError::InvalidState)
+                    .map_err(EditorSessionError::Atlas)?;
+                commands.push(RenderCommand::MergeTile(MergeTileCommand {
+                    brush_id: plan.brush_id,
+                    origin_tile_key,
+                    brush_tile_key: record.brush_tile_key,
+                    destination_tile_key,
+                    brush_payload: plan.brush_payload.clone(),
+                }));
+            }
+            (backup_group, undo_tile_records, commands)
         };
 
         let [image_backend, backup_backend] = image_undo.backends();
@@ -174,12 +202,12 @@ impl StrokeTransaction {
                 backup_backend,
             ],
             &clear_batches,
-            &batch.commands,
+            &commands,
             None,
             brushes,
         )?;
 
-        doc.push_undo_entry(active_layer_id, batch.backup_group, batch.tile_records)?;
+        doc.push_undo_entry(active_layer_id, backup_group, undo_tile_records)?;
 
         let brush_backend = brushes
             .brush_backend_mut(brush_id)

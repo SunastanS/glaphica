@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileKey, TileOwner};
+use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileKey, TileOwner};
 use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 use gla_undo::{GlaImageUndo, GlaImageUndoError, GlaImageUndoTileRecord};
 pub use glaphica_core::BrushId;
@@ -199,6 +199,14 @@ impl SparseTileOwners {
         self.backend_id
     }
 
+    fn credential(&self, tile_index: usize) -> Option<TileCredential> {
+        let sparse_index = self
+            .tile_indices
+            .iter()
+            .position(|&stored_tile_index| stored_tile_index == tile_index)?;
+        Some(self.tile_owners.get(sparse_index)?.credential())
+    }
+
     fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
         let sparse_index = self
             .tile_indices
@@ -239,6 +247,10 @@ pub struct BrushTileSet {
 impl BrushTileSet {
     pub fn backend_id(&self) -> BackendId {
         self.tiles.backend_id()
+    }
+
+    pub fn credential(&self, tile_index: usize) -> Option<TileCredential> {
+        self.tiles.credential(tile_index)
     }
 
     pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
@@ -343,6 +355,11 @@ impl From<BrushStrokeError> for BrushInputError {
 pub struct StrokeSlotRecord {
     pub tile_index: usize,
     pub brush_tile_key: TileKey,
+    // TODO: remove brush_tile_key when BrushStrokeState migrates from Backend to TileManager.
+    //       push_apply_dab / push_preview_merge still need immediate TileKey for ApplyDabCommand
+    //       and MergeTileCommand. Once the brush manager is a TileManager, resolve credential
+    //       on demand and drop the cached TileKey.
+    pub brush_credential: TileCredential,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,6 +423,19 @@ pub struct StrokeCommitBatch {
     pub backup_group: CachedTileGroup,
     pub tile_records: Vec<GlaImageUndoTileRecord>,
     pub commands: Vec<RenderCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeCommitPlan {
+    pub brush_id: BrushId,
+    pub brush_payload: Vec<u8>,
+    pub entries: Vec<StrokeCommitPlanEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrokeCommitPlanEntry {
+    pub tile_index: usize,
+    pub brush_credential: TileCredential,
 }
 
 #[derive(Debug)]
@@ -545,9 +575,14 @@ impl BrushStrokeState {
             .brush_tile_set
             .tiles
             .ensure_tile(tile_index, &self.brush_backend)?;
+        let brush_credential = self
+            .brush_tile_set
+            .credential(tile_index)
+            .ok_or(AtlasError::InvalidState)?;
         self.touched_tiles.push(StrokeSlotRecord {
             tile_index,
             brush_tile_key,
+            brush_credential,
         });
         self.touched_tiles
             .last_mut()
@@ -653,6 +688,25 @@ impl BrushStrokeState {
             tile_records: undo_tile_records,
             commands,
         })
+    }
+
+    pub fn build_commit_plan(
+        &self,
+        brush_payload: Vec<u8>,
+    ) -> StrokeCommitPlan {
+        let entries = self
+            .touched_tiles
+            .iter()
+            .map(|record| StrokeCommitPlanEntry {
+                tile_index: record.tile_index,
+                brush_credential: record.brush_credential,
+            })
+            .collect();
+        StrokeCommitPlan {
+            brush_id: self.brush_id,
+            brush_payload,
+            entries,
+        }
     }
 }
 
@@ -1011,6 +1065,59 @@ mod tests {
             tile_1_backup_key.is_empty(),
             "tile 1 was empty in image, should have empty backup key"
         );
+    }
+
+    #[test]
+    fn commit_plan_builds_pure_entries_from_touched_tiles() {
+        let brush_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
+        let mut state =
+            BrushStrokeState::new(BrushId::new(13), brush_backend).expect("state should build");
+        let mut commands = Vec::new();
+        let first_brush_tile = state
+            .push_apply_dab(
+                0,
+                None,
+                encode_round_apply_payload([1.0, 1.0], 2.0, 0.5),
+                &mut commands,
+            )
+            .expect("dab");
+        let second_brush_tile = state
+            .push_apply_dab(
+                3,
+                None,
+                encode_round_apply_payload([4.0, 4.0], 6.0, 1.0),
+                &mut commands,
+            )
+            .expect("dab");
+
+        let plan = state.build_commit_plan(vec![0xAB, 0xCD]);
+
+        assert_eq!(plan.brush_id, BrushId::new(13));
+        assert_eq!(plan.brush_payload, vec![0xAB, 0xCD]);
+        assert_eq!(plan.entries.len(), 2);
+
+        assert_eq!(plan.entries[0].tile_index, 0);
+        assert_eq!(plan.entries[1].tile_index, 3);
+
+        assert_ne!(
+            plan.entries[0].brush_credential,
+            plan.entries[1].brush_credential
+        );
+
+        let record_0 = state
+            .touched_tiles()
+            .iter()
+            .find(|r| r.tile_index == 0)
+            .expect("tile 0 should be touched");
+        let record_3 = state
+            .touched_tiles()
+            .iter()
+            .find(|r| r.tile_index == 3)
+            .expect("tile 3 should be touched");
+        assert_eq!(plan.entries[0].brush_credential, record_0.brush_credential);
+        assert_eq!(plan.entries[1].brush_credential, record_3.brush_credential);
+        assert_eq!(record_0.brush_tile_key, first_brush_tile);
+        assert_eq!(record_3.brush_tile_key, second_brush_tile);
     }
 
     #[test]
