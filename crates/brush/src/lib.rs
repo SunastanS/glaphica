@@ -8,7 +8,7 @@ pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
 use renderer::{
-    ApplyDabCommand, BrushShaderSpec, BrushTileFormat, MergeTileCommand, RenderCommand,
+    BrushShaderSpec, BrushTileFormat, MergeTileCommand,
 };
 use smoother::BrushLatencyTraceState;
 
@@ -356,9 +356,8 @@ pub struct StrokeSlotRecord {
     pub tile_index: usize,
     pub brush_tile_key: TileKey,
     // TODO: remove brush_tile_key when BrushStrokeState migrates from Backend to TileManager.
-    //       push_apply_dab / push_preview_merge still need immediate TileKey for ApplyDabCommand
-    //       and MergeTileCommand. Once the brush manager is a TileManager, resolve credential
-    //       on demand and drop the cached TileKey.
+    //       Then preview_brush_tile_key can return a credential, and the caller resolves
+    //       via TileManager to get the physical key for ApplyDabCommand / MergeTileCommand.
     pub brush_credential: TileCredential,
 }
 
@@ -602,40 +601,17 @@ impl BrushStrokeState {
     pub fn push_apply_dab(
         &mut self,
         tile_index: usize,
-        source_tile_key: Option<TileKey>,
-        brush_payload: Vec<u8>,
-        output: &mut Vec<RenderCommand>,
     ) -> Result<TileKey, BrushStrokeError> {
-        let destination_tile_key = self.ensure_touched_tile(tile_index)?.brush_tile_key;
-        output.push(RenderCommand::ApplyDab(ApplyDabCommand {
-            brush_id: self.brush_id,
-            destination_tile_key,
-            source_tile_key,
-            brush_payload,
-        }));
-        Ok(destination_tile_key)
+        let record = self.ensure_touched_tile(tile_index)?;
+        Ok(record.brush_tile_key)
     }
 
-    pub fn push_preview_merge(
+    pub fn preview_brush_tile_key(
         &self,
         tile_index: usize,
-        origin_tile_key: TileKey,
-        preview_tile_key: TileKey,
-        brush_payload: Vec<u8>,
-        output: &mut Vec<RenderCommand>,
     ) -> Option<TileKey> {
-        let Some(record_index) = self.touched_tile_index(tile_index) else {
-            return None;
-        };
-        let brush_tile_key = self.touched_tiles.get(record_index)?.brush_tile_key;
-        output.push(RenderCommand::MergeTile(MergeTileCommand {
-            brush_id: self.brush_id,
-            origin_tile_key,
-            brush_tile_key,
-            destination_tile_key: preview_tile_key,
-            brush_payload,
-        }));
-        Some(preview_tile_key)
+        let record_index = self.touched_tile_index(tile_index)?;
+        Some(self.touched_tiles.get(record_index)?.brush_tile_key)
     }
 
     pub fn build_commit_plan(
@@ -843,11 +819,23 @@ mod tests {
         let first_payload = encode_round_apply_payload([8.0, 9.0], 10.0, 0.75);
         let second_payload = encode_round_apply_payload([3.0, 4.0], 5.0, 0.25);
         let first = state
-            .push_apply_dab(4, None, first_payload.clone(), &mut commands)
+            .push_apply_dab(4)
             .expect("dab should build");
+        commands.push(RenderCommand::ApplyDab(ApplyDabCommand {
+            brush_id: state.brush_id(),
+            destination_tile_key: first,
+            source_tile_key: None,
+            brush_payload: first_payload.clone(),
+        }));
         let second = state
-            .push_apply_dab(4, Some(first), second_payload.clone(), &mut commands)
+            .push_apply_dab(4)
             .expect("dab should build");
+        commands.push(RenderCommand::ApplyDab(ApplyDabCommand {
+            brush_id: state.brush_id(),
+            destination_tile_key: second,
+            source_tile_key: Some(first),
+            brush_payload: second_payload.clone(),
+        }));
 
         assert_eq!(first, second);
         assert_eq!(state.brush_tiles().tile_key(4), Some(first));
@@ -881,12 +869,7 @@ mod tests {
             BrushStrokeState::new(BrushId::new(9), backend).expect("state should build");
         let mut commands = Vec::new();
         let brush_tile_key = state
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([1.0, 2.0], 3.0, 1.0),
-                &mut commands,
-            )
+            .push_apply_dab(0)
             .expect("dab");
         commands.clear();
         let preview_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(13));
@@ -902,17 +885,18 @@ mod tests {
             hardness: 0.7,
         });
 
-        let returned_tile_key = state
-            .push_preview_merge(
-                0,
-                active_tile_key,
-                preview_tile_key,
-                merge_payload.clone(),
-                &mut commands,
-            )
-            .expect("preview merge should allocate");
+        let returned_brush_tile_key = state
+            .preview_brush_tile_key(0)
+            .expect("preview merge should find brush tile");
+        commands.push(RenderCommand::MergeTile(MergeTileCommand {
+            brush_id: state.brush_id(),
+            origin_tile_key: active_tile_key,
+            brush_tile_key: returned_brush_tile_key,
+            destination_tile_key: preview_tile_key,
+            brush_payload: merge_payload.clone(),
+        }));
 
-        assert_eq!(returned_tile_key, preview_tile_key);
+        assert_eq!(returned_brush_tile_key, brush_tile_key);
         assert_eq!(
             commands,
             vec![RenderCommand::MergeTile(MergeTileCommand {
@@ -944,22 +928,11 @@ mod tests {
         let mut state =
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let image_undo = GlaImageUndo::new(image_backend.clone(), backup_backend);
-        let mut draw_commands = Vec::new();
         let first_brush_tile = state
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([4.0, 4.0], 6.0, 1.0),
-                &mut draw_commands,
-            )
+            .push_apply_dab(0)
             .expect("dab");
         let second_brush_tile = state
-            .push_apply_dab(
-                1,
-                None,
-                encode_round_apply_payload([2.0, 2.0], 5.0, 0.9),
-                &mut draw_commands,
-            )
+            .push_apply_dab(1)
             .expect("dab");
         let merge_payload = encode_round_merge_payload(RoundMergeSettings {
             tint: [0.1, 0.2, 0.3],
@@ -1051,22 +1024,11 @@ mod tests {
         let brush_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let mut state =
             BrushStrokeState::new(BrushId::new(13), brush_backend).expect("state should build");
-        let mut commands = Vec::new();
         let first_brush_tile = state
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([1.0, 1.0], 2.0, 0.5),
-                &mut commands,
-            )
+            .push_apply_dab(0)
             .expect("dab");
         let second_brush_tile = state
-            .push_apply_dab(
-                3,
-                None,
-                encode_round_apply_payload([4.0, 4.0], 6.0, 1.0),
-                &mut commands,
-            )
+            .push_apply_dab(3)
             .expect("dab");
 
         let plan = state.build_commit_plan(vec![0xAB, 0xCD]);
@@ -1109,12 +1071,7 @@ mod tests {
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let mut commands = Vec::new();
         let brush_tile_key = state
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([4.0, 4.0], 8.0, 0.4),
-                &mut commands,
-            )
+            .push_apply_dab(0)
             .expect("dab");
         commands.clear();
         let preview_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(13));
@@ -1130,16 +1087,17 @@ mod tests {
             hardness: 0.7,
         });
 
-        let returned_tile_key = state
-            .push_preview_merge(
-                0,
-                active_tile_key,
-                preview_tile_key,
-                merge_payload.clone(),
-                &mut commands,
-            )
-            .expect("preview merge should allocate");
-        assert_eq!(returned_tile_key, preview_tile_key);
+        let returned_brush_tile_key = state
+            .preview_brush_tile_key(0)
+            .expect("preview merge should find brush tile");
+        commands.push(RenderCommand::MergeTile(MergeTileCommand {
+            brush_id: state.brush_id(),
+            origin_tile_key: active_tile_key,
+            brush_tile_key: returned_brush_tile_key,
+            destination_tile_key: preview_tile_key,
+            brush_payload: merge_payload.clone(),
+        }));
+        assert_eq!(returned_brush_tile_key, brush_tile_key);
 
         assert_eq!(
             commands,
@@ -1163,14 +1121,8 @@ mod tests {
         )
         .expect("backend should build");
         let mut state = brush_backend.begin_stroke();
-        let mut commands = Vec::new();
         let active_tile_key = state
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([4.0, 4.0], 8.0, 0.7),
-                &mut commands,
-            )
+            .push_apply_dab(0)
             .expect("dab");
 
         let cached_group = brush_backend
@@ -1186,12 +1138,7 @@ mod tests {
 
         let mut next_state = brush_backend.begin_stroke();
         let next_tile_key = next_state
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([1.0, 1.0], 2.0, 0.5),
-                &mut Vec::new(),
-            )
+            .push_apply_dab(0)
             .expect("next dab");
         assert_ne!(next_tile_key, active_tile_key);
         assert_eq!(backend.tile_state(next_tile_key), Ok(TileState::Active));
@@ -1219,12 +1166,7 @@ mod tests {
             .begin_stroke(brush_id)
             .expect("stroke should build");
         let tile_key = stroke
-            .push_apply_dab(
-                0,
-                None,
-                encode_round_apply_payload([2.0, 3.0], 4.0, 0.6),
-                &mut Vec::new(),
-            )
+            .push_apply_dab(0)
             .expect("dab");
         let backend = registry
             .backend_mut(brush_id)

@@ -2,7 +2,7 @@ use atlas::{Backend, TileCredential};
 use brush::{BrushInput, BrushStrokeState, build_merge_command};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
-use renderer::{BrushTileFormat, RenderCommand, TileRenderer};
+use renderer::{ApplyDabCommand, BrushTileFormat, MergeTileCommand, RenderCommand, TileRenderer};
 
 use crate::AppBrushRegistry;
 use crate::editor::session::EditorSessionError;
@@ -66,12 +66,13 @@ impl StrokeTransaction {
                     let source_tile_key = self.stroke.brush_tiles().tile_key(tile_index);
                     let apply_payload =
                         brushes.encode_apply_dab_payload(input, block_index, tile_origin)?;
-                    self.stroke.push_apply_dab(
-                        tile_index,
+                    let destination_tile_key = self.stroke.push_apply_dab(tile_index)?;
+                    commands.push(RenderCommand::ApplyDab(ApplyDabCommand {
+                        brush_id: self.stroke.brush_id(),
+                        destination_tile_key,
                         source_tile_key,
-                        apply_payload,
-                        &mut commands,
-                    )?;
+                        brush_payload: apply_payload,
+                    }));
                     dirty_tile_indices.push(tile_index);
                 }
             }
@@ -91,13 +92,15 @@ impl StrokeTransaction {
         for &tile_index in &dirty_tile_indices {
             let (origin_tile_key, preview_tile_key) =
                 doc_renderer.ensure_brush_preview_merge_target(doc, tile_index)?;
-            self.stroke.push_preview_merge(
-                tile_index,
-                origin_tile_key,
-                preview_tile_key,
-                merge_payload.clone(),
-                &mut commands,
-            );
+            if let Some(brush_tile_key) = self.stroke.preview_brush_tile_key(tile_index) {
+                commands.push(RenderCommand::MergeTile(MergeTileCommand {
+                    brush_id: self.stroke.brush_id(),
+                    origin_tile_key,
+                    brush_tile_key,
+                    destination_tile_key: preview_tile_key,
+                    brush_payload: merge_payload.clone(),
+                }));
+            }
         }
 
         self.execute_preview_commands_gpu(
