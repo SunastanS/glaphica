@@ -143,14 +143,12 @@ impl PreviewState {
                     width: self.screen_present.texture().width,
                     height: self.screen_present.texture().height,
                 };
-                if dirty_tile_indices.len() == self.full_tile_indices.len() {
-                    self.tile_renderer.clear_render_target(
-                        &self.gpu.device,
-                        &self.gpu.queue,
-                        screen_present_target,
-                        DEFAULT_BACKGROUND_COLOR,
-                    );
-                }
+                self.tile_renderer.clear_render_target(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    screen_present_target,
+                    DEFAULT_BACKGROUND_COLOR,
+                );
                 let Some(runtime) = self.runtime.as_ref() else {
                     return Ok(());
                 };
@@ -162,7 +160,7 @@ impl PreviewState {
                     &self.gpu.queue,
                     runtime.view(),
                     screen_present_target,
-                    &dirty_tile_indices,
+                    &self.full_tile_indices,
                 )?;
             }
             perf.update_cache = update_cache_started.elapsed();
