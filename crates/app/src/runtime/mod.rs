@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use brush::BrushRegistry;
 use brush::round::RoundBrushSettings;
-use gla_document::{GlaDocError, GlaNodeId};
+use gla_document::{GlaDocError, GlaNodeId, GlaNodeKind};
 use glaphica_core::BlendMode;
 use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
@@ -118,6 +118,13 @@ impl AppRuntime {
 
     pub fn active_tool(&self) -> ActiveTool {
         self.brush_thread.active_tool()
+    }
+
+    pub fn active_layer_is_paintable(&self) -> bool {
+        self.session
+            .doc()
+            .active_layer()
+            .is_ok_and(|node| matches!(node.kind(), GlaNodeKind::Leaf))
     }
 
     pub fn set_active_tool(&self, active_tool: ActiveTool) -> Result<(), AppRuntimeError> {

@@ -75,6 +75,12 @@ impl PreviewState {
                     if !self.stroke_active
                         && let Some(runtime) = self.runtime.as_mut()
                     {
+                        if !runtime.active_layer_is_paintable() {
+                            return Ok(coalesce_redraw(
+                                PreviewEventAction::None,
+                                ui_requested_repaint,
+                            ));
+                        }
                         runtime.begin_active_tool_stroke()?;
                         self.stroke_active = true;
                         self.push_cursor_input();

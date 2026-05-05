@@ -7,7 +7,6 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use atlas::Backend;
 use renderer::{EguiRenderer, GpuContext, TileRenderer};
 use ui::AppUi;
 use winit::application::ApplicationHandler;
@@ -208,7 +207,6 @@ struct PreviewState {
     tile_renderer: TileRenderer,
     ui_renderer: EguiRenderer,
     ui: AppUi,
-    image_backend: Backend,
     full_tile_indices: Vec<usize>,
     started_at: Instant,
     cursor_position: Option<glaphica_core::ScreenVec2>,

@@ -112,7 +112,6 @@ impl PreviewState {
             tile_renderer,
             ui_renderer,
             ui,
-            image_backend,
             full_tile_indices,
             started_at: Instant::now(),
             cursor_position: None,
