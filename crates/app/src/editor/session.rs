@@ -4,7 +4,8 @@ use std::fmt::{Display, Formatter};
 use atlas::AtlasError;
 use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError};
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
-use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoTileAction};
+use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoError, GlaImageUndoTileAction};
+use gla_image::GlaImageEnsureActiveTileError;
 use renderer::{RenderCommand, TileRenderer, TileRendererError};
 
 use crate::AppBrushRegistry;
@@ -98,6 +99,18 @@ impl From<TileRendererError> for EditorSessionError {
 impl From<AtlasError> for EditorSessionError {
     fn from(error: AtlasError) -> Self {
         Self::Atlas(error)
+    }
+}
+
+impl From<GlaImageUndoError> for EditorSessionError {
+    fn from(error: GlaImageUndoError) -> Self {
+        Self::Brush(BrushStrokeError::ImageUndo(error))
+    }
+}
+
+impl From<GlaImageEnsureActiveTileError> for EditorSessionError {
+    fn from(error: GlaImageEnsureActiveTileError) -> Self {
+        Self::Brush(error.into())
     }
 }
 

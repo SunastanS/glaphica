@@ -1,5 +1,5 @@
 use atlas::Backend;
-use brush::{BrushInput, BrushStrokeError, BrushStrokeState};
+use brush::{BrushInput, BrushStrokeState};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError};
 use renderer::{MergeTileCommand, RenderCommand, TileRenderer};
@@ -152,8 +152,7 @@ impl StrokeTransaction {
         let (backup_group, undo_tile_records, commands) = {
             let image = doc.active_layer_image_mut()?;
             let backup = image_undo
-                .backup_tiles(image, &tile_indices)
-                .map_err(BrushStrokeError::ImageUndo)?;
+                .backup_tiles(image, &tile_indices)?;
             let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
             let mut commands: Vec<RenderCommand> = copy_commands
                 .into_iter()
@@ -162,8 +161,7 @@ impl StrokeTransaction {
 
             for (entry, record) in plan.entries.iter().zip(self.stroke.touched_tiles()) {
                 let destination_tile_key = image
-                    .ensure_active_tile_key(entry.tile_index)
-                    .map_err(BrushStrokeError::from)?;
+                    .ensure_active_tile_key(entry.tile_index)?;
                 let origin_tile_key = undo_tile_records
                     .iter()
                     .find(|r| r.tile_index() == entry.tile_index)

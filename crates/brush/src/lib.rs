@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileKey, TileOwner};
-use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
-use gla_undo::{GlaImageUndo, GlaImageUndoError, GlaImageUndoTileRecord};
+use gla_image::{GlaImageEnsureActiveTileError, GlaImageTileAccessError};
+use gla_undo::GlaImageUndoError;
 pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
@@ -419,13 +419,6 @@ impl From<GlaImageEnsureActiveTileError> for BrushStrokeError {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct StrokeCommitBatch {
-    pub backup_group: CachedTileGroup,
-    pub tile_records: Vec<GlaImageUndoTileRecord>,
-    pub commands: Vec<RenderCommand>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct StrokeCommitPlan {
     pub brush_id: BrushId,
     pub brush_payload: Vec<u8>,
@@ -628,68 +621,6 @@ impl BrushStrokeState {
         Some(preview_tile_key)
     }
 
-    pub fn build_commit_batch(
-        &mut self,
-        image: &mut GlaImage,
-        image_undo: &GlaImageUndo,
-        tile_indices: &[usize],
-        brush_payload: Vec<u8>,
-    ) -> Result<StrokeCommitBatch, BrushStrokeError> {
-        let image_backend_id = image_undo.image_backend_id();
-        let actual_backend_id = image.backend_id();
-        if actual_backend_id != image_backend_id {
-            return Err(BrushStrokeError::WrongImageBackend {
-                expected: image_backend_id,
-                actual: actual_backend_id,
-            });
-        }
-
-        let touched_tile_indices = tile_indices
-            .iter()
-            .copied()
-            .filter(|&tile_index| {
-                self.touched_tiles
-                    .iter()
-                    .any(|r| r.tile_index == tile_index)
-            })
-            .collect::<Vec<_>>();
-
-        let backup = image_undo.backup_tiles(image, &touched_tile_indices)?;
-        let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
-        let mut commands = copy_commands
-            .into_iter()
-            .map(RenderCommand::CopyTile)
-            .collect::<Vec<_>>();
-
-        for undo_record in &undo_tile_records {
-            let tile_index = undo_record.tile_index();
-            let record = self
-                .touched_tiles
-                .iter()
-                .find(|r| r.tile_index == tile_index)
-                .ok_or(AtlasError::InvalidState)?;
-            let destination_tile_key = image.ensure_active_tile_key(tile_index)?;
-
-            commands.push(RenderCommand::MergeTile(MergeTileCommand {
-                brush_id: self.brush_id,
-                origin_tile_key: undo_record.backup_tile_key(),
-                brush_tile_key: record.brush_tile_key,
-                destination_tile_key,
-                // Each MergeTileCommand holds an identical copy of the payload. The number of tiles
-                // per stroke is small (10–100) and the payload is a shader uniform (hundreds of
-                // bytes). Moving to Arc<Vec<u8>> would make MergeTileCommand asymmetric with
-                // ApplyDabCommand (which carries per-dab unique payloads) for negligible gain.
-                brush_payload: brush_payload.clone(),
-            }));
-        }
-
-        Ok(StrokeCommitBatch {
-            backup_group,
-            tile_records: undo_tile_records,
-            commands,
-        })
-    }
-
     pub fn build_commit_plan(
         &self,
         brush_payload: Vec<u8>,
@@ -879,7 +810,7 @@ mod tests {
         BrushBackend, BrushId, BrushRegistry, BrushShaderRegistration, BrushStrokeState,
         CanvasInput,
     };
-    use atlas::{Backend, TileKey};
+    use atlas::Backend;
     use gla_image::{GlaImage, GlaImageLayout};
     use gla_undo::GlaImageUndo;
 
@@ -976,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_batch_copies_non_empty_active_tiles_before_merge() {
+    fn commit_plan_executes_backup_then_merge() {
         let brush_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
         let image_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
         let backup_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(5));
@@ -1019,31 +950,53 @@ mod tests {
             hardness: 0.7,
         });
 
-        let batch = state
-            .build_commit_batch(&mut image, &image_undo, &[1, 0], merge_payload.clone())
-            .expect("commit batch should build");
+        let plan = state.build_commit_plan(merge_payload.clone());
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.brush_id, BrushId::new(11));
+
+        let tile_indices: Vec<usize> =
+            state.touched_tiles().iter().map(|r| r.tile_index).collect();
+        let backup = image_undo
+            .backup_tiles(&image, &tile_indices)
+            .expect("backup should succeed");
+        let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
+        let mut commands: Vec<RenderCommand> = copy_commands
+            .into_iter()
+            .map(RenderCommand::CopyTile)
+            .collect();
+
+        for (entry, record) in plan.entries.iter().zip(state.touched_tiles()) {
+            let destination_tile_key = image
+                .ensure_active_tile_key(entry.tile_index)
+                .expect("tile should activate");
+            let origin_tile_key = undo_tile_records
+                .iter()
+                .find(|r| r.tile_index() == entry.tile_index)
+                .map(|r| r.backup_tile_key())
+                .expect("undo record should exist");
+            commands.push(RenderCommand::MergeTile(MergeTileCommand {
+                brush_id: plan.brush_id,
+                origin_tile_key,
+                brush_tile_key: record.brush_tile_key,
+                destination_tile_key,
+                brush_payload: plan.brush_payload.clone(),
+            }));
+        }
+        drop(backup_group);
 
         let second_active_key = image.tile_key(1).expect("tile key should exist");
         assert!(!second_active_key.is_empty());
-        let tile_0_backup_key = batch
-            .tile_records
+        let tile_0_backup_key = undo_tile_records
             .iter()
             .find(|r| r.tile_index() == 0)
             .map(|r| r.backup_tile_key())
             .expect("tile 0 should have a backup key");
         assert_eq!(
-            batch.commands,
+            commands,
             vec![
                 RenderCommand::CopyTile(CopyTileCommand {
                     source_tile_key: first_active_key,
                     destination_tile_key: tile_0_backup_key,
-                }),
-                RenderCommand::MergeTile(MergeTileCommand {
-                    brush_id: BrushId::new(11),
-                    origin_tile_key: image_undo.backup_backend().empty_tile_key(),
-                    brush_tile_key: second_brush_tile,
-                    destination_tile_key: second_active_key,
-                    brush_payload: merge_payload.clone(),
                 }),
                 RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: BrushId::new(11),
@@ -1052,11 +1005,16 @@ mod tests {
                     destination_tile_key: first_active_key,
                     brush_payload: merge_payload.clone(),
                 }),
+                RenderCommand::MergeTile(MergeTileCommand {
+                    brush_id: BrushId::new(11),
+                    origin_tile_key: image_undo.backup_backend().empty_tile_key(),
+                    brush_tile_key: second_brush_tile,
+                    destination_tile_key: second_active_key,
+                    brush_payload: merge_payload.clone(),
+                }),
             ]
         );
-        // Verify backup keys via batch.tile_records (the authoritative source from undo)
-        let tile_1_backup_key = batch
-            .tile_records
+        let tile_1_backup_key = undo_tile_records
             .iter()
             .find(|r| r.tile_index() == 1)
             .map(|r| r.backup_tile_key())
