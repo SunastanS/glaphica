@@ -1,5 +1,5 @@
 use glaphica_core::{RadianVec2, ScreenVec2};
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::Key;
 
 use super::{
@@ -45,7 +45,12 @@ impl PreviewState {
                 ))
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_position = Some(ScreenVec2::new(position.x as f32, position.y as f32));
+                let position = ScreenVec2::new(position.x as f32, position.y as f32);
+                self.cursor_position = Some(position);
+                if self.middle_pan_active {
+                    self.pan_view_to(position)?;
+                    return Ok(PreviewEventAction::RequestRedraw);
+                }
                 if self.stroke_active && !ui_event_consumed {
                     self.push_cursor_input();
                     return Ok(PreviewEventAction::RequestRedraw);
@@ -91,6 +96,39 @@ impl PreviewState {
                     Ok(PreviewEventAction::RequestRedraw)
                 }
             },
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                match state {
+                    ElementState::Pressed if !ui_event_consumed => {
+                        self.middle_pan_active = true;
+                        self.middle_pan_last_position = self.cursor_position;
+                    }
+                    ElementState::Released => {
+                        self.middle_pan_active = false;
+                        self.middle_pan_last_position = None;
+                    }
+                    ElementState::Pressed => {}
+                }
+                Ok(PreviewEventAction::RequestRedraw)
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if ui_event_consumed {
+                    return Ok(coalesce_redraw(
+                        PreviewEventAction::None,
+                        ui_requested_repaint,
+                    ));
+                }
+                if self.zoom_view_at_cursor(&delta)? {
+                    return Ok(PreviewEventAction::RequestRedraw);
+                }
+                Ok(coalesce_redraw(
+                    PreviewEventAction::None,
+                    ui_requested_repaint,
+                ))
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -164,6 +202,50 @@ impl PreviewState {
         );
     }
 
+    fn pan_view_to(&mut self, position: ScreenVec2) -> Result<(), PreviewRuntimeError> {
+        let Some(last_position) = self.middle_pan_last_position else {
+            self.middle_pan_last_position = Some(position);
+            return Ok(());
+        };
+        let dx = position.x - last_position.x;
+        let dy = position.y - last_position.y;
+        self.middle_pan_last_position = Some(position);
+        if dx.abs() <= f32::EPSILON && dy.abs() <= f32::EPSILON {
+            return Ok(());
+        }
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.view_mut().translate_screen(dx, dy)?;
+            runtime
+                .frame_scheduler_mut()
+                .schedule_tile_indices(&self.full_tile_indices);
+        }
+        Ok(())
+    }
+
+    fn zoom_view_at_cursor(
+        &mut self,
+        delta: &MouseScrollDelta,
+    ) -> Result<bool, PreviewRuntimeError> {
+        let scroll_lines = scroll_delta_lines(delta);
+        if scroll_lines.abs() <= f32::EPSILON {
+            return Ok(false);
+        }
+        let center = self.cursor_position.unwrap_or_else(|| {
+            ScreenVec2::new(
+                self.surface.width() as f32 * 0.5,
+                self.surface.height() as f32 * 0.5,
+            )
+        });
+        if let Some(runtime) = self.runtime.as_mut() {
+            let scale = (scroll_lines * 0.12).exp().clamp(0.05, 20.0);
+            runtime.view_mut().scale_about_screen_point(scale, center)?;
+            runtime
+                .frame_scheduler_mut()
+                .schedule_tile_indices(&self.full_tile_indices);
+        }
+        Ok(true)
+    }
+
     fn elapsed_time_ns(&self) -> u64 {
         let nanos = self.started_at.elapsed().as_nanos();
         nanos.min(u128::from(u64::MAX)) as u64
@@ -176,6 +258,13 @@ impl PreviewState {
         {
             eprintln!("preview shutdown failed: {error}");
         }
+    }
+}
+
+fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => *y,
+        MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
     }
 }
 

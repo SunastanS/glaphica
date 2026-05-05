@@ -116,6 +116,8 @@ impl PreviewState {
             full_tile_indices,
             started_at: Instant::now(),
             cursor_position: None,
+            middle_pan_active: false,
+            middle_pan_last_position: None,
             modifiers: winit::keyboard::ModifiersState::default(),
             stroke_active: false,
             perf_trace,

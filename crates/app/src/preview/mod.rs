@@ -212,6 +212,8 @@ struct PreviewState {
     full_tile_indices: Vec<usize>,
     started_at: Instant,
     cursor_position: Option<glaphica_core::ScreenVec2>,
+    middle_pan_active: bool,
+    middle_pan_last_position: Option<glaphica_core::ScreenVec2>,
     modifiers: ModifiersState,
     stroke_active: bool,
     perf_trace: app_present_loop::PreviewPerfTraceConfig,

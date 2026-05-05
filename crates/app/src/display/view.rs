@@ -92,6 +92,37 @@ impl AppView {
     pub fn screen_to_document_point(&self, point: ScreenVec2) -> CanvasVec2 {
         transform_point(self.screen_to_document, point.x, point.y)
     }
+
+    pub fn translate_screen(&mut self, dx: f32, dy: f32) -> Result<(), AppViewMatrixError> {
+        let mut matrix = self.document_to_screen;
+        matrix[4] += dx;
+        matrix[5] += dy;
+        self.set_document_to_screen(matrix)
+    }
+
+    pub fn scale_about_screen_point(
+        &mut self,
+        scale: f32,
+        center: ScreenVec2,
+    ) -> Result<(), AppViewMatrixError> {
+        if !scale.is_finite() || scale <= f32::EPSILON {
+            return Err(AppViewMatrixError::NonInvertible);
+        }
+        let mut matrix = self.document_to_screen;
+        matrix[0] *= scale;
+        matrix[1] *= scale;
+        matrix[2] *= scale;
+        matrix[3] *= scale;
+        matrix[4] = center.x + (matrix[4] - center.x) * scale;
+        matrix[5] = center.y + (matrix[5] - center.y) * scale;
+        self.set_document_to_screen(matrix)
+    }
+
+    pub fn uniform_scale(&self) -> f32 {
+        (self.document_to_screen[0].hypot(self.document_to_screen[1])
+            + self.document_to_screen[2].hypot(self.document_to_screen[3]))
+            * 0.5
+    }
 }
 
 fn transform_point<S>(matrix: [f32; 6], x: f32, y: f32) -> glaphica_core::Vec2<S> {
@@ -143,5 +174,24 @@ mod tests {
     fn non_invertible_matrix_is_rejected() {
         let result = AppView::new([1.0, 2.0, 2.0, 4.0, 0.0, 0.0]);
         assert_eq!(result, Err(AppViewMatrixError::NonInvertible));
+    }
+
+    #[test]
+    fn translate_screen_offsets_document_to_screen_mapping() {
+        let mut view = AppView::identity();
+        view.translate_screen(10.0, -5.0).unwrap();
+        assert_eq!(
+            view.document_to_screen_point(CanvasVec2::new(3.0, 4.0)),
+            ScreenVec2::new(13.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn scale_about_screen_point_keeps_anchor_stable() {
+        let mut view = AppView::identity();
+        let anchor_screen = ScreenVec2::new(100.0, 80.0);
+        let anchor_doc = view.screen_to_document_point(anchor_screen);
+        view.scale_about_screen_point(2.0, anchor_screen).unwrap();
+        assert_eq!(view.document_to_screen_point(anchor_doc), anchor_screen);
     }
 }
