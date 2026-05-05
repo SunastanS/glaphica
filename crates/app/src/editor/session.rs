@@ -5,7 +5,7 @@ use atlas::AtlasError;
 use brush::{BrushId, BrushInput, BrushInputError, BrushStrokeError};
 use gla_doc_renderer::{GlaDocRenderer, GlaDocRendererError};
 use gla_document::{GlaDoc, GlaDocError, GlaDocUndoError, GlaImageUndoError, GlaImageUndoTileAction};
-use gla_image::GlaImageEnsureActiveTileError;
+use gla_image::{GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 use renderer::{RenderCommand, TileRenderer, TileRendererError};
 
 use crate::AppBrushRegistry;
@@ -111,6 +111,12 @@ impl From<GlaImageUndoError> for EditorSessionError {
 impl From<GlaImageEnsureActiveTileError> for EditorSessionError {
     fn from(error: GlaImageEnsureActiveTileError) -> Self {
         Self::Brush(error.into())
+    }
+}
+
+impl From<GlaImageTileAccessError> for EditorSessionError {
+    fn from(error: GlaImageTileAccessError) -> Self {
+        Self::Brush(BrushStrokeError::Image(error))
     }
 }
 

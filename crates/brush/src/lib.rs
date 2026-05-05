@@ -431,6 +431,23 @@ pub struct StrokeCommitPlanEntry {
     pub brush_credential: TileCredential,
 }
 
+#[must_use]
+pub fn build_merge_command(
+    brush_id: BrushId,
+    brush_payload: &[u8],
+    brush_tile_key: TileKey,
+    origin_tile_key: TileKey,
+    destination_tile_key: TileKey,
+) -> MergeTileCommand {
+    MergeTileCommand {
+        brush_id,
+        origin_tile_key,
+        brush_tile_key,
+        destination_tile_key,
+        brush_payload: brush_payload.to_vec(),
+    }
+}
+
 #[derive(Debug)]
 pub struct BrushBackend {
     brush_id: BrushId,
@@ -797,11 +814,13 @@ impl BrushRegistry {
 
 #[cfg(test)]
 mod tests {
-    use atlas::{AtlasLayout, BackendId, TileState};
+    use atlas::{AtlasLayout, BackendId, TileCredential, TileState};
     use glaphica_core::CanvasVec2;
     use glaphica_core::IMAGE_TILE_SIZE;
+    use gla_image::GlaImageTileAccessError;
     use renderer::{ApplyDabCommand, CopyTileCommand, MergeTileCommand, RenderCommand};
 
+    use crate::build_merge_command;
     use crate::round::{
         ROUND_SHADER_SPEC, RoundBrushInputProcessor, RoundMergeSettings,
         encode_round_apply_payload, encode_round_merge_payload,
@@ -954,42 +973,43 @@ mod tests {
         assert_eq!(plan.entries.len(), 2);
         assert_eq!(plan.brush_id, BrushId::new(11));
 
-        let tile_indices: Vec<usize> =
-            state.touched_tiles().iter().map(|r| r.tile_index).collect();
-        let backup = image_undo
-            .backup_tiles(&image, &tile_indices)
+        let source_credentials: Vec<(usize, TileCredential)> = plan
+            .entries
+            .iter()
+            .map(|e| Ok((e.tile_index, image.tile_credential(e.tile_index)?)))
+            .collect::<Result<_, GlaImageTileAccessError>>()
+            .expect("credentials should collect");
+        let backup_result = image_undo
+            .execute_backup(&source_credentials)
             .expect("backup should succeed");
-        let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
-        let mut commands: Vec<RenderCommand> = copy_commands
-            .into_iter()
-            .map(RenderCommand::CopyTile)
-            .collect();
 
+        let mut commands: Vec<RenderCommand> = backup_result.commands;
         for (entry, record) in plan.entries.iter().zip(state.touched_tiles()) {
             let destination_tile_key = image
                 .ensure_active_tile_key(entry.tile_index)
                 .expect("tile should activate");
-            let origin_tile_key = undo_tile_records
+            let origin_tile_key = backup_result
+                .origin_keys
                 .iter()
-                .find(|r| r.tile_index() == entry.tile_index)
-                .map(|r| r.backup_tile_key())
-                .expect("undo record should exist");
-            commands.push(RenderCommand::MergeTile(MergeTileCommand {
-                brush_id: plan.brush_id,
+                .find(|(idx, _)| *idx == entry.tile_index)
+                .map(|(_, key)| *key)
+                .expect("origin key should exist");
+            commands.push(RenderCommand::MergeTile(build_merge_command(
+                plan.brush_id,
+                &plan.brush_payload,
+                record.brush_tile_key,
                 origin_tile_key,
-                brush_tile_key: record.brush_tile_key,
                 destination_tile_key,
-                brush_payload: plan.brush_payload.clone(),
-            }));
+            )));
         }
-        drop(backup_group);
 
         let second_active_key = image.tile_key(1).expect("tile key should exist");
         assert!(!second_active_key.is_empty());
-        let tile_0_backup_key = undo_tile_records
+        let tile_0_backup_key = backup_result
+            .origin_keys
             .iter()
-            .find(|r| r.tile_index() == 0)
-            .map(|r| r.backup_tile_key())
+            .find(|(idx, _)| *idx == 0)
+            .map(|(_, key)| *key)
             .expect("tile 0 should have a backup key");
         assert_eq!(
             commands,
@@ -998,27 +1018,28 @@ mod tests {
                     source_tile_key: first_active_key,
                     destination_tile_key: tile_0_backup_key,
                 }),
-                RenderCommand::MergeTile(MergeTileCommand {
-                    brush_id: BrushId::new(11),
-                    origin_tile_key: tile_0_backup_key,
-                    brush_tile_key: first_brush_tile,
-                    destination_tile_key: first_active_key,
-                    brush_payload: merge_payload.clone(),
-                }),
-                RenderCommand::MergeTile(MergeTileCommand {
-                    brush_id: BrushId::new(11),
-                    origin_tile_key: image_undo.backup_backend().empty_tile_key(),
-                    brush_tile_key: second_brush_tile,
-                    destination_tile_key: second_active_key,
-                    brush_payload: merge_payload.clone(),
-                }),
+                RenderCommand::MergeTile(build_merge_command(
+                    BrushId::new(11),
+                    &merge_payload,
+                    first_brush_tile,
+                    tile_0_backup_key,
+                    first_active_key,
+                )),
+                RenderCommand::MergeTile(build_merge_command(
+                    BrushId::new(11),
+                    &merge_payload,
+                    second_brush_tile,
+                    image_undo.backup_backend().empty_tile_key(),
+                    second_active_key,
+                )),
             ]
         );
-        let tile_1_backup_key = undo_tile_records
+        let tile_1_backup_key = backup_result
+            .origin_keys
             .iter()
-            .find(|r| r.tile_index() == 1)
-            .map(|r| r.backup_tile_key())
-            .expect("tile 1 should be in tile_records");
+            .find(|(idx, _)| *idx == 1)
+            .map(|(_, key)| *key)
+            .expect("tile 1 should be in origin_keys");
         assert!(
             tile_1_backup_key.is_empty(),
             "tile 1 was empty in image, should have empty backup key"

@@ -1,9 +1,10 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileKey};
+use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileKey, TileManager};
 use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 use glaphica_core::CopyTileCommand;
+use renderer::RenderCommand;
 
 type TileCopyCommand = CopyTileCommand<TileKey>;
 
@@ -26,6 +27,13 @@ pub struct GlaImageUndoBackup {
     backup_group: CachedTileGroup,
     tile_records: Vec<GlaImageUndoTileRecord>,
     copy_commands: Vec<TileCopyCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackupResult {
+    pub commands: Vec<RenderCommand>,
+    pub backup_group: CachedTileGroup,
+    pub origin_keys: Vec<(usize, TileKey)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +188,67 @@ impl GlaImageUndo {
             backup_group,
             tile_records,
             copy_commands,
+        })
+    }
+
+    pub fn execute_backup(
+        &self,
+        source_credential_pairs: &[(usize, TileCredential)],
+    ) -> Result<BackupResult, GlaImageUndoError> {
+        let image_manager = TileManager::from(self.image_backend.clone());
+        let backup_manager = TileManager::from(self.backup_backend.clone());
+
+        let mut non_empty_count = 0usize;
+        for &(_, credential) in source_credential_pairs {
+            let Some(tile_key) = image_manager.resolve(credential)? else {
+                continue;
+            };
+            if !tile_key.is_empty() {
+                non_empty_count += 1;
+            }
+        }
+
+        let backup_group = if non_empty_count > 0 {
+            backup_manager.backend().alloc_cached(non_empty_count)?
+        } else {
+            backup_manager.backend().create_cached_group()?
+        };
+        let backup_keys = backup_group.keys();
+        let mut backup_key_cursor = 0usize;
+        let mut commands = Vec::with_capacity(non_empty_count);
+        let mut origin_keys = Vec::with_capacity(source_credential_pairs.len());
+
+        for &(tile_index, credential) in source_credential_pairs {
+            let source = image_manager.resolve(credential)?;
+            let Some(source_key) = source else {
+                origin_keys.push((tile_index, self.backup_backend.empty_tile_key()));
+                continue;
+            };
+            if source_key.is_empty() {
+                origin_keys.push((tile_index, self.backup_backend.empty_tile_key()));
+                continue;
+            }
+
+            let backup_tile_key = backup_keys
+                .get(backup_key_cursor)
+                .copied()
+                .ok_or(AtlasError::InvalidState)?;
+            backup_key_cursor += 1;
+            commands.push(RenderCommand::CopyTile(TileCopyCommand {
+                source_tile_key: source_key,
+                destination_tile_key: backup_tile_key,
+            }));
+            origin_keys.push((tile_index, backup_tile_key));
+        }
+
+        if backup_key_cursor != backup_keys.len() {
+            return Err(AtlasError::InvalidState.into());
+        }
+
+        Ok(BackupResult {
+            commands,
+            backup_group,
+            origin_keys,
         })
     }
 

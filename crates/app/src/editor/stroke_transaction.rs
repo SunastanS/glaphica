@@ -1,8 +1,8 @@
-use atlas::Backend;
-use brush::{BrushInput, BrushStrokeState};
+use atlas::{Backend, TileCredential};
+use brush::{BrushInput, BrushStrokeState, build_merge_command};
 use gla_doc_renderer::GlaDocRenderer;
-use gla_document::{GlaDoc, GlaDocError};
-use renderer::{MergeTileCommand, RenderCommand, TileRenderer};
+use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
+use renderer::{RenderCommand, TileRenderer};
 
 use crate::AppBrushRegistry;
 use crate::editor::session::EditorSessionError;
@@ -149,35 +149,33 @@ impl StrokeTransaction {
         let image_undo = doc.image_undo().clone();
         let plan = self.stroke.build_commit_plan(merge_payload);
 
-        let (backup_group, undo_tile_records, commands) = {
-            let image = doc.active_layer_image_mut()?;
-            let backup = image_undo
-                .backup_tiles(image, &tile_indices)?;
-            let (backup_group, undo_tile_records, copy_commands) = backup.into_parts();
-            let mut commands: Vec<RenderCommand> = copy_commands
-                .into_iter()
-                .map(RenderCommand::CopyTile)
-                .collect();
-
-            for (entry, record) in plan.entries.iter().zip(self.stroke.touched_tiles()) {
-                let destination_tile_key = image
-                    .ensure_active_tile_key(entry.tile_index)?;
-                let origin_tile_key = undo_tile_records
-                    .iter()
-                    .find(|r| r.tile_index() == entry.tile_index)
-                    .map(|r| r.backup_tile_key())
-                    .ok_or(atlas::AtlasError::InvalidState)
-                    .map_err(EditorSessionError::Atlas)?;
-                commands.push(RenderCommand::MergeTile(MergeTileCommand {
-                    brush_id: plan.brush_id,
-                    origin_tile_key,
-                    brush_tile_key: record.brush_tile_key,
-                    destination_tile_key,
-                    brush_payload: plan.brush_payload.clone(),
-                }));
-            }
-            (backup_group, undo_tile_records, commands)
+        let source_credentials: Vec<(usize, TileCredential)> = {
+            let image = doc.active_layer_image()?;
+            plan.entries
+                .iter()
+                .map(|e| Ok((e.tile_index, image.tile_credential(e.tile_index)?)))
+                .collect::<Result<Vec<_>, gla_image::GlaImageTileAccessError>>()?
         };
+        let backup_result = image_undo.execute_backup(&source_credentials)?;
+
+        let mut commands: Vec<RenderCommand> = backup_result.commands;
+        let image = doc.active_layer_image_mut()?;
+        for (entry, record) in plan.entries.iter().zip(self.stroke.touched_tiles()) {
+            let destination_tile_key = image.ensure_active_tile_key(entry.tile_index)?;
+            let origin_tile_key = backup_result
+                .origin_keys
+                .iter()
+                .find(|(idx, _)| *idx == entry.tile_index)
+                .map(|(_, key)| *key)
+                .ok_or(atlas::AtlasError::InvalidState)?;
+            commands.push(RenderCommand::MergeTile(build_merge_command(
+                plan.brush_id,
+                &plan.brush_payload,
+                record.brush_tile_key,
+                origin_tile_key,
+                destination_tile_key,
+            )));
+        }
 
         let [image_backend, backup_backend] = image_undo.backends();
         let render_backend = doc_renderer.render_backend();
@@ -205,7 +203,14 @@ impl StrokeTransaction {
             brushes,
         )?;
 
-        doc.push_undo_entry(active_layer_id, backup_group, undo_tile_records)?;
+        let tile_records: Vec<GlaImageUndoTileRecord> = backup_result
+            .origin_keys
+            .into_iter()
+            .map(|(tile_index, backup_tile_key)| {
+                GlaImageUndoTileRecord::new(tile_index, backup_tile_key)
+            })
+            .collect();
+        doc.push_undo_entry(active_layer_id, backup_result.backup_group, tile_records)?;
 
         let brush_backend = brushes
             .brush_backend_mut(brush_id)

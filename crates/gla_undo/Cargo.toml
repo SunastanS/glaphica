@@ -7,3 +7,4 @@ edition = "2024"
 atlas = { path = "../atlas" }
 gla_image = { path = "../gla_image" }
 glaphica_core = { package = "core", path = "../core" }
+renderer = { path = "../renderer" }
