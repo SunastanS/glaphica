@@ -19,7 +19,7 @@ use crate::{
 
 use super::{
     BRUSH_RING_CAPACITY, DEFAULT_DOCUMENT_HEIGHT, DEFAULT_DOCUMENT_WIDTH, INPUT_RING_CAPACITY,
-    PreviewInitError, PreviewState, WORKER_BATCH_CAPACITY, WORKER_WAIT_TIMEOUT,
+    PreviewInitError, PreviewState, PreviewTraceConfig, WORKER_BATCH_CAPACITY, WORKER_WAIT_TIMEOUT,
 };
 
 const DEFAULT_IMAGE_ATLAS_LAYOUT: AtlasLayout = AtlasLayout::Small11;
@@ -28,7 +28,10 @@ const DEFAULT_BACKUP_ATLAS_LAYOUT: AtlasLayout = AtlasLayout::Small11;
 const DEFAULT_BRUSH_ATLAS_LAYOUT: AtlasLayout = AtlasLayout::Small11;
 
 impl PreviewState {
-    pub(super) fn new(event_loop: &ActiveEventLoop) -> Result<Self, PreviewInitError> {
+    pub(super) fn new(
+        event_loop: &ActiveEventLoop,
+        trace_config: &PreviewTraceConfig,
+    ) -> Result<Self, PreviewInitError> {
         let perf_trace = super::app_present_loop::PreviewPerfTraceConfig::from_env();
         puffin::set_scopes_on(perf_trace.puffin_enabled());
         let puffin_server = start_puffin_server(perf_trace)?;
@@ -102,6 +105,15 @@ impl PreviewState {
         let full_tile_indices = (0..full_slot_count).collect::<Vec<_>>();
         let ui = AppUi::new(event_loop, &window, round_brush_settings);
         let ui_renderer = EguiRenderer::new(&gpu.device, surface.format());
+        let mut trace = super::trace::PreviewTraceState::default();
+        if let Some(path) = trace_config.record_input_path() {
+            trace.start_recording(path);
+        }
+        if let Some(path) = trace_config.replay_input_path() {
+            trace
+                .load_replay(path)
+                .map_err(|error| PreviewInitError::Trace(error.to_string()))?;
+        }
 
         Ok(Self {
             window,
@@ -119,6 +131,8 @@ impl PreviewState {
             middle_pan_last_position: None,
             modifiers: winit::keyboard::ModifiersState::default(),
             stroke_active: false,
+            trace,
+            trace_default_path: trace_config.default_trace_path().to_path_buf(),
             perf_trace,
             perf_frame_seq: 0,
             _puffin_server: puffin_server,

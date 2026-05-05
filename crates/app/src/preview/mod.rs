@@ -1,9 +1,11 @@
 mod app_bootstrap;
 mod app_controller;
 mod app_present_loop;
+mod trace;
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,11 +46,74 @@ impl Display for AppPreviewError {
 impl Error for AppPreviewError {}
 
 pub fn run_preview_window() -> Result<(), AppPreviewError> {
+    run_preview_window_with_config(PreviewTraceConfig::from_args(std::env::args().skip(1)))
+}
+
+pub fn run_preview_window_with_config(
+    trace_config: PreviewTraceConfig,
+) -> Result<(), AppPreviewError> {
     let event_loop = EventLoop::new().map_err(AppPreviewError::EventLoop)?;
-    let mut app = PreviewApp::default();
+    let mut app = PreviewApp::new(trace_config);
     event_loop
         .run_app(&mut app)
         .map_err(AppPreviewError::EventLoop)
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewTraceConfig {
+    record_input_path: Option<PathBuf>,
+    replay_input_path: Option<PathBuf>,
+    default_trace_path: PathBuf,
+}
+
+impl Default for PreviewTraceConfig {
+    fn default() -> Self {
+        Self {
+            record_input_path: None,
+            replay_input_path: None,
+            default_trace_path: PathBuf::from("target/glaphica-dev-preview-trace.json"),
+        }
+    }
+}
+
+impl PreviewTraceConfig {
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Self {
+        let mut config = Self::default();
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--record-input" => {
+                    if let Some(path) = args.next() {
+                        config.record_input_path = Some(PathBuf::from(path));
+                    }
+                }
+                "--replay-input" => {
+                    if let Some(path) = args.next() {
+                        config.replay_input_path = Some(PathBuf::from(path));
+                    }
+                }
+                "--trace-path" => {
+                    if let Some(path) = args.next() {
+                        config.default_trace_path = PathBuf::from(path);
+                    }
+                }
+                _ => {}
+            }
+        }
+        config
+    }
+
+    fn record_input_path(&self) -> Option<&std::path::Path> {
+        self.record_input_path.as_deref()
+    }
+
+    fn replay_input_path(&self) -> Option<&std::path::Path> {
+        self.replay_input_path.as_deref()
+    }
+
+    fn default_trace_path(&self) -> &std::path::Path {
+        &self.default_trace_path
+    }
 }
 
 #[derive(Debug)]
@@ -64,6 +129,7 @@ enum PreviewInitError {
     TileRenderer(renderer::TileRendererError),
     View(AppViewMatrixError),
     PuffinHttpServer(String),
+    Trace(String),
 }
 
 impl Display for PreviewInitError {
@@ -82,6 +148,7 @@ impl Display for PreviewInitError {
             Self::PuffinHttpServer(error) => {
                 write!(f, "failed to start puffin http server: {error}")
             }
+            Self::Trace(error) => write!(f, "preview trace init failed: {error}"),
         }
     }
 }
@@ -196,6 +263,16 @@ impl From<ScreenPresentTileError> for PreviewRuntimeError {
 #[derive(Default)]
 struct PreviewApp {
     state: Option<PreviewState>,
+    trace_config: PreviewTraceConfig,
+}
+
+impl PreviewApp {
+    fn new(trace_config: PreviewTraceConfig) -> Self {
+        Self {
+            state: None,
+            trace_config,
+        }
+    }
 }
 
 struct PreviewState {
@@ -214,6 +291,8 @@ struct PreviewState {
     middle_pan_last_position: Option<glaphica_core::ScreenVec2>,
     modifiers: ModifiersState,
     stroke_active: bool,
+    trace: trace::PreviewTraceState,
+    trace_default_path: PathBuf,
     perf_trace: app_present_loop::PreviewPerfTraceConfig,
     perf_frame_seq: u64,
     _puffin_server: Option<puffin_http::Server>,
@@ -225,7 +304,7 @@ impl ApplicationHandler for PreviewApp {
             return;
         }
 
-        match PreviewState::new(event_loop) {
+        match PreviewState::new(event_loop, &self.trace_config) {
             Ok(state) => {
                 state.window.request_redraw();
                 self.state = Some(state);
@@ -266,7 +345,12 @@ impl ApplicationHandler for PreviewApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
+        if let Some(state) = self.state.as_mut() {
+            if let Err(error) = state.process_replay_event() {
+                eprintln!("preview replay failed: {error}");
+                state.shutdown();
+                return;
+            }
             let scheduled_redraw = state
                 .runtime
                 .as_ref()

@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use renderer::RenderTarget2d;
+use brush::round::RoundBrushSettings;
 use gla_document::{GlaDoc, GlaDocError, GlaNodeId};
-use ui::{UiAction, UiLayerItem};
+use renderer::RenderTarget2d;
+use ui::{UiAction, UiLayerItem, UiTraceMode, UiTraceStatus};
 
 use crate::{
     AppPresentError, AppRuntimeError, EditorSessionError, ScreenPresentTileError, SurfaceRuntime,
@@ -12,6 +13,10 @@ use crate::{
 use super::{
     MAX_PENDING_BRUSH_INPUTS_PER_FRAME, PreviewRuntimeError, PreviewState,
     app_bootstrap::{env_flag, env_millis},
+    trace::{
+        PreviewTraceBlendMode, PreviewTraceEvent, PreviewTraceMode, PreviewTraceRoundBrushSettings,
+        PreviewTraceUiAction,
+    },
 };
 
 const DEFAULT_BACKGROUND_COLOR: wgpu::Color = wgpu::Color {
@@ -107,10 +112,14 @@ impl PreviewState {
                 ))
             })?
             .unwrap_or_default();
-        let ui_output = self
-            .ui
-            .paint(&self.window, document_size, &layers, self.stroke_active);
-        self.apply_ui_actions(&ui_output.actions)?;
+        let ui_output = self.ui.paint(
+            &self.window,
+            document_size,
+            &layers,
+            self.stroke_active,
+            &ui_trace_status(&self.trace.ui_state()),
+        );
+        self.apply_ui_actions(&layers, &ui_output.actions, true)?;
         self.ui_renderer.upload_textures(
             &self.gpu.device,
             &self.gpu.queue,
@@ -227,9 +236,30 @@ impl PreviewState {
         }
     }
 
-    fn apply_ui_actions(&mut self, actions: &[UiAction]) -> Result<(), PreviewRuntimeError> {
+    pub(super) fn apply_ui_actions(
+        &mut self,
+        layers: &[UiLayerItem],
+        actions: &[UiAction],
+        record: bool,
+    ) -> Result<(), PreviewRuntimeError> {
         for action in actions {
+            if record && let Some(event) = trace_action_for_ui_action(layers, action) {
+                self.trace.record(PreviewTraceEvent::Ui(event));
+            }
             match action {
+                UiAction::StartRecordingRequested => {
+                    self.trace.start_recording(&self.trace_default_path);
+                }
+                UiAction::StopRecordingRequested => {
+                    if let Err(error) = self.trace.stop_recording() {
+                        eprintln!("preview trace save failed: {error}");
+                    }
+                }
+                UiAction::ReplayRequested => {
+                    if let Err(error) = self.trace.load_replay(&self.trace_default_path) {
+                        eprintln!("preview trace load failed: {error}");
+                    }
+                }
                 UiAction::UndoRequested => {
                     if let Some(runtime) = self.runtime.as_mut() {
                         runtime.undo_last_stroke_gpu(
@@ -373,4 +403,151 @@ fn collect_ui_layer_subtree(
         }
     }
     Ok(())
+}
+
+impl PreviewState {
+    pub(super) fn process_replay_event(&mut self) -> Result<(), PreviewRuntimeError> {
+        let Some(event) = self.trace.next_replay_event() else {
+            return Ok(());
+        };
+        match event {
+            PreviewTraceEvent::Ui(action) => self.apply_trace_ui_action(action)?,
+            PreviewTraceEvent::BeginStroke => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && runtime.active_layer_is_paintable()
+                {
+                    runtime.begin_active_tool_stroke()?;
+                    self.stroke_active = true;
+                }
+            }
+            PreviewTraceEvent::StrokeSample(input) => {
+                if let Some(runtime) = self.runtime.as_ref() {
+                    runtime.push_canvas_input(input.into());
+                }
+            }
+            PreviewTraceEvent::EndStroke => {
+                if self.stroke_active {
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        runtime.end_active_tool_stroke_gpu(
+                            &mut self.tile_renderer,
+                            &self.gpu.device,
+                            &self.gpu.queue,
+                            MAX_PENDING_BRUSH_INPUTS_PER_FRAME,
+                        )?;
+                    }
+                    self.stroke_active = false;
+                }
+            }
+        }
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.frame_scheduler_mut().request_redraw();
+        }
+        Ok(())
+    }
+
+    fn apply_trace_ui_action(
+        &mut self,
+        action: PreviewTraceUiAction,
+    ) -> Result<(), PreviewRuntimeError> {
+        let layers = self
+            .runtime
+            .as_ref()
+            .map(|runtime| collect_ui_layers(runtime.session().doc()))
+            .transpose()
+            .map_err(|error| {
+                PreviewRuntimeError::Runtime(AppRuntimeError::Session(
+                    EditorSessionError::Document(error),
+                ))
+            })?
+            .unwrap_or_default();
+        let ui_action = match action {
+            PreviewTraceUiAction::Undo => UiAction::UndoRequested,
+            PreviewTraceUiAction::CreateLayer => UiAction::CreateLayerRequested,
+            PreviewTraceUiAction::CreateGroup => UiAction::CreateGroupRequested,
+            PreviewTraceUiAction::DeleteActiveLayer => UiAction::DeleteActiveLayerRequested,
+            PreviewTraceUiAction::SelectLayer { visible_index } => {
+                let Some(layer) = layers.get(visible_index) else {
+                    return Ok(());
+                };
+                UiAction::ActiveLayerChanged(layer.id)
+            }
+            PreviewTraceUiAction::SetLayerOpacity {
+                visible_index,
+                opacity,
+            } => {
+                let Some(layer) = layers.get(visible_index) else {
+                    return Ok(());
+                };
+                UiAction::LayerOpacityChanged(layer.id, opacity)
+            }
+            PreviewTraceUiAction::SetLayerBlendMode {
+                visible_index,
+                blend_mode,
+            } => {
+                let Some(layer) = layers.get(visible_index) else {
+                    return Ok(());
+                };
+                UiAction::LayerBlendModeChanged(layer.id, blend_mode.into())
+            }
+            PreviewTraceUiAction::SetRoundBrushSettings(settings) => {
+                let mut brush_settings = RoundBrushSettings::default();
+                settings.apply_to(&mut brush_settings);
+                UiAction::RoundBrushSettingsChanged(brush_settings)
+            }
+        };
+        self.apply_ui_actions(&layers, &[ui_action], false)
+    }
+}
+
+fn trace_action_for_ui_action(
+    layers: &[UiLayerItem],
+    action: &UiAction,
+) -> Option<PreviewTraceUiAction> {
+    match action {
+        UiAction::UndoRequested => Some(PreviewTraceUiAction::Undo),
+        UiAction::CreateLayerRequested => Some(PreviewTraceUiAction::CreateLayer),
+        UiAction::CreateGroupRequested => Some(PreviewTraceUiAction::CreateGroup),
+        UiAction::DeleteActiveLayerRequested => Some(PreviewTraceUiAction::DeleteActiveLayer),
+        UiAction::ActiveLayerChanged(node_id) => visible_layer_index(layers, *node_id)
+            .map(|visible_index| PreviewTraceUiAction::SelectLayer { visible_index }),
+        UiAction::LayerOpacityChanged(node_id, opacity) => visible_layer_index(layers, *node_id)
+            .map(|visible_index| PreviewTraceUiAction::SetLayerOpacity {
+                visible_index,
+                opacity: *opacity,
+            }),
+        UiAction::LayerBlendModeChanged(node_id, blend_mode) => {
+            visible_layer_index(layers, *node_id).map(|visible_index| {
+                PreviewTraceUiAction::SetLayerBlendMode {
+                    visible_index,
+                    blend_mode: PreviewTraceBlendMode::from(*blend_mode),
+                }
+            })
+        }
+        UiAction::RoundBrushSettingsChanged(settings) => {
+            Some(PreviewTraceUiAction::SetRoundBrushSettings(
+                PreviewTraceRoundBrushSettings::from(settings.clone()),
+            ))
+        }
+        UiAction::StartRecordingRequested
+        | UiAction::StopRecordingRequested
+        | UiAction::ReplayRequested => None,
+    }
+}
+
+fn visible_layer_index(layers: &[UiLayerItem], node_id: GlaNodeId) -> Option<usize> {
+    layers.iter().position(|layer| layer.id == node_id)
+}
+
+fn ui_trace_status(status: &super::trace::PreviewTraceUiState) -> UiTraceStatus {
+    UiTraceStatus {
+        mode: match status.mode {
+            PreviewTraceMode::Idle => UiTraceMode::Idle,
+            PreviewTraceMode::Recording => UiTraceMode::Recording,
+            PreviewTraceMode::Replaying => UiTraceMode::Replaying,
+            PreviewTraceMode::ReplayDone => UiTraceMode::ReplayDone,
+        },
+        event_count: status.event_count,
+        replay_index: status.replay_index,
+        path: status.path.clone(),
+    }
 }

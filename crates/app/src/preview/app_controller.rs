@@ -1,9 +1,10 @@
-use glaphica_core::{RadianVec2, ScreenVec2};
+use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::Key;
 
 use super::{
     MAX_PENDING_BRUSH_INPUTS_PER_FRAME, PreviewEventAction, PreviewRuntimeError, PreviewState,
+    trace::PreviewTraceEvent,
 };
 
 impl PreviewState {
@@ -45,6 +46,12 @@ impl PreviewState {
                 ))
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if self.trace.is_replaying() {
+                    return Ok(coalesce_redraw(
+                        PreviewEventAction::None,
+                        ui_requested_repaint,
+                    ));
+                }
                 let position = ScreenVec2::new(position.x as f32, position.y as f32);
                 self.cursor_position = Some(position);
                 if self.middle_pan_active {
@@ -66,6 +73,12 @@ impl PreviewState {
                 ..
             } => match state {
                 ElementState::Pressed => {
+                    if self.trace.is_replaying() {
+                        return Ok(coalesce_redraw(
+                            PreviewEventAction::None,
+                            ui_requested_repaint,
+                        ));
+                    }
                     if ui_event_consumed {
                         return Ok(coalesce_redraw(
                             PreviewEventAction::None,
@@ -83,6 +96,7 @@ impl PreviewState {
                         }
                         runtime.begin_active_tool_stroke()?;
                         self.stroke_active = true;
+                        self.trace.record(PreviewTraceEvent::BeginStroke);
                         self.push_cursor_input();
                     }
                     Ok(PreviewEventAction::RequestRedraw)
@@ -98,6 +112,7 @@ impl PreviewState {
                             )?;
                         }
                         self.stroke_active = false;
+                        self.trace.record(PreviewTraceEvent::EndStroke);
                     }
                     Ok(PreviewEventAction::RequestRedraw)
                 }
@@ -107,6 +122,12 @@ impl PreviewState {
                 button: MouseButton::Middle,
                 ..
             } => {
+                if self.trace.is_replaying() {
+                    return Ok(coalesce_redraw(
+                        PreviewEventAction::None,
+                        ui_requested_repaint,
+                    ));
+                }
                 match state {
                     ElementState::Pressed if !ui_event_consumed => {
                         self.middle_pan_active = true;
@@ -121,6 +142,12 @@ impl PreviewState {
                 Ok(PreviewEventAction::RequestRedraw)
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.trace.is_replaying() {
+                    return Ok(coalesce_redraw(
+                        PreviewEventAction::None,
+                        ui_requested_repaint,
+                    ));
+                }
                 if ui_event_consumed {
                     return Ok(coalesce_redraw(
                         PreviewEventAction::None,
@@ -145,6 +172,12 @@ impl PreviewState {
                     },
                 ..
             } => {
+                if self.trace.is_replaying() {
+                    return Ok(coalesce_redraw(
+                        PreviewEventAction::None,
+                        ui_requested_repaint,
+                    ));
+                }
                 if ui_event_consumed {
                     return Ok(coalesce_redraw(
                         PreviewEventAction::None,
@@ -164,6 +197,9 @@ impl PreviewState {
                             &self.gpu.queue,
                         )?;
                     }
+                    self.trace.record(PreviewTraceEvent::Ui(
+                        super::trace::PreviewTraceUiAction::Undo,
+                    ));
                     return Ok(PreviewEventAction::RequestRedraw);
                 }
                 Ok(coalesce_redraw(
@@ -199,13 +235,16 @@ impl PreviewState {
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
-        runtime.push_screen_input(
-            self.elapsed_time_ns(),
-            position,
-            1.0,
-            RadianVec2::new(0.0, 0.0),
-            0.0,
-        );
+        let input = CanvasInput {
+            time_ns: self.elapsed_time_ns(),
+            position: runtime.view().screen_to_document_point(position),
+            pressure: 1.0,
+            tilt: RadianVec2::new(0.0, 0.0),
+            twist: 0.0,
+        };
+        runtime.push_canvas_input(input);
+        self.trace
+            .record(PreviewTraceEvent::StrokeSample(input.into()));
     }
 
     fn pan_view_to(&mut self, position: ScreenVec2) -> Result<(), PreviewRuntimeError> {
@@ -259,6 +298,11 @@ impl PreviewState {
 
     pub(super) fn shutdown(&mut self) {
         self.stroke_active = false;
+        if self.trace.is_recording()
+            && let Err(error) = self.trace.stop_recording()
+        {
+            eprintln!("preview trace save failed: {error}");
+        }
         if let Some(runtime) = self.runtime.take()
             && let Err(error) = runtime.shutdown()
         {

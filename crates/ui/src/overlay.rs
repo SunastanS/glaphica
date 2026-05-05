@@ -27,6 +27,9 @@ pub struct AppUi {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     UndoRequested,
+    StartRecordingRequested,
+    StopRecordingRequested,
+    ReplayRequested,
     CreateLayerRequested,
     CreateGroupRequested,
     DeleteActiveLayerRequested,
@@ -34,6 +37,22 @@ pub enum UiAction {
     LayerOpacityChanged(GlaNodeId, f32),
     LayerBlendModeChanged(GlaNodeId, BlendMode),
     RoundBrushSettingsChanged(RoundBrushSettings),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTraceMode {
+    Idle,
+    Recording,
+    Replaying,
+    ReplayDone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiTraceStatus {
+    pub mode: UiTraceMode,
+    pub event_count: usize,
+    pub replay_index: usize,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +110,7 @@ impl AppUi {
         document_size: [u32; 2],
         layers: &[UiLayerItem],
         stroke_active: bool,
+        trace_status: &UiTraceStatus,
     ) -> UiPaintOutput {
         let raw_input = self.state.take_egui_input(window);
         let theme = self.theme;
@@ -100,9 +120,9 @@ impl AppUi {
         let mut actions = Vec::new();
 
         let full_output = self.ctx.run(raw_input, |ctx| {
-            render_top_bar(ctx, theme, &mut actions);
+            render_top_bar(ctx, theme, trace_status, &mut actions);
             render_layer_panel(ctx, theme, left_panel_width, layers, &mut actions);
-            render_status_bar(ctx, theme, document_size, stroke_active);
+            render_status_bar(ctx, theme, document_size, stroke_active, trace_status);
             render_brush_panel(
                 ctx,
                 theme,
@@ -128,7 +148,12 @@ impl AppUi {
     }
 }
 
-fn render_top_bar(ctx: &Context, theme: UiTheme, actions: &mut Vec<UiAction>) {
+fn render_top_bar(
+    ctx: &Context,
+    theme: UiTheme,
+    trace_status: &UiTraceStatus,
+    actions: &mut Vec<UiAction>,
+) {
     TopBottomPanel::top("glaphica-ui-top-bar")
         .frame(panel_frame(theme.panel_fill, theme.panel_border))
         .show(ctx, |ui| {
@@ -149,11 +174,36 @@ fn render_top_bar(ctx: &Context, theme: UiTheme, actions: &mut Vec<UiAction>) {
                 if ui.button("Delete").clicked() {
                     actions.push(UiAction::DeleteActiveLayerRequested);
                 }
+                ui.separator();
+                match trace_status.mode {
+                    UiTraceMode::Recording => {
+                        if ui.button("Stop").clicked() {
+                            actions.push(UiAction::StopRecordingRequested);
+                        }
+                    }
+                    UiTraceMode::Replaying => {
+                        ui.add_enabled(false, Button::new("Replaying"));
+                    }
+                    UiTraceMode::Idle | UiTraceMode::ReplayDone => {
+                        if ui.button("Record").clicked() {
+                            actions.push(UiAction::StartRecordingRequested);
+                        }
+                        if ui.button("Replay").clicked() {
+                            actions.push(UiAction::ReplayRequested);
+                        }
+                    }
+                }
             });
         });
 }
 
-fn render_status_bar(ctx: &Context, theme: UiTheme, document_size: [u32; 2], stroke_active: bool) {
+fn render_status_bar(
+    ctx: &Context,
+    theme: UiTheme,
+    document_size: [u32; 2],
+    stroke_active: bool,
+    trace_status: &UiTraceStatus,
+) {
     TopBottomPanel::bottom("glaphica-ui-status-bar")
         .frame(panel_frame(theme.panel_fill, theme.panel_border))
         .show(ctx, |ui| {
@@ -169,8 +219,28 @@ fn render_status_bar(ctx: &Context, theme: UiTheme, document_size: [u32; 2], str
                 );
                 ui.separator();
                 ui.label(RichText::new("Ctrl+Z Undo").color(theme.subdued_text));
+                ui.separator();
+                ui.label(RichText::new(trace_status_text(trace_status)).color(theme.subdued_text));
             });
         });
+}
+
+fn trace_status_text(status: &UiTraceStatus) -> String {
+    match status.mode {
+        UiTraceMode::Idle => status
+            .path
+            .as_ref()
+            .map(|path| format!("Trace ready: {path}"))
+            .unwrap_or_else(|| "Trace idle".to_owned()),
+        UiTraceMode::Recording => format!("Recording {} events", status.event_count),
+        UiTraceMode::Replaying => {
+            format!(
+                "Replaying {}/{} events",
+                status.replay_index, status.event_count
+            )
+        }
+        UiTraceMode::ReplayDone => format!("Replay done: {} events", status.event_count),
+    }
 }
 
 fn render_layer_panel(
@@ -221,10 +291,7 @@ fn render_layer_row(
         ui.add_space(indent);
         let label = layer_label(item);
         let selected = ui
-            .add_sized(
-                [96.0, 24.0],
-                Button::new(label).selected(item.active),
-            )
+            .add_sized([96.0, 24.0], Button::new(label).selected(item.active))
             .on_hover_text(format!("{:?}", item.id));
         if selected.clicked() {
             actions.push(UiAction::ActiveLayerChanged(item.id));
