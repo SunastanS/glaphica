@@ -1047,8 +1047,8 @@ mod tests {
         assert_eq!(
             doc.active_layer_image()
                 .expect("active image should exist")
-                .tile_key(0),
-            Ok(doc.image_backend_ref().empty_tile_key())
+                .physical_tile_key(0),
+            Ok(None)
         );
     }
 }
