@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend as AtlasBackend};
+use atlas::{AtlasError, Backend as AtlasBackend, TileCredential};
 use gla_document::{GlaDoc, GlaDocError, GlaNodeId, GlaNodeKind};
 use gla_image::{
     GlaCachedImage, GlaCachedImageActivateError, GlaCachedImageCreateError, GlaImage,
@@ -217,7 +217,7 @@ impl GlaDocRenderer {
         &mut self,
         doc: &GlaDoc,
         tile_index: usize,
-    ) -> Result<atlas::TileKey, GlaDocRendererError> {
+    ) -> Result<TileCredential, GlaDocRendererError> {
         if self.brush_preview_image.is_none() {
             self.brush_preview_image = Some(GlaImage::new(
                 doc.layout(),
@@ -228,19 +228,18 @@ impl GlaDocRenderer {
             .brush_preview_image
             .as_mut()
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        preview_image
-            .ensure_active_tile_key(tile_index)
-            .map_err(Into::into)
+        preview_image.ensure_active_tile_key(tile_index)?;
+        Ok(preview_image.tile_credential(tile_index)?)
     }
 
     pub fn ensure_brush_preview_merge_target(
         &mut self,
         doc: &GlaDoc,
         tile_index: usize,
-    ) -> Result<(atlas::TileKey, atlas::TileKey), GlaDocRendererError> {
-        let origin_tile_key = doc.active_layer_image()?.tile_key(tile_index)?;
-        let preview_tile_key = self.ensure_brush_preview_tile(doc, tile_index)?;
-        Ok((origin_tile_key, preview_tile_key))
+    ) -> Result<(TileCredential, TileCredential), GlaDocRendererError> {
+        let origin_credential = doc.active_layer_image()?.tile_credential(tile_index)?;
+        let preview_credential = self.ensure_brush_preview_tile(doc, tile_index)?;
+        Ok((origin_credential, preview_credential))
     }
 
     pub fn sync_document(&mut self, doc: &GlaDoc) -> Result<(), GlaDocRendererError> {
@@ -614,43 +613,11 @@ impl GlaDocRenderer {
     ) -> Result<Vec<TileCompositeSource>, GlaDocRendererError> {
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let tile_key =
-                match input.source_kind {
-                    RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
-                        let preview_tile_key = match self.brush_preview_image.as_ref() {
-                            Some(preview_node) => preview_node.tile_key(tile_index)?,
-                            None => self.render_backend.empty_tile_key(),
-                        };
-                        if !preview_tile_key.is_empty() {
-                            preview_tile_key
-                        } else {
-                            doc.node_image(input.node_id)?.tile_key(tile_index)?
-                        }
-                    }
-                    RenderProgramSourceKind::Truth => {
-                        doc.node_image(input.node_id)?.tile_key(tile_index)?
-                    }
-                    RenderProgramSourceKind::Result => {
-                        let entry = self
-                            .node_resources
-                            .iter()
-                            .find(|entry| entry.node_id == input.node_id)
-                            .ok_or(GlaDocError::InvalidNodeId(input.node_id))?;
-                        match &entry.state {
-                            RenderImageState::Active(image) => image.tile_key(tile_index)?,
-                            RenderImageState::Cached(cached) => cached.tile_key(tile_index).ok_or(
-                                GlaDocError::InvalidSlotIndex {
-                                    slot_index: tile_index,
-                                    slot_count: cached.slot_count(),
-                                },
-                            )?,
-                            RenderImageState::Empty => self.render_backend.empty_tile_key(),
-                        }
-                    }
-                };
-            if tile_key.is_empty() {
+            let Some(tile_key) =
+                self.source_tile_key(doc, input, tile_index, active_layer_id)?
+            else {
                 continue;
-            }
+            };
             sources.push(TileCompositeSource {
                 tile_key,
                 opacity: input.opacity,
@@ -658,6 +625,53 @@ impl GlaDocRenderer {
             });
         }
         Ok(sources)
+    }
+
+    fn source_tile_key(
+        &self,
+        doc: &GlaDoc,
+        input: &RenderProgramInput,
+        tile_index: usize,
+        active_layer_id: GlaNodeId,
+    ) -> Result<Option<atlas::TileKey>, GlaDocRendererError> {
+        match input.source_kind {
+            RenderProgramSourceKind::Truth if input.node_id == active_layer_id => {
+                if let Some(preview_tile_key) = self
+                    .brush_preview_image
+                    .as_ref()
+                    .map(|preview_node| preview_node.physical_tile_key(tile_index))
+                    .transpose()?
+                    .flatten()
+                {
+                    return Ok(Some(preview_tile_key));
+                }
+                Ok(doc.node_image(input.node_id)?.physical_tile_key(tile_index)?)
+            }
+            RenderProgramSourceKind::Truth => {
+                Ok(doc.node_image(input.node_id)?.physical_tile_key(tile_index)?)
+            }
+            RenderProgramSourceKind::Result => {
+                let entry = self
+                    .node_resources
+                    .iter()
+                    .find(|entry| entry.node_id == input.node_id)
+                    .ok_or(GlaDocError::InvalidNodeId(input.node_id))?;
+                match &entry.state {
+                    RenderImageState::Active(image) => Ok(image.physical_tile_key(tile_index)?),
+                    RenderImageState::Cached(cached) => {
+                        if tile_index >= cached.slot_count() {
+                            return Err(GlaDocError::InvalidSlotIndex {
+                                slot_index: tile_index,
+                                slot_count: cached.slot_count(),
+                            }
+                            .into());
+                        }
+                        Ok(cached.physical_tile_key(tile_index))
+                    }
+                    RenderImageState::Empty => Ok(None),
+                }
+            }
+        }
     }
 }
 
@@ -877,7 +891,6 @@ mod tests {
 
     #[test]
     fn ensure_brush_preview_merge_target_uses_active_layer_truth_and_render_cache() {
-        let image_backend = AtlasBackend::new(AtlasLayout::Tiny8, BackendId::new(3));
         let mut doc = new_doc();
         let layer_id = doc
             .append_layer(doc.root_id())
@@ -885,7 +898,8 @@ mod tests {
         doc.set_active_layer(layer_id)
             .expect("active layer should update");
 
-        let active_tile = image_backend
+        let active_tile = doc
+            .image_backend_ref()
             .alloc_active()
             .expect("active tile should allocate");
         let active_tile_key = active_tile.tile_key();
@@ -895,17 +909,29 @@ mod tests {
             .expect("tile owner should install");
 
         let mut renderer = GlaDocRenderer::new(new_render_backend());
-        let (origin_tile_key, preview_tile_key) = renderer
+        let (origin_credential, preview_credential) = renderer
             .ensure_brush_preview_merge_target(&doc, 0)
             .expect("preview target should build");
 
-        assert_eq!(origin_tile_key, active_tile_key);
-        assert!(!preview_tile_key.is_empty());
+        assert_eq!(
+            doc.active_layer_image()
+                .expect("layer image should exist")
+                .tile_manager()
+                .resolve_active_key(origin_credential),
+            Ok(active_tile_key)
+        );
         assert_eq!(
             renderer
                 .brush_preview_image()
-                .map(|image| image.tile_key(0)),
-            Some(Ok(preview_tile_key))
+                .map(|image| image.tile_credential(0)),
+            Some(Ok(preview_credential))
+        );
+        assert!(
+            renderer
+                .brush_preview_image()
+                .and_then(|image| image.physical_tile_key(0).ok())
+                .flatten()
+                .is_some()
         );
     }
 

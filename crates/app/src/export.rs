@@ -133,10 +133,9 @@ fn export_node_tiles(
     let mut image_tiles = Vec::new();
 
     for tile_index in 0..image.slot_count() {
-        let tile_key = image.tile_key(tile_index)?;
-        if tile_key.is_empty() {
+        let Some(tile_key) = image.physical_tile_key(tile_index)? else {
             continue;
-        }
+        };
 
         tile_keys.push(tile_key);
         image_tiles.push((tile_index, tile_key));

@@ -151,14 +151,13 @@ impl GlaImageUndo {
         let mut tile_records = Vec::with_capacity(affected_tiles.len());
         let mut copy_commands = Vec::with_capacity(backup_tile_keys.len());
         for tile_index in affected_tiles {
-            let source_tile_key = image.tile_key(tile_index)?;
-            if source_tile_key.is_empty() {
+            let Some(source_tile_key) = image.physical_tile_key(tile_index)? else {
                 tile_records.push(GlaImageUndoTileRecord::new(
                     tile_index,
                     self.backup_backend.empty_tile_key(),
                 ));
                 continue;
-            }
+            };
 
             let backup_tile_key = backup_tile_keys
                 .get(backup_key_cursor)
@@ -192,10 +191,7 @@ impl GlaImageUndo {
 
         let mut non_empty_count = 0usize;
         for &(_, credential) in source_credential_pairs {
-            let Some(tile_key) = image_manager.resolve(credential)? else {
-                continue;
-            };
-            if !tile_key.is_empty() {
+            if image_manager.resolve(credential)?.is_some() {
                 non_empty_count += 1;
             }
         }
@@ -211,15 +207,10 @@ impl GlaImageUndo {
         let mut origin_keys = Vec::with_capacity(source_credential_pairs.len());
 
         for &(tile_index, credential) in source_credential_pairs {
-            let source = image_manager.resolve(credential)?;
-            let Some(source_key) = source else {
+            let Some(source_key) = image_manager.resolve(credential)? else {
                 origin_keys.push((tile_index, self.backup_backend.empty_tile_key()));
                 continue;
             };
-            if source_key.is_empty() {
-                origin_keys.push((tile_index, self.backup_backend.empty_tile_key()));
-                continue;
-            }
 
             let backup_tile_key = backup_keys
                 .get(backup_key_cursor)

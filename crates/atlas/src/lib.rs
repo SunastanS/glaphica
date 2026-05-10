@@ -1288,6 +1288,20 @@ impl TileManager {
             .map_err(|_| AtlasError::BackendPoisoned)?;
         pool.tile_key(credential, self.backend_id())
     }
+
+    pub fn resolve_active_key(&self, credential: TileCredential) -> Result<TileKey, AtlasError> {
+        let tile_key = self.resolve(credential)?.ok_or(AtlasError::InvalidState)?;
+        if tile_key.is_empty() {
+            return Err(AtlasError::InvalidState);
+        }
+        Ok(tile_key)
+    }
+
+    pub fn resolve_key_or_empty(&self, credential: TileCredential) -> Result<TileKey, AtlasError> {
+        Ok(self
+            .resolve(credential)?
+            .unwrap_or_else(|| self.backend.empty_tile_key()))
+    }
 }
 
 impl From<Backend> for TileManager {

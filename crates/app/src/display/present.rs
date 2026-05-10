@@ -84,10 +84,9 @@ pub fn present_root_tiles(
     let mut commands = Vec::new();
 
     for &tile_index in tile_indices {
-        let tile_key = root_image.tile_key(tile_index)?;
-        if tile_key.is_empty() {
+        let Some(tile_key) = root_image.physical_tile_key(tile_index)? else {
             continue;
-        }
+        };
 
         let origin =
             layout

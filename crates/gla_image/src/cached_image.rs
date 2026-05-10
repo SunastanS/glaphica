@@ -177,6 +177,11 @@ impl GlaCachedImage {
         self.tile_keys.get(tile_index).copied()
     }
 
+    pub fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
+        let tile_key = self.tile_key(tile_index)?;
+        (!tile_key.is_empty()).then_some(tile_key)
+    }
+
     pub fn tile_keys(&self) -> &[TileKey] {
         &self.tile_keys
     }
@@ -213,8 +218,7 @@ impl TileGrid for GlaCachedImage {
 
 impl AtlasTileMap for GlaCachedImage {
     fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        let tile_key = GlaCachedImage::tile_key(self, tile_index)?;
-        (!tile_key.is_empty()).then_some(tile_key)
+        GlaCachedImage::physical_tile_key(self, tile_index)
     }
 
     fn tile_key(&self, tile_index: usize) -> Option<TileKey> {

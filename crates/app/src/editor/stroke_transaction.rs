@@ -1,4 +1,4 @@
-use atlas::{Backend, TileCredential, TileKey, TileManager};
+use atlas::{Backend, TileCredential, TileManager};
 use brush::{BrushInput, BrushRegistry, BrushStrokeState, build_merge_command};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
@@ -38,10 +38,12 @@ impl StrokeTransaction {
         }
 
         let [image_backend, _] = doc.image_undo().backends();
+        let image_tile_manager = TileManager::from(image_backend.clone());
         let brush_backend = brushes.backend(self.stroke.brush_id()).ok_or(
             EditorSessionError::BrushNotRegistered(self.stroke.brush_id()),
         )?;
         let brush_tile_manager = TileManager::from(brush_backend.brush_backend().clone());
+        let render_tile_manager = TileManager::from(doc_renderer.render_backend().clone());
 
         let active_image = doc.active_layer_image()?;
         let mut dirty_tile_indices = Vec::new();
@@ -70,13 +72,13 @@ impl StrokeTransaction {
                         .stroke
                         .brush_tiles()
                         .credential(tile_index)
-                        .map(|credential| resolve_active_tile(&brush_tile_manager, credential))
+                        .map(|credential| brush_tile_manager.resolve_active_key(credential))
                         .transpose()?;
                     let apply_payload =
                         brushes.encode_apply_dab_payload(input, block_index, tile_origin)?;
                     let destination_credential = self.stroke.push_apply_dab(tile_index)?;
                     let destination_tile_key =
-                        resolve_active_tile(&brush_tile_manager, destination_credential)?;
+                        brush_tile_manager.resolve_active_key(destination_credential)?;
                     commands.push(RenderCommand::ApplyDab(ApplyDabCommand {
                         brush_id: self.stroke.brush_id(),
                         destination_tile_key,
@@ -100,10 +102,12 @@ impl StrokeTransaction {
         )?;
         self.merge_payload = Some(merge_payload.clone());
         for &tile_index in &dirty_tile_indices {
-            let (origin_tile_key, preview_tile_key) =
+            let (origin_credential, preview_credential) =
                 doc_renderer.ensure_brush_preview_merge_target(doc, tile_index)?;
+            let origin_tile_key = image_tile_manager.resolve_key_or_empty(origin_credential)?;
+            let preview_tile_key = render_tile_manager.resolve_active_key(preview_credential)?;
             if let Some(brush_credential) = self.stroke.preview_brush_tile_credential(tile_index) {
-                let brush_tile_key = resolve_active_tile(&brush_tile_manager, brush_credential)?;
+                let brush_tile_key = brush_tile_manager.resolve_active_key(brush_credential)?;
                 commands.push(RenderCommand::MergeTile(MergeTileCommand {
                     brush_id: self.stroke.brush_id(),
                     origin_tile_key,
@@ -182,7 +186,7 @@ impl StrokeTransaction {
             .collect::<Result<_, _>>()?;
 
         for (i, entry) in plan.entries.iter().enumerate() {
-            let brush_tile_key = resolve_active_tile(&brush_tile_manager, entry.brush_credential)?;
+            let brush_tile_key = brush_tile_manager.resolve_active_key(entry.brush_credential)?;
             let (_, origin_tile_key) = backup_result.origin_keys[i];
             commands.push(RenderCommand::MergeTile(build_merge_command(
                 plan.brush_id,
@@ -258,19 +262,6 @@ impl StrokeTransaction {
             brushes,
         )
     }
-}
-
-fn resolve_active_tile(
-    tile_manager: &TileManager,
-    credential: TileCredential,
-) -> Result<TileKey, EditorSessionError> {
-    let tile_key = tile_manager
-        .resolve(credential)?
-        .ok_or(atlas::AtlasError::InvalidState)?;
-    if tile_key.is_empty() {
-        return Err(atlas::AtlasError::InvalidState.into());
-    }
-    Ok(tile_key)
 }
 
 fn execute_stroke_commands(
