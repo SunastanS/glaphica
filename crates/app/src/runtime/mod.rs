@@ -8,8 +8,8 @@ use glaphica_core::{CanvasInput, RadianVec2, ScreenVec2};
 use renderer::TileRenderer;
 
 use crate::{
-    ActiveTool, AppFrameScheduler, AppView, BrushThreadRuntime,
-    BrushThreadRuntimeError, EditorRenderUpdate, EditorSession, EditorSessionError, ToolSet,
+    ActiveTool, AppFrameScheduler, AppView, BrushThreadRuntime, BrushThreadRuntimeError,
+    EditorRenderUpdate, EditorSession, EditorSessionError, ToolSet,
 };
 
 pub struct AppRuntime {

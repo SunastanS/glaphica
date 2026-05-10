@@ -2,8 +2,8 @@ use std::env;
 use std::time::Instant;
 
 use atlas::{AtlasLayout, Backend, BackendManager};
-use brush::round::{ROUND_BRUSH_ID, ROUND_SHADER_SPEC, RoundBrushSettings};
 use brush::BrushRegistry;
+use brush::round::{ROUND_BRUSH_ID, ROUND_SHADER_SPEC, RoundBrushSettings};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError, GlaImageCreateError, GlaImageLayout};
 use gla_image::GlaImageTileAccessError;
@@ -14,8 +14,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 use crate::{
-    ActiveTool, AppRuntime, AppView, AppViewMatrixError, ScreenPresentTile, Tool,
-    ToolSet,
+    ActiveTool, AppRuntime, AppView, AppViewMatrixError, ScreenPresentTile, Tool, ToolSet,
 };
 
 use super::{
@@ -72,10 +71,8 @@ impl PreviewState {
             brush_backend.clone(),
             round_brush_settings.clone(),
         );
-        let worker_brushes = BrushRegistry::with_builtin_round_settings(
-            brush_backend,
-            round_brush_settings.clone(),
-        );
+        let worker_brushes =
+            BrushRegistry::with_builtin_round_settings(brush_backend, round_brush_settings.clone());
         let tool_set = ToolSet::new(vec![Tool::Brush(ROUND_BRUSH_ID)]);
         let active_tool = ActiveTool::Brush(ROUND_BRUSH_ID);
         let view = fitted_view(

@@ -644,9 +644,7 @@ mod tests {
 
     type TileCopyCommand = CopyTileCommand<TileKey>;
 
-    use crate::{
-        GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileRecord, GlaNodeKind,
-    };
+    use crate::{GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileRecord, GlaNodeKind};
     use glaphica_core::BlendMode;
 
     fn new_doc() -> GlaDoc {

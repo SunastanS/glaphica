@@ -349,11 +349,7 @@ impl GlaDocRenderer {
             })
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
 
-        let commands = self.build_render_commands(
-            doc,
-            &prepare_steps,
-            active_layer_id,
-        )?;
+        let commands = self.build_render_commands(doc, &prepare_steps, active_layer_id)?;
         let clear_batches = self.render_backend.take_pending_clear_batches()?;
         tile_renderer.execute_commands(
             device,
@@ -398,11 +394,7 @@ impl GlaDocRenderer {
             })
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
 
-        let commands = self.build_render_commands(
-            doc,
-            &passes,
-            active_layer_id,
-        )?;
+        let commands = self.build_render_commands(doc, &passes, active_layer_id)?;
         let clear_batches = self.render_backend.take_pending_clear_batches()?;
         tile_renderer.execute_commands(
             device,

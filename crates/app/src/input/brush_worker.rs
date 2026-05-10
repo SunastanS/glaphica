@@ -1,9 +1,11 @@
-use brush::{BrushId, BrushInputError, BrushRegistry, BrushStrokeInputProcessor, round::RoundBrushSettings};
+use brush::{
+    BrushId, BrushInputError, BrushRegistry, BrushStrokeInputProcessor, round::RoundBrushSettings,
+};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::input::BrushThreadBrushInputProducer;
 use crate::CanvasInput;
+use crate::input::BrushThreadBrushInputProducer;
 
 pub struct BrushWorker {
     brushes: BrushRegistry,
@@ -79,10 +81,7 @@ impl BrushWorker {
         self.active_input_stroke.reset();
     }
 
-    pub fn update_round_brush_settings(
-        &mut self,
-        settings: RoundBrushSettings,
-    ) {
+    pub fn update_round_brush_settings(&mut self, settings: RoundBrushSettings) {
         self.brushes.update_round_brush_settings(settings);
         self.active_input_stroke = begin_input_stroke(&self.brushes, self.active_brush_id)
             .map_err(map_begin_input_stroke_error)

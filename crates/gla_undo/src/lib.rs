@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileKey, TileManager};
+use atlas::{
+    AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileKey, TileManager,
+};
 use gla_image::{GlaImage, GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 use glaphica_core::CopyTileCommand;
 use renderer::RenderCommand;
