@@ -4,8 +4,7 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasError, Backend, CachedTileGroup, TileKey};
 
 use crate::{
-    AtlasTileMap, GlaImage, GlaImageCreateError, GlaImageTileAccessError, TileGrid,
-    layout::GlaImageLayout,
+    GlaImage, GlaImageCreateError, GlaImageTileAccessError, TileGrid, layout::GlaImageLayout,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,10 +183,6 @@ impl GlaCachedImage {
         self.tile_keys.get(tile_index).copied().flatten()
     }
 
-    pub fn tile_keys(&self) -> &[Option<TileKey>] {
-        &self.tile_keys
-    }
-
     pub fn collect_non_empty_slot_indices(&self, output: &mut Vec<usize>) {
         output.clear();
         for (tile_index, tile_key) in self.tile_keys.iter().enumerate() {
@@ -215,12 +210,6 @@ impl TileGrid for GlaCachedImage {
 
     fn slot_count(&self) -> usize {
         GlaCachedImage::slot_count(self)
-    }
-}
-
-impl AtlasTileMap for GlaCachedImage {
-    fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        GlaCachedImage::physical_tile_key(self, tile_index)
     }
 }
 

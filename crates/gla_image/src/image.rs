@@ -4,7 +4,7 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasError, Backend, BackendId, TileCredential, TileKey, TileManager, TileOwner};
 use glaphica_core::CanvasVec2;
 
-use crate::{AtlasTileMap, ImageId, ImageTileSlot, TileGrid, layout::GlaImageLayout};
+use crate::{ImageId, ImageTileSlot, TileGrid, layout::GlaImageLayout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlaImageCreateError {
@@ -358,12 +358,6 @@ impl TileGrid for GlaImage {
 
     fn slot_count(&self) -> usize {
         GlaImage::slot_count(self)
-    }
-}
-
-impl AtlasTileMap for GlaImage {
-    fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        GlaImage::physical_tile_key(self, tile_index).ok().flatten()
     }
 }
 

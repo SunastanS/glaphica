@@ -1027,7 +1027,7 @@ mod tests {
             backup_result
                 .tile_records
                 .iter()
-                .any(|record| record.tile_index() == 1 && record.backup_tile_key().is_none()),
+                .any(|record| record.tile_index() == 1 && record.restores_empty_tile()),
             "tile 1 was empty in image, should not have a backup tile"
         );
     }

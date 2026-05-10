@@ -151,7 +151,7 @@ impl GlaImageUndo {
         let mut copy_commands = Vec::with_capacity(backup_group.len());
         for tile_index in affected_tiles {
             let Some(source_tile_key) = image.physical_tile_key(tile_index)? else {
-                tile_records.push(GlaImageUndoTileRecord::new(tile_index, None));
+                tile_records.push(GlaImageUndoTileRecord::empty(tile_index));
                 continue;
             };
 
@@ -163,9 +163,9 @@ impl GlaImageUndo {
                 source_tile_key,
                 destination_tile_key: backup_tile_key,
             });
-            tile_records.push(GlaImageUndoTileRecord::new(
+            tile_records.push(GlaImageUndoTileRecord::backed_up(
                 tile_index,
-                Some(backup_tile_key),
+                backup_tile_key,
             ));
         }
 
@@ -207,7 +207,7 @@ impl GlaImageUndo {
         for &(tile_index, credential) in source_credential_pairs {
             let Some(source_key) = image_manager.resolve(credential)? else {
                 origin_keys.push((tile_index, self.backup_backend.empty_tile_key()));
-                tile_records.push(GlaImageUndoTileRecord::new(tile_index, None));
+                tile_records.push(GlaImageUndoTileRecord::empty(tile_index));
                 continue;
             };
 
@@ -220,9 +220,9 @@ impl GlaImageUndo {
                 destination_tile_key: backup_tile_key,
             }));
             origin_keys.push((tile_index, backup_tile_key));
-            tile_records.push(GlaImageUndoTileRecord::new(
+            tile_records.push(GlaImageUndoTileRecord::backed_up(
                 tile_index,
-                Some(backup_tile_key),
+                backup_tile_key,
             ));
         }
 
@@ -283,18 +283,30 @@ impl GlaImageUndo {
 }
 
 impl GlaImageUndoTileRecord {
-    pub const fn new(tile_index: usize, backup_tile_key: Option<TileKey>) -> Self {
+    const fn new(tile_index: usize, backup_tile_key: Option<TileKey>) -> Self {
         Self {
             tile_index,
             backup_tile_key,
         }
     }
 
+    pub const fn backed_up(tile_index: usize, backup_tile_key: TileKey) -> Self {
+        Self::new(tile_index, Some(backup_tile_key))
+    }
+
+    pub const fn empty(tile_index: usize) -> Self {
+        Self::new(tile_index, None)
+    }
+
     pub const fn tile_index(&self) -> usize {
         self.tile_index
     }
 
-    pub const fn backup_tile_key(&self) -> Option<TileKey> {
+    pub const fn restores_empty_tile(&self) -> bool {
+        self.backup_tile_key.is_none()
+    }
+
+    const fn backup_tile_key(&self) -> Option<TileKey> {
         self.backup_tile_key
     }
 }

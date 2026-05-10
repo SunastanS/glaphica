@@ -20,10 +20,6 @@ pub trait TileGrid {
     fn slot_count(&self) -> usize;
 }
 
-pub trait AtlasTileMap: TileGrid {
-    fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey>;
-}
-
 pub trait PixelTileSource: TileGrid {
     type Error;
 
