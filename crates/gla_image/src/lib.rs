@@ -22,9 +22,6 @@ pub trait TileGrid {
 
 pub trait AtlasTileMap: TileGrid {
     fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey>;
-
-    #[deprecated(note = "use physical_tile_key; TileKey::empty is a backend sentinel")]
-    fn tile_key(&self, tile_index: usize) -> Option<TileKey>;
 }
 
 pub trait PixelTileSource: TileGrid {
@@ -51,17 +48,9 @@ impl ImageTileSlot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ImageTileBinding {
-    pub image_tile: ImageTileSlot,
-    pub tile_key: TileKey,
-}
-
 #[cfg(test)]
 mod tests {
-    use atlas::{AtlasLayout, Backend, BackendId};
-
-    use crate::{GlaImageLayout, ImageId, ImageTileBinding, ImageTileSlot};
+    use crate::{GlaImageLayout, ImageId, ImageTileSlot};
 
     #[test]
     fn image_tile_slot_keeps_image_and_tile_index() {
@@ -69,19 +58,6 @@ mod tests {
 
         assert_eq!(slot.image_id, ImageId(7));
         assert_eq!(slot.tile_index, 3);
-    }
-
-    #[test]
-    fn image_tile_binding_keeps_slot_and_tile_key_together() {
-        let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
-        let binding = ImageTileBinding {
-            image_tile: ImageTileSlot::new(ImageId(3), 9),
-            tile_key: backend.empty_tile_key(),
-        };
-
-        assert_eq!(binding.image_tile.image_id, ImageId(3));
-        assert_eq!(binding.image_tile.tile_index, 9);
-        assert!(binding.tile_key.is_empty());
     }
 
     #[test]

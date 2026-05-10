@@ -170,13 +170,6 @@ impl GlaImage {
         self.tile_owners.len()
     }
 
-    pub fn tile_key(&self, tile_index: usize) -> Result<TileKey, GlaImageTileAccessError> {
-        let Some(tile_owner) = self.tile_owners.get(tile_index) else {
-            return Err(GlaImageTileAccessError::OutOfBounds);
-        };
-        Ok(tile_owner.tile_key())
-    }
-
     pub fn physical_tile_key(
         &self,
         tile_index: usize,
@@ -372,10 +365,6 @@ impl AtlasTileMap for GlaImage {
     fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
         GlaImage::physical_tile_key(self, tile_index).ok().flatten()
     }
-
-    fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        GlaImage::tile_key(self, tile_index).ok()
-    }
 }
 
 #[cfg(test)]
@@ -398,7 +387,7 @@ mod tests {
 
         let replaced = image.replace_tile_owner(0, tile_owner);
         assert!(matches!(replaced, Ok(previous) if previous.physical_tile_key().is_none()));
-        assert_eq!(image.tile_key(0), Ok(key));
+        assert_eq!(image.physical_tile_key(0), Ok(Some(key)));
     }
 
     #[test]
@@ -545,8 +534,8 @@ mod tests {
                 .is_ok()
         );
 
-        assert_eq!(image.tile_key(0), Ok(kept_top_left_key));
-        assert_eq!(image.tile_key(1), Ok(kept_bottom_left_key));
+        assert_eq!(image.physical_tile_key(0), Ok(Some(kept_top_left_key)));
+        assert_eq!(image.physical_tile_key(1), Ok(Some(kept_bottom_left_key)));
         assert_eq!(
             backend.tile_state(removed_top_right_key),
             Err(atlas::AtlasError::GenerationMismatch)

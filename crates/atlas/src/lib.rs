@@ -44,11 +44,11 @@ impl TileKey {
             && ((raw >> SLOT_SHIFT) & SLOT_MASK) == SLOT_MASK
     }
 
-    const fn from_raw(raw: u64) -> Self {
+    pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
-    const fn raw(self) -> u64 {
+    pub const fn raw(self) -> u64 {
         self.0
     }
 
@@ -323,8 +323,20 @@ pub struct CachedTileGroup {
 }
 
 impl CachedTileGroup {
-    pub fn keys(&self) -> &[TileKey] {
-        &self.keys
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    pub fn physical_key(&self, index: usize) -> Option<TileKey> {
+        self.keys.get(index).copied()
+    }
+
+    pub fn physical_keys(&self) -> impl ExactSizeIterator<Item = TileKey> + '_ {
+        self.keys.iter().copied()
     }
 }
 
@@ -1037,13 +1049,13 @@ impl Backend {
         Ok(TileOwner::new(self.recycle.clone(), credential, key))
     }
 
-    /// Returns owners in the same order as `cached.keys()`.
+    /// Returns owners in the same order as `cached.physical_keys()`.
     pub fn activate_cached_group(
         &self,
         cached: &CachedTileGroup,
     ) -> Result<Vec<TileOwner>, AtlasError> {
-        let mut credentials = Vec::with_capacity(cached.keys().len());
-        for _ in cached.keys() {
+        let mut credentials = Vec::with_capacity(cached.len());
+        for _ in 0..cached.len() {
             match self.alloc_credential() {
                 Ok(credential) => credentials.push(credential),
                 Err(error) => {
@@ -1505,7 +1517,9 @@ mod tests {
         let cached = backend
             .alloc_cached(1)
             .expect("cached tile should allocate");
-        let cached_key = cached.keys()[0];
+        let cached_key = cached
+            .physical_key(0)
+            .expect("cached group should contain one key");
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let _pool_guard = backend
                 .credential_pool
@@ -1545,17 +1559,21 @@ mod tests {
             Err(_) => return,
         };
         let oldest_slots: Vec<u32> = oldest
-            .keys()
-            .iter()
-            .copied()
+            .physical_keys()
             .map(|key| decode_tile_key(key).slot_index)
             .collect();
 
+        let oldest_key = oldest
+            .physical_key(0)
+            .expect("oldest cached group should contain a key");
         assert_eq!(
-            backend.tile_state(oldest.keys()[0]),
+            backend.tile_state(oldest_key),
             Err(AtlasError::GenerationMismatch)
         );
-        assert_eq!(backend.tile_state(newest.keys()[0]), Ok(TileState::Cached));
+        let newest_key = newest
+            .physical_key(0)
+            .expect("newest cached group should contain a key");
+        assert_eq!(backend.tile_state(newest_key), Ok(TileState::Cached));
         assert!(oldest_slots.contains(&replacement_slot));
     }
 
@@ -1679,15 +1697,16 @@ mod tests {
             Err(_) => return,
         };
         let cached_slots: Vec<u32> = cached
-            .keys()
-            .iter()
-            .copied()
+            .physical_keys()
             .map(|key| decode_tile_key(key).slot_index)
             .collect();
 
-        assert!(backend.free(cached.keys()[1]).is_ok());
+        let second_key = cached
+            .physical_key(1)
+            .expect("cached group should contain second key");
+        assert!(backend.free(second_key).is_ok());
 
-        for &key in cached.keys() {
+        for key in cached.physical_keys() {
             assert_eq!(backend.tile_state(key), Err(AtlasError::GenerationMismatch));
         }
         assert_eq!(
@@ -1709,16 +1728,22 @@ mod tests {
             Err(_) => return,
         };
 
-        let reactivated = backend.activate_cached_tile(cached.keys()[0]);
+        let first_key = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
+        let second_key = cached
+            .physical_key(1)
+            .expect("cached group should contain second key");
+        let reactivated = backend.activate_cached_tile(first_key);
         assert!(reactivated.is_ok());
         let reactivated = match reactivated {
             Ok(owner) => owner,
             Err(_) => return,
         };
 
-        assert_eq!(reactivated.tile_key(), cached.keys()[0]);
-        assert_eq!(backend.tile_state(cached.keys()[0]), Ok(TileState::Active));
-        assert_eq!(backend.tile_state(cached.keys()[1]), Ok(TileState::Cached));
+        assert_eq!(reactivated.tile_key(), first_key);
+        assert_eq!(backend.tile_state(first_key), Ok(TileState::Active));
+        assert_eq!(backend.tile_state(second_key), Ok(TileState::Cached));
     }
 
     #[test]
@@ -1727,7 +1752,7 @@ mod tests {
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
-        let cached_keys = cached.keys().to_vec();
+        let cached_keys = cached.physical_keys().collect::<Vec<_>>();
 
         let reactivated = backend
             .activate_cached_group(&cached)
@@ -1752,7 +1777,10 @@ mod tests {
             .cache_active_owners([first, second])
             .expect("active owners should cache");
 
-        assert_eq!(cached.keys(), &[first_key, second_key]);
+        assert_eq!(
+            cached.physical_keys().collect::<Vec<_>>(),
+            vec![first_key, second_key]
+        );
         assert_eq!(backend.cached_group_alive(&cached), Ok(true));
         assert_eq!(backend.tile_state(first_key), Ok(TileState::Cached));
         assert_eq!(backend.tile_state(second_key), Ok(TileState::Cached));
@@ -1787,7 +1815,7 @@ mod tests {
             .cache_active_owners([empty_owner])
             .expect("all-empty owners should succeed");
 
-        assert!(cached.keys().is_empty());
+        assert!(cached.is_empty());
     }
 
     #[test]
@@ -1797,7 +1825,7 @@ mod tests {
             .create_cached_group()
             .expect("cached group should create");
 
-        assert!(cached.keys().is_empty());
+        assert!(cached.is_empty());
         assert_eq!(backend.cached_group_alive(&cached), Ok(true));
     }
 
@@ -1815,7 +1843,10 @@ mod tests {
             .alloc_cached_extending_group(&cached)
             .expect("second cached key should allocate");
 
-        assert_eq!(cached.keys(), &[first, second]);
+        assert_eq!(
+            cached.physical_keys().collect::<Vec<_>>(),
+            vec![first, second]
+        );
         assert_eq!(backend.tile_state(first), Ok(TileState::Cached));
         assert_eq!(backend.tile_state(second), Ok(TileState::Cached));
     }
@@ -1858,7 +1889,10 @@ mod tests {
             .expect("cached tiles should allocate");
 
         assert_eq!(backend.cached_group_alive(&cached), Ok(true));
-        assert!(backend.free(cached.keys()[0]).is_ok());
+        let first_key = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
+        assert!(backend.free(first_key).is_ok());
         assert_eq!(backend.cached_group_alive(&cached), Ok(false));
     }
 

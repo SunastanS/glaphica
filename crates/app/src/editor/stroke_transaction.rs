@@ -1,5 +1,5 @@
 use atlas::{Backend, TileCredential, TileManager};
-use brush::{BrushInput, BrushRegistry, BrushStrokeState, build_merge_command};
+use brush::{BrushInput, BrushRegistry, BrushStrokeState};
 use gla_doc_renderer::GlaDocRenderer;
 use gla_document::{GlaDoc, GlaDocError};
 use renderer::{ApplyDabCommand, BrushTileFormat, MergeTileCommand, RenderCommand, TileRenderer};
@@ -190,13 +190,13 @@ impl StrokeTransaction {
             let origin_tile_key = backup_result
                 .origin_tile_key(i)
                 .ok_or(atlas::AtlasError::InvalidState)?;
-            merge_commands.push(RenderCommand::MergeTile(build_merge_command(
-                plan.brush_id,
-                &plan.brush_payload,
+            merge_commands.push(RenderCommand::MergeTile(MergeTileCommand {
+                brush_id: plan.brush_id,
                 brush_tile_key,
                 origin_tile_key,
-                destination_tile_keys[i],
-            )));
+                destination_tile_key: destination_tile_keys[i],
+                brush_payload: plan.brush_payload.clone(),
+            }));
         }
 
         let mut commands: Vec<RenderCommand> = backup_result.commands;

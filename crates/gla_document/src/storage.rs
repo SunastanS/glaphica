@@ -516,11 +516,11 @@ fn tile_key_file_stem(tile_key: TileKey) -> String {
 }
 
 fn tile_key_to_u64(tile_key: TileKey) -> u64 {
-    unsafe { std::mem::transmute::<TileKey, u64>(tile_key) }
+    tile_key.raw()
 }
 
 fn tile_key_from_u64(value: u64) -> TileKey {
-    unsafe { std::mem::transmute::<u64, TileKey>(value) }
+    TileKey::from_raw(value)
 }
 
 #[cfg(test)]
@@ -684,8 +684,9 @@ mod tests {
     ) -> atlas::TileKey {
         doc.node_image(node_id)
             .expect("node image should exist")
-            .tile_key(tile_index)
+            .physical_tile_key(tile_index)
             .expect("tile key should exist")
+            .expect("tile should be active")
     }
 
     fn write_document_fixture(

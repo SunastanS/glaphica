@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -124,36 +123,47 @@ impl GlaCachedImage {
             });
         }
 
-        let cached_set: HashSet<TileKey> = cache_group.keys().iter().copied().collect();
-        let mut non_empty_set = HashSet::with_capacity(cached_set.len());
-        for &key in tile_keys.iter().flatten() {
-            if !cached_set.contains(&key) {
+        let mut cached_tile_indices = vec![None; cache_group.len()];
+        let mut non_empty_count = 0usize;
+        for (tile_index, key) in tile_keys.iter().copied().enumerate() {
+            let Some(key) = key else {
+                continue;
+            };
+
+            non_empty_count += 1;
+            let Some(group_index) = cache_group
+                .physical_keys()
+                .position(|cached_key| cached_key == key)
+            else {
                 return Err(GlaCachedImageCreateError::WrongTileKeys);
-            }
-            if !non_empty_set.insert(key) {
+            };
+            if cached_tile_indices[group_index]
+                .replace(tile_index)
+                .is_some()
+            {
                 return Err(GlaCachedImageCreateError::DuplicateTileKeys);
             }
         }
 
-        if non_empty_set != cached_set {
+        if non_empty_count != cache_group.len() {
             return Err(GlaCachedImageCreateError::WrongCachedTileCount {
-                expected: non_empty_set.len(),
-                actual: cached_set.len(),
+                expected: non_empty_count,
+                actual: cache_group.len(),
             });
         }
 
-        let mut cached_tile_indices = Vec::with_capacity(cache_group.keys().len());
-        for &cached_key in cache_group.keys() {
-            let Some(tile_index) = tile_keys.iter().position(|&key| key == Some(cached_key)) else {
+        let mut cached_tile_indices_ordered = Vec::with_capacity(cache_group.len());
+        for tile_index in cached_tile_indices {
+            let Some(tile_index) = tile_index else {
                 return Err(GlaCachedImageCreateError::WrongTileKeys);
             };
-            cached_tile_indices.push(tile_index);
+            cached_tile_indices_ordered.push(tile_index);
         }
 
         Ok(Self {
             layout,
             cache_group,
-            cached_tile_indices: cached_tile_indices.into_boxed_slice(),
+            cached_tile_indices: cached_tile_indices_ordered.into_boxed_slice(),
             tile_keys: tile_keys.into_boxed_slice(),
         })
     }
@@ -170,12 +180,8 @@ impl GlaCachedImage {
         self.tile_keys.len()
     }
 
-    pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        self.tile_keys.get(tile_index).copied().flatten()
-    }
-
     pub fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        self.tile_key(tile_index)
+        self.tile_keys.get(tile_index).copied().flatten()
     }
 
     pub fn tile_keys(&self) -> &[Option<TileKey>] {
@@ -215,10 +221,6 @@ impl TileGrid for GlaCachedImage {
 impl AtlasTileMap for GlaCachedImage {
     fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
         GlaCachedImage::physical_tile_key(self, tile_index)
-    }
-
-    fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        GlaCachedImage::tile_key(self, tile_index)
     }
 }
 
@@ -278,7 +280,9 @@ mod tests {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
         let group_a = backend.alloc_cached(1).expect("group a should allocate");
         let group_b = backend.alloc_cached(1).expect("group b should allocate");
-        let key_from_b = group_b.keys()[0];
+        let key_from_b = group_b
+            .physical_key(0)
+            .expect("cached group should contain one key");
 
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
@@ -295,8 +299,12 @@ mod tests {
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
-        let key_a = cached.keys()[0];
-        let key_b = cached.keys()[1];
+        let key_a = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
+        let key_b = cached
+            .physical_key(1)
+            .expect("cached group should contain second key");
 
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2),
@@ -313,7 +321,9 @@ mod tests {
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
-        let key_a = cached.keys()[0];
+        let key_a = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
 
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
@@ -331,22 +341,23 @@ mod tests {
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
-        let first = cached.keys()[0];
-        let second = cached.keys()[1];
-        let cached_image = GlaCachedImage::new(
-            layout,
-            cached,
-            vec![Some(first), None, Some(second), None],
-        )
-        .expect("cached image should build");
+        let first = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
+        let second = cached
+            .physical_key(1)
+            .expect("cached group should contain second key");
+        let cached_image =
+            GlaCachedImage::new(layout, cached, vec![Some(first), None, Some(second), None])
+                .expect("cached image should build");
 
         let active = cached_image
             .activate(&backend)
             .expect("activate should succeed");
 
-        assert_eq!(active.tile_key(0), Ok(first));
+        assert_eq!(active.physical_tile_key(0), Ok(Some(first)));
         assert_eq!(active.physical_tile_key(1), Ok(None));
-        assert_eq!(active.tile_key(2), Ok(second));
+        assert_eq!(active.physical_tile_key(2), Ok(Some(second)));
         assert_eq!(active.physical_tile_key(3), Ok(None));
         assert_eq!(backend.tile_state(first), Ok(atlas::TileState::Active));
         assert_eq!(backend.tile_state(second), Ok(atlas::TileState::Active));
@@ -359,8 +370,12 @@ mod tests {
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
-        let first = cached.keys()[0];
-        let second = cached.keys()[1];
+        let first = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
+        let second = cached
+            .physical_key(1)
+            .expect("cached group should contain second key");
         let cached_image = GlaCachedImage::new(layout, cached, vec![Some(second), Some(first)])
             .expect("cached image should build");
 
@@ -368,8 +383,8 @@ mod tests {
             .activate(&backend)
             .expect("activate should succeed");
 
-        assert_eq!(active.tile_key(0), Ok(second));
-        assert_eq!(active.tile_key(1), Ok(first));
+        assert_eq!(active.physical_tile_key(0), Ok(Some(second)));
+        assert_eq!(active.physical_tile_key(1), Ok(Some(first)));
     }
 
     #[test]
@@ -378,8 +393,12 @@ mod tests {
         let cached = backend
             .alloc_cached(2)
             .expect("cached tiles should allocate");
-        let first = cached.keys()[0];
-        let second = cached.keys()[1];
+        let first = cached
+            .physical_key(0)
+            .expect("cached group should contain first key");
+        let second = cached
+            .physical_key(1)
+            .expect("cached group should contain second key");
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2),
             cached,
@@ -387,9 +406,9 @@ mod tests {
         );
         let image = image.expect("cached image should build");
 
-        assert_eq!(image.tile_key(0), Some(first));
-        assert_eq!(image.tile_key(1), None);
-        assert_eq!(image.tile_key(2), Some(second));
-        assert_eq!(image.tile_key(3), None);
+        assert_eq!(image.physical_tile_key(0), Some(first));
+        assert_eq!(image.physical_tile_key(1), None);
+        assert_eq!(image.physical_tile_key(2), Some(second));
+        assert_eq!(image.physical_tile_key(3), None);
     }
 }

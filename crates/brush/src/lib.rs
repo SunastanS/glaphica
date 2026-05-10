@@ -7,7 +7,7 @@ use gla_undo::GlaImageUndoError;
 pub use glaphica_core::BrushId;
 pub use glaphica_core::CanvasInput;
 use glaphica_core::CanvasVec2;
-use renderer::{BrushShaderProvider, BrushShaderSpec, BrushTileFormat, MergeTileCommand};
+use renderer::{BrushShaderProvider, BrushShaderSpec, BrushTileFormat};
 use smoother::BrushLatencyTraceState;
 
 pub mod round;
@@ -205,14 +205,6 @@ impl SparseTileOwners {
         Some(self.tile_owners.get(sparse_index)?.credential())
     }
 
-    fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        let sparse_index = self
-            .tile_indices
-            .iter()
-            .position(|&stored_tile_index| stored_tile_index == tile_index)?;
-        Some(self.tile_owners.get(sparse_index)?.tile_key())
-    }
-
     fn credentials(&self) -> impl Iterator<Item = (usize, TileCredential)> + '_ {
         self.tile_indices
             .iter()
@@ -220,16 +212,20 @@ impl SparseTileOwners {
             .zip(self.tile_owners.iter().map(TileOwner::credential))
     }
 
-    fn ensure_tile(&mut self, tile_index: usize, backend: &Backend) -> Result<TileKey, AtlasError> {
-        if let Some(tile_key) = self.tile_key(tile_index) {
-            return Ok(tile_key);
+    fn ensure_tile(
+        &mut self,
+        tile_index: usize,
+        backend: &Backend,
+    ) -> Result<TileCredential, AtlasError> {
+        if let Some(credential) = self.credential(tile_index) {
+            return Ok(credential);
         }
 
         let tile_owner = backend.alloc_active()?;
-        let tile_key = tile_owner.tile_key();
+        let credential = tile_owner.credential();
         self.tile_indices.push(tile_index);
         self.tile_owners.push(tile_owner);
-        Ok(tile_key)
+        Ok(credential)
     }
 
     fn into_tile_owners(self) -> Vec<TileOwner> {
@@ -422,23 +418,6 @@ pub struct StrokeCommitPlanEntry {
     pub brush_credential: TileCredential,
 }
 
-#[must_use]
-pub fn build_merge_command(
-    brush_id: BrushId,
-    brush_payload: &[u8],
-    brush_tile_key: TileKey,
-    origin_tile_key: TileKey,
-    destination_tile_key: TileKey,
-) -> MergeTileCommand {
-    MergeTileCommand {
-        brush_id,
-        origin_tile_key,
-        brush_tile_key,
-        destination_tile_key,
-        brush_payload: brush_payload.to_vec(),
-    }
-}
-
 #[derive(Debug)]
 pub struct BrushBackend {
     brush_id: BrushId,
@@ -572,13 +551,10 @@ impl BrushStrokeState {
                 .ok_or(AtlasError::InvalidState.into());
         }
 
-        self.brush_tile_set
-            .tiles
-            .ensure_tile(tile_index, &self.brush_backend)?;
         let brush_credential = self
             .brush_tile_set
-            .credential(tile_index)
-            .ok_or(AtlasError::InvalidState)?;
+            .tiles
+            .ensure_tile(tile_index, &self.brush_backend)?;
         self.touched_tiles.push(StrokeSlotRecord {
             tile_index,
             brush_credential,
@@ -825,7 +801,6 @@ mod tests {
     use glaphica_core::IMAGE_TILE_SIZE;
     use renderer::{ApplyDabCommand, CopyTileCommand, MergeTileCommand, RenderCommand};
 
-    use crate::build_merge_command;
     use crate::round::{
         ROUND_SHADER_SPEC, RoundBrushInputProcessor, RoundMergeSettings,
         encode_round_apply_payload, encode_round_merge_payload,
@@ -1004,16 +979,18 @@ mod tests {
             let origin_tile_key = backup_result
                 .origin_tile_key_for_slot(entry.tile_index)
                 .expect("origin key should exist");
-            merge_commands.push(RenderCommand::MergeTile(build_merge_command(
-                plan.brush_id,
-                &plan.brush_payload,
+            merge_commands.push(RenderCommand::MergeTile(MergeTileCommand {
+                brush_id: plan.brush_id,
                 brush_tile_key,
                 origin_tile_key,
                 destination_tile_key,
-            )));
+                brush_payload: plan.brush_payload.clone(),
+            }));
         }
-        let second_active_key = image.tile_key(1).expect("tile key should exist");
-        assert!(!second_active_key.is_empty());
+        let second_active_key = image
+            .physical_tile_key(1)
+            .expect("tile key should exist")
+            .expect("tile should be active");
         let tile_0_backup_key = backup_result
             .origin_tile_key_for_slot(0)
             .expect("tile 0 should have a backup key");
@@ -1030,20 +1007,20 @@ mod tests {
                     source_tile_key: first_active_key,
                     destination_tile_key: tile_0_backup_key,
                 }),
-                RenderCommand::MergeTile(build_merge_command(
-                    BrushId::new(11),
-                    &merge_payload,
-                    first_brush_tile,
-                    tile_0_backup_key,
-                    first_active_key,
-                )),
-                RenderCommand::MergeTile(build_merge_command(
-                    BrushId::new(11),
-                    &merge_payload,
-                    second_brush_tile,
-                    tile_1_origin_key,
-                    second_active_key,
-                )),
+                RenderCommand::MergeTile(MergeTileCommand {
+                    brush_id: BrushId::new(11),
+                    brush_tile_key: first_brush_tile,
+                    origin_tile_key: tile_0_backup_key,
+                    destination_tile_key: first_active_key,
+                    brush_payload: merge_payload.clone(),
+                }),
+                RenderCommand::MergeTile(MergeTileCommand {
+                    brush_id: BrushId::new(11),
+                    brush_tile_key: second_brush_tile,
+                    origin_tile_key: tile_1_origin_key,
+                    destination_tile_key: second_active_key,
+                    brush_payload: merge_payload,
+                }),
             ]
         );
         assert!(
@@ -1175,7 +1152,10 @@ mod tests {
             .archive_stroke(state)
             .expect("stroke should retire");
 
-        assert_eq!(cached_group.keys(), &[active_tile_key]);
+        assert_eq!(
+            cached_group.physical_keys().collect::<Vec<_>>(),
+            vec![active_tile_key]
+        );
         assert_eq!(
             brush_backend.stroke_history_groups(),
             &[cached_group.clone()]
@@ -1218,7 +1198,10 @@ mod tests {
             .expect("backend should exist");
         let cached_group = backend.archive_stroke(stroke).expect("cache");
 
-        assert_eq!(cached_group.keys(), &[tile_key]);
+        assert_eq!(
+            cached_group.physical_keys().collect::<Vec<_>>(),
+            vec![tile_key]
+        );
         assert_eq!(backend.stroke_history_groups(), &[cached_group]);
     }
 

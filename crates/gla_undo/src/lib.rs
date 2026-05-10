@@ -146,20 +146,17 @@ impl GlaImageUndo {
             self.backup_backend
                 .alloc_cached(backup_tile_indices.len())?
         };
-        let backup_tile_keys = backup_group.keys();
-
         let mut backup_key_cursor = 0usize;
         let mut tile_records = Vec::with_capacity(affected_tiles.len());
-        let mut copy_commands = Vec::with_capacity(backup_tile_keys.len());
+        let mut copy_commands = Vec::with_capacity(backup_group.len());
         for tile_index in affected_tiles {
             let Some(source_tile_key) = image.physical_tile_key(tile_index)? else {
                 tile_records.push(GlaImageUndoTileRecord::new(tile_index, None));
                 continue;
             };
 
-            let backup_tile_key = backup_tile_keys
-                .get(backup_key_cursor)
-                .copied()
+            let backup_tile_key = backup_group
+                .physical_key(backup_key_cursor)
                 .ok_or(AtlasError::InvalidState)?;
             backup_key_cursor += 1;
             copy_commands.push(TileCopyCommand {
@@ -172,7 +169,7 @@ impl GlaImageUndo {
             ));
         }
 
-        if backup_key_cursor != backup_tile_keys.len() {
+        if backup_key_cursor != backup_group.len() {
             return Err(AtlasError::InvalidState.into());
         }
 
@@ -202,7 +199,6 @@ impl GlaImageUndo {
         } else {
             backup_manager.backend().create_cached_group()?
         };
-        let backup_keys = backup_group.keys();
         let mut backup_key_cursor = 0usize;
         let mut commands = Vec::with_capacity(non_empty_count);
         let mut origin_keys = Vec::with_capacity(source_credential_pairs.len());
@@ -215,9 +211,8 @@ impl GlaImageUndo {
                 continue;
             };
 
-            let backup_tile_key = backup_keys
-                .get(backup_key_cursor)
-                .copied()
+            let backup_tile_key = backup_group
+                .physical_key(backup_key_cursor)
                 .ok_or(AtlasError::InvalidState)?;
             backup_key_cursor += 1;
             commands.push(RenderCommand::CopyTile(TileCopyCommand {
@@ -231,7 +226,7 @@ impl GlaImageUndo {
             ));
         }
 
-        if backup_key_cursor != backup_keys.len() {
+        if backup_key_cursor != backup_group.len() {
             return Err(AtlasError::InvalidState.into());
         }
 

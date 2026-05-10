@@ -984,7 +984,9 @@ mod tests {
             .backup_backend()
             .alloc_cached(1)
             .expect("backup group should allocate");
-        let backup_tile_key = backup_group.keys()[0];
+        let backup_tile_key = backup_group
+            .physical_key(0)
+            .expect("backup group should contain one key");
         doc.push_active_layer_undo_entry(
             backup_group,
             vec![GlaImageUndoTileRecord::new(0, Some(backup_tile_key))],

@@ -613,8 +613,7 @@ impl GlaDocRenderer {
     ) -> Result<Vec<TileCompositeSource>, GlaDocRendererError> {
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
-            let Some(tile_key) =
-                self.source_tile_key(doc, input, tile_index, active_layer_id)?
+            let Some(tile_key) = self.source_tile_key(doc, input, tile_index, active_layer_id)?
             else {
                 continue;
             };
@@ -645,11 +644,13 @@ impl GlaDocRenderer {
                 {
                     return Ok(Some(preview_tile_key));
                 }
-                Ok(doc.node_image(input.node_id)?.physical_tile_key(tile_index)?)
+                Ok(doc
+                    .node_image(input.node_id)?
+                    .physical_tile_key(tile_index)?)
             }
-            RenderProgramSourceKind::Truth => {
-                Ok(doc.node_image(input.node_id)?.physical_tile_key(tile_index)?)
-            }
+            RenderProgramSourceKind::Truth => Ok(doc
+                .node_image(input.node_id)?
+                .physical_tile_key(tile_index)?),
             RenderProgramSourceKind::Result => {
                 let entry = self
                     .node_resources
@@ -1263,7 +1264,7 @@ mod tests {
         let RenderImageState::Active(left_image) = left_state.state() else {
             panic!("left group should be active");
         };
-        assert_eq!(left_image.tile_key(0), Ok(cached_tile_key));
+        assert_eq!(left_image.physical_tile_key(0), Ok(Some(cached_tile_key)));
         assert_eq!(
             renderer.render_backend.tile_state(cached_tile_key),
             Ok(atlas::TileState::Active)
