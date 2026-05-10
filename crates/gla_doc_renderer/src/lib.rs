@@ -464,9 +464,9 @@ impl GlaDocRenderer {
             let mut tile_keys = Vec::with_capacity(tile_owners.len());
             let mut non_empty_owners = Vec::new();
             for tile_owner in tile_owners {
-                let tile_key = tile_owner.tile_key();
+                let tile_key = tile_owner.physical_tile_key();
                 tile_keys.push(tile_key);
-                if !tile_key.is_empty() {
+                if tile_key.is_some() {
                     non_empty_owners.push(tile_owner);
                 }
             }

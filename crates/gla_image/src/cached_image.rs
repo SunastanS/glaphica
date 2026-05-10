@@ -96,7 +96,7 @@ pub struct GlaCachedImage {
     layout: GlaImageLayout,
     cache_group: CachedTileGroup,
     cached_tile_indices: Box<[usize]>,
-    tile_keys: Box<[TileKey]>,
+    tile_keys: Box<[Option<TileKey>]>,
 }
 
 impl GlaCachedImage {
@@ -106,7 +106,7 @@ impl GlaCachedImage {
     ) -> Result<Self, GlaCachedImageCreateError> {
         let mut tile_keys = Vec::with_capacity(image.slot_count());
         for tile_index in 0..image.slot_count() {
-            tile_keys.push(image.tile_key(tile_index)?);
+            tile_keys.push(image.physical_tile_key(tile_index)?);
         }
         Self::new(*image.layout(), cache_group, tile_keys)
     }
@@ -114,7 +114,7 @@ impl GlaCachedImage {
     pub fn new(
         layout: GlaImageLayout,
         cache_group: CachedTileGroup,
-        tile_keys: Vec<TileKey>,
+        tile_keys: Vec<Option<TileKey>>,
     ) -> Result<Self, GlaCachedImageCreateError> {
         let expected_tiles = layout.total_slots() as usize;
         if tile_keys.len() != expected_tiles {
@@ -126,10 +126,7 @@ impl GlaCachedImage {
 
         let cached_set: HashSet<TileKey> = cache_group.keys().iter().copied().collect();
         let mut non_empty_set = HashSet::with_capacity(cached_set.len());
-        for &key in &tile_keys {
-            if key.is_empty() {
-                continue;
-            }
+        for &key in tile_keys.iter().flatten() {
             if !cached_set.contains(&key) {
                 return Err(GlaCachedImageCreateError::WrongTileKeys);
             }
@@ -147,7 +144,7 @@ impl GlaCachedImage {
 
         let mut cached_tile_indices = Vec::with_capacity(cache_group.keys().len());
         for &cached_key in cache_group.keys() {
-            let Some(tile_index) = tile_keys.iter().position(|&key| key == cached_key) else {
+            let Some(tile_index) = tile_keys.iter().position(|&key| key == Some(cached_key)) else {
                 return Err(GlaCachedImageCreateError::WrongTileKeys);
             };
             cached_tile_indices.push(tile_index);
@@ -174,22 +171,21 @@ impl GlaCachedImage {
     }
 
     pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        self.tile_keys.get(tile_index).copied()
+        self.tile_keys.get(tile_index).copied().flatten()
     }
 
     pub fn physical_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        let tile_key = self.tile_key(tile_index)?;
-        (!tile_key.is_empty()).then_some(tile_key)
+        self.tile_key(tile_index)
     }
 
-    pub fn tile_keys(&self) -> &[TileKey] {
+    pub fn tile_keys(&self) -> &[Option<TileKey>] {
         &self.tile_keys
     }
 
     pub fn collect_non_empty_slot_indices(&self, output: &mut Vec<usize>) {
         output.clear();
-        for (tile_index, &tile_key) in self.tile_keys.iter().enumerate() {
-            if !tile_key.is_empty() {
+        for (tile_index, tile_key) in self.tile_keys.iter().enumerate() {
+            if tile_key.is_some() {
                 output.push(tile_index);
             }
         }
@@ -233,10 +229,6 @@ mod tests {
 
     use crate::{GlaCachedImage, GlaCachedImageCreateError, GlaImageLayout};
 
-    fn empty_key_with_backend(backend: &Backend) -> atlas::TileKey {
-        backend.empty_tile_key()
-    }
-
     #[test]
     fn cached_image_requires_full_logical_tile_map() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(1));
@@ -247,7 +239,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE),
             cached,
-            vec![empty_key_with_backend(&backend)],
+            vec![None],
         );
 
         assert_eq!(
@@ -269,10 +261,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE),
             cached,
-            vec![
-                empty_key_with_backend(&backend),
-                empty_key_with_backend(&backend),
-            ],
+            vec![None, None],
         );
 
         assert_eq!(
@@ -294,7 +283,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
             group_a,
-            vec![key_from_b],
+            vec![Some(key_from_b)],
         );
 
         assert_eq!(image, Err(GlaCachedImageCreateError::WrongTileKeys));
@@ -312,7 +301,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2),
             cached,
-            vec![key_a, key_b, key_a, empty_key_with_backend(&backend)],
+            vec![Some(key_a), Some(key_b), Some(key_a), None],
         );
 
         assert_eq!(image, Err(GlaCachedImageCreateError::DuplicateTileKeys));
@@ -329,7 +318,7 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE, IMAGE_TILE_SIZE),
             cached,
-            vec![key_a],
+            vec![Some(key_a)],
         );
 
         assert!(image.is_err());
@@ -347,12 +336,7 @@ mod tests {
         let cached_image = GlaCachedImage::new(
             layout,
             cached,
-            vec![
-                first,
-                empty_key_with_backend(&backend),
-                second,
-                empty_key_with_backend(&backend),
-            ],
+            vec![Some(first), None, Some(second), None],
         )
         .expect("cached image should build");
 
@@ -361,9 +345,9 @@ mod tests {
             .expect("activate should succeed");
 
         assert_eq!(active.tile_key(0), Ok(first));
-        assert_eq!(active.tile_key(1), Ok(empty_key_with_backend(&backend)));
+        assert_eq!(active.physical_tile_key(1), Ok(None));
         assert_eq!(active.tile_key(2), Ok(second));
-        assert_eq!(active.tile_key(3), Ok(empty_key_with_backend(&backend)));
+        assert_eq!(active.physical_tile_key(3), Ok(None));
         assert_eq!(backend.tile_state(first), Ok(atlas::TileState::Active));
         assert_eq!(backend.tile_state(second), Ok(atlas::TileState::Active));
     }
@@ -377,7 +361,7 @@ mod tests {
             .expect("cached tiles should allocate");
         let first = cached.keys()[0];
         let second = cached.keys()[1];
-        let cached_image = GlaCachedImage::new(layout, cached, vec![second, first])
+        let cached_image = GlaCachedImage::new(layout, cached, vec![Some(second), Some(first)])
             .expect("cached image should build");
 
         let active = cached_image
@@ -399,18 +383,13 @@ mod tests {
         let image = GlaCachedImage::new(
             GlaImageLayout::new(IMAGE_TILE_SIZE * 2, IMAGE_TILE_SIZE * 2),
             cached,
-            vec![
-                first,
-                empty_key_with_backend(&backend),
-                second,
-                empty_key_with_backend(&backend),
-            ],
+            vec![Some(first), None, Some(second), None],
         );
         let image = image.expect("cached image should build");
 
         assert_eq!(image.tile_key(0), Some(first));
-        assert_eq!(image.tile_key(1), Some(empty_key_with_backend(&backend)));
+        assert_eq!(image.tile_key(1), None);
         assert_eq!(image.tile_key(2), Some(second));
-        assert_eq!(image.tile_key(3), Some(empty_key_with_backend(&backend)));
+        assert_eq!(image.tile_key(3), None);
     }
 }
