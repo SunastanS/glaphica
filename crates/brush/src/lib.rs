@@ -992,7 +992,7 @@ mod tests {
             .execute_backup(&source_credentials)
             .expect("backup should succeed");
 
-        let mut commands: Vec<RenderCommand> = backup_result.commands;
+        let mut merge_commands = Vec::new();
         for entry in &plan.entries {
             let destination_tile_key = image
                 .ensure_active_tile_key(entry.tile_index)
@@ -1002,12 +1002,9 @@ mod tests {
                 .expect("brush credential should resolve")
                 .expect("brush tile should be active");
             let origin_tile_key = backup_result
-                .origin_keys
-                .iter()
-                .find(|(idx, _)| *idx == entry.tile_index)
-                .map(|(_, key)| *key)
+                .origin_tile_key_for_slot(entry.tile_index)
                 .expect("origin key should exist");
-            commands.push(RenderCommand::MergeTile(build_merge_command(
+            merge_commands.push(RenderCommand::MergeTile(build_merge_command(
                 plan.brush_id,
                 &plan.brush_payload,
                 brush_tile_key,
@@ -1015,15 +1012,17 @@ mod tests {
                 destination_tile_key,
             )));
         }
-
         let second_active_key = image.tile_key(1).expect("tile key should exist");
         assert!(!second_active_key.is_empty());
         let tile_0_backup_key = backup_result
-            .origin_keys
-            .iter()
-            .find(|(idx, _)| *idx == 0)
-            .map(|(_, key)| *key)
+            .origin_tile_key_for_slot(0)
             .expect("tile 0 should have a backup key");
+        let tile_1_origin_key = backup_result
+            .origin_tile_key_for_slot(1)
+            .expect("tile 1 should have an origin key");
+        let mut commands: Vec<RenderCommand> = backup_result.commands;
+        commands.extend(merge_commands);
+
         assert_eq!(
             commands,
             vec![
@@ -1042,20 +1041,17 @@ mod tests {
                     BrushId::new(11),
                     &merge_payload,
                     second_brush_tile,
-                    image_undo.backup_backend().empty_tile_key(),
+                    tile_1_origin_key,
                     second_active_key,
                 )),
             ]
         );
-        let tile_1_backup_key = backup_result
-            .origin_keys
-            .iter()
-            .find(|(idx, _)| *idx == 1)
-            .map(|(_, key)| *key)
-            .expect("tile 1 should be in origin_keys");
         assert!(
-            tile_1_backup_key.is_empty(),
-            "tile 1 was empty in image, should have empty backup key"
+            backup_result
+                .tile_records
+                .iter()
+                .any(|record| record.tile_index() == 1 && record.backup_tile_key().is_none()),
+            "tile 1 was empty in image, should not have a backup tile"
         );
     }
 

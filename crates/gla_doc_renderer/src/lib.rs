@@ -845,7 +845,7 @@ mod tests {
         let action = prepare_target_tile(&mut image, 0, &[]).expect("target should prepare");
 
         assert_eq!(action, TargetTileAction::Noop);
-        assert!(image.tile_key(0).is_ok_and(|key| key.is_empty()));
+        assert_eq!(image.physical_tile_key(0), Ok(None));
         assert_eq!(backend.tile_state(tile_key), Ok(atlas::TileState::Cached));
     }
 

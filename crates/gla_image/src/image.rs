@@ -397,7 +397,7 @@ mod tests {
         let key = tile_owner.tile_key();
 
         let replaced = image.replace_tile_owner(0, tile_owner);
-        assert!(matches!(replaced, Ok(previous) if previous.tile_key().is_empty()));
+        assert!(matches!(replaced, Ok(previous) if previous.physical_tile_key().is_none()));
         assert_eq!(image.tile_key(0), Ok(key));
     }
 
@@ -466,8 +466,6 @@ mod tests {
         assert_ne!(left, right);
         assert_eq!(image.physical_tile_key(0), Ok(None));
         assert_eq!(image.physical_tile_key(1), Ok(None));
-        assert!(image.tile_key(0).is_ok_and(|key| key.is_empty()));
-        assert!(image.tile_key(1).is_ok_and(|key| key.is_empty()));
     }
 
     #[test]
@@ -594,7 +592,7 @@ mod tests {
 
         assert!(image.cache_tile(0).is_ok());
 
-        assert!(image.tile_key(0).is_ok_and(|key| key.is_empty()));
+        assert_eq!(image.physical_tile_key(0), Ok(None));
         assert_eq!(backend.tile_state(key), Ok(atlas::TileState::Cached));
     }
 }

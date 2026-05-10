@@ -177,7 +177,6 @@ impl StrokeTransaction {
         };
         let backup_result = image_undo.execute_backup(&source_credentials)?;
 
-        let mut commands: Vec<RenderCommand> = backup_result.commands;
         let image = doc.active_layer_image_mut()?;
         let destination_tile_keys: Vec<_> = plan
             .entries
@@ -185,10 +184,13 @@ impl StrokeTransaction {
             .map(|e| image.ensure_active_tile_key(e.tile_index))
             .collect::<Result<_, _>>()?;
 
+        let mut merge_commands = Vec::with_capacity(plan.entries.len());
         for (i, entry) in plan.entries.iter().enumerate() {
             let brush_tile_key = brush_tile_manager.resolve_active_key(entry.brush_credential)?;
-            let (_, origin_tile_key) = backup_result.origin_keys[i];
-            commands.push(RenderCommand::MergeTile(build_merge_command(
+            let origin_tile_key = backup_result
+                .origin_tile_key(i)
+                .ok_or(atlas::AtlasError::InvalidState)?;
+            merge_commands.push(RenderCommand::MergeTile(build_merge_command(
                 plan.brush_id,
                 &plan.brush_payload,
                 brush_tile_key,
@@ -196,6 +198,9 @@ impl StrokeTransaction {
                 destination_tile_keys[i],
             )));
         }
+
+        let mut commands: Vec<RenderCommand> = backup_result.commands;
+        commands.extend(merge_commands);
 
         let [image_backend, backup_backend] = image_undo.backends();
         let render_backend = doc_renderer.render_backend();

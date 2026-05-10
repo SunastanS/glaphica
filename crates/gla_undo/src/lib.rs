@@ -35,7 +35,7 @@ pub struct GlaImageUndoBackup {
 pub struct BackupResult {
     pub commands: Vec<RenderCommand>,
     pub backup_group: CachedTileGroup,
-    pub origin_keys: Vec<(usize, TileKey)>,
+    origin_keys: Vec<(usize, TileKey)>,
     pub tile_records: Vec<GlaImageUndoTileRecord>,
 }
 
@@ -301,6 +301,21 @@ impl GlaImageUndoTileRecord {
 
     pub const fn backup_tile_key(&self) -> Option<TileKey> {
         self.backup_tile_key
+    }
+}
+
+impl BackupResult {
+    pub fn origin_tile_key(&self, entry_index: usize) -> Option<TileKey> {
+        self.origin_keys
+            .get(entry_index)
+            .map(|(_, tile_key)| *tile_key)
+    }
+
+    pub fn origin_tile_key_for_slot(&self, tile_index: usize) -> Option<TileKey> {
+        self.origin_keys
+            .iter()
+            .find(|(stored_tile_index, _)| *stored_tile_index == tile_index)
+            .map(|(_, tile_key)| *tile_key)
     }
 }
 
