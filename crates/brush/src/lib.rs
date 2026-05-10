@@ -174,7 +174,7 @@ impl BrushStrokeInputProcessor for SmoothedBrushStrokeInputProcessor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrushTile {
     pub tile_index: usize,
-    pub tile_key: TileKey,
+    pub brush_credential: TileCredential,
 }
 
 #[derive(Debug)]
@@ -213,11 +213,11 @@ impl SparseTileOwners {
         Some(self.tile_owners.get(sparse_index)?.tile_key())
     }
 
-    fn tiles(&self) -> impl Iterator<Item = (usize, TileKey)> + '_ {
+    fn credentials(&self) -> impl Iterator<Item = (usize, TileCredential)> + '_ {
         self.tile_indices
             .iter()
             .copied()
-            .zip(self.tile_owners.iter().map(TileOwner::tile_key))
+            .zip(self.tile_owners.iter().map(TileOwner::credential))
     }
 
     fn ensure_tile(&mut self, tile_index: usize, backend: &Backend) -> Result<TileKey, AtlasError> {
@@ -251,15 +251,13 @@ impl BrushTileSet {
         self.tiles.credential(tile_index)
     }
 
-    pub fn tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        self.tiles.tile_key(tile_index)
-    }
-
     pub fn tiles(&self) -> impl Iterator<Item = BrushTile> + '_ {
-        self.tiles.tiles().map(|(tile_index, tile_key)| BrushTile {
-            tile_index,
-            tile_key,
-        })
+        self.tiles
+            .credentials()
+            .map(|(tile_index, brush_credential)| BrushTile {
+                tile_index,
+                brush_credential,
+            })
     }
 
     pub fn into_tile_owners(self) -> Vec<TileOwner> {
@@ -574,8 +572,7 @@ impl BrushStrokeState {
                 .ok_or(AtlasError::InvalidState.into());
         }
 
-        let brush_tile_key = self
-            .brush_tile_set
+        self.brush_tile_set
             .tiles
             .ensure_tile(tile_index, &self.brush_backend)?;
         let brush_credential = self
@@ -591,16 +588,17 @@ impl BrushStrokeState {
             .ok_or(AtlasError::InvalidState.into())
     }
 
-    pub fn push_apply_dab(&mut self, tile_index: usize) -> Result<TileKey, BrushStrokeError> {
-        self.ensure_touched_tile(tile_index)?;
-        self.brush_tile_set
-            .tile_key(tile_index)
-            .ok_or(AtlasError::InvalidState.into())
+    pub fn push_apply_dab(
+        &mut self,
+        tile_index: usize,
+    ) -> Result<TileCredential, BrushStrokeError> {
+        let record = self.ensure_touched_tile(tile_index)?;
+        Ok(record.brush_credential)
     }
 
-    pub fn preview_brush_tile_key(&self, tile_index: usize) -> Option<TileKey> {
-        self.touched_tile_index(tile_index)?;
-        self.brush_tile_set.tile_key(tile_index)
+    pub fn preview_brush_tile_credential(&self, tile_index: usize) -> Option<TileCredential> {
+        let record_index = self.touched_tile_index(tile_index)?;
+        Some(self.touched_tiles.get(record_index)?.brush_credential)
     }
 
     pub fn build_commit_plan(&self, brush_payload: Vec<u8>) -> StrokeCommitPlan {
@@ -840,23 +838,33 @@ mod tests {
     use gla_image::{GlaImage, GlaImageLayout};
     use gla_undo::GlaImageUndo;
 
+    fn resolve_tile(tile_manager: &TileManager, credential: TileCredential) -> atlas::TileKey {
+        tile_manager
+            .resolve(credential)
+            .expect("credential should resolve")
+            .expect("brush tile should be active")
+    }
+
     #[test]
     fn apply_dab_allocates_brush_tile_once() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
+        let tile_manager = TileManager::from(backend.clone());
         let mut state =
             BrushStrokeState::new(BrushId::new(5), backend.clone()).expect("state should build");
         let mut commands = Vec::new();
 
         let first_payload = encode_round_apply_payload([8.0, 9.0], 10.0, 0.75);
         let second_payload = encode_round_apply_payload([3.0, 4.0], 5.0, 0.25);
-        let first = state.push_apply_dab(4).expect("dab should build");
+        let first_credential = state.push_apply_dab(4).expect("dab should build");
+        let first = resolve_tile(&tile_manager, first_credential);
         commands.push(RenderCommand::ApplyDab(ApplyDabCommand {
             brush_id: state.brush_id(),
             destination_tile_key: first,
             source_tile_key: None,
             brush_payload: first_payload.clone(),
         }));
-        let second = state.push_apply_dab(4).expect("dab should build");
+        let second_credential = state.push_apply_dab(4).expect("dab should build");
+        let second = resolve_tile(&tile_manager, second_credential);
         commands.push(RenderCommand::ApplyDab(ApplyDabCommand {
             brush_id: state.brush_id(),
             destination_tile_key: second,
@@ -865,7 +873,8 @@ mod tests {
         }));
 
         assert_eq!(first, second);
-        assert_eq!(state.brush_tiles().tile_key(4), Some(first));
+        assert_eq!(first_credential, second_credential);
+        assert_eq!(state.brush_tiles().credential(4), Some(first_credential));
         assert_eq!(
             commands,
             vec![
@@ -889,13 +898,15 @@ mod tests {
     #[test]
     fn preview_merge_uses_virtual_preview_node_tile() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
+        let tile_manager = TileManager::from(backend.clone());
         let active_tile = backend.alloc_active().expect("active tile");
         let active_tile_key = active_tile.tile_key();
 
         let mut state =
             BrushStrokeState::new(BrushId::new(9), backend).expect("state should build");
         let mut commands = Vec::new();
-        let brush_tile_key = state.push_apply_dab(0).expect("dab");
+        let brush_credential = state.push_apply_dab(0).expect("dab");
+        let brush_tile_key = resolve_tile(&tile_manager, brush_credential);
         commands.clear();
         let preview_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(13));
         let preview_tile_key = preview_backend
@@ -910,9 +921,10 @@ mod tests {
             hardness: 0.7,
         });
 
-        let returned_brush_tile_key = state
-            .preview_brush_tile_key(0)
+        let returned_brush_credential = state
+            .preview_brush_tile_credential(0)
             .expect("preview merge should find brush tile");
+        let returned_brush_tile_key = resolve_tile(&tile_manager, returned_brush_credential);
         commands.push(RenderCommand::MergeTile(MergeTileCommand {
             brush_id: state.brush_id(),
             origin_tile_key: active_tile_key,
@@ -954,8 +966,10 @@ mod tests {
         let mut state =
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let image_undo = GlaImageUndo::new(image_backend.clone(), backup_backend);
-        let first_brush_tile = state.push_apply_dab(0).expect("dab");
-        let second_brush_tile = state.push_apply_dab(1).expect("dab");
+        let first_brush_credential = state.push_apply_dab(0).expect("dab");
+        let second_brush_credential = state.push_apply_dab(1).expect("dab");
+        let first_brush_tile = resolve_tile(&brush_tile_manager, first_brush_credential);
+        let second_brush_tile = resolve_tile(&brush_tile_manager, second_brush_credential);
         let merge_payload = encode_round_merge_payload(RoundMergeSettings {
             tint: [0.1, 0.2, 0.3],
             opacity: 1.0,
@@ -1051,8 +1065,10 @@ mod tests {
         let brush_tile_manager = TileManager::from(brush_backend.clone());
         let mut state =
             BrushStrokeState::new(BrushId::new(13), brush_backend).expect("state should build");
-        let first_brush_tile = state.push_apply_dab(0).expect("dab");
-        let second_brush_tile = state.push_apply_dab(3).expect("dab");
+        let first_brush_credential = state.push_apply_dab(0).expect("dab");
+        let second_brush_credential = state.push_apply_dab(3).expect("dab");
+        let first_brush_tile = resolve_tile(&brush_tile_manager, first_brush_credential);
+        let second_brush_tile = resolve_tile(&brush_tile_manager, second_brush_credential);
 
         let plan = state.build_commit_plan(vec![0xAB, 0xCD]);
 
@@ -1097,13 +1113,15 @@ mod tests {
     #[test]
     fn preview_merge_uses_explicit_origin_tile_key() {
         let brush_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
+        let brush_tile_manager = TileManager::from(brush_backend.clone());
         let origin_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(3));
         let active_tile = origin_backend.alloc_active().expect("active tile");
         let active_tile_key = active_tile.tile_key();
         let mut state =
             BrushStrokeState::new(BrushId::new(11), brush_backend).expect("state should build");
         let mut commands = Vec::new();
-        let brush_tile_key = state.push_apply_dab(0).expect("dab");
+        let brush_credential = state.push_apply_dab(0).expect("dab");
+        let brush_tile_key = resolve_tile(&brush_tile_manager, brush_credential);
         commands.clear();
         let preview_backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(13));
         let preview_tile_key = preview_backend
@@ -1118,9 +1136,10 @@ mod tests {
             hardness: 0.7,
         });
 
-        let returned_brush_tile_key = state
-            .preview_brush_tile_key(0)
+        let returned_brush_credential = state
+            .preview_brush_tile_credential(0)
             .expect("preview merge should find brush tile");
+        let returned_brush_tile_key = resolve_tile(&brush_tile_manager, returned_brush_credential);
         commands.push(RenderCommand::MergeTile(MergeTileCommand {
             brush_id: state.brush_id(),
             origin_tile_key: active_tile_key,
@@ -1145,6 +1164,7 @@ mod tests {
     #[test]
     fn atlas_backend_retires_stroke_brush_tiles_as_cached_group() {
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(7));
+        let tile_manager = TileManager::from(backend.clone());
         let mut brush_backend = BrushBackend::new(
             BrushId::new(17),
             backend.clone(),
@@ -1152,7 +1172,8 @@ mod tests {
         )
         .expect("backend should build");
         let mut state = brush_backend.begin_stroke();
-        let active_tile_key = state.push_apply_dab(0).expect("dab");
+        let active_credential = state.push_apply_dab(0).expect("dab");
+        let active_tile_key = resolve_tile(&tile_manager, active_credential);
 
         let cached_group = brush_backend
             .archive_stroke(state)
@@ -1166,7 +1187,8 @@ mod tests {
         assert_eq!(backend.tile_state(active_tile_key), Ok(TileState::Cached));
 
         let mut next_state = brush_backend.begin_stroke();
-        let next_tile_key = next_state.push_apply_dab(0).expect("next dab");
+        let next_credential = next_state.push_apply_dab(0).expect("next dab");
+        let next_tile_key = resolve_tile(&tile_manager, next_credential);
         assert_ne!(next_tile_key, active_tile_key);
         assert_eq!(backend.tile_state(next_tile_key), Ok(TileState::Active));
     }
@@ -1175,6 +1197,7 @@ mod tests {
     fn registry_registers_shader_and_backend_together() {
         let brush_id = BrushId::new(23);
         let backend = Backend::new(AtlasLayout::Tiny8, BackendId::new(9));
+        let tile_manager = TileManager::from(backend.clone());
         let mut registry = BrushRegistry::new();
 
         registry
@@ -1192,7 +1215,8 @@ mod tests {
         let mut stroke = registry
             .begin_stroke(brush_id)
             .expect("stroke should build");
-        let tile_key = stroke.push_apply_dab(0).expect("dab");
+        let credential = stroke.push_apply_dab(0).expect("dab");
+        let tile_key = resolve_tile(&tile_manager, credential);
         let backend = registry
             .backend_mut(brush_id)
             .expect("backend should exist");
