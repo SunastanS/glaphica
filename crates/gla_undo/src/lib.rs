@@ -290,11 +290,11 @@ impl GlaImageUndoTileRecord {
         }
     }
 
-    pub const fn backed_up(tile_index: usize, backup_tile_key: TileKey) -> Self {
+    const fn backed_up(tile_index: usize, backup_tile_key: TileKey) -> Self {
         Self::new(tile_index, Some(backup_tile_key))
     }
 
-    pub const fn empty(tile_index: usize) -> Self {
+    const fn empty(tile_index: usize) -> Self {
         Self::new(tile_index, None)
     }
 

@@ -644,7 +644,7 @@ mod tests {
 
     type TileCopyCommand = CopyTileCommand<TileKey>;
 
-    use crate::{GlaDoc, GlaDocError, GlaImageLayout, GlaImageUndoTileRecord, GlaNodeKind};
+    use crate::{GlaDoc, GlaDocError, GlaImageLayout, GlaNodeKind};
     use glaphica_core::BlendMode;
 
     fn new_doc() -> GlaDoc {
@@ -973,24 +973,21 @@ mod tests {
         let current_tile = image_backend
             .alloc_active()
             .expect("active tile should allocate");
-        let current_tile_key = current_tile.tile_key();
         doc.active_layer_image_mut()
             .expect("active image should exist")
             .replace_tile_owner(0, current_tile)
             .expect("tile owner should install");
 
-        let backup_group = doc
+        let backup = doc
             .image_undo()
-            .backup_backend()
-            .alloc_cached(1)
-            .expect("backup group should allocate");
-        let backup_tile_key = backup_group
-            .physical_key(0)
-            .expect("backup group should contain one key");
-        doc.push_active_layer_undo_entry(
-            backup_group,
-            vec![GlaImageUndoTileRecord::backed_up(0, backup_tile_key)],
-        );
+            .backup_tiles(
+                doc.active_layer_image()
+                    .expect("active image should be available"),
+                &[0],
+            )
+            .expect("backup should build");
+        let (backup_group, tile_records, _) = backup.into_parts();
+        doc.push_active_layer_undo_entry(backup_group, tile_records);
 
         let restore = doc
             .restore_last_undo()
@@ -1021,6 +1018,15 @@ mod tests {
         doc.set_active_layer(layer_id)
             .expect("active layer should update");
 
+        let backup = doc
+            .image_undo()
+            .backup_tiles(
+                doc.active_layer_image()
+                    .expect("active image should be available"),
+                &[0],
+            )
+            .expect("backup should build");
+        let (backup_group, tile_records, _) = backup.into_parts();
         let current_tile = image_backend
             .alloc_active()
             .expect("active tile should allocate");
@@ -1028,15 +1034,7 @@ mod tests {
             .expect("active image should exist")
             .replace_tile_owner(0, current_tile)
             .expect("tile owner should install");
-        let empty_backup_group = doc
-            .image_undo()
-            .backup_backend()
-            .create_cached_group()
-            .expect("empty backup group should allocate");
-        doc.push_active_layer_undo_entry(
-            empty_backup_group,
-            vec![GlaImageUndoTileRecord::empty(0)],
-        );
+        doc.push_active_layer_undo_entry(backup_group, tile_records);
 
         let restore = doc
             .restore_last_undo()
