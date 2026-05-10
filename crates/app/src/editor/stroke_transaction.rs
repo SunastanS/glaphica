@@ -1,7 +1,7 @@
 use atlas::{Backend, TileCredential, TileManager};
 use brush::{BrushInput, BrushRegistry, BrushStrokeState, build_merge_command};
 use gla_doc_renderer::GlaDocRenderer;
-use gla_document::{GlaDoc, GlaDocError, GlaImageUndoTileRecord};
+use gla_document::{GlaDoc, GlaDocError};
 use renderer::{ApplyDabCommand, BrushTileFormat, MergeTileCommand, RenderCommand, TileRenderer};
 
 use crate::editor::session::EditorSessionError;
@@ -212,14 +212,11 @@ impl StrokeTransaction {
             brushes,
         )?;
 
-        let tile_records: Vec<GlaImageUndoTileRecord> = backup_result
-            .origin_keys
-            .into_iter()
-            .map(|(tile_index, backup_tile_key)| {
-                GlaImageUndoTileRecord::new(tile_index, backup_tile_key)
-            })
-            .collect();
-        doc.push_undo_entry(active_layer_id, backup_result.backup_group, tile_records)?;
+        doc.push_undo_entry(
+            active_layer_id,
+            backup_result.backup_group,
+            backup_result.tile_records,
+        )?;
 
         let brush_backend = brushes
             .backend_mut(brush_id)

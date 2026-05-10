@@ -987,7 +987,7 @@ mod tests {
         let backup_tile_key = backup_group.keys()[0];
         doc.push_active_layer_undo_entry(
             backup_group,
-            vec![GlaImageUndoTileRecord::new(0, backup_tile_key)],
+            vec![GlaImageUndoTileRecord::new(0, Some(backup_tile_key))],
         );
 
         let restore = doc
@@ -1033,10 +1033,7 @@ mod tests {
             .expect("empty backup group should allocate");
         doc.push_active_layer_undo_entry(
             empty_backup_group,
-            vec![GlaImageUndoTileRecord::new(
-                0,
-                doc.image_undo().backup_backend().empty_tile_key(),
-            )],
+            vec![GlaImageUndoTileRecord::new(0, None)],
         );
 
         let restore = doc

@@ -21,7 +21,7 @@ pub struct GlaImageUndo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlaImageUndoTileRecord {
     tile_index: usize,
-    backup_tile_key: TileKey,
+    backup_tile_key: Option<TileKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,7 @@ pub struct BackupResult {
     pub commands: Vec<RenderCommand>,
     pub backup_group: CachedTileGroup,
     pub origin_keys: Vec<(usize, TileKey)>,
+    pub tile_records: Vec<GlaImageUndoTileRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,10 +153,7 @@ impl GlaImageUndo {
         let mut copy_commands = Vec::with_capacity(backup_tile_keys.len());
         for tile_index in affected_tiles {
             let Some(source_tile_key) = image.physical_tile_key(tile_index)? else {
-                tile_records.push(GlaImageUndoTileRecord::new(
-                    tile_index,
-                    self.backup_backend.empty_tile_key(),
-                ));
+                tile_records.push(GlaImageUndoTileRecord::new(tile_index, None));
                 continue;
             };
 
@@ -168,7 +166,10 @@ impl GlaImageUndo {
                 source_tile_key,
                 destination_tile_key: backup_tile_key,
             });
-            tile_records.push(GlaImageUndoTileRecord::new(tile_index, backup_tile_key));
+            tile_records.push(GlaImageUndoTileRecord::new(
+                tile_index,
+                Some(backup_tile_key),
+            ));
         }
 
         if backup_key_cursor != backup_tile_keys.len() {
@@ -205,10 +206,12 @@ impl GlaImageUndo {
         let mut backup_key_cursor = 0usize;
         let mut commands = Vec::with_capacity(non_empty_count);
         let mut origin_keys = Vec::with_capacity(source_credential_pairs.len());
+        let mut tile_records = Vec::with_capacity(source_credential_pairs.len());
 
         for &(tile_index, credential) in source_credential_pairs {
             let Some(source_key) = image_manager.resolve(credential)? else {
                 origin_keys.push((tile_index, self.backup_backend.empty_tile_key()));
+                tile_records.push(GlaImageUndoTileRecord::new(tile_index, None));
                 continue;
             };
 
@@ -222,6 +225,10 @@ impl GlaImageUndo {
                 destination_tile_key: backup_tile_key,
             }));
             origin_keys.push((tile_index, backup_tile_key));
+            tile_records.push(GlaImageUndoTileRecord::new(
+                tile_index,
+                Some(backup_tile_key),
+            ));
         }
 
         if backup_key_cursor != backup_keys.len() {
@@ -232,6 +239,7 @@ impl GlaImageUndo {
             commands,
             backup_group,
             origin_keys,
+            tile_records,
         })
     }
 
@@ -246,8 +254,7 @@ impl GlaImageUndo {
         let mut commands = Vec::with_capacity(tile_records.len());
         let mut tile_indices = Vec::with_capacity(tile_records.len());
         for record in tile_records {
-            let source_tile_key = record.backup_tile_key();
-            if !source_tile_key.is_empty() {
+            if let Some(source_tile_key) = record.backup_tile_key() {
                 let destination_tile_key = image.ensure_active_tile_key(record.tile_index())?;
                 commands.push(RenderCommand::CopyTile(TileCopyCommand {
                     source_tile_key,
@@ -281,7 +288,7 @@ impl GlaImageUndo {
 }
 
 impl GlaImageUndoTileRecord {
-    pub const fn new(tile_index: usize, backup_tile_key: TileKey) -> Self {
+    pub const fn new(tile_index: usize, backup_tile_key: Option<TileKey>) -> Self {
         Self {
             tile_index,
             backup_tile_key,
@@ -292,7 +299,7 @@ impl GlaImageUndoTileRecord {
         self.tile_index
     }
 
-    pub const fn backup_tile_key(&self) -> TileKey {
+    pub const fn backup_tile_key(&self) -> Option<TileKey> {
         self.backup_tile_key
     }
 }
