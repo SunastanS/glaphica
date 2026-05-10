@@ -312,16 +312,9 @@ impl GlaImageUndoTileRecord {
 }
 
 impl BackupResult {
-    pub fn origin_tile_key(&self, entry_index: usize) -> Option<TileKey> {
+    pub fn merge_origin_tile_key(&self, entry_index: usize) -> Option<TileKey> {
         self.origin_keys
             .get(entry_index)
-            .map(|(_, tile_key)| *tile_key)
-    }
-
-    pub fn origin_tile_key_for_slot(&self, tile_index: usize) -> Option<TileKey> {
-        self.origin_keys
-            .iter()
-            .find(|(stored_tile_index, _)| *stored_tile_index == tile_index)
             .map(|(_, tile_key)| *tile_key)
     }
 }

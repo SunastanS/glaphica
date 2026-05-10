@@ -188,7 +188,7 @@ impl StrokeTransaction {
         for (i, entry) in plan.entries.iter().enumerate() {
             let brush_tile_key = brush_tile_manager.resolve_active_key(entry.brush_credential)?;
             let origin_tile_key = backup_result
-                .origin_tile_key(i)
+                .merge_origin_tile_key(i)
                 .ok_or(atlas::AtlasError::InvalidState)?;
             merge_commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: plan.brush_id,

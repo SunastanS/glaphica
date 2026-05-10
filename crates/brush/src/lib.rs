@@ -968,7 +968,7 @@ mod tests {
             .expect("backup should succeed");
 
         let mut merge_commands = Vec::new();
-        for entry in &plan.entries {
+        for (entry_index, entry) in plan.entries.iter().enumerate() {
             let destination_tile_key = image
                 .ensure_active_tile_key(entry.tile_index)
                 .expect("tile should activate");
@@ -977,7 +977,7 @@ mod tests {
                 .expect("brush credential should resolve")
                 .expect("brush tile should be active");
             let origin_tile_key = backup_result
-                .origin_tile_key_for_slot(entry.tile_index)
+                .merge_origin_tile_key(entry_index)
                 .expect("origin key should exist");
             merge_commands.push(RenderCommand::MergeTile(MergeTileCommand {
                 brush_id: plan.brush_id,
@@ -992,10 +992,10 @@ mod tests {
             .expect("tile key should exist")
             .expect("tile should be active");
         let tile_0_backup_key = backup_result
-            .origin_tile_key_for_slot(0)
+            .merge_origin_tile_key(0)
             .expect("tile 0 should have a backup key");
         let tile_1_origin_key = backup_result
-            .origin_tile_key_for_slot(1)
+            .merge_origin_tile_key(1)
             .expect("tile 1 should have an origin key");
         let mut commands: Vec<RenderCommand> = backup_result.commands;
         commands.extend(merge_commands);
