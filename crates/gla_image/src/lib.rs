@@ -3,7 +3,6 @@ mod image;
 mod layout;
 mod stored_image;
 
-use atlas::TileKey;
 
 pub use crate::cached_image::{
     GlaCachedImage, GlaCachedImageActivateError, GlaCachedImageCreateError,

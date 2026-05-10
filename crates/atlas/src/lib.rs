@@ -1313,8 +1313,36 @@ impl TileManager {
         &self,
         credential: TileCredential,
     ) -> Result<TileKey, AtlasError> {
-        self.resolve_active_key(credential)
+        {
+            let pool = self
+                .backend
+                .credential_pool
+                .lock()
+                .map_err(|_| AtlasError::BackendPoisoned)?;
+            if let Some(tile_key) = pool.tile_key(credential, self.backend_id())?
+                && !tile_key.is_empty()
+            {
+                return Ok(tile_key);
+            }
+        }
+
+        let allocated_key = self.backend.with_inner(|inner| inner.alloc_active())?;
+        let mut pool = self
+            .backend
+            .credential_pool
+            .lock()
+            .map_err(|_| AtlasError::BackendPoisoned)?;
+        if let Some(tile_key) = pool.tile_key(credential, self.backend_id())?
+            && !tile_key.is_empty()
+        {
+            self.backend.free(allocated_key)?;
+            return Ok(tile_key);
+        }
+
+        pool.bind(credential, self.backend_id(), allocated_key)?;
+        Ok(allocated_key)
     }
+
 
     pub fn resolve_key_or_empty(&self, credential: TileCredential) -> Result<TileKey, AtlasError> {
         Ok(self

@@ -250,7 +250,10 @@ impl GlaImageUndo {
         let mut tile_indices = Vec::with_capacity(tile_records.len());
         for record in tile_records {
             if let Some(source_tile_key) = record.backup_tile_key() {
-                let destination_tile_key = image.ensure_active_tile_key(record.tile_index())?;
+                let destination_credential = image.source_tile_credential(record.tile_index())?;
+                let destination_tile_key = image
+                    .tile_manager()
+                    .resolve_destination_key(destination_credential)?;
                 commands.push(RenderCommand::CopyTile(TileCopyCommand {
                     source_tile_key,
                     destination_tile_key,

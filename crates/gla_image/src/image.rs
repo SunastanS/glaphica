@@ -270,16 +270,7 @@ impl GlaImage {
         Ok(self.tile_manager.ensure_active_tile(tile_owner)?)
     }
 
-    pub fn ensure_destination_tile(
-        &mut self,
-        tile_index: usize,
-    ) -> Result<TileCredential, GlaImageEnsureActiveTileError> {
-        let Some(tile_owner) = self.tile_owners.get_mut(tile_index) else {
-            return Err(GlaImageTileAccessError::OutOfBounds.into());
-        };
-        self.tile_manager.ensure_active_tile(tile_owner)?;
-        Ok(tile_owner.credential())
-    }
+
 
     pub fn resize_anchored_top_left(
         &mut self,

@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileKey, TileOwner};
+use atlas::{AtlasError, Backend, BackendId, CachedTileGroup, TileCredential, TileOwner};
 use gla_image::{GlaImageEnsureActiveTileError, GlaImageTileAccessError};
 use gla_undo::GlaImageUndoError;
 pub use glaphica_core::BrushId;
@@ -960,7 +960,7 @@ mod tests {
         let source_credentials: Vec<(usize, TileCredential)> = plan
             .entries
             .iter()
-            .map(|e| Ok((e.tile_index, image.tile_credential(e.tile_index)?)))
+            .map(|e| Ok((e.tile_index, image.source_tile_credential(e.tile_index)?)))
             .collect::<Result<_, GlaImageTileAccessError>>()
             .expect("credentials should collect");
         let backup_result = image_undo
@@ -969,9 +969,13 @@ mod tests {
 
         let mut merge_commands = Vec::new();
         for (entry_index, entry) in plan.entries.iter().enumerate() {
+            let destination_credential = image
+                .source_tile_credential(entry.tile_index)
+                .expect("tile credential should exist");
             let destination_tile_key = image
-                .ensure_active_tile_key(entry.tile_index)
-                .expect("tile should activate");
+                .tile_manager()
+                .resolve_destination_key(destination_credential)
+                .expect("destination credential should resolve");
             let brush_tile_key = brush_tile_manager
                 .resolve(entry.brush_credential)
                 .expect("brush credential should resolve")
@@ -988,9 +992,9 @@ mod tests {
             }));
         }
         let second_active_key = image
-            .physical_tile_key(1)
-            .expect("tile key should exist")
-            .expect("tile should be active");
+            .tile_manager()
+            .resolve_destination_key(image.source_tile_credential(1).expect("credential should exist"))
+            .expect("tile should resolve");
         let tile_0_backup_key = backup_result
             .merge_origin_tile_key(0)
             .expect("tile 0 should have a backup key");

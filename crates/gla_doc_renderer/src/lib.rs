@@ -228,8 +228,7 @@ impl GlaDocRenderer {
             .brush_preview_image
             .as_mut()
             .ok_or(GlaDocRendererError::MissingActivePlan)?;
-        preview_image.ensure_active_tile_key(tile_index)?;
-        Ok(preview_image.tile_credential(tile_index)?)
+        Ok(preview_image.source_tile_credential(tile_index)?)
     }
 
     pub fn ensure_brush_preview_merge_target(
@@ -237,7 +236,7 @@ impl GlaDocRenderer {
         doc: &GlaDoc,
         tile_index: usize,
     ) -> Result<(TileCredential, TileCredential), GlaDocRendererError> {
-        let origin_credential = doc.active_layer_image()?.tile_credential(tile_index)?;
+        let origin_credential = doc.active_layer_image()?.source_tile_credential(tile_index)?;
         let preview_credential = self.ensure_brush_preview_tile(doc, tile_index)?;
         Ok((origin_credential, preview_credential))
     }
@@ -688,9 +687,12 @@ fn prepare_target_tile(
         return Ok(TargetTileAction::Noop);
     }
 
-    Ok(TargetTileAction::Composite(
-        target_image.ensure_active_tile_key(tile_index)?,
-    ))
+    let destination_credential = target_image.source_tile_credential(tile_index)?;
+    let destination_tile_key = target_image
+        .tile_manager()
+        .resolve_destination_key(destination_credential)?;
+
+    Ok(TargetTileAction::Composite(destination_tile_key))
 }
 
 fn build_composite_command(
@@ -839,15 +841,19 @@ mod tests {
         let backend = new_render_backend();
         let mut image = GlaImage::new(GlaImageLayout::new(64, 64), backend.clone())
             .expect("image should build");
+        let credential = image
+            .source_tile_credential(0)
+            .expect("target credential should exist");
         let tile_key = image
-            .ensure_active_tile_key(0)
-            .expect("target tile should allocate");
+            .tile_manager()
+            .resolve_destination_key(credential)
+            .expect("target credential should resolve");
 
         let action = prepare_target_tile(&mut image, 0, &[]).expect("target should prepare");
 
         assert_eq!(action, TargetTileAction::Noop);
         assert_eq!(image.physical_tile_key(0), Ok(None));
-        assert_eq!(backend.tile_state(tile_key), Ok(atlas::TileState::Cached));
+        assert_eq!(backend.tile_state(tile_key), Ok(atlas::TileState::Active));
     }
 
     #[test]
@@ -924,16 +930,15 @@ mod tests {
         assert_eq!(
             renderer
                 .brush_preview_image()
-                .map(|image| image.tile_credential(0)),
+                .map(|image| image.source_tile_credential(0)),
             Some(Ok(preview_credential))
         );
-        assert!(
-            renderer
-                .brush_preview_image()
-                .and_then(|image| image.physical_tile_key(0).ok())
-                .flatten()
-                .is_some()
-        );
+        let preview_tile_key = renderer
+            .brush_preview_image()
+            .map(|image| image.tile_manager().resolve_destination_key(preview_credential))
+            .transpose()
+            .expect("preview credential should resolve");
+        assert!(preview_tile_key.is_some());
     }
 
     #[test]
@@ -1341,7 +1346,7 @@ mod tests {
             .build_render_commands(&doc, &passes, active_layer_id)
             .expect("render commands should build");
 
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 1);
         for command in &commands {
             let RenderCommand::CompositeTile(composite) = command else {
                 panic!("expected CompositeTile command");
