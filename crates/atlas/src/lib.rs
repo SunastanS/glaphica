@@ -1309,10 +1309,21 @@ impl TileManager {
         Ok(tile_key)
     }
 
+    pub fn resolve_destination_key(
+        &self,
+        credential: TileCredential,
+    ) -> Result<TileKey, AtlasError> {
+        self.resolve_active_key(credential)
+    }
+
     pub fn resolve_key_or_empty(&self, credential: TileCredential) -> Result<TileKey, AtlasError> {
         Ok(self
             .resolve(credential)?
             .unwrap_or_else(|| self.backend.empty_tile_key()))
+    }
+
+    pub fn resolve_source_key(&self, credential: TileCredential) -> Result<TileKey, AtlasError> {
+        self.resolve_key_or_empty(credential)
     }
 }
 
