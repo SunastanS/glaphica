@@ -1,0 +1,9 @@
+[package]
+name = "tile_key"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_core = { path = "../gla_core" }
+atlas = { path = "../atlas" }
+tile_commands = { path = "../tile_commands" }

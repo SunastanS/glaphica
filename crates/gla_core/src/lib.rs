@@ -1,0 +1,132 @@
+use std::marker::PhantomData;
+
+pub const ATLAS_TILE_SIZE: u32 = 64;
+pub const GUTTER_SIZE: u32 = 1;
+pub const IMAGE_TILE_SIZE: u32 = ATLAS_TILE_SIZE - 2 * GUTTER_SIZE;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec2F32<S = ()> {
+    pub x: f32,
+    pub y: f32,
+    _phantom: PhantomData<S>,
+}
+
+impl<S> Vec2F32<S> {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self {
+            x,
+            y,
+            _phantom: PhantomData::<S>,
+        }
+    }
+}
+
+pub struct Vec2U<S = ()> {
+    pub x: usize,
+    pub y: usize,
+    _phantom: PhantomData<S>,
+}
+
+impl<S> Vec2U<S> {
+    pub fn new(x: usize, y: usize) -> Self {
+        Self {
+            x,
+            y,
+            _phantom: PhantomData::<S>,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenSpace {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasSpace {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileSpace {}
+
+pub type ScreenCoordF = Vec2F32<ScreenSpace>;
+pub type CanvasCoordF = Vec2F32<CanvasSpace>;
+pub type TileCoordF = Vec2F32<TileSpace>;
+pub type ScreenCoordU = Vec2U<ScreenSpace>;
+pub type CanvasCoordU = Vec2U<CanvasSpace>;
+pub type TileCoordU = Vec2U<TileSpace>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Input<T> {
+    pub time_ns: u64,
+    pub position: T,
+    pub pressure: f32,
+    pub tilt: (f32, f32), // (tilt_x, tilt_y) in radians
+    pub twist: f32,       // twist in radians, `+` = clockwise
+}
+
+pub type ScreenInput = Input<ScreenCoordF>;
+pub type CanvasInput = Input<CanvasCoordF>;
+
+#[derive(Debug)]
+pub struct Pool {
+    total: u32,
+    used: u32,
+    next: u32,
+    free: Vec<u32>,
+    generations: Vec<u32>,
+}
+
+pub enum PoolError {
+    Full,
+}
+
+impl Pool {
+    pub fn new(total: u32) -> Self {
+        Self {
+            total,
+            next: 0,
+            free: Vec::new(),
+            used: 0,
+            generations: Vec::new(),
+        }
+    }
+
+    pub fn check(&self, index: u32, generation: u32) -> bool {
+        if let Some(pool_generation) = self.generations.get(index as usize) {
+            *pool_generation == generation
+        } else {
+            false
+        }
+    }
+
+    pub fn alloc(&mut self) -> Result<(u32, u32), PoolError> {
+        if self.next == self.total {
+            return Err(PoolError::Full);
+        }
+
+        self.used += 1;
+
+        if let Some(index) = self.free.pop() {
+            return Ok((index, self.generations[index as usize]));
+        }
+
+        let index = self.next;
+        self.next = self.next.checked_add(1).ok_or(PoolError::Full)?;
+        self.generations.push(0);
+        Ok((index, 0))
+    }
+
+    pub fn remaining(&self) -> u32 {
+        self.total - self.used
+    }
+
+    /// caller should check before free
+    pub fn free(&mut self, index: u32) {
+        debug_assert!(!self.free.contains(&index), "double free of index {index}");
+        debug_assert!(index < self.next, "free of never-allocated index {index}");
+
+        let generation = self.generations.get_mut(index as usize).unwrap();
+        *generation = (*generation).wrapping_add(1);
+
+        self.free.push(index);
+        self.used -= 1;
+    }
+}

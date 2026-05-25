@@ -1,0 +1,9 @@
+[package]
+name = "gla_nodes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_core = { path = "../gla_core" }
+gla_color = { path = "../gla_color" }
+tile_key = { path = "../tile_key" }

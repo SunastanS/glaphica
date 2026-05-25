@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/gla_core",
+    "crates/gla_nodes",
+    "crates/atlas",
+    "crates/tile_key",
+    "crates/tile_commands", "crates/gla_color",
+]
+
+resolver = "3"
