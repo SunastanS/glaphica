@@ -5,6 +5,7 @@ members = [
     "crates/atlas",
     "crates/tile_key",
     "crates/tile_commands", "crates/gla_color",
+    "crates/gla_session",
 ]
 
 resolver = "3"

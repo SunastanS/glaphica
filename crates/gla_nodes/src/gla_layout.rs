@@ -42,15 +42,15 @@ impl GlaImageLayout {
         Ok(CanvasCoordU::new(x, y))
     }
 
-    pub fn for_each_affected_tile_index<F>(
+    pub fn for_each_affected_tile_index<F, E>(
         &self,
         center: CanvasCoordF,
         radius: f32,
         mode: HitMode,
         mut f: F,
-    ) -> Result<(), GlaLayoutError>
+    ) -> Result<(), E>
     where
-        F: FnMut(usize),
+        F: FnMut(usize) -> Result<(), E>,
     {
         let tile_w = self.tile_x();
         let tile_h = self.tile_y();
@@ -83,7 +83,7 @@ impl GlaImageLayout {
 
                 for ty in min_ty..=max_ty {
                     for tx in min_tx..=max_tx {
-                        f(ty * tile_w + tx);
+                        f(ty * tile_w + tx)?;
                     }
                 }
             }
@@ -131,7 +131,7 @@ impl GlaImageLayout {
                     let max_tx = (max_tx_f.floor() as usize).min(tile_w.saturating_sub(1));
 
                     for tx in min_tx..=max_tx {
-                        f(ty * tile_w + tx);
+                        f(ty * tile_w + tx)?;
                     }
                 }
             }

@@ -38,6 +38,9 @@ pub struct Tiles {
     bindings: Vec<KeyBinding>,
 }
 
+use std::fmt::{Display, Formatter};
+
+#[derive(Debug)]
 pub enum TilesError {
     AtlasOutOfTiles { atlas_id: u8 },
     KeyPoolFull,
@@ -45,6 +48,19 @@ pub enum TilesError {
     InvalidKey { key: TileKey },
     KeyGenMisMatch { key: TileKey },
     TileGenMisMatch { key: TileKey },
+}
+
+impl Display for TilesError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AtlasOutOfTiles { atlas_id } => write!(f, "atlas {atlas_id} out of tiles"),
+            Self::KeyPoolFull => f.write_str("key pool is full"),
+            Self::InvalidAtlasId { atlas_id } => write!(f, "invalid atlas id {atlas_id}"),
+            Self::InvalidKey { key } => write!(f, "invalid key {key:?}"),
+            Self::KeyGenMisMatch { key } => write!(f, "key generation mismatch for {key:?}"),
+            Self::TileGenMisMatch { key } => write!(f, "tile generation mismatch for {key:?}"),
+        }
+    }
 }
 
 impl Tiles {

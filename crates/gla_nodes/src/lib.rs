@@ -1,5 +1,6 @@
 use gla_color::BlendMode;
 use gla_core::{Pool, PoolError};
+use std::fmt::{Display, Formatter};
 
 pub type NodeId = u32;
 
@@ -33,12 +34,30 @@ pub mod gla_image;
 pub use gla_image::GlaImage;
 
 pub mod gla_group;
-pub use gla_group::GlaGroup;
+pub use gla_group::{GlaGroup, GlaGroupError, GlaGroupError::ChildNotFound};
 
 #[derive(Debug, Clone)]
 pub enum NodeContent {
     GlaImage(GlaImage),
     GlaGroup(GlaGroup),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeContentError {
+    TypeMismatch,
+    GlaGroupError(GlaGroupError),
+}
+
+impl NodeContent {
+    pub fn modify_child(&self, target: NodeKey, new: NodeKey) -> Result<Self, NodeContentError> {
+        match self {
+            Self::GlaGroup(group) => group
+                .switch_child(target, new)
+                .map(Self::GlaGroup)
+                .map_err(NodeContentError::GlaGroupError),
+            Self::GlaImage(_) => Err(NodeContentError::TypeMismatch),
+        }
+    }
 }
 
 pub enum DirtyRange {
@@ -47,10 +66,11 @@ pub enum DirtyRange {
 }
 
 pub trait NodeContentExt {
-    fn transimiss_dirty(&self, _dirty: &mut DirtyRange) {
-        ()
-    }
+    fn transmiss_input(&self, _input: &mut gla_core::CanvasInput) {}
+    fn transmiss_dirty(&self, _dirty: &mut DirtyRange) {}
 }
+
+impl NodeContentExt for NodeContent {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeKey {
@@ -65,9 +85,19 @@ pub struct Nodes {
     next_id: NodeId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodesError {
     KeyPoolFull,
     InvalidKey,
+}
+
+impl Display for NodesError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeyPoolFull => f.write_str("node key pool is full"),
+            Self::InvalidKey => f.write_str("invalid node key"),
+        }
+    }
 }
 
 impl Nodes {
@@ -109,6 +139,17 @@ impl Nodes {
         Ok(&mut self.nodes[key.index as usize])
     }
 
+    pub fn modify(&mut self, key: NodeKey, content: NodeContent) -> Result<NodeKey, NodesError> {
+        self.ensure_key(key)?;
+        let (index, generation) = self.node_key_pool.alloc()?;
+        self.nodes[index as usize] = Node {
+            id: self.nodes[key.index as usize].id,
+            config: self.nodes[key.index as usize].config,
+            content,
+        };
+        Ok(NodeKey { index, generation })
+    }
+
     pub fn discard_node(&mut self, key: NodeKey) -> Result<(), NodesError> {
         self.ensure_key(key)?;
         self.node_key_pool.free(key.index);
@@ -147,6 +188,21 @@ impl<'a> NodesSession<'a> {
     pub fn discard_node(&mut self, key: NodeKey) -> Result<(), NodesError> {
         self.discarded.push(key);
         Ok(())
+    }
+
+    pub fn get_node(&self, key: NodeKey) -> Result<&Node, NodesError> {
+        self.nodes.get_node(key)
+    }
+
+    pub fn get_node_mut(&mut self, key: NodeKey) -> Result<&mut Node, NodesError> {
+        self.nodes.get_node_mut(key)
+    }
+
+    pub fn modify(&mut self, key: NodeKey, content: NodeContent) -> Result<NodeKey, NodesError> {
+        let new_key = self.nodes.modify(key, content)?;
+        self.allocated.push(new_key);
+        self.discarded.push(key);
+        Ok(new_key)
     }
 
     pub fn record(&self) -> NodesSessionRecord {

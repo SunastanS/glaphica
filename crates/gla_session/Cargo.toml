@@ -1,0 +1,10 @@
+[package]
+name = "gla_session"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_core = { path = "../gla_core" }
+gla_nodes = { path = "../gla_nodes" }
+tile_key = { path = "../tile_key" }
+tile_commands = { path = "../tile_commands" }
