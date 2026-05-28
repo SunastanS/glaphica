@@ -84,6 +84,47 @@ impl Tiles {
         Ok(position)
     }
 
+    fn bind_key(&mut self, key: TileKey, binding: KeyBinding) {
+        let index = key.index() as usize;
+        if self.bindings.len() <= index {
+            self.bindings
+                .resize(index + 1, KeyBinding::empty(binding.position().atlas_id()));
+        }
+        self.bindings[index] = binding;
+    }
+
+    fn alloc_empty_from(&mut self, atlas_id: u8) -> Result<TileKey, TilesError> {
+        self.atlases
+            .get(atlas_id as usize)
+            .ok_or(TilesError::InvalidAtlasId { atlas_id })?;
+
+        let (index, generation) = self.key_pool.alloc()?;
+        let key = TileKey::new(index, generation);
+        self.bind_key(key, KeyBinding::empty(atlas_id));
+        Ok(key)
+    }
+
+    fn materialize_empty(&mut self, key: TileKey) -> Result<Position, TilesError> {
+        self.ensure_valid(key)?;
+        let position = self.bindings[key.index() as usize].position();
+        if !position.is_empty() {
+            return Ok(position);
+        }
+
+        let atlas_id = position.atlas_id();
+        let atlas = self
+            .atlases
+            .get_mut(atlas_id as usize)
+            .ok_or(TilesError::InvalidAtlasId { atlas_id })?;
+        if atlas.remaining() == 0 {
+            return Err(TilesError::AtlasOutOfTiles { atlas_id });
+        }
+
+        let binding = atlas.alloc()?;
+        self.bind_key(key, binding);
+        Ok(binding.position())
+    }
+
     pub fn alloc_from(&mut self, atlas_id: u8) -> Result<TileKey, TilesError> {
         let atlas = self
             .atlases
@@ -95,7 +136,7 @@ impl Tiles {
         let (index, generation) = self.key_pool.alloc()?;
         let binding = atlas.alloc()?;
         let key = TileKey::new(index, generation);
-        self.bindings[key.index() as usize] = binding;
+        self.bind_key(key, binding);
         Ok(key)
     }
 
@@ -104,13 +145,16 @@ impl Tiles {
         atlas_id: u8,
         count: u32,
     ) -> Result<Vec<TileKey>, TilesError> {
-        let atlas = &mut self.atlases[atlas_id as usize];
-        if atlas.remaining() < count {
-            return Err(TilesError::AtlasOutOfTiles { atlas_id });
+        self.atlases
+            .get(atlas_id as usize)
+            .ok_or(TilesError::InvalidAtlasId { atlas_id })?;
+        if self.key_pool.remaining() < count {
+            return Err(TilesError::KeyPoolFull);
         }
-        let mut keys = Vec::new();
+
+        let mut keys = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            keys.push(self.alloc_from(atlas_id)?); // n redandent check for remaining tiles, but fine
+            keys.push(self.alloc_empty_from(atlas_id)?);
         }
         Ok(keys)
     }
@@ -220,6 +264,25 @@ impl<'a> TilesSession<'a> {
         Ok(keys)
     }
 
+    pub fn acquire_for_read(&self, key: TileKey) -> Result<Position, TilesError> {
+        self.tiles.position(key)
+    }
+
+    pub fn acquire_for_write(
+        &mut self,
+        key: TileKey,
+        recorder: &mut TileOpRecorder,
+    ) -> Result<Position, TilesError> {
+        let position = self.tiles.position(key)?;
+        if !position.is_empty() {
+            return Ok(position);
+        }
+
+        let position = self.tiles.materialize_empty(key)?;
+        recorder.clear_tile(position);
+        Ok(position)
+    }
+
     /// this should be considered as getting a mut ref of a tile
     /// after called, you can use TileOpRecorder to modify the content of a tile
     pub fn copy_on_write(
@@ -232,9 +295,16 @@ impl<'a> TilesSession<'a> {
         if self.allocated.contains(&key) {
             Ok(key)
         } else {
+            let position = self.tiles.position(key)?;
+            if position.is_empty() {
+                let new_key = self.tiles.alloc_empty_from(position.atlas_id())?;
+                self.allocated.push(new_key);
+                return Ok(new_key);
+            }
+
             let new_key = self.tiles.alloc_from(backup_atlas_id)?;
             self.allocated.push(new_key);
-            recorder.copy_tile(self.tiles.position(key)?, self.tiles.position(new_key)?);
+            recorder.copy_tile(position, self.tiles.position(new_key)?);
             self.tiles.swap_binding(key, new_key)?;
             Ok(new_key)
         }

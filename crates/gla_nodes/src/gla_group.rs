@@ -1,7 +1,8 @@
-use crate::NodeKey;
+use crate::{GlaImageLayout, NodeKey};
 
 #[derive(Debug, Clone)]
 pub struct GlaGroup {
+    pub layout: GlaImageLayout,
     pub children: Vec<NodeKey>,
 }
 
