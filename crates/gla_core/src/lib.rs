@@ -74,6 +74,7 @@ pub struct Pool {
     generations: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
     Full,
 }
@@ -98,19 +99,19 @@ impl Pool {
     }
 
     pub fn alloc(&mut self) -> Result<(u32, u32), PoolError> {
-        if self.next == self.total {
-            return Err(PoolError::Full);
+        if let Some(index) = self.free.pop() {
+            self.used = self.used.checked_add(1).ok_or(PoolError::Full)?;
+            return Ok((index, self.generations[index as usize]));
         }
 
-        self.used += 1;
-
-        if let Some(index) = self.free.pop() {
-            return Ok((index, self.generations[index as usize]));
+        if self.next == self.total {
+            return Err(PoolError::Full);
         }
 
         let index = self.next;
         self.next = self.next.checked_add(1).ok_or(PoolError::Full)?;
         self.generations.push(0);
+        self.used = self.used.checked_add(1).ok_or(PoolError::Full)?;
         Ok((index, 0))
     }
 
@@ -128,5 +129,22 @@ impl Pool {
 
         self.free.push(index);
         self.used -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Pool, PoolError};
+
+    #[test]
+    fn alloc_reuses_freed_slots_after_pool_reaches_capacity() {
+        let mut pool = Pool::new(1);
+        assert_eq!(pool.alloc().unwrap(), (0, 0));
+        assert!(matches!(pool.alloc(), Err(PoolError::Full)));
+
+        pool.free(0);
+
+        assert_eq!(pool.alloc().unwrap(), (0, 1));
+        assert_eq!(pool.remaining(), 0);
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "tile_commands"
+name = "gla_renderer"
 version = "0.1.0"
 edition = "2024"
 

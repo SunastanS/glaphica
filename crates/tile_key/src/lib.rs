@@ -1,6 +1,7 @@
-use atlas::{Atlas, AtlasError, AtlasFormat, AtlasLayout, KeyBinding, Position};
+use atlas::{Atlas, AtlasError, AtlasLayout, KeyBinding, TilePos};
+use gla_color::GlaFormat;
 use gla_core::{Pool, PoolError};
-use tile_commands::TileOpRecorder;
+use gla_renderer::Renderer;
 
 /// Key (u32):
 /// - [0,  32) key index
@@ -72,13 +73,13 @@ impl Tiles {
         }
     }
 
-    pub fn new_atlas(&mut self, layout: AtlasLayout, format: AtlasFormat) -> u8 {
+    pub fn new_atlas(&mut self, layout: AtlasLayout, format: GlaFormat) -> u8 {
         let atlas_id = self.atlases.len() as u8;
         self.atlases.push(Atlas::new(atlas_id, layout, format));
         atlas_id
     }
 
-    pub fn position(&self, key: TileKey) -> Result<Position, TilesError> {
+    pub fn position(&self, key: TileKey) -> Result<TilePos, TilesError> {
         self.ensure_valid(key)?;
         let position = self.bindings[key.index() as usize].position();
         Ok(position)
@@ -104,7 +105,7 @@ impl Tiles {
         Ok(key)
     }
 
-    fn materialize_empty(&mut self, key: TileKey) -> Result<Position, TilesError> {
+    fn materialize_empty(&mut self, key: TileKey) -> Result<TilePos, TilesError> {
         self.ensure_valid(key)?;
         let position = self.bindings[key.index() as usize].position();
         if !position.is_empty() {
@@ -264,22 +265,17 @@ impl<'a> TilesSession<'a> {
         Ok(keys)
     }
 
-    pub fn acquire_for_read(&self, key: TileKey) -> Result<Position, TilesError> {
+    pub fn acquire_for_read(&self, key: TileKey) -> Result<TilePos, TilesError> {
         self.tiles.position(key)
     }
 
-    pub fn acquire_for_write(
-        &mut self,
-        key: TileKey,
-        recorder: &mut TileOpRecorder,
-    ) -> Result<Position, TilesError> {
+    pub fn acquire_for_write(&mut self, key: TileKey) -> Result<TilePos, TilesError> {
         let position = self.tiles.position(key)?;
         if !position.is_empty() {
             return Ok(position);
         }
 
         let position = self.tiles.materialize_empty(key)?;
-        recorder.clear_tile(position);
         Ok(position)
     }
 
@@ -289,7 +285,7 @@ impl<'a> TilesSession<'a> {
         &mut self,
         key: TileKey,
         backup_atlas_id: u8,
-        recorder: &mut TileOpRecorder,
+        renderer: &mut Renderer,
     ) -> Result<TileKey, TilesError> {
         self.tiles.ensure_valid(key)?;
         if self.allocated.contains(&key) {
@@ -304,7 +300,7 @@ impl<'a> TilesSession<'a> {
 
             let new_key = self.tiles.alloc_from(backup_atlas_id)?;
             self.allocated.push(new_key);
-            recorder.copy_tile(position, self.tiles.position(new_key)?);
+            renderer.copy(position, self.tiles.position(new_key)?);
             self.tiles.swap_binding(key, new_key)?;
             Ok(new_key)
         }

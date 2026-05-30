@@ -1,11 +1,9 @@
 [workspace]
 members = [
     "crates/gla_core",
-    "crates/gla_nodes",
     "crates/atlas",
     "crates/tile_key",
-    "crates/tile_commands", "crates/gla_color",
-    "crates/gla_session",
+    "crates/gla_color", "crates/gla_renderer", "crates/gla_image",
 ]
 
 resolver = "3"

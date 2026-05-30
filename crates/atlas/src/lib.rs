@@ -1,3 +1,4 @@
+use gla_color::GlaFormat;
 use gla_core::{ATLAS_TILE_SIZE, Pool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,9 +26,9 @@ impl TileAddress {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct Position(u32);
+pub struct TilePos(u32);
 
-impl Position {
+impl TilePos {
     const TILE_BITS: u32 = 24;
     const ATLAS_SHIFT: u32 = Self::TILE_BITS;
     // const ATLAS_BITS: u32 = 8;
@@ -80,13 +81,13 @@ impl KeyBinding {
     const TILE_GEN_SHIFT: u64 = Self::POSITION_BITS;
 
     #[inline]
-    pub(crate) fn new(position: Position, tile_gen: u32) -> Self {
+    pub(crate) fn new(position: TilePos, tile_gen: u32) -> Self {
         Self((position.0 as u64) | ((tile_gen as u64) << Self::TILE_GEN_SHIFT))
     }
 
     #[inline]
-    pub fn position(self) -> Position {
-        Position(self.0 as u32)
+    pub fn position(self) -> TilePos {
+        TilePos(self.0 as u32)
     }
 
     #[inline]
@@ -95,7 +96,7 @@ impl KeyBinding {
     }
 
     pub fn empty(atlas_id: u8) -> Self {
-        Self::new(Position::empty(atlas_id), 0)
+        Self::new(TilePos::empty(atlas_id), 0)
     }
 
     #[inline]
@@ -173,33 +174,10 @@ pub enum AtlasLayoutError {
     OutOfBounds,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChannelCount {
-    D1,
-    D2,
-    D4,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChannelType {
-    U8,
-    U16,
-    Unorm8,
-    Unorm16,
-    F16,
-    F32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AtlasFormat {
-    pub channel_count: ChannelCount,
-    pub channel_type: ChannelType,
-}
-
 pub struct Atlas {
     pub id: u8,
     pub layout: AtlasLayout,
-    pub format: AtlasFormat,
+    pub format: GlaFormat,
     tile_pool: Pool,
 }
 
@@ -210,7 +188,7 @@ pub enum AtlasError {
 }
 
 impl Atlas {
-    pub fn new(id: u8, layout: AtlasLayout, format: AtlasFormat) -> Self {
+    pub fn new(id: u8, layout: AtlasLayout, format: GlaFormat) -> Self {
         Self {
             id,
             layout,
@@ -224,7 +202,7 @@ impl Atlas {
             .tile_pool
             .alloc()
             .map_err(|_| AtlasError::OutOfTiles { atlas_id: self.id })?;
-        Ok(KeyBinding::new(Position::new(self.id, index), tile_gen))
+        Ok(KeyBinding::new(TilePos::new(self.id, index), tile_gen))
     }
 
     pub fn remaining(&self) -> u32 {
@@ -238,7 +216,7 @@ impl Atlas {
                 .check(binding.position().tile_index(), binding.tile_generation())
     }
 
-    pub fn free(&mut self, position: Position) {
+    pub fn free(&mut self, position: TilePos) {
         if position.atlas_id() != self.id {
             return;
         }
