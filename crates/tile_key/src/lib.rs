@@ -1,7 +1,6 @@
 use atlas::{Atlas, AtlasError, AtlasLayout, KeyBinding, TilePos};
 use gla_color::GlaFormat;
 use gla_core::{Pool, PoolError};
-use gla_renderer::Renderer;
 
 /// Key (u32):
 /// - [0,  32) key index
@@ -181,33 +180,6 @@ impl Tiles {
         Ok(())
     }
 
-    /// WARNING: BLACK MAGIC
-    /// see [`Tiles::copy_on_write`]
-    ///
-    /// This is a dangerous operation for modifying bindings directly without protection of generations.
-    /// It has to be because on the logic tile side, editing a tile is Copy on Write,
-    /// but at resource level, we backup historical tiles in different atlases.
-    /// So once editing a tile, we need to
-    /// - alloc a new tile in backup atlas
-    /// - copy the original tile to the new tile
-    /// - binding a new key to original tile
-    /// - binding the old key to the new tile at backup atlas
-    ///
-    /// During this process, the generation of keys do not increase
-    /// because their coordinate data did not change, only the position changed,
-    /// so if you try to render the original key, you can still get it's coordinate data (but in backup atlas).
-    ///
-    /// Theoretically, the generation of both positions should increase,
-    /// but in practice, preservation is fine if we keep the operating order
-    pub fn swap_binding(&mut self, lhs: TileKey, rhs: TileKey) -> Result<(), TilesError> {
-        self.ensure_valid(lhs)?;
-        self.ensure_valid(rhs)?;
-        let lhs_binding = self.bindings[lhs.index() as usize];
-        let rhs_binding = self.bindings[rhs.index() as usize];
-        self.bindings[lhs.index() as usize] = rhs_binding;
-        self.bindings[rhs.index() as usize] = lhs_binding;
-        Ok(())
-    }
 }
 
 impl From<AtlasError> for TilesError {
@@ -277,33 +249,6 @@ impl<'a> TilesSession<'a> {
 
         let position = self.tiles.materialize_empty(key)?;
         Ok(position)
-    }
-
-    /// this should be considered as getting a mut ref of a tile
-    /// after called, you can use TileOpRecorder to modify the content of a tile
-    pub fn copy_on_write(
-        &mut self,
-        key: TileKey,
-        backup_atlas_id: u8,
-        renderer: &mut Renderer,
-    ) -> Result<TileKey, TilesError> {
-        self.tiles.ensure_valid(key)?;
-        if self.allocated.contains(&key) {
-            Ok(key)
-        } else {
-            let position = self.tiles.position(key)?;
-            if position.is_empty() {
-                let new_key = self.tiles.alloc_empty_from(position.atlas_id())?;
-                self.allocated.push(new_key);
-                return Ok(new_key);
-            }
-
-            let new_key = self.tiles.alloc_from(backup_atlas_id)?;
-            self.allocated.push(new_key);
-            renderer.copy(position, self.tiles.position(new_key)?);
-            self.tiles.swap_binding(key, new_key)?;
-            Ok(new_key)
-        }
     }
 
     pub fn discard(&mut self, key: TileKey) {

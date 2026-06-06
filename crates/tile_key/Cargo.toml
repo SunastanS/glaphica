@@ -6,5 +6,4 @@ edition = "2024"
 [dependencies]
 gla_core = { path = "../gla_core" }
 atlas = { path = "../atlas" }
-gla_renderer = { path = "../gla_renderer" }
 gla_color = { path = "../gla_color" }
