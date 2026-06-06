@@ -3,7 +3,7 @@ members = [
     "crates/gla_core",
     "crates/atlas",
     "crates/tile_key",
-    "crates/gla_color", "crates/gla_renderer", "crates/gla_image",
+    "crates/gla_color", "crates/gla_renderer", "crates/gla_image", "crates/gla_session",
 ]
 
 resolver = "3"

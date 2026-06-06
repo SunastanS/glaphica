@@ -1,0 +1,8 @@
+[package]
+name = "gla_session"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_image = { path = "../gla_image" }
+gla_color = { path = "../gla_color" }
