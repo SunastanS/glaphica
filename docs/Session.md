@@ -13,8 +13,9 @@ document concepts, or brush names.
 
 ## Keys And Active State
 
-Janet-visible IR names images with compact opaque `ImageId`s. Display names and
-UI layer names are outside the executor identity model.
+Janet-visible IR names images with compact opaque `ImageId`s. `ImageId` is
+business-layer identity. Display names and UI layer names are outside the
+executor identity model, and image storage does not know `ImageId`.
 
 Rust stores resources behind generation-checked keys:
 
@@ -48,8 +49,11 @@ RegistryGraph {
 ```
 
 The root may be a primitive or derived image. The binding table must cover every
-image id in the graph. The root is not stored in the binding table; the binding
+image id in the graph. The root is not special in the binding table; the binding
 table only answers which `ImageKey` currently backs an `ImageId`.
+
+`ImageId -> ImageKey` tables are doc/session-layer state. They are not part of
+the image storage layer or the executable image-command layer.
 
 Doc-level `ImageId`s are never reused within one document lifetime. Session-local
 images use the same `ImageId` type and may shadow doc ids within one draw
@@ -68,24 +72,24 @@ PrimitiveImage {
 DerivedImage {
   format,
   layout,
-  build_command,
+  command: GraphCommand,
 }
 ```
 
 `PrimitiveImage` is editable or externally supplied image content. It has no
-registry build command and may be declared `ReadWrite` by a draw session.
+graph command and may be declared `ReadWrite` by a draw session.
 
 `DerivedImage` is a document-level cache or output image. It has exactly one
-build command and is not a direct draw target. The single build-command rule is
+graph command and is not a direct draw target. The single-command rule is
 intentional: a group cache must not have different update programs depending on
 which child layer was edited.
 
 Registry validation derives:
 
 ```text
-writer_of: ImageId -> BuildCommandIndex
-readers_by_image: ImageId -> [BuildCommandIndex]
-topo_order: [BuildCommandIndex]
+writer_of: ImageId -> GraphCommandIndex
+readers_by_image: ImageId -> [GraphCommandIndex]
+topo_order: [GraphCommandIndex]
 ```
 
 Validation rules:
@@ -93,12 +97,12 @@ Validation rules:
 - the graph has exactly one root;
 - every remaining graph image is reachable from the root by walking derived
   command reads backwards from the root;
-- every derived image has exactly one build command;
-- primitive images have no build command;
-- all build command reads reference registered document images;
-- build commands form an acyclic image dependency graph;
-- a build command writes exactly one derived image;
-- a build command does not read its destination current image;
+- every derived image has exactly one graph command;
+- primitive images have no graph command;
+- all graph command reads reference registered document images;
+- graph commands form an acyclic image dependency graph;
+- a graph command writes exactly one derived image;
+- a graph command does not read its destination current image;
 - each read edge has a coordinate mapping.
 
 A command may read the same image multiple times with different ports or
@@ -121,11 +125,11 @@ NewImage {
   id,
   format,
   layout,
-  role: Primitive | Derived(build_command),
+  role: Primitive | Derived(GraphCommand),
 }
 
 SetPrimitive(id)
-SetDerived(id, build_command)
+SetDerived(id, GraphCommand)
 SetRoot(id)
 ```
 
@@ -137,10 +141,10 @@ Patch semantics:
 
 - `NewImage(..., Primitive)` creates a full empty image with valid empty tile
   keys.
-- `NewImage(..., Derived(cmd))` creates a derived cache image whose slots may
+- `NewImage(..., Derived(command))` creates a derived cache image whose slots may
   start as `TileKey::INVALID`.
-- `SetDerived` on an existing derived image replaces its command if the command
-  is structurally different. The new cache image starts invalid.
+- `SetDerived` on an existing derived image replaces its graph command if the
+  command is structurally different. The new cache image starts invalid.
 - `SetDerived` on an existing primitive image is forbidden in normal patch
   execution.
 - `SetPrimitive` on an existing derived image is flatten/materialize: first
@@ -155,7 +159,7 @@ Patch semantics:
   `SetRoot`.
 
 No-op patch items are skipped by comparing only the locally patched
-declaration, command, or root value. Command equality is exact structural
+declaration, graph command, or root value. Command equality is exact structural
 equality, including read order.
 
 Registry patches are conservative for repaint. A patch item that changes an
@@ -228,11 +232,11 @@ not from draw IR.
 ```text
 SessionImageDecl =
   Primitive { id, format, layout }
-  Derived { id, format, layout, build_command }
+  Derived { id, format, layout, command: SessionCommand }
 ```
 
 Primitive session images start as full empty valid images. Derived session
-images may start with `TileKey::INVALID` and have one local build command.
+images may start with `TileKey::INVALID` and have one local session command.
 Session images are released at draw session end and do not enter the document
 binding table or session record.
 
@@ -266,8 +270,8 @@ The executor has two image modification forms:
 DrawOn:
   input-driven
   ordered by source invocation
-  may mutate or accumulate
-  may read destination current if the primitive supports one GPU pass
+  may mutate or accumulate into one ReadWrite destination
+  has no image read edges in the first design stage
 
 Derive:
   dirty-driven
@@ -297,34 +301,58 @@ Local/session derived commands may write session images or doc images declared
 `ReadWrite`. They do not change the document registry graph. They are a
 session-scoped way to produce the current value of a writable object.
 
-Command reads are ordered. The read array index is the pipeline port for the
-first implementation stage:
+Dirty-driven command reads are ordered. The read array index is the pipeline
+port for the first implementation stage:
 
 ```text
-DeriveCommand {
-  reads: [ImageRead],
-  dst: ImageId,
+GraphCommand {
+  reads: [GraphRead],
   op: OpId,
   params: OpParams,
 }
 
+GraphRead {
+  image: ImageId,
+  mapping: Mapping,
+  modifier: FootprintModifier,
+}
+
+SessionCommand {
+  reads: [SessionRead],
+  op: OpId,
+  params: OpParams,
+}
+
+SessionRead {
+  image: ImageId | ImageId.backup,
+  mapping: Mapping,
+  modifier: FootprintModifier,
+}
+
+DeriveCommand {
+  dst: ImageId,
+  command: SessionCommand,
+}
+
 DrawOnCommand {
-  reads: [ImageRead],
   dst: ImageId,
   input_mapping: Mapping,
   op: OpId,
   params: OpParams,
 }
-
-ImageRead {
-  image: ImageId | ImageId.backup,
-  mapping: Mapping,
-  modifier: FootprintModifier,
-}
 ```
 
 Destinations are always plain current `ImageId`s. `.backup` is read-only syntax
 and cannot appear as a command destination.
+
+`GraphCommand` cannot express `.backup` reads. It belongs to the document graph
+and is independent of any draw session. `SessionCommand` can express `.backup`
+reads and appears only in session-local derived image declarations and explicit
+draw-session `DeriveCommand`s.
+
+`DrawOnCommand` is not a dirty-driven command body. It is an input-driven atomic
+draw into one destination image. In the first design stage it has no read list;
+source image reads for stamp/smudge-like drawing are a later design problem.
 
 `OpId`s are compact Rust-side operation ids. Initial params can be strongly
 typed Rust enums or structs; the graph semantics remain `op + params` so packed
@@ -337,11 +365,11 @@ Draw sessions use two evaluation contexts.
 Current evaluation:
 
 ```text
-tool/local command image lookup:
+session command image lookup:
   local current table first
   then doc current table
 
-registry build command image lookup:
+graph command image lookup:
   doc current table only
 
 derive writer lookup:
@@ -387,8 +415,8 @@ merged current table and in the local table. This is not a commit ambiguity:
 only `ReadWrite` document declarations and the computed doc write closure update
 `bindings_after`.
 
-Registry build commands always resolve document images through `doc_current`
-and never through the local table or a merged local-first current table.
+Graph commands always resolve document images through `doc_current` and never
+through the local table or a merged local-first current table.
 
 The session-start document table is the `bindings_before` snapshot. Lookup and
 commit decisions do not rely on id equality or id shadowing. They use the IR
@@ -408,6 +436,17 @@ priority.
 
 Local derive commands may shadow only session images and doc images declared
 `ReadWrite`. They may not shadow a doc-level derived image's registry writer.
+
+Before execution, id-level IR is lowered through these evaluation contexts:
+
+```text
+GraphCommand + doc_current -> ImageCommand
+SessionCommand + local/doc_current/doc_start -> ImageCommand
+DrawOnCommand + writable dst lookup -> DrawCommand
+```
+
+`ImageCommand` and `DrawCommand` are key-level executable commands. They do not
+know `ImageId`, `.backup`, document bindings, or local shadowing.
 
 ## Session Initialization
 
@@ -466,8 +505,8 @@ input_mapping:
   canvas/root input coordinate -> DrawOn destination image coordinate
 ```
 
-If a DrawOn primitive reads another image, that read still uses a normal read
-edge mapping from DrawOn destination space to read image space.
+DrawOn has no image read edges in the first design stage. Stamp, smudge, or
+other source-reading draw primitives need a separate design.
 
 ## Tile Sets
 
@@ -529,14 +568,17 @@ pending_by_command: CommandIndex -> TileSet
 ```
 
 A pending item is only `(command, dst_tile)`. It does not cache read tile keys,
-read positions, or lowered tile commands.
+read positions, or lowered tile commands. The pending command is an id-level
+graph/session command reference; it is lowered to a key-level `ImageCommand`
+when it is processed.
 
 Processing a command tile:
 
 ```text
 process(command, dst_tile):
   consume pending_by_command[command][dst_tile] if present
-  resolve every read tile in the command's evaluation context
+  lower the id-level command through its evaluation context
+  resolve every read tile for the resulting ImageCommand
   acquire or create the destination tile key
   lower and execute the tile command
   mark_dirty(command.dst, dst_tile)
@@ -551,6 +593,10 @@ When resolving a read tile:
 
 Current dirty upload to root is the root repaint demand. Stage 1 does not try to
 tree-shake dirty through visibility, opacity, or GPU content checks.
+
+TODO: Specify the exact `ImageCommand -> TileCommand` lowering interface. This
+needs a separate decision for read ordering when one image command read covers
+multiple source tiles.
 
 ## Source Work And Frames
 

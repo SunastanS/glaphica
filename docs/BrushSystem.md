@@ -42,7 +42,7 @@ doc_images:
 
 `ReadWrite` document images must be primitive images in the active registry
 graph. Derived document images may be read, but they cannot be direct draw
-targets. Their writes come from registry build commands.
+targets. Their writes come from graph commands.
 
 `image.backup` is written explicitly at a command read site. It reads the
 stroke-start document image key and never sees session-local images or
@@ -123,10 +123,10 @@ pressure mapping, and tool presets. The session receives input samples from the
 Rust app loop, applies input mappings, invokes DrawOn primitives, marks dirty,
 and drains downstream Derive and registry commands.
 
-DrawOn primitives may read their destination current tile only for operations
-that can be expressed as a supported GPU single pass. Current-reading stamp or
-smudge behavior that requires dab-level or frame-level snapshots is not part of
-the first version.
+DrawOn primitives have one `ReadWrite` destination and no image read edges in
+the first version. Current-reading stamp or smudge behavior that requires
+source images, dab-level snapshots, or frame-level snapshots is not part of the
+first version.
 
 ## Pixel Round Example
 

@@ -16,14 +16,20 @@ ActiveDocumentState {
 
 ## Ids And Keys
 
-Janet-visible IR uses compact opaque `ImageId`s. Rust stores resources behind
-generation-checked keys:
+Janet-visible IR uses compact opaque `ImageId`s. `ImageId` is business-layer
+identity. It is not an image storage key.
+
+Rust stores resources behind generation-checked keys:
 
 ```text
 RegistryGraphKey      // declarations, root, derived commands
 ImageBindingTableKey  // ImageId -> ImageKey
 ImageKey              // image tile array / content version
 ```
+
+`ImageId -> ImageKey` tables are doc/session-layer state. They do not belong to
+the image storage layer. The image storage layer works in `ImageKey` and
+`TileKey`; the image-command layer works in key-level executable commands.
 
 Doc-level `ImageId`s are not reused during a document lifetime. Session-local
 images use the same id type and may shadow doc ids within a draw session.
@@ -33,18 +39,25 @@ images use the same id type and may shadow doc ids within a draw session.
 The registry graph declares document images:
 
 ```text
-PrimitiveImage:
-  Editable or externally supplied document image.
-  Valid ReadWrite draw target.
-  Has no registry build command.
-  Never contains TileKey::INVALID.
+ImageDeclaration =
+  PrimitiveImage {
+    format,
+    layout,
+  }
 
-DerivedImage:
-  Document cache or output image.
-  Has exactly one build command.
-  Not a direct draw target.
-  May contain TileKey::INVALID.
+  DerivedImage {
+    format,
+    layout,
+    command: GraphCommand,
+  }
 ```
+
+`PrimitiveImage` is editable or externally supplied document image content. It
+is a valid `ReadWrite` draw target, has no graph command, and never
+contains `TileKey::INVALID`.
+
+`DerivedImage` is document cache or output image content. It has exactly one
+graph command, is not a direct draw target, and may contain `TileKey::INVALID`.
 
 Examples:
 
@@ -69,10 +82,52 @@ Session Primitive:
   Full empty valid image, released at session end.
 
 Session Derived:
-  Local cache with one local build command, released at session end.
+  Local cache with one SessionCommand, released at session end.
 ```
 
 Session images do not enter the document binding table or undo records.
+
+## Command Layers
+
+The command layers are deliberately separate:
+
+```text
+gla_ir:
+  id-level cross-language declarations
+
+gla_image_command:
+  key-level executable image commands
+
+tile command:
+  tile-resource-level executable work
+```
+
+`GraphCommand` and `SessionCommand` are IR-level declarations. Both describe
+dirty-driven full-overwrite image commands. The only semantic difference is read
+identity:
+
+```text
+GraphCommand:
+  reads: [GraphRead]       // current document images only
+
+SessionCommand:
+  reads: [SessionRead]     // current image or backup document image
+```
+
+`DrawOnCommand` is a different IR form. It is an input-driven atomic draw into
+one `ReadWrite` destination and has no read list in the first design stage.
+
+Before execution, doc/session code lowers id-level IR through the active
+evaluation context:
+
+```text
+GraphCommand + doc current table -> ImageCommand
+SessionCommand + draw evaluation context -> ImageCommand
+DrawOnCommand + draw evaluation context -> DrawCommand
+```
+
+`ImageCommand` and `DrawCommand` operate on `ImageKey`s. They do not know
+`ImageId`, document bindings, session-local shadowing, or `.backup`.
 
 ## Tile Resources
 

@@ -369,6 +369,66 @@ impl<'a> ImagesSession<'a> {
         self.images.set_tile(key, tile_index, tile_key)
     }
 
+    pub fn insert_invalid(
+        &mut self,
+        format: GlaFormat,
+        layout: GlaImageLayout,
+    ) -> Result<GlaImageKey, GlaImagesError> {
+        let tiles = vec![TileKey::INVALID; layout.tile_count() as usize].into_boxed_slice();
+        self.insert(format, layout, tiles)
+    }
+
+    pub fn discard_all_tiles(
+        &mut self,
+        tiles: &mut TilesSession<'_>,
+        key: GlaImageKey,
+    ) -> Result<Vec<TileKey>, GlaImagesError> {
+        let image = self.images.get(key)?;
+        let discarded: Vec<TileKey> = image
+            .tiles
+            .iter()
+            .copied()
+            .filter(|t| !t.is_invalid())
+            .collect();
+        for tile in &discarded {
+            tiles.discard(*tile);
+        }
+        Ok(discarded)
+    }
+
+    pub fn discard_replaced_tiles(
+        &mut self,
+        tiles: &mut TilesSession<'_>,
+        old_key: GlaImageKey,
+        new_key: GlaImageKey,
+    ) -> Result<Vec<TileKey>, GlaImagesError> {
+        let old_image = self.images.get(old_key)?;
+        let new_image = self.images.get(new_key)?;
+
+        let discarded: Vec<TileKey> =
+            if old_image.format == new_image.format && old_image.layout == new_image.layout {
+                old_image
+                    .tiles
+                    .iter()
+                    .copied()
+                    .zip(new_image.tiles.iter().copied())
+                    .filter_map(|(old, new)| (old != new && !old.is_invalid()).then_some(old))
+                    .collect()
+            } else {
+                old_image
+                    .tiles
+                    .iter()
+                    .copied()
+                    .filter(|t| !t.is_invalid())
+                    .collect()
+            };
+
+        for tile in &discarded {
+            tiles.discard(*tile);
+        }
+        Ok(discarded)
+    }
+
     pub fn record(&self) -> ImagesSessionRecord {
         ImagesSessionRecord {
             allocated: self.allocated.clone().into_boxed_slice(),

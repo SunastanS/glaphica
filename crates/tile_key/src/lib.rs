@@ -11,6 +11,8 @@ use gla_core::{Pool, PoolError};
 pub struct TileKey(u64);
 
 impl TileKey {
+    pub const INVALID: Self = Self(u64::MAX);
+
     const INDEX_BITS: u32 = 32;
     const INDEX_MASK: u64 = (1 << Self::INDEX_BITS) - 1;
     const GENERATION_SHIFT: u32 = Self::INDEX_BITS;
@@ -29,6 +31,11 @@ impl TileKey {
     #[inline]
     pub fn generation(self) -> u32 {
         (self.0 >> Self::GENERATION_SHIFT) as u32
+    }
+
+    #[inline]
+    pub fn is_invalid(self) -> bool {
+        self == Self::INVALID
     }
 }
 
