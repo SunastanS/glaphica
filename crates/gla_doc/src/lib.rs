@@ -2,7 +2,7 @@ use gla_image::{GlaImageKey, ImagesSession, TileSet};
 use gla_ir::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use tile_key::TilesSession;
+use tile_key::{TileKey, TilesSession};
 
 /// Re-exported from gla_ir.
 pub use gla_ir::ImageRole;
@@ -15,6 +15,7 @@ pub struct DrawPatch {
     pub version: DocumentVersionId,
     pub bindings: HashMap<ImageId, GlaImageKey>,
     pub dirty: TileSet,
+    pub tile_keys: Vec<TileKey>,
 }
 
 impl DrawPatch {
@@ -23,6 +24,7 @@ impl DrawPatch {
             version: DocumentVersionId::default(),
             bindings,
             dirty,
+            tile_keys: Vec::new(),
         }
     }
 }
@@ -161,6 +163,7 @@ impl Document {
             version: self.version,
             bindings: old_bindings,
             dirty: patch.dirty.clone(),
+            tile_keys: Vec::new(),
         };
         patch.version = self.version;
         let id = self.store_patch(PatchKind::Draw(inverse));

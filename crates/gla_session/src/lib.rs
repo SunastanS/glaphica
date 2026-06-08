@@ -274,12 +274,28 @@ impl DrawSession {
 
     pub fn commit(self, doc: &mut Document) -> Result<DrawCommit, SessionError> {
         let mut bindings = HashMap::new();
+        let mut tile_keys = Vec::new();
+
         for (id, entry) in &self.local_keys {
             if self.active_chain.contains(&entry.key) {
                 bindings.insert(*id, entry.key);
+                if let Some(old_key) = self.doc_bindings.get(id).copied() {
+                    let old = self.images.get(old_key)?;
+                    let new = self.images.get(entry.key)?;
+                    for (old_tile, new_tile) in old.tiles.iter().zip(new.tiles.iter()) {
+                        if *old_tile != TileKey::INVALID && old_tile != new_tile {
+                            tile_keys.push(*old_tile);
+                        }
+                    }
+                }
             }
         }
+
         let patch = DrawPatch::new(bindings, self.root_dirty.clone());
+        let patch = DrawPatch {
+            tile_keys,
+            ..patch
+        };
         let session_id = doc.commit_draw(patch)?;
         Ok(DrawCommit {
             session_id,
