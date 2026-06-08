@@ -1,4 +1,4 @@
-use gla_doc::{DocError, Document, DrawPatch};
+use gla_doc::{DocError, Document, DrawPatch, SessionId};
 use gla_image::{GlaImageKey, GlaImageLayout, GlaImages, GlaImagesError, ImagesSession, TileSet};
 use gla_image_command::{Derive, DeriveCommand, ImageRef, RenderCtx};
 use gla_ir::*;
@@ -20,6 +20,7 @@ pub struct CanvasInput {
 
 #[derive(Clone, Debug)]
 pub struct DrawCommit {
+    pub session_id: SessionId,
     pub version: DocumentVersionId,
 }
 
@@ -279,8 +280,9 @@ impl DrawSession {
             }
         }
         let patch = DrawPatch::new(bindings, self.root_dirty.clone());
-        doc.commit_draw(patch)?;
+        let session_id = doc.commit_draw(patch)?;
         Ok(DrawCommit {
+            session_id,
             version: doc.version(),
         })
     }

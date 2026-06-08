@@ -7,16 +7,36 @@ use tile_key::TilesSession;
 /// Re-exported from gla_ir.
 pub use gla_ir::ImageRole;
 
+/// Opaque handle to a stored patch. Janet passes this to apply undo/redo.
+pub type SessionId = u64;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawPatch {
+    pub version: DocumentVersionId,
     pub bindings: HashMap<ImageId, GlaImageKey>,
     pub dirty: TileSet,
 }
 
 impl DrawPatch {
     pub fn new(bindings: HashMap<ImageId, GlaImageKey>, dirty: TileSet) -> Self {
-        Self { bindings, dirty }
+        Self {
+            version: DocumentVersionId::default(),
+            bindings,
+            dirty,
+        }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PatchKind {
+    Draw(DrawPatch),
+    Registry(RegistryPatch),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredPatch {
+    pub version: DocumentVersionId,
+    pub kind: PatchKind,
 }
 
 #[derive(Debug)]
@@ -29,6 +49,8 @@ pub enum DocError {
     RegistryCycle { id: ImageId },
     BindingMissing { id: ImageId },
     BindingExtra { id: ImageId },
+    InvalidSessionId { id: SessionId },
+    VersionMismatch { expected: DocumentVersionId, actual: DocumentVersionId },
 }
 
 impl Display for DocError {
@@ -48,6 +70,10 @@ impl Display for DocError {
             }
             Self::BindingMissing { id } => write!(f, "binding table is missing {id:?}"),
             Self::BindingExtra { id } => write!(f, "binding table has extra image {id:?}"),
+            Self::InvalidSessionId { id } => write!(f, "invalid session id {id}"),
+            Self::VersionMismatch { expected, actual } => {
+                write!(f, "version mismatch: expected {expected:?}, actual {actual:?}")
+            }
         }
     }
 }
@@ -58,6 +84,8 @@ pub struct Document {
     roles: HashMap<ImageId, ImageRole>,
     bindings: HashMap<ImageId, GlaImageKey>,
     version: DocumentVersionId,
+    patches: HashMap<SessionId, StoredPatch>,
+    next_id: SessionId,
 }
 
 impl Document {
@@ -82,6 +110,8 @@ impl Document {
             roles,
             bindings,
             version: DocumentVersionId::default(),
+            patches: HashMap::new(),
+            next_id: 0,
         })
     }
 
@@ -113,7 +143,11 @@ impl Document {
         self.bindings.get(&self.root).copied()
     }
 
-    pub fn commit_draw(&mut self, patch: DrawPatch) -> Result<DrawPatch, DocError> {
+    pub fn stored_patch_version(&self, id: SessionId) -> Option<DocumentVersionId> {
+        self.patches.get(&id).map(|p| p.version)
+    }
+
+    pub fn commit_draw(&mut self, mut patch: DrawPatch) -> Result<SessionId, DocError> {
         let mut old_bindings = HashMap::new();
         for (id, new_key) in &patch.bindings {
             let old_key = self
@@ -123,10 +157,14 @@ impl Document {
             old_bindings.insert(*id, old_key);
         }
         self.version = self.version.next();
-        Ok(DrawPatch {
+        let inverse = DrawPatch {
+            version: self.version,
             bindings: old_bindings,
-            dirty: patch.dirty,
-        })
+            dirty: patch.dirty.clone(),
+        };
+        patch.version = self.version;
+        let id = self.store_patch(PatchKind::Draw(inverse));
+        Ok(id)
     }
 
     pub fn apply_registry_patch(
@@ -135,7 +173,7 @@ impl Document {
         images: &mut ImagesSession<'_>,
         tiles: &mut TilesSession<'_>,
         atlas_id: u8,
-    ) -> Result<RegistryPatch, DocError> {
+    ) -> Result<SessionId, DocError> {
         let old_root = self.root;
         let mut inverse_ops = Vec::new();
         let mut pending_discard = Vec::new();
@@ -231,7 +269,46 @@ impl Document {
 
         inverse_ops.push(RegistryPatchOp::SetRoot(old_root));
         self.version = self.version.next();
-        Ok(RegistryPatch::new(inverse_ops))
+        let inverse = RegistryPatch::new(inverse_ops);
+        Ok(self.store_patch(PatchKind::Registry(inverse)))
+    }
+
+    pub fn apply_stored_patch(
+        &mut self,
+        id: SessionId,
+        images: &mut ImagesSession<'_>,
+        tiles: &mut TilesSession<'_>,
+        atlas_id: u8,
+    ) -> Result<SessionId, DocError> {
+        let stored = self
+            .patches
+            .get(&id)
+            .ok_or(DocError::InvalidSessionId { id })?;
+        let stored_version = stored.version;
+        if stored_version != self.version {
+            return Err(DocError::VersionMismatch {
+                expected: stored_version,
+                actual: self.version,
+            });
+        }
+
+        match stored.kind.clone() {
+            PatchKind::Draw(mut patch) => {
+                patch.version = stored_version; // ensure version stamp
+                self.commit_draw(patch)
+            }
+            PatchKind::Registry(patch) => {
+                self.apply_registry_patch(&patch, images, tiles, atlas_id)
+            }
+        }
+    }
+
+    fn store_patch(&mut self, kind: PatchKind) -> SessionId {
+        let id = self.next_id;
+        self.next_id += 1;
+        let version = self.version;
+        self.patches.insert(id, StoredPatch { version, kind });
+        id
     }
 }
 
@@ -429,48 +506,54 @@ mod tests {
     }
 
     #[test]
-    fn commit_draw_swaps_bindings_and_increments_version() {
+    fn commit_draw_returns_session_id_and_stores_inverse() {
         let root = ImageId::new(1);
-        let before_key = key(10);
         let after_key = key(11);
         let mut doc = simple_doc(root);
-        assert_eq!(doc.binding(root), Some(before_key));
         assert_eq!(doc.version(), DocumentVersionId::new(0));
 
         let patch = DrawPatch::new(HashMap::from([(root, after_key)]), TileSet::single(3));
-        let inverse = doc.commit_draw(patch).unwrap();
+        let id = doc.commit_draw(patch).unwrap();
 
         assert_eq!(doc.binding(root), Some(after_key));
         assert_eq!(doc.version(), DocumentVersionId::new(1));
-        assert_eq!(inverse.bindings.get(&root), Some(&before_key));
-        assert_eq!(inverse.dirty, TileSet::single(3));
+        assert_eq!(doc.stored_patch_version(id), Some(DocumentVersionId::new(1)));
     }
 
     #[test]
-    fn commit_draw_is_reversible() {
+    fn apply_stored_draw_patch_undoes_and_stores_redo() {
         let root = ImageId::new(1);
         let before_key = key(10);
         let after_key = key(11);
         let mut doc = simple_doc(root);
 
         let forward = DrawPatch::new(HashMap::from([(root, after_key)]), TileSet::single(3));
-        let inverse = doc.commit_draw(forward.clone()).unwrap();
+        let undo_id = doc.commit_draw(forward).unwrap();
         assert_eq!(doc.binding(root), Some(after_key));
 
-        let redo = doc.commit_draw(inverse).unwrap();
+        let redo_id = doc.apply_stored_patch(undo_id, &mut ImagesSession::new(&mut gla_image::GlaImages::new()), &mut TilesSession::new(&mut Tiles::new()), 0).unwrap();
         assert_eq!(doc.binding(root), Some(before_key));
-        assert_eq!(redo.bindings.get(&root), Some(&after_key));
-        assert_eq!(redo.dirty, TileSet::single(3));
+        assert_eq!(doc.version(), DocumentVersionId::new(2));
+
+        let undo_id2 = doc.apply_stored_patch(redo_id, &mut ImagesSession::new(&mut gla_image::GlaImages::new()), &mut TilesSession::new(&mut Tiles::new()), 0).unwrap();
+        assert_eq!(doc.binding(root), Some(after_key));
+        assert_ne!(undo_id2, undo_id);
     }
 
     #[test]
-    fn empty_draw_patch_is_valid() {
+    fn apply_stored_patch_fails_on_version_mismatch() {
         let root = ImageId::new(1);
+        let after_key = key(11);
         let mut doc = simple_doc(root);
-        let patch = DrawPatch::new(HashMap::new(), TileSet::default());
-        let inverse = doc.commit_draw(patch).unwrap();
-        assert!(inverse.bindings.is_empty());
-        assert!(inverse.dirty.is_empty());
+
+        let patch = DrawPatch::new(HashMap::from([(root, after_key)]), TileSet::single(3));
+        let id = doc.commit_draw(patch).unwrap();
+        // doc is now at version 1. commit again to move further.
+        let _id2 = doc.commit_draw(DrawPatch::new(HashMap::new(), TileSet::default())).unwrap();
+        // doc is at version 2. stored patch expects version 1.
+
+        let err = doc.apply_stored_patch(id, &mut ImagesSession::new(&mut gla_image::GlaImages::new()), &mut TilesSession::new(&mut Tiles::new()), 0).unwrap_err();
+        assert!(matches!(err, DocError::VersionMismatch { expected, actual } if expected == DocumentVersionId::new(1) && actual == DocumentVersionId::new(2)));
     }
 
     #[test]
@@ -485,7 +568,17 @@ mod tests {
     }
 
     #[test]
-    fn apply_registry_patch_adds_derived_root() {
+    fn empty_draw_patch_is_valid() {
+        let root = ImageId::new(1);
+        let mut doc = simple_doc(root);
+        let patch = DrawPatch::new(HashMap::new(), TileSet::default());
+        let id = doc.commit_draw(patch).unwrap();
+        let stored = doc.stored_patch_version(id);
+        assert!(stored.is_some());
+    }
+
+    #[test]
+    fn apply_registry_patch_adds_derived_root_and_stores_inverse() {
         let root = ImageId::new(1);
         let new_root = ImageId::new(2);
         let mut doc = simple_doc(root);
@@ -506,10 +599,43 @@ mod tests {
             RegistryPatchOp::SetRoot(new_root),
         ]);
 
-        let inverse = doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
+        let id = doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
         assert_eq!(doc.root(), new_root);
         assert!(doc.binding(new_root).is_some());
-        assert!(!inverse.ops.is_empty());
+        assert_eq!(doc.stored_patch_version(id), Some(DocumentVersionId::new(1)));
+    }
+
+    #[test]
+    fn registry_patch_undo_redo_via_stored_patches() {
+        let root = ImageId::new(1);
+        let new_root = ImageId::new(2);
+        let mut doc = simple_doc(root);
+        let mut images = gla_image::GlaImages::new();
+        let mut image_session = ImagesSession::new(&mut images);
+        let mut tiles = Tiles::new();
+        let mut tile_session = make_tile_session(&mut tiles);
+        let orig_root = doc.root();
+
+        let patch = RegistryPatch::new(vec![
+            RegistryPatchOp::NewImage {
+                id: new_root,
+                format: format(),
+                layout: layout(),
+                role: ImageRole::Derived(GraphCommand::new(
+                    vec![GraphRead::current(root)],
+                )),
+            },
+            RegistryPatchOp::SetRoot(new_root),
+        ]);
+        let undo_id = doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
+        assert_eq!(doc.root(), new_root);
+
+        let redo_id = doc.apply_stored_patch(undo_id, &mut image_session, &mut tile_session, 0).unwrap();
+        assert_eq!(doc.root(), orig_root);
+        assert!(!doc.roles.contains_key(&new_root));
+
+        let _ = doc.apply_stored_patch(redo_id, &mut image_session, &mut tile_session, 0).unwrap();
+        assert_eq!(doc.root(), new_root);
     }
 
     #[test]
@@ -546,39 +672,5 @@ mod tests {
 
         assert!(!doc.roles.contains_key(&drop));
         assert!(!doc.bindings.contains_key(&drop));
-    }
-
-    #[test]
-    fn registry_patch_is_reversible() {
-        let root = ImageId::new(1);
-        let mut doc = simple_doc(root);
-        let mut images = gla_image::GlaImages::new();
-        let mut image_session = ImagesSession::new(&mut images);
-        let mut tiles = Tiles::new();
-        let mut tile_session = make_tile_session(&mut tiles);
-        let orig_root = doc.root();
-        assert_eq!(doc.version(), DocumentVersionId::new(0));
-
-        let new_root = ImageId::new(2);
-        let patch = RegistryPatch::new(vec![
-            RegistryPatchOp::NewImage {
-                id: new_root,
-                format: format(),
-                layout: layout(),
-                role: ImageRole::Derived(GraphCommand::new(
-                    vec![GraphRead::current(root)],
-                )),
-            },
-            RegistryPatchOp::SetRoot(new_root),
-        ]);
-        let inverse = doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
-        assert_eq!(doc.root(), new_root);
-        assert_eq!(doc.version(), DocumentVersionId::new(1));
-
-        let redo = doc.apply_registry_patch(&inverse, &mut image_session, &mut tile_session, 0).unwrap();
-        assert_eq!(doc.root(), orig_root);
-        assert_eq!(doc.version(), DocumentVersionId::new(2));
-        assert!(!doc.roles.contains_key(&new_root));
-        assert_eq!(redo.ops.len(), 2);
     }
 }
