@@ -59,6 +59,11 @@ Doc-level `ImageId`s are never reused within one document lifetime. Session-loca
 images use the same `ImageId` type and may shadow doc ids within one draw
 session.
 
+The Rust module boundary follows that split. `gla_doc` owns `RegistryGraph`,
+`ImageBindingTable`, active document snapshots, registry patch application, and
+undo/redo transitions. `gla_session` owns draw-session validation/execution and
+uses `LocalImageTable` for session-local ids, keys, and declarations.
+
 ## Registry Graph
 
 Each document image declaration is one of:

@@ -34,6 +34,11 @@ the image storage layer. The image storage layer works in `ImageKey` and
 Doc-level `ImageId`s are not reused during a document lifetime. Session-local
 images use the same id type and may shadow doc ids within a draw session.
 
+In code, `gla_doc` owns document graph snapshots, `ImageBindingTable`, active
+document state, registry patch records, and undo/redo state transitions.
+`gla_session` owns draw-session execution state, including `LocalImageTable` for
+session-local `ImageId -> ImageKey` and `ImageId -> LocalImageDeclaration`.
+
 ## Image Declarations
 
 The registry graph declares document images:
