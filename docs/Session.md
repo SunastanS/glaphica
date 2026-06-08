@@ -147,14 +147,9 @@ images from the staging graph and binding table.
 
 Patch semantics:
 
-These are logical registry-patch semantics. Resource work such as allocating
-new image keys, materializing a derived image, and releasing unreachable caches
-is prepared outside `gla_doc`. The document model accepts already prepared graph
-and binding transitions; it does not call `ImagesSession` or `TilesSession`.
-
-- `NewImage(..., Primitive)` creates a full empty image with valid empty tile
-  keys.
-- `NewImage(..., Derived(command))` creates a derived cache image whose slots may
+- `NewImage(..., Primitive)` allocates a full empty image with valid empty tile
+  keys via `ImagesSession` and `TilesSession`.
+- `NewImage(..., Derived(command))` allocates a derived cache image whose slots
   start as `TileKey::INVALID`.
 - `SetDerived` on an existing derived image replaces its graph command if the
   command is structurally different. The new cache image starts invalid.

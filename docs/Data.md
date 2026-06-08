@@ -4,15 +4,8 @@ The upper management layer owns the document tree. It may contain concepts such
 as groups, layers, masks, filters, blend modes, transforms, and UI names.
 
 Rust sessions do not execute against that tree directly. The document tree is
-compiled into image-level state:
-
-```text
-ActiveDocumentState {
-  graph: RegistryGraphKey,
-  bindings: ImageBindingTableKey,
-  version: DocumentVersionId,
-}
-```
+compiled into image-level state: a registry of image roles plus an image-key
+binding table.
 
 ## Ids And Keys
 
@@ -22,8 +15,6 @@ identity. It is not an image storage key.
 Rust stores resources behind generation-checked keys:
 
 ```text
-RegistryGraphKey      // declarations, root, derived commands
-ImageBindingTableKey  // ImageId -> ImageKey
 ImageKey              // image tile array / content version
 ```
 
@@ -36,47 +27,73 @@ image-command layer works in key-level executable commands.
 Doc-level `ImageId`s are not reused during a document lifetime. Session-local
 images use the same id type and may shadow doc ids within a draw session.
 
-In code, `gla_doc` owns document graph snapshots, `ImageBindingTable`, active
-document state, registry patch records, and undo/redo state transitions. Doc
-image roles are persistent IR in the registry graph and can be indexed as
-`ImageKey -> role` from the active graph and bindings.
+## Document Model
+
+`gla_doc` holds the current document state inline:
+
+```text
+Document {
+  root: ImageId,
+  roles: ImageId -> ImageRole,
+  bindings: ImageId -> ImageKey,
+  version: DocumentVersionId,
+}
+```
+
+`ImageRole = Primitive | Derived(GraphCommand)`. The graph has exactly one root.
+The binding table must contain a key for every image id in roles, and every
+binding must correspond to a declared role.
+
+`gla_doc` supports two state transitions:
+
+- `commit_draw(patch) -> inverse_patch` — replaces bindings for write
+  targets, bumps version. Purely id-key level; does not touch roles.
+- `apply_registry_patch(patch, images, tiles) -> inverse_patch` —
+  applies registry ops, allocates/releases image keys, sweeps unreachable
+  images. Generates an inverse patch for undo.
+
+## Patch Resource Invariant
+
+A patch owns exactly the set of image keys and tile keys listed in its
+`bindings`. When a history node is evicted, all image keys and tile keys
+referenced by the evicted direction's patch are released.
+
+- Forward patch evicted → release keys from the inverse patch's bindings.
+- Inverse patch evicted → release keys from the forward patch's bindings.
+
+Each patch is self-describing: its `bindings` values are the complete resource
+set it is responsible for. No separate orphan-tracking data is needed.
+
 `gla_session` is the app-loop entry point. It owns draw-session execution state,
-including the local binding overlay and key-role index used while executing a
-session.
+including the local key overlay, active-chain tracking, and key-level derive
+commands used while executing a session.
 
 ## Image Declarations
 
 The registry graph declares document images:
 
 ```text
-ImageDeclaration =
-  PrimitiveImage {
-    format,
-    layout,
-  }
-
-  DerivedImage {
-    format,
-    layout,
-    command: GraphCommand,
-  }
+ImageRole =
+  Primitive
+  Derived(GraphCommand)
 ```
 
-`PrimitiveImage` is editable or externally supplied document image content. It
+`Primitive` is editable or externally supplied document image content. It
 is a valid `ReadWrite` draw target, has no graph command, and never
 contains `TileKey::INVALID`.
 
-`DerivedImage` is document cache or output image content. It has exactly one
-graph command, is not a direct draw target, and may contain `TileKey::INVALID`.
+`Derived(GraphCommand)` is document cache or output image content. It has
+exactly one graph command, is not a direct draw target, and may contain
+`TileKey::INVALID`.
 
 Examples:
 
 ```text
-Layer image       -> PrimitiveImage
-Group cache       -> DerivedImage
-Filter cache      -> DerivedImage
-Root display      -> PrimitiveImage or DerivedImage
-Mask image        -> PrimitiveImage or DerivedImage, depending on ownership
+Layer image       -> Primitive
+Group cache       -> Derived(GraphCommand)
+Filter cache      -> Derived(GraphCommand)
+Root display      -> Primitive or Derived(GraphCommand)
+Mask image        -> Primitive or Derived(GraphCommand), depending on ownership
 ```
 
 The graph has exactly one root image. The binding table must contain a binding
@@ -107,9 +124,6 @@ gla_ir:
 
 gla_image_command:
   key-level image operation programs
-
-tile command:
-  tile-resource-level executable work
 ```
 
 `GraphCommand` and `SessionCommand` are IR-level declarations. Both describe
