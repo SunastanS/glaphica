@@ -186,7 +186,6 @@ impl Tiles {
             .ok_or(TilesError::TileGenMisMatch { key })?;
         Ok(())
     }
-
 }
 
 impl From<AtlasError> for TilesError {
