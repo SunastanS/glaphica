@@ -9,7 +9,7 @@ use tile_key::{TileKey, Tiles, TilesError, TilesSession};
 mod local;
 
 pub use gla_doc::ImageRole;
-pub use local::{LocalImage, LocalImageDeclaration, LocalImageTable};
+pub use local::LocalImageDeclaration;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CanvasInput {
@@ -91,24 +91,25 @@ impl From<TilesError> for SessionError {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LocalKeyEntry {
+    key: GlaImageKey,
+    layout: GlaImageLayout,
+}
+
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct DrawOnInput {
     dst_key: GlaImageKey,
     input_mapping: Mapping,
-    tool: Tool,
-    tool_params: ToolParams,
+    _tool: Tool,
+    _tool_params: ToolParams,
 }
 
 pub struct DrawSession {
     doc_root: ImageId,
     doc_roles: HashMap<ImageId, ImageRole>,
     doc_bindings: HashMap<ImageId, GlaImageKey>,
-    #[allow(dead_code)]
-    doc_version: DocumentVersionId,
-    #[allow(dead_code)]
-    doc_access: HashMap<ImageId, DocumentImageAccess>,
-    local_keys: HashMap<ImageId, GlaImageKey>,
+    local_keys: HashMap<ImageId, LocalKeyEntry>,
     local_commands: HashMap<GlaImageKey, DeriveCommand>,
     key_to_id: HashMap<GlaImageKey, ImageId>,
     active_chain: HashSet<GlaImageKey>,
@@ -139,7 +140,6 @@ impl DrawSession {
         let doc_roles = doc.roles().clone();
         let doc_bindings = doc.bindings().clone();
         let doc_root = doc.root();
-        let doc_version = doc.version();
 
         let doc_access = validate_doc_image_uses(&doc_roles, &ir.doc_images)?;
         let session_decls =
@@ -153,8 +153,6 @@ impl DrawSession {
             doc_root,
             doc_roles: doc_roles.clone(),
             doc_bindings: doc_bindings.clone(),
-            doc_version,
-            doc_access: doc_access.clone(),
             local_keys: HashMap::new(),
             local_commands: HashMap::new(),
             key_to_id: HashMap::new(),
@@ -173,21 +171,27 @@ impl DrawSession {
             for id in &active_ids {
                 if let Some(old_key) = doc_bindings.get(id).copied() {
                     let new_key = img.copy_on_write(old_key)?;
-                    self_.local_keys.insert(*id, new_key);
+                    let layout = img.get(new_key)?.layout;
+                    self_.local_keys.insert(*id, LocalKeyEntry {
+                        key: new_key,
+                        layout,
+                    });
                     self_.key_to_id.insert(new_key, *id);
                     self_.active_chain.insert(new_key);
                 }
             }
             for (id, decl) in &session_decls {
-                let key = match decl {
+                let (key, layout) = match decl {
                     LocalImageDeclaration::Primitive { format, layout } => {
-                        img.alloc(*format, *layout, &mut t, atlas_id)?
+                        let k = img.alloc(*format, *layout, &mut t, atlas_id)?;
+                        (k, *layout)
                     }
                     LocalImageDeclaration::Derived { format, layout, .. } => {
-                        img.insert_invalid(*format, *layout)?
+                        let k = img.insert_invalid(*format, *layout)?;
+                        (k, *layout)
                     }
                 };
-                self_.local_keys.insert(*id, key);
+                self_.local_keys.insert(*id, LocalKeyEntry { key, layout });
                 self_.key_to_id.insert(key, *id);
             }
         }
@@ -199,13 +203,12 @@ impl DrawSession {
         }
 
         for id in active_ids.iter().rev() {
-            if let Some(key) = self_.local_keys.get(id).copied() {
+            if let Some(entry) = self_.local_keys.get(id) {
+                let key = entry.key;
                 if let Some(role) = doc_roles.get(id) {
                     if let Some(command) = role.graph_command() {
-                        let cmd =
-                            lower_graph_command(&doc_roles, command, &self_.local_keys, &doc_bindings)?;
-                        let layout = self_.find_layout(key, id)?;
-                        let full_cmd = DeriveCommand::new(key, layout, cmd);
+                        let cmd = self_.lower_graph_command(command)?;
+                        let full_cmd = DeriveCommand::new(key, entry.layout, cmd);
                         self_.local_commands.insert(key, full_cmd);
                     }
                 }
@@ -213,19 +216,11 @@ impl DrawSession {
         }
 
         for cmd in &ir.derive {
-            if let Some(key) = self_.local_keys.get(&cmd.dst).copied() {
-                if let Some(id) = self_.key_to_id.get(&key).copied() {
-                    let ops = lower_session_command(
-                        &doc_roles,
-                        &cmd.command,
-                        &self_.local_keys,
-                        &doc_bindings,
-                    )?;
-                    let layout = self_.find_layout(key, &id)?;
-                    self_
-                        .local_commands
-                        .insert(key, DeriveCommand::new(key, layout, ops));
-                }
+            if let Some(entry) = self_.local_keys.get(&cmd.dst) {
+                let ops = self_.lower_session_command(&cmd.command)?;
+                self_
+                    .local_commands
+                    .insert(entry.key, DeriveCommand::new(entry.key, entry.layout, ops));
             }
         }
 
@@ -234,17 +229,15 @@ impl DrawSession {
             .iter()
             .map(|cmd| -> Result<DrawOnInput, SessionError> {
                 let id = resolve_draw_on_target(&doc_access, &session_decls, cmd.dst)?;
-                let dst_key = self_
+                let entry = self_
                     .local_keys
                     .get(&id)
-                    .copied()
-                    .or_else(|| self_.doc_bindings.get(&id).copied())
                     .ok_or(SessionError::MissingImage { id })?;
                 Ok(DrawOnInput {
-                    dst_key,
+                    dst_key: entry.key,
                     input_mapping: cmd.input_mapping,
-                    tool: cmd.tool,
-                    tool_params: cmd.tool_params,
+                    _tool: cmd.tool,
+                    _tool_params: cmd.tool_params,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -255,10 +248,7 @@ impl DrawSession {
 
     pub fn draw(&mut self, input: CanvasInput) -> Result<(), SessionError> {
         for di in self.draw_inputs.clone() {
-            let layout = {
-                let img = ImagesSession::new(&mut self.images);
-                img.get(di.dst_key)?.layout
-            };
+            let layout = self.layout_of(di.dst_key)?;
             let tile_index = input_to_tile_index(di.input_mapping, input, layout);
 
             {
@@ -274,7 +264,6 @@ impl DrawSession {
                 };
                 let pos = t.acquire_for_write(tile_key)?;
                 self.renderer.clear(pos);
-                let _ = di;
             }
 
             self.mark_dirty(di.dst_key, tile_index);
@@ -284,9 +273,9 @@ impl DrawSession {
 
     pub fn commit(self, doc: &mut Document) -> Result<DrawCommit, SessionError> {
         let mut bindings = HashMap::new();
-        for (id, key) in &self.local_keys {
-            if self.active_chain.contains(key) {
-                bindings.insert(*id, *key);
+        for (id, entry) in &self.local_keys {
+            if self.active_chain.contains(&entry.key) {
+                bindings.insert(*id, entry.key);
             }
         }
         let patch = DrawPatch::new(bindings, self.root_dirty.clone());
@@ -300,13 +289,9 @@ impl DrawSession {
         &self.root_dirty
     }
 
-    fn find_layout(
-        &mut self,
-        key: GlaImageKey,
-        _id: &ImageId,
-    ) -> Result<GlaImageLayout, SessionError> {
-        let img = ImagesSession::new(&mut self.images);
-        Ok(img.get(key)?.layout)
+    fn layout_of(&self, key: GlaImageKey) -> Result<GlaImageLayout, SessionError> {
+        let image = self.images.get(key)?;
+        Ok(image.layout)
     }
 
     fn mark_dirty(&mut self, _key: GlaImageKey, tile_index: u32) {
@@ -317,14 +302,16 @@ impl DrawSession {
         let root_key = self
             .local_keys
             .get(&self.doc_root)
-            .copied()
+            .map(|e| e.key)
             .or_else(|| self.doc_bindings.get(&self.doc_root).copied())
             .ok_or(SessionError::MissingImage {
                 id: self.doc_root,
             })?;
 
+        let root_layout = self.layout_of(root_key)?;
+        let tile_count = root_layout.tile_count();
         let tiles: Vec<u32> = match &self.root_dirty {
-            TileSet::Full => (0..1024).collect(),
+            TileSet::Full => (0..tile_count).collect(),
             TileSet::Tiles(t) => t.clone(),
         };
         for tile in tiles {
@@ -340,7 +327,11 @@ impl DrawSession {
     ) -> Result<TileKey, SessionError> {
         if let Some(cmd) = self.local_commands.get(&key).cloned() {
             cmd.exec_tile(self, tile_index)?;
-            return Ok(TileKey::INVALID);
+            let tile = {
+                let img = ImagesSession::new(&mut self.images);
+                img.tile(key, tile_index)?
+            };
+            return Ok(tile);
         }
 
         let id = self
@@ -354,21 +345,66 @@ impl DrawSession {
         if let Some(role) = self.doc_roles.get(&id) {
             match role {
                 ImageRole::Primitive => {
-                    return Ok(TileKey::INVALID);
+                    let img = ImagesSession::new(&mut self.images);
+                    return Ok(img.tile(key, tile_index)?);
                 }
                 ImageRole::Derived(command) => {
-                    let ops =
-                        lower_graph_command(&self.doc_roles, command, &self.local_keys, &self.doc_bindings)?;
-                    let layout = GlaImageLayout::new(1024, 1024);
+                    let ops = self.lower_graph_command(command)?;
+                    let layout = self.layout_of(key)?;
                     let cmd = DeriveCommand::new(key, layout, ops);
                     self.local_commands.insert(key, cmd.clone());
                     cmd.exec_tile(self, tile_index)?;
-                    return Ok(TileKey::INVALID);
+                    let img = ImagesSession::new(&mut self.images);
+                    return Ok(img.tile(key, tile_index)?);
                 }
             }
         }
 
         Err(SessionError::MissingImage { id })
+    }
+
+    fn lower_graph_command(
+        &self,
+        command: &GraphCommand,
+    ) -> Result<Vec<Derive>, SessionError> {
+        let mut ops = Vec::new();
+        for read in &command.reads {
+            let src_key = self
+                .local_keys
+                .get(&read.image)
+                .map(|e| e.key)
+                .or_else(|| self.doc_bindings.get(&read.image).copied())
+                .ok_or(SessionError::MissingImage { id: read.image })?;
+            let layout = self.layout_of(src_key)?;
+            let image_ref =
+                ImageRef::with_footprint(src_key, layout, read.mapping, read.modifier);
+            ops.push(Derive::Copy(gla_image_command::Copy::new(image_ref)));
+        }
+        Ok(ops)
+    }
+
+    fn lower_session_command(
+        &self,
+        command: &SessionCommand,
+    ) -> Result<Vec<Derive>, SessionError> {
+        let mut ops = Vec::new();
+        for read in &command.reads {
+            let id = read.image.id();
+            let src_key = match read.image {
+                SessionReadImage::Current(id) => self
+                    .local_keys
+                    .get(&id)
+                    .map(|e| e.key)
+                    .or_else(|| self.doc_bindings.get(&id).copied()),
+                SessionReadImage::Backup(id) => self.doc_bindings.get(&id).copied(),
+            }
+            .ok_or(SessionError::MissingImage { id })?;
+            let layout = self.layout_of(src_key)?;
+            let image_ref =
+                ImageRef::with_footprint(src_key, layout, read.mapping, read.modifier);
+            ops.push(Derive::Copy(gla_image_command::Copy::new(image_ref)));
+        }
+        Ok(ops)
     }
 }
 
@@ -618,52 +654,6 @@ fn compute_active_chain(
     let mut sorted: Vec<ImageId> = chain.into_iter().collect();
     sorted.sort_unstable_by_key(|id| id.value());
     sorted
-}
-
-fn lower_graph_command(
-    doc_roles: &HashMap<ImageId, ImageRole>,
-    command: &GraphCommand,
-    local_keys: &HashMap<ImageId, GlaImageKey>,
-    doc_bindings: &HashMap<ImageId, GlaImageKey>,
-) -> Result<Vec<Derive>, SessionError> {
-    let mut ops = Vec::new();
-    for read in &command.reads {
-        let src_key = local_keys
-            .get(&read.image)
-            .copied()
-            .or_else(|| doc_bindings.get(&read.image).copied())
-            .ok_or(SessionError::MissingImage { id: read.image })?;
-        let layout = GlaImageLayout::new(1024, 1024);
-        let _ = doc_roles;
-        let image_ref = ImageRef::with_footprint(src_key, layout, read.mapping, read.modifier);
-        ops.push(Derive::Copy(gla_image_command::Copy::new(image_ref)));
-    }
-    Ok(ops)
-}
-
-fn lower_session_command(
-    doc_roles: &HashMap<ImageId, ImageRole>,
-    command: &SessionCommand,
-    local_keys: &HashMap<ImageId, GlaImageKey>,
-    doc_bindings: &HashMap<ImageId, GlaImageKey>,
-) -> Result<Vec<Derive>, SessionError> {
-    let mut ops = Vec::new();
-    for read in &command.reads {
-        let id = read.image.id();
-        let src_key = match read.image {
-            SessionReadImage::Current(id) => local_keys
-                .get(&id)
-                .copied()
-                .or_else(|| doc_bindings.get(&id).copied()),
-            SessionReadImage::Backup(id) => doc_bindings.get(&id).copied(),
-        }
-        .ok_or(SessionError::MissingImage { id })?;
-        let layout = GlaImageLayout::new(1024, 1024);
-        let _ = doc_roles;
-        let image_ref = ImageRef::with_footprint(src_key, layout, read.mapping, read.modifier);
-        ops.push(Derive::Copy(gla_image_command::Copy::new(image_ref)));
-    }
-    Ok(ops)
 }
 
 fn input_to_tile_index(_mapping: Mapping, input: CanvasInput, layout: GlaImageLayout) -> u32 {
