@@ -1,8 +1,8 @@
-use gla_image::{GlaImageKey, ImagesSession, TileSet};
+use gla_image::{GlaImageKey, GlaImages, TileSet};
 use gla_ir::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use tile_key::{TileKey, TilesSession};
+use tile_key::{TileKey, Tiles};
 
 /// Re-exported from gla_ir.
 pub use gla_ir::ImageRole;
@@ -173,8 +173,8 @@ impl Document {
     pub fn apply_registry_patch(
         &mut self,
         patch: &RegistryPatch,
-        images: &mut ImagesSession<'_>,
-        tiles: &mut TilesSession<'_>,
+        images: &mut GlaImages,
+        tiles: &mut Tiles,
         atlas_id: u8,
     ) -> Result<SessionId, DocError> {
         let old_root = self.root;
@@ -267,7 +267,7 @@ impl Document {
         }
 
         for key in pending_discard {
-            images.discard(key);
+            let _ = images.free(key);
         }
 
         inverse_ops.push(RegistryPatchOp::SetRoot(old_root));
@@ -279,8 +279,8 @@ impl Document {
     pub fn apply_stored_patch(
         &mut self,
         id: SessionId,
-        images: &mut ImagesSession<'_>,
-        tiles: &mut TilesSession<'_>,
+        images: &mut GlaImages,
+        tiles: &mut Tiles,
         atlas_id: u8,
     ) -> Result<SessionId, DocError> {
         let stored = self
@@ -460,9 +460,12 @@ mod tests {
         GlaImageKey::new(value, 0)
     }
 
-    fn make_tile_session(tiles: &mut Tiles) -> TilesSession<'_> {
+    fn make_tile_atlas(tiles: &mut Tiles) {
         tiles.new_atlas(atlas::AtlasLayout::LARGE17, format());
-        TilesSession::new(tiles)
+    }
+
+    fn fresh_resources() -> (GlaImages, Tiles) {
+        (gla_image::GlaImages::new(), Tiles::new())
     }
 
     fn simple_doc(root: ImageId) -> Document {
@@ -534,11 +537,11 @@ mod tests {
         let undo_id = doc.commit_draw(forward).unwrap();
         assert_eq!(doc.binding(root), Some(after_key));
 
-        let redo_id = doc.apply_stored_patch(undo_id, &mut ImagesSession::new(&mut gla_image::GlaImages::new()), &mut TilesSession::new(&mut Tiles::new()), 0).unwrap();
+        let redo_id = doc.apply_stored_patch(undo_id, &mut gla_image::GlaImages::new(), &mut Tiles::new(), 0).unwrap();
         assert_eq!(doc.binding(root), Some(before_key));
         assert_eq!(doc.version(), DocumentVersionId::new(2));
 
-        let undo_id2 = doc.apply_stored_patch(redo_id, &mut ImagesSession::new(&mut gla_image::GlaImages::new()), &mut TilesSession::new(&mut Tiles::new()), 0).unwrap();
+        let undo_id2 = doc.apply_stored_patch(redo_id, &mut gla_image::GlaImages::new(), &mut Tiles::new(), 0).unwrap();
         assert_eq!(doc.binding(root), Some(after_key));
         assert_ne!(undo_id2, undo_id);
     }
@@ -555,7 +558,7 @@ mod tests {
         let _id2 = doc.commit_draw(DrawPatch::new(HashMap::new(), TileSet::default())).unwrap();
         // doc is at version 2. stored patch expects version 1.
 
-        let err = doc.apply_stored_patch(id, &mut ImagesSession::new(&mut gla_image::GlaImages::new()), &mut TilesSession::new(&mut Tiles::new()), 0).unwrap_err();
+        let err = doc.apply_stored_patch(id, &mut gla_image::GlaImages::new(), &mut Tiles::new(), 0).unwrap_err();
         assert!(matches!(err, DocError::VersionMismatch { expected, actual } if expected == DocumentVersionId::new(1) && actual == DocumentVersionId::new(2)));
     }
 
@@ -585,10 +588,8 @@ mod tests {
         let root = ImageId::new(1);
         let new_root = ImageId::new(2);
         let mut doc = simple_doc(root);
-        let mut images = gla_image::GlaImages::new();
-        let mut image_session = ImagesSession::new(&mut images);
-        let mut tiles = Tiles::new();
-        let mut tile_session = make_tile_session(&mut tiles);
+        let (mut images, mut tiles) = fresh_resources();
+        make_tile_atlas(&mut tiles);
 
         let patch = RegistryPatch::new(vec![
             RegistryPatchOp::NewImage {
@@ -602,7 +603,7 @@ mod tests {
             RegistryPatchOp::SetRoot(new_root),
         ]);
 
-        let id = doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
+        let id = doc.apply_registry_patch(&patch, &mut images, &mut tiles, 0).unwrap();
         assert_eq!(doc.root(), new_root);
         assert!(doc.binding(new_root).is_some());
         assert_eq!(doc.stored_patch_version(id), Some(DocumentVersionId::new(1)));
@@ -613,10 +614,8 @@ mod tests {
         let root = ImageId::new(1);
         let new_root = ImageId::new(2);
         let mut doc = simple_doc(root);
-        let mut images = gla_image::GlaImages::new();
-        let mut image_session = ImagesSession::new(&mut images);
-        let mut tiles = Tiles::new();
-        let mut tile_session = make_tile_session(&mut tiles);
+        let (mut images, mut tiles) = fresh_resources();
+        make_tile_atlas(&mut tiles);
         let orig_root = doc.root();
 
         let patch = RegistryPatch::new(vec![
@@ -630,14 +629,14 @@ mod tests {
             },
             RegistryPatchOp::SetRoot(new_root),
         ]);
-        let undo_id = doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
+        let undo_id = doc.apply_registry_patch(&patch, &mut images, &mut tiles, 0).unwrap();
         assert_eq!(doc.root(), new_root);
 
-        let redo_id = doc.apply_stored_patch(undo_id, &mut image_session, &mut tile_session, 0).unwrap();
+        let redo_id = doc.apply_stored_patch(undo_id, &mut images, &mut tiles, 0).unwrap();
         assert_eq!(doc.root(), orig_root);
         assert!(!doc.roles.contains_key(&new_root));
 
-        let _ = doc.apply_stored_patch(redo_id, &mut image_session, &mut tile_session, 0).unwrap();
+        let _ = doc.apply_stored_patch(redo_id, &mut images, &mut tiles, 0).unwrap();
         assert_eq!(doc.root(), new_root);
     }
 
@@ -654,12 +653,11 @@ mod tests {
         )));
 
         let mut images = gla_image::GlaImages::new();
-        let mut image_session = ImagesSession::new(&mut images);
         let mut tiles = Tiles::new();
-        let mut tile_session = make_tile_session(&mut tiles);
-        let key_keep = image_session.insert_invalid(format(), GlaImageLayout::new(64, 64)).unwrap();
-        let key_drop = image_session.insert_invalid(format(), GlaImageLayout::new(64, 64)).unwrap();
-        let key_root = image_session.insert_invalid(format(), GlaImageLayout::new(64, 64)).unwrap();
+        make_tile_atlas(&mut tiles);
+        let key_keep = images.insert_invalid(format(), GlaImageLayout::new(64, 64)).unwrap();
+        let key_drop = images.insert_invalid(format(), GlaImageLayout::new(64, 64)).unwrap();
+        let key_root = images.insert_invalid(format(), GlaImageLayout::new(64, 64)).unwrap();
         let bindings = HashMap::from([
             (keep, key_keep),
             (drop, key_drop),
@@ -671,7 +669,7 @@ mod tests {
             id: root,
             command: GraphCommand::new(vec![GraphRead::current(keep)]),
         }]);
-        doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
+        doc.apply_registry_patch(&patch, &mut images, &mut tiles, 0).unwrap();
 
         assert!(!doc.roles.contains_key(&drop));
         assert!(!doc.bindings.contains_key(&drop));

@@ -2,7 +2,7 @@ use atlas::{Atlas, AtlasError, AtlasLayout, KeyBinding, TilePos};
 use gla_color::GlaFormat;
 use gla_core::{Pool, PoolError};
 
-/// Key (u32):
+/// Key (u64):
 /// - [0,  32) key index
 /// - [32, 64) key generation
 
@@ -91,27 +91,11 @@ impl Tiles {
         Ok(position)
     }
 
-    fn bind_key(&mut self, key: TileKey, binding: KeyBinding) {
-        let index = key.index() as usize;
-        if self.bindings.len() <= index {
-            self.bindings
-                .resize(index + 1, KeyBinding::empty(binding.position().atlas_id()));
-        }
-        self.bindings[index] = binding;
+    pub fn acquire_for_read(&self, key: TileKey) -> Result<TilePos, TilesError> {
+        self.position(key)
     }
 
-    fn alloc_empty_from(&mut self, atlas_id: u8) -> Result<TileKey, TilesError> {
-        self.atlases
-            .get(atlas_id as usize)
-            .ok_or(TilesError::InvalidAtlasId { atlas_id })?;
-
-        let (index, generation) = self.key_pool.alloc()?;
-        let key = TileKey::new(index, generation);
-        self.bind_key(key, KeyBinding::empty(atlas_id));
-        Ok(key)
-    }
-
-    fn materialize_empty(&mut self, key: TileKey) -> Result<TilePos, TilesError> {
+    pub fn acquire_for_write(&mut self, key: TileKey) -> Result<TilePos, TilesError> {
         self.ensure_valid(key)?;
         let position = self.bindings[key.index() as usize].position();
         if !position.is_empty() {
@@ -166,6 +150,26 @@ impl Tiles {
         Ok(keys)
     }
 
+    pub fn discard(&mut self, key: TileKey) {
+        if let Ok(()) = self.ensure_valid(key) {
+            let idx = key.index() as usize;
+            let binding = self.bindings[idx];
+            let atlas_id = binding.position().atlas_id();
+            if let Some(atlas) = self.atlases.get_mut(atlas_id as usize) {
+                if atlas.check(binding) {
+                    atlas.free(binding.position());
+                }
+            }
+            self.key_pool.free(key.index());
+        }
+    }
+
+    pub fn discard_batch(&mut self, keys: &[TileKey]) {
+        for key in keys {
+            self.discard(*key);
+        }
+    }
+
     pub fn ensure_valid(&self, key: TileKey) -> Result<(), TilesError> {
         self.key_pool
             .check(key.index(), key.generation())
@@ -186,6 +190,26 @@ impl Tiles {
             .ok_or(TilesError::TileGenMisMatch { key })?;
         Ok(())
     }
+
+    fn bind_key(&mut self, key: TileKey, binding: KeyBinding) {
+        let index = key.index() as usize;
+        if self.bindings.len() <= index {
+            self.bindings
+                .resize(index + 1, KeyBinding::empty(binding.position().atlas_id()));
+        }
+        self.bindings[index] = binding;
+    }
+
+    fn alloc_empty_from(&mut self, atlas_id: u8) -> Result<TileKey, TilesError> {
+        self.atlases
+            .get(atlas_id as usize)
+            .ok_or(TilesError::InvalidAtlasId { atlas_id })?;
+
+        let (index, generation) = self.key_pool.alloc()?;
+        let key = TileKey::new(index, generation);
+        self.bind_key(key, KeyBinding::empty(atlas_id));
+        Ok(key)
+    }
 }
 
 impl From<AtlasError> for TilesError {
@@ -203,72 +227,6 @@ impl From<PoolError> for TilesError {
     fn from(error: PoolError) -> Self {
         match error {
             PoolError::Full => TilesError::KeyPoolFull,
-        }
-    }
-}
-
-pub struct TilesSession<'a> {
-    tiles: &'a mut Tiles,
-    pub allocated: Vec<TileKey>,
-    pub discarded: Vec<TileKey>,
-}
-
-pub struct TilesSessionRecord {
-    pub allocated: Box<[TileKey]>,
-    pub discarded: Box<[TileKey]>,
-}
-
-impl<'a> TilesSession<'a> {
-    pub fn new(tiles: &'a mut Tiles) -> Self {
-        Self {
-            tiles,
-            allocated: Vec::new(),
-            discarded: Vec::new(),
-        }
-    }
-
-    pub fn alloc_from(&mut self, atlas_id: u8) -> Result<TileKey, TilesError> {
-        let key = self.tiles.alloc_from(atlas_id)?;
-        self.allocated.push(key);
-        Ok(key)
-    }
-
-    pub fn alloc_batch_from(
-        &mut self,
-        atlas_id: u8,
-        count: u32,
-    ) -> Result<Vec<TileKey>, TilesError> {
-        let keys = self.tiles.alloc_batch_from(atlas_id, count)?;
-        self.allocated.extend(keys.clone());
-        Ok(keys)
-    }
-
-    pub fn acquire_for_read(&self, key: TileKey) -> Result<TilePos, TilesError> {
-        self.tiles.position(key)
-    }
-
-    pub fn acquire_for_write(&mut self, key: TileKey) -> Result<TilePos, TilesError> {
-        let position = self.tiles.position(key)?;
-        if !position.is_empty() {
-            return Ok(position);
-        }
-
-        let position = self.tiles.materialize_empty(key)?;
-        Ok(position)
-    }
-
-    pub fn discard(&mut self, key: TileKey) {
-        self.discarded.push(key);
-    }
-
-    pub fn discard_batch(&mut self, keys: Vec<TileKey>) {
-        self.discarded.extend(keys);
-    }
-
-    pub fn record(&self) -> TilesSessionRecord {
-        TilesSessionRecord {
-            allocated: self.allocated.clone().into_boxed_slice(),
-            discarded: self.discarded.clone().into_boxed_slice(),
         }
     }
 }

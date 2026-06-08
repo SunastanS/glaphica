@@ -1,7 +1,7 @@
 use gla_color::GlaFormat;
 use gla_core::{IMAGE_TILE_SIZE, Pool, PoolError};
 use std::fmt::{Display, Formatter};
-use tile_key::{TileKey, TilesError, TilesSession};
+use tile_key::{TileKey, Tiles, TilesError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -207,17 +207,17 @@ impl GlaImages {
         &mut self,
         format: GlaFormat,
         layout: GlaImageLayout,
-        tiles_session: &mut TilesSession<'_>,
+        tiles: &mut Tiles,
         atlas_id: u8,
     ) -> Result<GlaImageKey, GlaImagesError> {
         if self.pool.remaining() == 0 {
             return Err(GlaImagesError::KeyPoolFull);
         }
 
-        let tiles = tiles_session
+        let tile_keys = tiles
             .alloc_batch_from(atlas_id, layout.tile_count())
             .map_err(|source| GlaImagesError::TileAllocFailed { source })?;
-        self.insert(format, layout, tiles.into_boxed_slice())
+        self.insert(format, layout, tile_keys.into_boxed_slice())
     }
 
     pub fn insert(
@@ -235,6 +235,15 @@ impl GlaImages {
         let key = GlaImageKey::new(index, generation);
         self.bind_image(key, image);
         Ok(key)
+    }
+
+    pub fn insert_invalid(
+        &mut self,
+        format: GlaFormat,
+        layout: GlaImageLayout,
+    ) -> Result<GlaImageKey, GlaImagesError> {
+        let tiles = vec![TileKey::INVALID; layout.tile_count() as usize].into_boxed_slice();
+        self.insert(format, layout, tiles)
     }
 
     /// Clones image metadata and the tile key array into a new image key.
@@ -376,165 +385,9 @@ impl From<TilesError> for GlaImagesError {
     }
 }
 
-pub struct ImagesSession<'a> {
-    images: &'a mut GlaImages,
-    pub allocated: Vec<GlaImageKey>,
-    pub discarded: Vec<GlaImageKey>,
-}
-
-pub struct ImagesSessionRecord {
-    pub allocated: Box<[GlaImageKey]>,
-    pub discarded: Box<[GlaImageKey]>,
-}
-
-impl<'a> ImagesSession<'a> {
-    pub fn new(images: &'a mut GlaImages) -> Self {
-        Self {
-            images,
-            allocated: Vec::new(),
-            discarded: Vec::new(),
-        }
-    }
-
-    pub fn alloc(
-        &mut self,
-        format: GlaFormat,
-        layout: GlaImageLayout,
-        tiles_session: &mut TilesSession<'_>,
-        atlas_id: u8,
-    ) -> Result<GlaImageKey, GlaImagesError> {
-        let key = self.images.alloc(format, layout, tiles_session, atlas_id)?;
-        self.allocated.push(key);
-        Ok(key)
-    }
-
-    pub fn insert(
-        &mut self,
-        format: GlaFormat,
-        layout: GlaImageLayout,
-        tiles: Box<[TileKey]>,
-    ) -> Result<GlaImageKey, GlaImagesError> {
-        let key = self.images.insert(format, layout, tiles)?;
-        self.allocated.push(key);
-        Ok(key)
-    }
-
-    pub fn copy_on_write(&mut self, key: GlaImageKey) -> Result<GlaImageKey, GlaImagesError> {
-        let key = self.images.copy_on_write(key)?;
-        self.allocated.push(key);
-        Ok(key)
-    }
-
-    pub fn discard(&mut self, key: GlaImageKey) {
-        self.discarded.push(key);
-    }
-
-    pub fn discard_batch(&mut self, keys: Vec<GlaImageKey>) {
-        self.discarded.extend(keys);
-    }
-
-    pub fn get(&self, key: GlaImageKey) -> Result<&GlaImage, GlaImagesError> {
-        self.images.get(key)
-    }
-
-    pub fn get_mut(&mut self, key: GlaImageKey) -> Result<&mut GlaImage, GlaImagesError> {
-        self.images.get_mut(key)
-    }
-
-    pub fn tile(&self, key: GlaImageKey, tile_index: u32) -> Result<TileKey, GlaImagesError> {
-        self.images.tile(key, tile_index)
-    }
-
-    pub fn set_tile(
-        &mut self,
-        key: GlaImageKey,
-        tile_index: u32,
-        tile_key: TileKey,
-    ) -> Result<(), GlaImagesError> {
-        self.images.set_tile(key, tile_index, tile_key)
-    }
-
-    pub fn backfill_invalid_from(
-        &mut self,
-        dst: GlaImageKey,
-        src: GlaImageKey,
-    ) -> Result<Vec<(u32, TileKey)>, GlaImagesError> {
-        self.images.backfill_invalid_from(dst, src)
-    }
-
-    pub fn insert_invalid(
-        &mut self,
-        format: GlaFormat,
-        layout: GlaImageLayout,
-    ) -> Result<GlaImageKey, GlaImagesError> {
-        let tiles = vec![TileKey::INVALID; layout.tile_count() as usize].into_boxed_slice();
-        self.insert(format, layout, tiles)
-    }
-
-    pub fn discard_all_tiles(
-        &mut self,
-        tiles: &mut TilesSession<'_>,
-        key: GlaImageKey,
-    ) -> Result<Vec<TileKey>, GlaImagesError> {
-        let image = self.images.get(key)?;
-        let discarded: Vec<TileKey> = image
-            .tiles
-            .iter()
-            .copied()
-            .filter(|t| !t.is_invalid())
-            .collect();
-        for tile in &discarded {
-            tiles.discard(*tile);
-        }
-        Ok(discarded)
-    }
-
-    pub fn discard_replaced_tiles(
-        &mut self,
-        tiles: &mut TilesSession<'_>,
-        old_key: GlaImageKey,
-        new_key: GlaImageKey,
-    ) -> Result<Vec<TileKey>, GlaImagesError> {
-        let old_image = self.images.get(old_key)?;
-        let new_image = self.images.get(new_key)?;
-
-        let discarded: Vec<TileKey> =
-            if old_image.format == new_image.format && old_image.layout == new_image.layout {
-                old_image
-                    .tiles
-                    .iter()
-                    .copied()
-                    .zip(new_image.tiles.iter().copied())
-                    .filter_map(|(old, new)| (old != new && !old.is_invalid()).then_some(old))
-                    .collect()
-            } else {
-                old_image
-                    .tiles
-                    .iter()
-                    .copied()
-                    .filter(|t| !t.is_invalid())
-                    .collect()
-            };
-
-        for tile in &discarded {
-            tiles.discard(*tile);
-        }
-        Ok(discarded)
-    }
-
-    pub fn record(&self) -> ImagesSessionRecord {
-        ImagesSessionRecord {
-            allocated: self.allocated.clone().into_boxed_slice(),
-            discarded: self.discarded.clone().into_boxed_slice(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        GlaImageKey, GlaImageLayout, GlaImages, GlaImagesError, IMAGE_TILE_SIZE, ImagesSession,
-    };
+    use super::{GlaImageLayout, GlaImages, GlaImagesError, IMAGE_TILE_SIZE};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use tile_key::TileKey;
 
@@ -618,14 +471,8 @@ mod tests {
             .insert(format(), layout, vec![old_tile].into_boxed_slice())
             .unwrap();
 
-        let new = {
-            let mut session = ImagesSession::new(&mut images);
-            let new = session.copy_on_write(old).unwrap();
-            let record = session.record();
-            assert_eq!(record.allocated.as_ref(), &[new]);
-            assert!(record.discarded.is_empty());
-            new
-        };
+        let new = images.copy_on_write(old).unwrap();
+        assert_ne!(new, old);
 
         assert_ne!(new, old);
         assert_eq!(images.tile(old, 0).unwrap(), old_tile);
@@ -634,21 +481,6 @@ mod tests {
         images.set_tile(new, 0, new_tile).unwrap();
         assert_eq!(images.tile(old, 0).unwrap(), old_tile);
         assert_eq!(images.tile(new, 0).unwrap(), new_tile);
-    }
-
-    #[test]
-    fn session_discard_only_records_key() {
-        let mut images = GlaImages::new();
-        let key = GlaImageKey::new(42, 7);
-
-        let record = {
-            let mut session = ImagesSession::new(&mut images);
-            session.discard(key);
-            session.record()
-        };
-
-        assert!(record.allocated.is_empty());
-        assert_eq!(record.discarded.as_ref(), &[key]);
     }
 
     #[test]
@@ -726,17 +558,24 @@ mod tests {
             )
             .unwrap();
 
-        let discarded_tiles = {
-            let mut session = ImagesSession::new(&mut images);
-            session.backfill_invalid_from(new, old).unwrap();
-            let mut tiles = tile_key::Tiles::new();
-            let mut tile_session = tile_key::TilesSession::new(&mut tiles);
-            session
-                .discard_replaced_tiles(&mut tile_session, old, new)
-                .unwrap()
-        };
+        images.backfill_invalid_from(new, old).unwrap();
 
-        assert_eq!(discarded_tiles, vec![discarded]);
+        let old_img = images.get(old).unwrap();
+        let new_img = images.get(new).unwrap();
+        let mut discarding = Vec::new();
+        let mut keeping = Vec::new();
+        if old_img.format == new_img.format && old_img.layout == new_img.layout {
+            for (&old_tile, &new_tile) in old_img.tiles.iter().zip(new_img.tiles.iter()) {
+                if old_tile != TileKey::INVALID && old_tile != new_tile {
+                    discarding.push(old_tile);
+                } else if old_tile != TileKey::INVALID && old_tile == new_tile {
+                    keeping.push(old_tile);
+                }
+            }
+        }
+
+        assert_eq!(discarding, vec![discarded]);
+        assert_eq!(keeping, vec![kept]);
         assert_eq!(images.tile(new, 0).unwrap(), kept);
         assert_eq!(images.tile(new, 1).unwrap(), replacement);
     }

@@ -208,7 +208,7 @@ mod tests {
     use atlas::{AtlasLayout, TilePos};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use gla_renderer::Pass;
-    use tile_key::{Tiles, TilesSession};
+    use tile_key::Tiles;
 
     #[derive(Debug)]
     enum TestError {
@@ -216,8 +216,8 @@ mod tests {
         Tiles(tile_key::TilesError),
     }
 
-    struct TestCtx<'a> {
-        tiles: TilesSession<'a>,
+    struct TestCtx {
+        tiles: Tiles,
         renderer: Renderer,
         calls: Vec<(GlaImageKey, u32)>,
         write_calls: Vec<(GlaImageKey, u32)>,
@@ -226,7 +226,7 @@ mod tests {
         nested_pass: Option<TilePos>,
     }
 
-    impl RenderCtx for TestCtx<'_> {
+    impl RenderCtx for TestCtx {
         type Error = TestError;
 
         fn render(&mut self, image: GlaImageKey, tile_index: u32) -> Result<TileKey, Self::Error> {
@@ -266,9 +266,9 @@ mod tests {
         }
     }
 
-    fn ctx_with_tiles<'a>(tiles: &'a mut Tiles, returns: Vec<TileKey>) -> TestCtx<'a> {
+    fn ctx_with_tiles(returns: Vec<TileKey>) -> TestCtx {
         TestCtx {
-            tiles: TilesSession::new(tiles),
+            tiles: Tiles::new(),
             renderer: Renderer::new(),
             calls: Vec::new(),
             write_calls: Vec::new(),
@@ -284,9 +284,8 @@ mod tests {
 
     #[test]
     fn copy_renders_source_before_recording_copy_pass() {
-        let mut tiles = Tiles::new();
-        let atlas = tiles.new_atlas(AtlasLayout::TINY8, format());
-        let mut ctx = ctx_with_tiles(&mut tiles, Vec::new());
+        let mut ctx = ctx_with_tiles(Vec::new());
+        let atlas = ctx.tiles.new_atlas(AtlasLayout::TINY8, format());
         let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let nested_dst = ctx.tiles.acquire_for_write(dst_tile).unwrap();
@@ -325,9 +324,8 @@ mod tests {
 
     #[test]
     fn render_to_records_blend_mode_and_opacity() {
-        let mut tiles = Tiles::new();
-        let atlas = tiles.new_atlas(AtlasLayout::TINY8, format());
-        let mut ctx = ctx_with_tiles(&mut tiles, Vec::new());
+        let mut ctx = ctx_with_tiles(Vec::new());
+        let atlas = ctx.tiles.new_atlas(AtlasLayout::TINY8, format());
         let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let source_pos = ctx.tiles.acquire_for_read(source_tile).unwrap();
@@ -364,9 +362,8 @@ mod tests {
 
     #[test]
     fn clear_writes_without_rendering_source() {
-        let mut tiles = Tiles::new();
-        let atlas = tiles.new_atlas(AtlasLayout::TINY8, format());
-        let mut ctx = ctx_with_tiles(&mut tiles, Vec::new());
+        let mut ctx = ctx_with_tiles(Vec::new());
+        let atlas = ctx.tiles.new_atlas(AtlasLayout::TINY8, format());
         let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
         ctx.dst_tile = Some(dst_tile);

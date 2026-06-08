@@ -1,10 +1,10 @@
 use gla_doc::{DocError, Document, DrawPatch, SessionId};
-use gla_image::{GlaImageKey, GlaImageLayout, GlaImages, GlaImagesError, ImagesSession, TileSet};
+use gla_image::{GlaImageKey, GlaImageLayout, GlaImages, GlaImagesError, TileSet};
 use gla_image_command::{Derive, DeriveCommand, ImageRef, RenderCtx};
 use gla_ir::*;
 use gla_renderer::Renderer;
 use std::collections::{HashMap, HashSet};
-use tile_key::{TileKey, Tiles, TilesError, TilesSession};
+use tile_key::{TileKey, Tiles, TilesError};
 
 mod local;
 
@@ -167,12 +167,10 @@ impl DrawSession {
         };
 
         {
-            let mut img = ImagesSession::new(&mut self_.images);
-            let mut t = TilesSession::new(&mut self_.tiles);
             for id in &active_ids {
                 if let Some(old_key) = doc_bindings.get(id).copied() {
-                    let new_key = img.copy_on_write(old_key)?;
-                    let layout = img.get(new_key)?.layout;
+                    let new_key = self_.images.copy_on_write(old_key)?;
+                    let layout = self_.images.get(new_key)?.layout;
                     self_.local_keys.insert(*id, LocalKeyEntry {
                         key: new_key,
                         layout,
@@ -184,11 +182,11 @@ impl DrawSession {
             for (id, decl) in &session_decls {
                 let (key, layout) = match decl {
                     LocalImageDeclaration::Primitive { format, layout } => {
-                        let k = img.alloc(*format, *layout, &mut t, atlas_id)?;
+                        let k = self_.images.alloc(*format, *layout, &mut self_.tiles, atlas_id)?;
                         (k, *layout)
                     }
                     LocalImageDeclaration::Derived { format, layout, .. } => {
-                        let k = img.insert_invalid(*format, *layout)?;
+                        let k = self_.images.insert_invalid(*format, *layout)?;
                         (k, *layout)
                     }
                 };
@@ -253,17 +251,15 @@ impl DrawSession {
             let tile_index = input_to_tile_index(di.input_mapping, input, layout);
 
             {
-                let mut img = ImagesSession::new(&mut self.images);
-                let mut t = TilesSession::new(&mut self.tiles);
-                let existing = img.tile(di.dst_key, tile_index)?;
+                let existing = self.images.tile(di.dst_key, tile_index)?;
                 let tile_key = if existing == TileKey::INVALID {
-                    let new_key = t.alloc_from(self.atlas_id)?;
-                    img.set_tile(di.dst_key, tile_index, new_key)?;
+                    let new_key = self.tiles.alloc_from(self.atlas_id)?;
+                    self.images.set_tile(di.dst_key, tile_index, new_key)?;
                     new_key
                 } else {
                     existing
                 };
-                let pos = t.acquire_for_write(tile_key)?;
+                let pos = self.tiles.acquire_for_write(tile_key)?;
                 self.renderer.clear(pos);
             }
 
@@ -345,11 +341,7 @@ impl DrawSession {
     ) -> Result<TileKey, SessionError> {
         if let Some(cmd) = self.local_commands.get(&key).cloned() {
             cmd.exec_tile(self, tile_index)?;
-            let tile = {
-                let img = ImagesSession::new(&mut self.images);
-                img.tile(key, tile_index)?
-            };
-            return Ok(tile);
+            return Ok(self.images.tile(key, tile_index)?);
         }
 
         let id = self
@@ -363,8 +355,7 @@ impl DrawSession {
         if let Some(role) = self.doc_roles.get(&id) {
             match role {
                 ImageRole::Primitive => {
-                    let img = ImagesSession::new(&mut self.images);
-                    return Ok(img.tile(key, tile_index)?);
+                    return Ok(self.images.tile(key, tile_index)?);
                 }
                 ImageRole::Derived(command) => {
                     let ops = self.lower_graph_command(command)?;
@@ -372,8 +363,7 @@ impl DrawSession {
                     let cmd = DeriveCommand::new(key, layout, ops);
                     self.local_commands.insert(key, cmd.clone());
                     cmd.exec_tile(self, tile_index)?;
-                    let img = ImagesSession::new(&mut self.images);
-                    return Ok(img.tile(key, tile_index)?);
+                    return Ok(self.images.tile(key, tile_index)?);
                 }
             }
         }
@@ -438,25 +428,21 @@ impl RenderCtx for DrawSession {
         image: GlaImageKey,
         tile_index: u32,
     ) -> Result<TileKey, Self::Error> {
-        let mut img = ImagesSession::new(&mut self.images);
-        let mut t = TilesSession::new(&mut self.tiles);
-        let existing = img.tile(image, tile_index)?;
+        let existing = self.images.tile(image, tile_index)?;
         if existing == TileKey::INVALID {
-            let new_key = t.alloc_from(self.atlas_id)?;
-            img.set_tile(image, tile_index, new_key)?;
+            let new_key = self.tiles.alloc_from(self.atlas_id)?;
+            self.images.set_tile(image, tile_index, new_key)?;
             return Ok(new_key);
         }
         Ok(existing)
     }
 
     fn acquire_for_read(&mut self, key: TileKey) -> Result<atlas::TilePos, Self::Error> {
-        let t = TilesSession::new(&mut self.tiles);
-        Ok(t.acquire_for_read(key)?)
+        Ok(self.tiles.acquire_for_read(key)?)
     }
 
     fn acquire_for_write(&mut self, key: TileKey) -> Result<atlas::TilePos, Self::Error> {
-        let mut t = TilesSession::new(&mut self.tiles);
-        Ok(t.acquire_for_write(key)?)
+        Ok(self.tiles.acquire_for_write(key)?)
     }
 
     fn renderer(&mut self) -> &mut Renderer {
