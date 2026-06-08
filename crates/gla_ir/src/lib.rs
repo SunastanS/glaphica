@@ -121,56 +121,74 @@ impl SessionCommand {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ImageDeclaration {
-    Primitive {
-        format: GlaFormat,
-        layout: GlaImageLayout,
-    },
-    Derived {
-        format: GlaFormat,
-        layout: GlaImageLayout,
-        command: GraphCommand,
-    },
+pub enum ImageRole {
+    Primitive,
+    Derived(GraphCommand),
 }
 
-impl ImageDeclaration {
-    pub fn primitive(format: GlaFormat, layout: GlaImageLayout) -> Self {
-        Self::Primitive { format, layout }
-    }
-
-    pub fn derived(format: GlaFormat, layout: GlaImageLayout, command: GraphCommand) -> Self {
-        Self::Derived {
-            format,
-            layout,
-            command,
-        }
-    }
-
-    pub fn format(&self) -> GlaFormat {
-        match self {
-            Self::Primitive { format, .. } | Self::Derived { format, .. } => *format,
-        }
-    }
-
-    pub fn layout(&self) -> GlaImageLayout {
-        match self {
-            Self::Primitive { layout, .. } | Self::Derived { layout, .. } => *layout,
-        }
-    }
-
+impl ImageRole {
     pub fn is_primitive(&self) -> bool {
-        matches!(self, Self::Primitive { .. })
+        matches!(self, Self::Primitive)
     }
 
     pub fn is_derived(&self) -> bool {
-        matches!(self, Self::Derived { .. })
+        matches!(self, Self::Derived(_))
     }
 
     pub fn graph_command(&self) -> Option<&GraphCommand> {
         match self {
-            Self::Primitive { .. } => None,
-            Self::Derived { command, .. } => Some(command),
+            Self::Primitive => None,
+            Self::Derived(command) => Some(command),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageDeclaration {
+    pub role: ImageRole,
+    pub format: GlaFormat,
+    pub layout: GlaImageLayout,
+}
+
+impl ImageDeclaration {
+    pub fn primitive(format: GlaFormat, layout: GlaImageLayout) -> Self {
+        Self {
+            role: ImageRole::Primitive,
+            format,
+            layout,
+        }
+    }
+
+    pub fn derived(format: GlaFormat, layout: GlaImageLayout, command: GraphCommand) -> Self {
+        Self {
+            role: ImageRole::Derived(command),
+            format,
+            layout,
+        }
+    }
+
+    pub fn role(&self) -> &ImageRole {
+        &self.role
+    }
+
+    pub fn format(&self) -> GlaFormat {
+        self.format
+    }
+
+    pub fn layout(&self) -> GlaImageLayout {
+        self.layout
+    }
+
+    pub fn is_primitive(&self) -> bool {
+        self.role.is_primitive()
+    }
+
+    pub fn is_derived(&self) -> bool {
+        self.role.is_derived()
+    }
+
+    pub fn graph_command(&self) -> Option<&GraphCommand> {
+        self.role.graph_command()
     }
 }
 
@@ -297,7 +315,14 @@ pub enum RegistryPatchOp {
         id: ImageId,
         format: GlaFormat,
         layout: GlaImageLayout,
-        role: NewImageRole,
+        role: ImageRole,
+    },
+    InsertImage {
+        id: ImageId,
+        key: gla_image::GlaImageKey,
+        role: ImageRole,
+        format: GlaFormat,
+        layout: GlaImageLayout,
     },
     SetPrimitive(ImageId),
     SetDerived {
@@ -305,10 +330,4 @@ pub enum RegistryPatchOp {
         command: GraphCommand,
     },
     SetRoot(ImageId),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum NewImageRole {
-    Primitive,
-    Derived(GraphCommand),
 }

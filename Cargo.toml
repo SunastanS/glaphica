@@ -9,6 +9,7 @@ members = [
     "crates/gla_renderer",
     "crates/gla_image",
     "crates/gla_image_command",
+    "crates/gla_doc",
 ]
 
 resolver = "3"

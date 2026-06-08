@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+atlas = { path = "../atlas" }
+gla_color = { path = "../gla_color" }
 gla_image = { path = "../gla_image" }
-gla_image_command = { path = "../gla_image_command" }
 gla_ir = { path = "../gla_ir" }
 tile_key = { path = "../tile_key" }

@@ -52,8 +52,10 @@ The root may be a primitive or derived image. The binding table must cover every
 image id in the graph. The root is not special in the binding table; the binding
 table only answers which `ImageKey` currently backs an `ImageId`.
 
-`ImageId -> ImageKey` tables are doc/session-layer state. They are not part of
-the image storage layer or the executable image-command layer.
+`ImageId -> ImageKey` binding tables are doc/session-layer state. Runtime role
+lookup is keyed by `ImageKey`, so recursive `render(image_key, tile_index)` can
+find `Primitive | Derived(command)` directly without reverse lookup through an
+image id.
 
 Doc-level `ImageId`s are never reused within one document lifetime. Session-local
 images use the same `ImageId` type and may shadow doc ids within one draw
@@ -62,8 +64,8 @@ session.
 The Rust module boundary follows that split. `gla_doc` owns `RegistryGraph`,
 `ImageBindingTable`, active document snapshots, registry patch application, and
 undo/redo transitions. `gla_session` is the app-loop entry point and owns the
-local `ImageId -> ImageRow { key, role }` table used to shadow document rows
-during a session.
+local binding overlay and key-role index used to shadow document images during a
+session.
 
 ## Registry Graph
 
@@ -144,6 +146,11 @@ all root-reachable derived commands. Rust then garbage-collects unreachable
 images from the staging graph and binding table.
 
 Patch semantics:
+
+These are logical registry-patch semantics. Resource work such as allocating
+new image keys, materializing a derived image, and releasing unreachable caches
+is prepared outside `gla_doc`. The document model accepts already prepared graph
+and binding transitions; it does not call `ImagesSession` or `TilesSession`.
 
 - `NewImage(..., Primitive)` creates a full empty image with valid empty tile
   keys.
@@ -366,20 +373,28 @@ parameter blocks can replace them later.
 
 ## Current, Backup, And Local Rows
 
-The draw-session execution model uses two image row tables:
+The draw-session execution model uses binding tables plus role indexes:
 
 ```text
-Doc table:
-  ImageId -> ImageRow { key: ImageKey, role: Primitive | Derived(GraphCommand) }
+Doc binding:
+  ImageId -> ImageKey
 
-Local table:
-  ImageId -> ImageRow { key: ImageKey, role: Primitive | Derived(DeriveCommand) }
+Doc role index:
+  ImageKey -> Primitive | Derived(GraphCommand)
+
+Local binding overlay:
+  ImageId -> ImageKey
+
+Local role index:
+  ImageKey -> Primitive | Derived(DeriveCommand)
 ```
 
-The doc table is document truth and stores id-level IR. The local table is
-session execution state. Current lookup is local-first, then doc. Backup lookup
-uses only the session-start doc table. Backup evaluation never sees local rows,
-which prevents a command such as:
+The doc binding and registry graph are document truth. The doc role index is a
+derived lookup from the active graph and binding table. Local bindings shadow doc
+bindings by id, while role lookup is direct by image key and does not shadow by
+id. Current binding lookup is local-first, then doc. Backup lookup uses only the
+session-start doc binding table. Backup evaluation never sees local rows, which
+prevents a command such as:
 
 ```text
 Merge(base_paint.backup, pigment) -> base_paint
@@ -387,17 +402,16 @@ Merge(base_paint.backup, pigment) -> base_paint
 
 from recursively resolving `base_paint` through its own current-session writer.
 
-`DrawOn` is not an image row role. It is a separate draw task with a resolved
-destination key and decoded draw parameters. An image row role has only two
-forms:
+`DrawOn` is not an image role. It is a separate draw task with a resolved
+destination key and decoded draw parameters. An image role has only two forms:
 
 ```text
 Primitive
 Derived(command)
 ```
 
-In the doc table, `Derived(command)` stores the persistent id-level
-`GraphCommand`. In the local table, `Derived(command)` stores a key-level
+In the doc role index, `Derived(command)` stores the persistent id-level
+`GraphCommand`. In the local role index, `Derived(command)` stores a key-level
 `gla_image_command::DeriveCommand`. The key-level command contains its
 destination `ImageKey`, destination layout, and source `ImageRef`s inline. Each
 `ImageRef` has a source `ImageKey`, source layout, mapping, and footprint
@@ -650,13 +664,24 @@ cache accelerator in the session record.
 
 Session images are released at draw session end.
 
-## Session Records
+## Document Records
 
-Session records are an enum because draw and registry sessions have different
-semantics.
+`gla_doc` is a document model. It records committed model transitions, but it
+does not execute draw sessions. `gla_session` builds and executes local state,
+then commits an `ImageId -> ImageKey` binding patch and dirty sources into
+`gla_doc`.
+
+Draw-session commit is an id-key patch. It does not modify registry IR or the
+doc role source. `gla_doc` applies the patch to the active binding table and
+stores the before/after binding snapshots in the record. For a primitive
+document image, the committed key fully replaces the previous key for that
+`ImageId`. For a derived document image, the session first backfills any
+`TileKey::INVALID` slots in the new cache from the old cache where the old tile
+is valid, then replaces the binding. The derived role remains the existing
+`GraphCommand` in the registry graph.
 
 ```text
-SessionRecord =
+DocRecord =
   DrawRecord {
     graph: RegistryGraphKey,
     bindings_before: ImageBindingTableKey,

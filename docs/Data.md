@@ -27,18 +27,22 @@ ImageBindingTableKey  // ImageId -> ImageKey
 ImageKey              // image tile array / content version
 ```
 
-`ImageId -> ImageKey` tables are doc/session-layer state. They do not belong to
-the image storage layer. The image storage layer works in `ImageKey` and
-`TileKey`; the image-command layer works in key-level executable commands.
+`ImageId -> ImageKey` binding tables are doc/session-layer state. Runtime role
+lookup is keyed by `ImageKey`: `ImageKey -> Primitive | Derived(command)`. This
+matches `render(image_key, tile_index)` and avoids reverse lookup from image key
+back to image id. The image storage layer works in `ImageKey` and `TileKey`; the
+image-command layer works in key-level executable commands.
 
 Doc-level `ImageId`s are not reused during a document lifetime. Session-local
 images use the same id type and may shadow doc ids within a draw session.
 
 In code, `gla_doc` owns document graph snapshots, `ImageBindingTable`, active
-document state, registry patch records, and undo/redo state transitions.
+document state, registry patch records, and undo/redo state transitions. Doc
+image roles are persistent IR in the registry graph and can be indexed as
+`ImageKey -> role` from the active graph and bindings.
 `gla_session` is the app-loop entry point. It owns draw-session execution state,
-including the local `ImageId -> ImageRow { key, role }` table that shadows doc
-rows during a session.
+including the local binding overlay and key-role index used while executing a
+session.
 
 ## Image Declarations
 
