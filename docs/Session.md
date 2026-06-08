@@ -61,8 +61,9 @@ session.
 
 The Rust module boundary follows that split. `gla_doc` owns `RegistryGraph`,
 `ImageBindingTable`, active document snapshots, registry patch application, and
-undo/redo transitions. `gla_session` owns draw-session validation/execution and
-uses `LocalImageTable` for session-local ids, keys, and declarations.
+undo/redo transitions. `gla_session` is the app-loop entry point and owns the
+local `ImageId -> ImageRow { key, role }` table used to shadow document rows
+during a session.
 
 ## Registry Graph
 
@@ -363,37 +364,22 @@ source image reads for stamp/smudge-like drawing are a later design problem.
 typed Rust enums or structs; the graph semantics remain `op + params` so packed
 parameter blocks can replace them later.
 
-## Current And Backup Evaluation
+## Current, Backup, And Local Rows
 
-Draw sessions use two evaluation contexts.
-
-Current evaluation:
+The draw-session execution model uses two image row tables:
 
 ```text
-session command image lookup:
-  local current table first
-  then doc current table
+Doc table:
+  ImageId -> ImageRow { key: ImageKey, role: Primitive | Derived(GraphCommand) }
 
-graph command image lookup:
-  doc current table only
-
-derive writer lookup:
-  local/session derive table first
-  then document registry graph
+Local table:
+  ImageId -> ImageRow { key: ImageKey, role: Primitive | Derived(DeriveCommand) }
 ```
 
-Backup evaluation:
-
-```text
-image key lookup:
-  session-start document binding table only
-
-derive writer lookup:
-  document registry graph only
-```
-
-Backup evaluation does not see session-local images or session-local derived
-commands. This prevents a tool command such as:
+The doc table is document truth and stores id-level IR. The local table is
+session execution state. Current lookup is local-first, then doc. Backup lookup
+uses only the session-start doc table. Backup evaluation never sees local rows,
+which prevents a command such as:
 
 ```text
 Merge(base_paint.backup, pigment) -> base_paint
@@ -401,57 +387,27 @@ Merge(base_paint.backup, pigment) -> base_paint
 
 from recursively resolving `base_paint` through its own current-session writer.
 
-Draw sessions keep three conceptual tables:
+`DrawOn` is not an image row role. It is a separate draw task with a resolved
+destination key and decoded draw parameters. An image row role has only two
+forms:
 
 ```text
-doc_start:
-  session-start document bindings, used by .backup
-
-doc_current:
-  current document bindings after pre-COW
-
-local:
-  session-created images and their lifecycle ownership
+Primitive
+Derived(command)
 ```
 
-An implementation may also materialize a merged current lookup table for
-tool-local commands. In that case, local image keys can appear both in the
-merged current table and in the local table. This is not a commit ambiguity:
-only `ReadWrite` document declarations and the computed doc write closure update
-`bindings_after`.
+In the doc table, `Derived(command)` stores the persistent id-level
+`GraphCommand`. In the local table, `Derived(command)` stores a key-level
+`gla_image_command::DeriveCommand`. The key-level command contains its
+destination `ImageKey`, destination layout, and source `ImageRef`s inline. Each
+`ImageRef` has a source `ImageKey`, source layout, mapping, and footprint
+modifier; there is no separate read table at this layer.
 
-Graph commands always resolve document images through `doc_current` and never
-through the local table or a merged local-first current table.
-
-The session-start document table is the `bindings_before` snapshot. Lookup and
-commit decisions do not rely on id equality or id shadowing. They use the IR
-declarations and the computed write closure.
-
-Draw session validation builds a normalized key-level current dependency graph
-for derive commands:
-
-```text
-edge = current_read_image_key -> dst_image_key
-```
-
-Backup reads are excluded. DrawOn commands are not cache-repair writers and do
-not enter this derive cycle graph. The graph includes local/session derive
-commands and the reachable registry derived commands under local writer overlay
-priority.
-
-Local derive commands may shadow only session images and doc images declared
-`ReadWrite`. They may not shadow a doc-level derived image's registry writer.
-
-Before execution, id-level IR is lowered through these evaluation contexts:
-
-```text
-GraphCommand + doc_current -> ImageCommand
-SessionCommand + local/doc_current/doc_start -> ImageCommand
-DrawOnCommand + writable dst lookup -> DrawCommand
-```
-
-`ImageCommand` and `DrawCommand` are key-level executable commands. They do not
-know `ImageId`, `.backup`, document bindings, or local shadowing.
+Session start creates all required local shadows before lowering commands.
+After shadows exist, graph/session IR is lowered once into key-level commands.
+This guarantees downstream refs point at the current shadow keys rather than at
+old document cache keys. Key-level commands are session execution artifacts and
+are not persisted.
 
 ## Session Initialization
 
@@ -462,20 +418,35 @@ Draw session initialization performs the non-frame work up front:
 2. Bind graph_before and bindings_before.
 3. Validate doc_images and session_images.
 4. Capture old keys for declared doc images, supporting .backup.
-5. Compute the doc write closure.
-6. Pre-COW every doc image in that write closure once.
-7. Allocate session images.
-8. Build doc current, local, writer indices, reader indices, and topo order.
+5. Compute write starts from DrawOn and session derive destinations.
+6. Upload write starts through registry readers to compute active images.
+7. Create local shadows for every active image.
+8. Allocate session-only images.
+9. Lower graph/session IR through the completed local-first table.
+10. Build render indices and draw tasks.
 ```
 
-The write closure starts at doc images that can be written by draw IR and then
-follows registry readers up to the root. In the current model this is normally
-the active layer to root cache chain. Pre-COW is whole-image shallow copy: the
-new image initially has the same tile key array as the old image.
+The active image closure starts at images written by draw IR and follows
+registry readers up to the root. In the current model this is normally the
+active layer to root cache chain.
 
-Pre-COW avoids hot-path "has this image been COW'd" branches. If a pre-COW image
-does not receive dirty writes by commit time, its binding is reverted and the
-unused new image is released.
+Local shadow creation follows the original document role:
+
+```text
+doc Primitive:
+  shallow COW the old image tile array
+
+doc Derived:
+  allocate a new cache image whose tile slots are all TileKey::INVALID
+```
+
+Shadowed, COWed, active, and commit-replace candidate are the same condition for
+document images. Session-only images are also local rows, but they are discarded
+at session end unless a registry patch explicitly promotes them.
+
+Derived shadows are local only until commit. They do not update the document
+binding table during the session. This keeps cancel/error handling local to the
+draw session.
 
 ## Coordinate Mapping And Footprints
 
@@ -497,6 +468,11 @@ FootprintModifier =
 For a command tile, the executor computes source tiles by taking destination
 tile bounds, applying the read edge mapping and modifier, and conservatively
 covering source tiles.
+
+The first executable path supports `Identity + None` as a single same-index
+source tile. `Identity + Expand(px)` and `Matrix(Affine2D)` remain explicit
+implementation TODOs in the executor until layout-aware footprint enumeration
+and renderer sampling semantics are wired.
 
 Dirty upload uses the same edge in the reverse conservative direction. `Full`
 means all tiles of the current image. Uploading `Full` through a mapping does
@@ -552,56 +528,73 @@ image-level COW. It is cache residency, not effective content change. The new
 tile key belongs to the owner `ImageKey` and is released when that image is
 released.
 
-Dirty-driven rewrites and DrawOn writes are effective content changes. They
-write only to pre-COW current image keys for doc images.
+Repairing an unshadowed document derived cache is allowed to write the existing
+document cache `ImageKey` directly. It uses that image's existing graph command
+and existing document binding, does not enter the session record, and is not
+undone or redone. This is equivalent to completing previously deferred cache
+work for the same document state.
 
-## Dirty And Execution
+Dirty-driven rewrites and DrawOn writes are effective content changes. For
+document images, they write only to local shadow keys created during session
+initialization.
 
-Dirty has exactly one meaning: image content changed.
+## Dirty, Demand Render, And Cache Repair
 
-```text
-mark_dirty(image, tiles):
-  for reader in readers_by_image[image]:
-    dst_tiles = reader.affected_dst(image, tiles)
-    pending_by_command[reader] += dst_tiles
-```
+Dirty has exactly one meaning: effective image content changed. `DrawOn` writes
+and session derived rewrites mark dirty. Materializing an invalid cache tile
+does not mark dirty.
 
-Pending work is stored at image-command granularity:
-
-```text
-pending_by_command: CommandIndex -> TileSet
-```
-
-A pending item is only `(command, dst_tile)`. It does not cache read tile keys,
-read positions, or lowered tile commands. The pending command is an id-level
-graph/session command reference; it is lowered to a key-level `ImageCommand`
-when it is processed.
-
-Processing a command tile:
+The frame loop uploads dirty from the written image toward root to compute root
+repaint demand. The repaint then renders from root downward by demand:
 
 ```text
-process(command, dst_tile):
-  consume pending_by_command[command][dst_tile] if present
-  lower the id-level command through its evaluation context
-  resolve every read tile for the resulting ImageCommand
-  acquire or create the destination tile key
-  lower and execute the tile command
-  mark_dirty(command.dst, dst_tile)
+render(image_key, tile_index):
+  if tile is valid:
+    return tile key
+  if image row is Primitive:
+    error
+  render the row's Derived command for tile_index
+  return the now-valid tile key
 ```
 
-When resolving a read tile:
+`gla_image_command::DeriveCommand` is an ordered list of key-level ops such as
+`Clear`, `Copy`, and `RenderTo`, plus the destination `ImageKey` and destination
+layout. Ops that read source images carry their own inline `ImageRef`. During
+execution, the command asks the session for its writable destination tile and
+asks `render(image_ref.key, source_tile_index)` before using each returned source
+tile. This keeps recursive dependency rendering in pre-order: a parent tile is
+written only after every required source tile has been materialized.
 
-- a valid tile can be read;
-- an `INVALID` tile is materialized by running its writer in the current
-  evaluation context;
-- reading an `INVALID` primitive image tile is an error.
+`render` is not a renderer call. It is the recursive materialization entry for
+read dependencies. The same execution context also exposes tile-key acquisition
+and a `gla_renderer` pass queue. After `render` returns a readable `TileKey`,
+the current command resolves source and destination tile positions and appends
+`Clear`, `Copy`, or `RenderTo` tile passes directly to the renderer.
 
-Current dirty upload to root is the root repaint demand. Stage 1 does not try to
-tree-shake dirty through visibility, opacity, or GPU content checks.
+Because `render` may inspect the same derived-command binding table that led to
+the current command, session code clones the command before entering
+`exec_tile`. The command is then owned by the stack frame, and recursive lookups
+do not alias a borrowed table entry.
 
-TODO: Specify the exact `ImageCommand -> TileCommand` lowering interface. This
-needs a separate decision for read ordering when one image command read covers
-multiple source tiles.
+There are two cache materialization paths:
+
+```text
+local/shadowed derived:
+  write the local shadow cache key
+  publish it at commit if the session commits
+
+unshadowed doc derived:
+  write the existing doc cache key
+  do not record history
+  do not undo/redo
+```
+
+The unshadowed path is cache repair for an unchanged document state. It uses
+the existing document key and existing graph command, so filling an invalid tile
+is equivalent to completing deferred work from an earlier session.
+
+Stage 1 does not try to tree-shake dirty through visibility, opacity, or GPU
+content checks.
 
 ## Source Work And Frames
 
@@ -638,6 +631,8 @@ the same id by tile index:
 
 ```text
 for each tile index i:
+  if new.tiles[i] == INVALID and old.tiles[i] is valid:
+    new.tiles[i] = old.tiles[i]
   if old.tiles[i] != new.tiles[i]:
     release old.tiles[i]
   else:

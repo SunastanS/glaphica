@@ -56,6 +56,53 @@ impl GlaImageLayout {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TileSet {
+    Full,
+    Tiles(Vec<u32>),
+}
+
+impl TileSet {
+    pub fn tiles<I>(tiles: I) -> Self
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        let mut tiles: Vec<u32> = tiles.into_iter().collect();
+        tiles.sort_unstable();
+        tiles.dedup();
+        Self::Tiles(tiles)
+    }
+
+    pub fn single(tile: u32) -> Self {
+        Self::Tiles(vec![tile])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Tiles(tiles) if tiles.is_empty())
+    }
+
+    pub fn union_assign(&mut self, other: &Self) {
+        match other {
+            Self::Full => *self = Self::Full,
+            Self::Tiles(right) if right.is_empty() => {}
+            Self::Tiles(right) => match self {
+                Self::Full => {}
+                Self::Tiles(left) => {
+                    left.extend(right.iter().copied());
+                    left.sort_unstable();
+                    left.dedup();
+                }
+            },
+        }
+    }
+}
+
+impl Default for TileSet {
+    fn default() -> Self {
+        Self::Tiles(Vec::new())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GlaImage {
     pub format: GlaFormat,
@@ -101,6 +148,10 @@ pub enum GlaImagesError {
         tile_index: u32,
         tile_count: u32,
     },
+    ImageMetadataMismatch {
+        dst: GlaImageKey,
+        src: GlaImageKey,
+    },
     TileAllocFailed {
         source: TilesError,
     },
@@ -125,6 +176,9 @@ impl Display for GlaImagesError {
                 f,
                 "tile index {tile_index} out of bounds for image {key:?} with {tile_count} tiles"
             ),
+            Self::ImageMetadataMismatch { dst, src } => {
+                write!(f, "image metadata mismatch between {dst:?} and {src:?}")
+            }
             Self::TileAllocFailed { source } => {
                 write!(f, "tile allocation failed while creating image: {source}")
             }
@@ -257,6 +311,37 @@ impl GlaImages {
         Ok(())
     }
 
+    pub fn backfill_invalid_from(
+        &mut self,
+        dst: GlaImageKey,
+        src: GlaImageKey,
+    ) -> Result<Vec<(u32, TileKey)>, GlaImagesError> {
+        if dst == src {
+            self.ensure_valid(dst)?;
+            return Ok(Vec::new());
+        }
+
+        let src_image = self.get(src)?.clone();
+        let dst_image = self.get_mut(dst)?;
+        if dst_image.format != src_image.format || dst_image.layout != src_image.layout {
+            return Err(GlaImagesError::ImageMetadataMismatch { dst, src });
+        }
+
+        let mut backfilled = Vec::new();
+        for (index, (dst_tile, src_tile)) in dst_image
+            .tiles
+            .iter_mut()
+            .zip(src_image.tiles.iter().copied())
+            .enumerate()
+        {
+            if dst_tile.is_invalid() && !src_tile.is_invalid() {
+                *dst_tile = src_tile;
+                backfilled.push((index as u32, src_tile));
+            }
+        }
+        Ok(backfilled)
+    }
+
     fn bind_image(&mut self, key: GlaImageKey, image: GlaImage) {
         let index = key.index() as usize;
         if self.images.len() <= index {
@@ -369,6 +454,14 @@ impl<'a> ImagesSession<'a> {
         self.images.set_tile(key, tile_index, tile_key)
     }
 
+    pub fn backfill_invalid_from(
+        &mut self,
+        dst: GlaImageKey,
+        src: GlaImageKey,
+    ) -> Result<Vec<(u32, TileKey)>, GlaImagesError> {
+        self.images.backfill_invalid_from(dst, src)
+    }
+
     pub fn insert_invalid(
         &mut self,
         format: GlaFormat,
@@ -448,6 +541,13 @@ mod tests {
     fn format() -> GlaFormat {
         GlaFormat {
             channel_count: ChannelCount::D4,
+            channel_type: ChannelType::U8,
+        }
+    }
+
+    fn d1_format() -> GlaFormat {
+        GlaFormat {
+            channel_count: ChannelCount::D1,
             channel_type: ChannelType::U8,
         }
     }
@@ -549,5 +649,95 @@ mod tests {
 
         assert!(record.allocated.is_empty());
         assert_eq!(record.discarded.as_ref(), &[key]);
+    }
+
+    #[test]
+    fn backfill_invalid_from_copies_only_valid_source_tiles_into_invalid_slots() {
+        let mut images = GlaImages::new();
+        let layout = GlaImageLayout::new(3 * IMAGE_TILE_SIZE, 1);
+        let old_a = TileKey::new(1, 0);
+        let old_b = TileKey::new(2, 0);
+        let new_c = TileKey::new(3, 0);
+        let old = images
+            .insert(
+                format(),
+                layout,
+                vec![old_a, TileKey::INVALID, old_b].into_boxed_slice(),
+            )
+            .unwrap();
+        let new = images
+            .insert(
+                format(),
+                layout,
+                vec![TileKey::INVALID, new_c, TileKey::INVALID].into_boxed_slice(),
+            )
+            .unwrap();
+
+        let copied = images.backfill_invalid_from(new, old).unwrap();
+
+        assert_eq!(copied, vec![(0, old_a), (2, old_b)]);
+        assert_eq!(images.tile(new, 0).unwrap(), old_a);
+        assert_eq!(images.tile(new, 1).unwrap(), new_c);
+        assert_eq!(images.tile(new, 2).unwrap(), old_b);
+    }
+
+    #[test]
+    fn backfill_invalid_from_rejects_metadata_mismatch() {
+        let mut images = GlaImages::new();
+        let layout = GlaImageLayout::new(1, 1);
+        let old = images
+            .insert(
+                format(),
+                layout,
+                vec![TileKey::new(1, 0)].into_boxed_slice(),
+            )
+            .unwrap();
+        let new = images
+            .insert(
+                d1_format(),
+                layout,
+                vec![TileKey::INVALID].into_boxed_slice(),
+            )
+            .unwrap();
+
+        let err = images.backfill_invalid_from(new, old).unwrap_err();
+
+        assert!(matches!(
+            err,
+            GlaImagesError::ImageMetadataMismatch { dst, src } if dst == new && src == old
+        ));
+    }
+
+    #[test]
+    fn backfilled_tiles_are_kept_by_replaced_tile_cleanup() {
+        let mut images = GlaImages::new();
+        let layout = GlaImageLayout::new(2 * IMAGE_TILE_SIZE, 1);
+        let kept = TileKey::new(1, 0);
+        let discarded = TileKey::new(2, 0);
+        let replacement = TileKey::new(3, 0);
+        let old = images
+            .insert(format(), layout, vec![kept, discarded].into_boxed_slice())
+            .unwrap();
+        let new = images
+            .insert(
+                format(),
+                layout,
+                vec![TileKey::INVALID, replacement].into_boxed_slice(),
+            )
+            .unwrap();
+
+        let discarded_tiles = {
+            let mut session = ImagesSession::new(&mut images);
+            session.backfill_invalid_from(new, old).unwrap();
+            let mut tiles = tile_key::Tiles::new();
+            let mut tile_session = tile_key::TilesSession::new(&mut tiles);
+            session
+                .discard_replaced_tiles(&mut tile_session, old, new)
+                .unwrap()
+        };
+
+        assert_eq!(discarded_tiles, vec![discarded]);
+        assert_eq!(images.tile(new, 0).unwrap(), kept);
+        assert_eq!(images.tile(new, 1).unwrap(), replacement);
     }
 }

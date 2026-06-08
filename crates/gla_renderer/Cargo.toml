@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 atlas = { path = "../atlas" }
+gla_color = { path = "../gla_color" }

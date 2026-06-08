@@ -36,8 +36,9 @@ images use the same id type and may shadow doc ids within a draw session.
 
 In code, `gla_doc` owns document graph snapshots, `ImageBindingTable`, active
 document state, registry patch records, and undo/redo state transitions.
-`gla_session` owns draw-session execution state, including `LocalImageTable` for
-session-local `ImageId -> ImageKey` and `ImageId -> LocalImageDeclaration`.
+`gla_session` is the app-loop entry point. It owns draw-session execution state,
+including the local `ImageId -> ImageRow { key, role }` table that shadows doc
+rows during a session.
 
 ## Image Declarations
 
@@ -101,7 +102,7 @@ gla_ir:
   id-level cross-language declarations
 
 gla_image_command:
-  key-level executable image commands
+  key-level image operation programs
 
 tile command:
   tile-resource-level executable work
@@ -122,17 +123,33 @@ SessionCommand:
 `DrawOnCommand` is a different IR form. It is an input-driven atomic draw into
 one `ReadWrite` destination and has no read list in the first design stage.
 
-Before execution, doc/session code lowers id-level IR through the active
-evaluation context:
+Document truth stays in id-level IR. At draw-session start, `gla_session`
+lowers id-level graph/session declarations through the active local-first image
+tables into key-level image-command programs:
 
 ```text
-GraphCommand + doc current table -> ImageCommand
-SessionCommand + draw evaluation context -> ImageCommand
-DrawOnCommand + draw evaluation context -> DrawCommand
+GraphCommand + current table -> gla_image_command::DeriveCommand
+SessionCommand + current/backup table -> gla_image_command::DeriveCommand
+DrawOnCommand + writable target lookup -> Draw task
 ```
 
-`ImageCommand` and `DrawCommand` operate on `ImageKey`s. They do not know
-`ImageId`, document bindings, session-local shadowing, or `.backup`.
+`gla_image_command::DeriveCommand` is not document truth and is not stored in
+records. It holds the destination `ImageKey`, destination layout, and ordered
+operations. Its operations hold key-level `ImageRef`s with source `ImageKey`,
+source layout, mapping, and footprint metadata. When a session creates new cache
+shadows, downstream commands are re-lowered so their refs point at the new keys.
+
+At execution time, `gla_image_command` owns only key-level ordering. A command
+uses a `RenderCtx` to request `render(image_key, tile_index)` for read
+dependencies, asks the same context for the destination tile key, then appends
+tile passes directly to `gla_renderer`. The context also owns tile-key
+acquisition, so session code can keep renderer, tile resources, and recursive
+command lookup in one reentrant state machine.
+
+Session code must enter image commands with an owned command value, normally by
+cloning the row's `DeriveCommand` before execution. This prevents a recursive
+`render` call from borrowing the command binding table while the current command
+is still borrowed from that table.
 
 ## Tile Resources
 
@@ -142,3 +159,9 @@ An image is an array of tile keys. Empty tile bindings are valid zero content.
 Tile write paths do not own history semantics. Session cleanup compares old and
 new image tile arrays by index to release replaced cache resources. Primitive
 history and root presentation caches are retained by session records.
+Unshadowed derived cache repair may fill `TileKey::INVALID` slots in an
+existing document cache key without creating history; it is cache residency for
+the same graph and binding state, not document content change.
+When a shadowed derived cache replaces an older cache at commit, any
+`TileKey::INVALID` slots in the new cache are first backfilled from the old
+cache if the old slot is valid.
