@@ -265,4 +265,5 @@ root_cache_before
 root_cache_after
 ```
 
-If a draw session produces no document dirty, it produces no record.
+If a draw session produces no document dirty, its dirty set is empty. The
+session may still commit active-chain binding or cache replacements.

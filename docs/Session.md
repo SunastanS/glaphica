@@ -122,9 +122,10 @@ affected destination tiles from every matching read edge.
 A session task is either drawing work or registry management work. A single
 session never mixes the two.
 
-Registry management IR is an incremental patch. Rust applies it to a staging
-copy, sweeps unreachable images, validates the whole resulting graph, and only
-then publishes new graph and binding snapshots.
+Registry management IR is an incremental patch. Rust applies it through the
+same local-first registry overlay used for lookup, sweeps unreachable images
+from that overlay, validates the whole resulting graph, and only then publishes
+new graph and binding snapshots.
 
 Patch operations:
 
@@ -143,7 +144,7 @@ SetRoot(id)
 
 There is no `RemoveImage` operation. Removing an image means removing it from
 all root-reachable derived commands. Rust then garbage-collects unreachable
-images from the staging graph and binding table.
+images from the overlaid graph and binding table.
 
 Patch semantics:
 
@@ -151,16 +152,18 @@ Patch semantics:
   keys via `GlaImages` and `Tiles`.
 - `NewImage(..., Derived(command))` allocates a derived cache image whose slots
   start as `TileKey::INVALID`.
-- `SetDerived` on an existing derived image replaces its graph command if the
-  command is structurally different. The new cache image starts invalid.
-- `SetDerived` on an existing primitive image is forbidden in normal patch
-  execution.
-- `SetPrimitive` on an existing derived image is flatten/materialize: first
-  materialize the old derived image under the old graph, then make that
-  materialized image the primitive backing image with the same format and
-  layout. The implementation may reuse the materialized derived `ImageKey`
-  directly. It does not need to copy every tile into a second image key unless
-  another resource constraint requires a new backing image.
+- `SetDerived` on an existing derived image replaces its graph command. The new
+  cache image starts invalid. If the replaced image is the current root, its old
+  cache key is retained by the inverse patch as a root presentation cache;
+  otherwise the old derived cache key is released after the patch publishes.
+- `SetDerived` on an existing primitive image changes the role by allocating a
+  new invalid derived cache image. The inverse patch retains the old primitive
+  image key.
+- `SetPrimitive` on an existing derived image is flatten/materialize. The
+  current implementation requires the derived image to be fully materialized,
+  then reclassifies that image key as the primitive backing image with the same
+  format and layout. If the converted image is the current root, undo restores
+  the same key as the root derived cache.
 - `SetPrimitive` on an existing primitive image is a no-op unless other metadata
   changes.
 - `SetRoot` changes the graph root. Removing the current root is forbidden; use
@@ -439,15 +442,18 @@ The active image closure starts at images written by draw IR and follows
 registry readers up to the root. In the current model this is normally the
 active layer to root cache chain.
 
-Local shadow creation follows the original document role:
+Local shadow creation follows one document-image rule:
 
 ```text
-doc Primitive:
+doc Primitive or doc Derived:
   shallow COW the old image tile array
-
-doc Derived:
-  allocate a new cache image whose tile slots are all TileKey::INVALID
+  record the source document ImageKey in the local entry
 ```
+
+The first write to a COW shadow tile compares the shadow slot with the source
+slot. If the slot still aliases the source, the session allocates a fresh tile,
+replaces the shadow slot, copies the source tile when it is valid, and writes the
+fresh tile. Later writes to that shadow tile are in-place writes.
 
 Shadowed, COWed, active, and commit-replace candidate are the same condition for
 document images. Session-only images are also local rows, but they are discarded
@@ -648,14 +654,16 @@ for each tile index i:
     keep it, because the new image still references it
 ```
 
-If format or layout changed, there is no same-index successor relationship; a
-non-root derived old image is released as cache. Primitive old images are still
-history truth and follow the record lifetime.
+If format or layout changed, there is no same-index successor relationship.
+Primitive old images are still history truth and follow the record lifetime.
+Non-root derived old images are cache and may be released once a valid
+replacement is published.
 
-Primitive old images are document truth and are retained through
-`bindings_before`. Non-root derived old images are cache and are released at
-session end by the diff rule. The root old image is stored as a presentation
-cache accelerator in the history patch.
+Registry patches retain primitive image keys needed to restore document truth.
+They also retain the derived cache key for the root image as a presentation
+cache accelerator across undo/redo. Other derived images are not history-owned;
+when they are replaced or swept, their cache keys and valid tile keys may be
+released and later rebuilt from their graph commands.
 
 Session images are released at draw session end.
 
@@ -702,8 +710,10 @@ DocRecord =
 `ReadWrite` by the draw session. It does not record session-local dirty or
 downstream registry derived dirty.
 
-If a draw session produces no `doc_dirty`, it produces no record and active
-bindings remain unchanged.
+A draw session with empty `doc_dirty` may still commit active-chain binding
+replacements and bump the document version. Empty `doc_dirty` means there is no
+direct document dirty source to upload for repaint; it is not a no-record
+sentinel.
 
 `RegistryRecord.changed_before` and `changed_after` are full-dirty source image
 ids. Registry records do not store tile sets because registry changes are

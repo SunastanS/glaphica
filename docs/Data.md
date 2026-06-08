@@ -49,20 +49,26 @@ binding must correspond to a declared role.
 - `commit_draw(patch) -> inverse_patch` — replaces bindings for write
   targets, bumps version. Purely id-key level; does not touch roles.
 - `apply_registry_patch(patch, images, tiles) -> inverse_patch` —
-  applies registry ops, allocates/releases image keys, sweeps unreachable
-  images. Generates an inverse patch for undo.
+  applies registry ops through a local-first overlay, sweeps unreachable
+  images from the overlaid graph, validates the whole result, publishes the
+  graph and binding changes, and generates an inverse patch for undo.
 
 ## Patch Resource Invariant
 
-A patch owns exactly the set of image keys and tile keys listed in its
-`bindings`. When a history node is evicted, all image keys and tile keys
-referenced by the evicted direction's patch are released.
+Patch history owns resource keys only when they are needed to restore document
+truth or root presentation cache:
 
-- Forward patch evicted → release keys from the inverse patch's bindings.
-- Inverse patch evicted → release keys from the forward patch's bindings.
+- Primitive image keys replaced or swept by registry changes are retained by
+  `InsertImage` inverse ops.
+- The derived cache key for the current root image is retained by `InsertImage`
+  inverse ops as undo/redo presentation cache.
+- Non-root derived cache keys are not history-owned. When they are replaced or
+  swept by a successfully published registry patch, their image key and valid
+  tile keys are released; undo recreates them from graph commands when needed.
 
-Each patch is self-describing: its `bindings` values are the complete resource
-set it is responsible for. No separate orphan-tracking data is needed.
+Draw patches are id-key binding patches. Their image keys represent document
+content versions; primitive old keys and tile keys follow the stored patch
+lifetime. No separate orphan-tracking data is needed for derived cache keys.
 
 `gla_session` is the app-loop entry point. It owns draw-session execution state,
 including the local key overlay, active-chain tracking, and key-level derive
@@ -176,7 +182,8 @@ An image is an array of tile keys. Empty tile bindings are valid zero content.
 
 Tile write paths do not own history semantics. Session cleanup compares old and
 new image tile arrays by index to release replaced cache resources. Primitive
-history and root presentation caches are retained by history patches.
+history and root presentation caches are retained by history patches; other
+derived cache resources can be released when replaced or swept.
 Unshadowed derived cache repair may fill `TileKey::INVALID` slots in an
 existing document cache key without creating history; it is cache residency for
 the same graph and binding state, not document content change.
