@@ -1,5 +1,5 @@
 use gla_color::GlaFormat;
-pub use gla_command_core::{Affine2D, FootprintModifier, Mapping, OpId, OpParams};
+pub use gla_command_core::{Affine2D, FootprintModifier, Mapping, Tool, ToolParams};
 use gla_image::GlaImageLayout;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,17 +50,11 @@ impl GraphRead {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphCommand {
     pub reads: Vec<GraphRead>,
-    pub op: OpId,
-    pub params: OpParams,
 }
 
 impl GraphCommand {
-    pub fn new(reads: Vec<GraphRead>, op: OpId) -> Self {
-        Self {
-            reads,
-            op,
-            params: OpParams::default(),
-        }
+    pub fn new(reads: Vec<GraphRead>) -> Self {
+        Self { reads }
     }
 }
 
@@ -106,17 +100,11 @@ impl SessionRead {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionCommand {
     pub reads: Vec<SessionRead>,
-    pub op: OpId,
-    pub params: OpParams,
 }
 
 impl SessionCommand {
-    pub fn new(reads: Vec<SessionRead>, op: OpId) -> Self {
-        Self {
-            reads,
-            op,
-            params: OpParams::default(),
-        }
+    pub fn new(reads: Vec<SessionRead>) -> Self {
+        Self { reads }
     }
 }
 
@@ -196,17 +184,17 @@ impl ImageDeclaration {
 pub struct DrawOnCommand {
     pub dst: ImageId,
     pub input_mapping: Mapping,
-    pub op: OpId,
-    pub params: OpParams,
+    pub tool: Tool,
+    pub tool_params: ToolParams,
 }
 
 impl DrawOnCommand {
-    pub fn new(dst: ImageId, op: OpId) -> Self {
+    pub fn new(dst: ImageId) -> Self {
         Self {
             dst,
             input_mapping: Mapping::Identity,
-            op,
-            params: OpParams::default(),
+            tool: Tool::default(),
+            tool_params: ToolParams::default(),
         }
     }
 }
@@ -218,10 +206,10 @@ pub struct DeriveCommand {
 }
 
 impl DeriveCommand {
-    pub fn new(reads: Vec<SessionRead>, dst: ImageId, op: OpId) -> Self {
+    pub fn new(reads: Vec<SessionRead>, dst: ImageId) -> Self {
         Self {
             dst,
-            command: SessionCommand::new(reads, op),
+            command: SessionCommand::new(reads),
         }
     }
 }

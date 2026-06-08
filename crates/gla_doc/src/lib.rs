@@ -409,8 +409,8 @@ mod tests {
         let a = ImageId::new(1);
         let b = ImageId::new(2);
         let mut roles = HashMap::new();
-        roles.insert(a, ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(b)], OpId(1))));
-        roles.insert(b, ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(a)], OpId(2))));
+        roles.insert(a, ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(b)])));
+        roles.insert(b, ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(a)])));
 
         let err = Document::new(a, roles, HashMap::new()).unwrap_err();
         assert!(matches!(err, DocError::RegistryCycle { .. }));
@@ -421,7 +421,7 @@ mod tests {
         let root = ImageId::new(1);
         let roles = HashMap::from([(
             root,
-            ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(root)], OpId(1))),
+            ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(root)])),
         )]);
 
         let err = Document::new(root, roles, HashMap::new()).unwrap_err();
@@ -501,7 +501,6 @@ mod tests {
                 layout: layout(),
                 role: ImageRole::Derived(GraphCommand::new(
                     vec![GraphRead::current(root)],
-                    OpId(3),
                 )),
             },
             RegistryPatchOp::SetRoot(new_root),
@@ -523,7 +522,6 @@ mod tests {
         roles.insert(drop, primitive_role());
         roles.insert(root, ImageRole::Derived(GraphCommand::new(
             vec![GraphRead::current(keep), GraphRead::current(drop)],
-            OpId(70),
         )));
 
         let mut images = gla_image::GlaImages::new();
@@ -542,7 +540,7 @@ mod tests {
 
         let patch = RegistryPatch::new(vec![RegistryPatchOp::SetDerived {
             id: root,
-            command: GraphCommand::new(vec![GraphRead::current(keep)], OpId(71)),
+            command: GraphCommand::new(vec![GraphRead::current(keep)]),
         }]);
         doc.apply_registry_patch(&patch, &mut image_session, &mut tile_session, 0).unwrap();
 
@@ -569,7 +567,6 @@ mod tests {
                 layout: layout(),
                 role: ImageRole::Derived(GraphCommand::new(
                     vec![GraphRead::current(root)],
-                    OpId(3),
                 )),
             },
             RegistryPatchOp::SetRoot(new_root),

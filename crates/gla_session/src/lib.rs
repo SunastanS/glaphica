@@ -96,8 +96,8 @@ impl From<TilesError> for SessionError {
 struct DrawOnInput {
     dst_key: GlaImageKey,
     input_mapping: Mapping,
-    op: OpId,
-    params: OpParams,
+    tool: Tool,
+    tool_params: ToolParams,
 }
 
 pub struct DrawSession {
@@ -243,8 +243,8 @@ impl DrawSession {
                 Ok(DrawOnInput {
                     dst_key,
                     input_mapping: cmd.input_mapping,
-                    op: cmd.op,
-                    params: cmd.params.clone(),
+                    tool: cmd.tool,
+                    tool_params: cmd.tool_params,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
