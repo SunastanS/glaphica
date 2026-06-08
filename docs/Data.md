@@ -176,7 +176,7 @@ An image is an array of tile keys. Empty tile bindings are valid zero content.
 
 Tile write paths do not own history semantics. Session cleanup compares old and
 new image tile arrays by index to release replaced cache resources. Primitive
-history and root presentation caches are retained by session records.
+history and root presentation caches are retained by history patches.
 Unshadowed derived cache repair may fill `TileKey::INVALID` slots in an
 existing document cache key without creating history; it is cache residency for
 the same graph and binding state, not document content change.

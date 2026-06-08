@@ -148,7 +148,7 @@ images from the staging graph and binding table.
 Patch semantics:
 
 - `NewImage(..., Primitive)` allocates a full empty image with valid empty tile
-  keys via `ImagesSession` and `TilesSession`.
+  keys via `GlaImages` and `Tiles`.
 - `NewImage(..., Derived(command))` allocates a derived cache image whose slots
   start as `TileKey::INVALID`.
 - `SetDerived` on an existing derived image replaces its graph command if the
@@ -246,7 +246,7 @@ SessionImageDecl =
 Primitive session images start as full empty valid images. Derived session
 images may start with `TileKey::INVALID` and have one local session command.
 Session images are released at draw session end and do not enter the document
-binding table or session record.
+binding table.
 
 `format` and `layout` may be explicit or `Like(image)`. `Like` may reference
 only an image that already exists and already has concrete metadata at the point
@@ -539,7 +539,7 @@ released.
 
 Repairing an unshadowed document derived cache is allowed to write the existing
 document cache `ImageKey` directly. It uses that image's existing graph command
-and existing document binding, does not enter the session record, and is not
+and existing document binding, does not enter history, and is not
 undone or redone. This is equivalent to completing previously deferred cache
 work for the same document state.
 
@@ -655,7 +655,7 @@ history truth and follow the record lifetime.
 Primitive old images are document truth and are retained through
 `bindings_before`. Non-root derived old images are cache and are released at
 session end by the diff rule. The root old image is stored as a presentation
-cache accelerator in the session record.
+cache accelerator in the history patch.
 
 Session images are released at draw session end.
 
