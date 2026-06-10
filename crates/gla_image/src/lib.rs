@@ -77,8 +77,25 @@ impl TileSet {
         Self::Tiles(vec![tile])
     }
 
+    pub fn insert(&mut self, tile: u32) {
+        match self {
+            Self::Full => {}
+            Self::Tiles(tiles) => match tiles.binary_search(&tile) {
+                Ok(_) => {}
+                Err(index) => tiles.insert(index, tile),
+            },
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         matches!(self, Self::Tiles(tiles) if tiles.is_empty())
+    }
+
+    pub fn clear(&mut self) {
+        match self {
+            Self::Full => *self = Self::default(),
+            Self::Tiles(tiles) => tiles.clear(),
+        }
     }
 
     pub fn union_assign(&mut self, other: &Self) {

@@ -1,6 +1,8 @@
-use atlas::{Atlas, AtlasError, AtlasLayout, KeyBinding, TilePos};
+use atlas::{Atlas, AtlasError, AtlasLayout, AtlasTextureStore, KeyBinding, TilePos};
 use gla_color::GlaFormat;
 use gla_core::{Pool, PoolError};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 
 /// Key (u64):
 /// - [0,  32) key index
@@ -45,7 +47,22 @@ pub struct Tiles {
     bindings: Vec<KeyBinding>,
 }
 
-use std::fmt::{Display, Formatter};
+#[derive(Debug)]
+pub enum NewAtlasError<E> {
+    TooManyAtlases,
+    Texture(E),
+}
+
+impl<E: Display> Display for NewAtlasError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyAtlases => f.write_str("too many atlases"),
+            Self::Texture(error) => write!(f, "atlas texture creation failed: {error}"),
+        }
+    }
+}
+
+impl<E> Error for NewAtlasError<E> where E: Error + 'static {}
 
 #[derive(Debug)]
 pub enum TilesError {
@@ -79,10 +96,30 @@ impl Tiles {
         }
     }
 
-    pub fn new_atlas(&mut self, layout: AtlasLayout, format: GlaFormat) -> u8 {
-        let atlas_id = self.atlases.len() as u8;
+    pub fn new_atlas<S>(
+        &mut self,
+        layout: AtlasLayout,
+        format: GlaFormat,
+        textures: &mut S,
+    ) -> Result<u8, NewAtlasError<S::Error>>
+    where
+        S: AtlasTextureStore,
+    {
+        let atlas_id =
+            u8::try_from(self.atlases.len()).map_err(|_| NewAtlasError::TooManyAtlases)?;
+        textures
+            .create_atlas_texture(atlas_id, layout, format)
+            .map_err(NewAtlasError::Texture)?;
         self.atlases.push(Atlas::new(atlas_id, layout, format));
-        atlas_id
+        Ok(atlas_id)
+    }
+
+    pub fn atlas(&self, atlas_id: u8) -> Option<&Atlas> {
+        self.atlases.get(atlas_id as usize)
+    }
+
+    pub fn atlases(&self) -> &[Atlas] {
+        &self.atlases
     }
 
     pub fn position(&self, key: TileKey) -> Result<TilePos, TilesError> {

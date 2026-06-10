@@ -14,12 +14,16 @@ pub type SessionId = u64;
 pub struct DrawPatch {
     pub version: DocumentVersionId,
     pub bindings: HashMap<ImageId, GlaImageKey>,
-    pub dirty: TileSet,
+    pub dirty: HashMap<ImageId, TileSet>,
     pub tile_keys: Vec<TileKey>,
 }
 
 impl DrawPatch {
-    pub fn new(bindings: HashMap<ImageId, GlaImageKey>, dirty: TileSet) -> Self {
+    pub fn new(
+        bindings: HashMap<ImageId, GlaImageKey>,
+        mut dirty: HashMap<ImageId, TileSet>,
+    ) -> Self {
+        dirty.retain(|_, tiles| !tiles.is_empty());
         Self {
             version: DocumentVersionId::default(),
             bindings,
@@ -178,6 +182,7 @@ impl Document {
     }
 
     pub fn commit_draw(&mut self, mut patch: DrawPatch) -> Result<SessionId, DocError> {
+        patch.dirty.retain(|_, tiles| !tiles.is_empty());
         let mut old_bindings = HashMap::new();
         for (id, new_key) in &patch.bindings {
             let old_key = self
@@ -891,7 +896,10 @@ mod tests {
     }
 
     fn make_tile_atlas(tiles: &mut Tiles) {
-        tiles.new_atlas(atlas::AtlasLayout::LARGE17, format());
+        let mut textures = atlas::NoAtlasTextures;
+        tiles
+            .new_atlas(atlas::AtlasLayout::LARGE17, format(), &mut textures)
+            .unwrap();
     }
 
     fn fresh_resources() -> (GlaImages, Tiles) {
@@ -905,6 +913,10 @@ mod tests {
             HashMap::from([(root, key(10))]),
         )
         .unwrap()
+    }
+
+    fn dirty(id: ImageId, tile: u32) -> HashMap<ImageId, TileSet> {
+        HashMap::from([(id, TileSet::single(tile))])
     }
 
     #[test]
@@ -957,7 +969,7 @@ mod tests {
         let mut doc = simple_doc(root);
         assert_eq!(doc.version(), DocumentVersionId::new(0));
 
-        let patch = DrawPatch::new(HashMap::from([(root, after_key)]), TileSet::single(3));
+        let patch = DrawPatch::new(HashMap::from([(root, after_key)]), dirty(root, 3));
         let id = doc.commit_draw(patch).unwrap();
 
         assert_eq!(doc.binding(root), Some(after_key));
@@ -975,7 +987,7 @@ mod tests {
         let after_key = key(11);
         let mut doc = simple_doc(root);
 
-        let forward = DrawPatch::new(HashMap::from([(root, after_key)]), TileSet::single(3));
+        let forward = DrawPatch::new(HashMap::from([(root, after_key)]), dirty(root, 3));
         let undo_id = doc.commit_draw(forward).unwrap();
         assert_eq!(doc.binding(root), Some(after_key));
 
@@ -1008,11 +1020,11 @@ mod tests {
         let after_key = key(11);
         let mut doc = simple_doc(root);
 
-        let patch = DrawPatch::new(HashMap::from([(root, after_key)]), TileSet::single(3));
+        let patch = DrawPatch::new(HashMap::from([(root, after_key)]), dirty(root, 3));
         let id = doc.commit_draw(patch).unwrap();
         // doc is now at version 1. commit again to move further.
         let _id2 = doc
-            .commit_draw(DrawPatch::new(HashMap::new(), TileSet::default()))
+            .commit_draw(DrawPatch::new(HashMap::new(), HashMap::new()))
             .unwrap();
         // doc is at version 2. stored patch expects version 1.
 
@@ -1029,7 +1041,7 @@ mod tests {
         let root = ImageId::new(1);
         let mut doc = simple_doc(root);
         let missing = ImageId::new(99);
-        let patch = DrawPatch::new(HashMap::from([(missing, key(99))]), TileSet::default());
+        let patch = DrawPatch::new(HashMap::from([(missing, key(99))]), HashMap::new());
 
         let err = doc.commit_draw(patch).unwrap_err();
         assert!(matches!(err, DocError::BindingMissing { id } if id == missing));
@@ -1039,10 +1051,18 @@ mod tests {
     fn empty_draw_patch_is_valid() {
         let root = ImageId::new(1);
         let mut doc = simple_doc(root);
-        let patch = DrawPatch::new(HashMap::new(), TileSet::default());
+        let patch = DrawPatch::new(HashMap::new(), HashMap::new());
         let id = doc.commit_draw(patch).unwrap();
         let stored = doc.stored_patch_version(id);
         assert!(stored.is_some());
+    }
+
+    #[test]
+    fn draw_patch_new_drops_empty_dirty_entries() {
+        let root = ImageId::new(1);
+        let patch = DrawPatch::new(HashMap::new(), HashMap::from([(root, TileSet::default())]));
+
+        assert!(patch.dirty.is_empty());
     }
 
     #[test]

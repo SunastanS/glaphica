@@ -174,6 +174,33 @@ pub enum AtlasLayoutError {
     OutOfBounds,
 }
 
+pub trait AtlasTextureStore {
+    type Error;
+
+    fn create_atlas_texture(
+        &mut self,
+        atlas_id: u8,
+        layout: AtlasLayout,
+        format: GlaFormat,
+    ) -> Result<(), Self::Error>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoAtlasTextures;
+
+impl AtlasTextureStore for NoAtlasTextures {
+    type Error = std::convert::Infallible;
+
+    fn create_atlas_texture(
+        &mut self,
+        _atlas_id: u8,
+        _layout: AtlasLayout,
+        _format: GlaFormat,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 pub struct Atlas {
     pub id: u8,
     pub layout: AtlasLayout,

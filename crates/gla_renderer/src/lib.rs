@@ -1,5 +1,10 @@
+mod gpu;
+mod texture;
+
 use atlas::TilePos;
 use gla_color::BlendMode;
+
+pub use crate::gpu::{GpuRenderer, GpuRendererError};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pass {
@@ -36,6 +41,16 @@ impl Renderer {
         self.passes
     }
 
+    pub fn clear_passes(&mut self) {
+        self.passes.clear();
+    }
+
+    pub fn execute(&mut self, gpu: &mut GpuRenderer) -> Result<(), GpuRendererError> {
+        gpu.execute_passes(&self.passes)?;
+        self.passes.clear();
+        Ok(())
+    }
+
     pub fn clear(&mut self, dst: TilePos) {
         self.passes.push(Pass::Clear { dst });
     }
@@ -68,6 +83,7 @@ mod tests {
         renderer.clear(dst);
         renderer.copy(src, dst);
         renderer.render_to(src, dst, BlendMode::Multiply, 0.5);
+        renderer.render_to(src, dst, BlendMode::MaskAlpha, 1.0);
 
         assert_eq!(
             renderer.passes(),
@@ -80,7 +96,23 @@ mod tests {
                     blend_mode: BlendMode::Multiply,
                     opacity: 0.5,
                 },
+                Pass::RenderTo {
+                    src,
+                    dst,
+                    blend_mode: BlendMode::MaskAlpha,
+                    opacity: 1.0,
+                },
             ]
         );
+    }
+
+    #[test]
+    fn clear_passes_removes_recorded_work() {
+        let mut renderer = Renderer::new();
+        renderer.clear(TilePos::new(7, 0));
+
+        assert_eq!(renderer.passes().len(), 1);
+        renderer.clear_passes();
+        assert!(renderer.passes().is_empty());
     }
 }

@@ -205,7 +205,7 @@ impl RenderTo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas::{AtlasLayout, TilePos};
+    use atlas::{AtlasLayout, NoAtlasTextures, TilePos};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use gla_renderer::Pass;
     use tile_key::Tiles;
@@ -282,10 +282,17 @@ mod tests {
         GlaImageLayout::new(4096, 4096)
     }
 
+    fn new_test_atlas(tiles: &mut Tiles) -> u8 {
+        let mut textures = NoAtlasTextures;
+        tiles
+            .new_atlas(AtlasLayout::TINY8, format(), &mut textures)
+            .unwrap()
+    }
+
     #[test]
     fn copy_renders_source_before_recording_copy_pass() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = ctx.tiles.new_atlas(AtlasLayout::TINY8, format());
+        let atlas = new_test_atlas(&mut ctx.tiles);
         let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let nested_dst = ctx.tiles.acquire_for_write(dst_tile).unwrap();
@@ -325,7 +332,7 @@ mod tests {
     #[test]
     fn render_to_records_blend_mode_and_opacity() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = ctx.tiles.new_atlas(AtlasLayout::TINY8, format());
+        let atlas = new_test_atlas(&mut ctx.tiles);
         let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let source_pos = ctx.tiles.acquire_for_read(source_tile).unwrap();
@@ -361,9 +368,45 @@ mod tests {
     }
 
     #[test]
+    fn render_to_records_value_to_rgba_mask_mode() {
+        let mut ctx = ctx_with_tiles(Vec::new());
+        let atlas = new_test_atlas(&mut ctx.tiles);
+        let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
+        let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
+        let source_pos = ctx.tiles.acquire_for_read(source_tile).unwrap();
+        let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
+        ctx.returns.push(source_tile);
+        ctx.dst_tile = Some(dst_tile);
+
+        let source_image = GlaImageKey::new(13, 0);
+        let dst_image = GlaImageKey::new(14, 0);
+        let command = DeriveCommand::new(
+            dst_image,
+            layout(),
+            [Derive::RenderTo(RenderTo::new(
+                ImageRef::new(source_image, layout()),
+                BlendMode::MaskAlpha,
+                0.75,
+            ))],
+        );
+
+        command.exec_tile(&mut ctx, 4).unwrap();
+
+        assert_eq!(
+            ctx.renderer.passes(),
+            &[Pass::RenderTo {
+                src: source_pos,
+                dst: dst_pos,
+                blend_mode: BlendMode::MaskAlpha,
+                opacity: 0.75,
+            }]
+        );
+    }
+
+    #[test]
     fn clear_writes_without_rendering_source() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = ctx.tiles.new_atlas(AtlasLayout::TINY8, format());
+        let atlas = new_test_atlas(&mut ctx.tiles);
         let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
         let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
         ctx.dst_tile = Some(dst_tile);

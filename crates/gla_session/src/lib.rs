@@ -6,8 +6,10 @@ use gla_renderer::Renderer;
 use std::collections::{HashMap, HashSet};
 use tile_key::{TileKey, Tiles, TilesError};
 
+mod frame;
 mod local;
 
+pub use frame::FrameBudget;
 pub use gla_doc::ImageRole;
 pub use local::LocalImageDeclaration;
 
@@ -29,6 +31,7 @@ pub enum SessionError {
     Doc(DocError),
     Image(GlaImagesError),
     Tile(TilesError),
+    Renderer(gla_renderer::GpuRendererError),
     ExpectedDocumentVersion {
         expected: DocumentVersionId,
         actual: DocumentVersionId,
@@ -92,6 +95,12 @@ impl From<TilesError> for SessionError {
     }
 }
 
+impl From<gla_renderer::GpuRendererError> for SessionError {
+    fn from(e: gla_renderer::GpuRendererError) -> Self {
+        SessionError::Renderer(e)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum LocalStorage {
     Owned,
@@ -107,22 +116,35 @@ struct LocalKeyEntry {
 
 #[derive(Clone, Debug)]
 struct DrawOnInput {
+    dst_id: ImageId,
     dst_key: GlaImageKey,
     input_mapping: Mapping,
     _tool: Tool,
     _tool_params: ToolParams,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DirtyEdge {
+    src: ImageId,
+    dst: ImageId,
+    mapping: Mapping,
+    modifier: FootprintModifier,
+}
+
 pub struct DrawSession {
     doc_root: ImageId,
     doc_roles: HashMap<ImageId, ImageRole>,
     doc_bindings: HashMap<ImageId, GlaImageKey>,
+    doc_write_ids: HashSet<ImageId>,
     local_keys: HashMap<ImageId, LocalKeyEntry>,
     local_commands: HashMap<GlaImageKey, DeriveCommand>,
     key_to_id: HashMap<GlaImageKey, ImageId>,
     active_chain: HashSet<GlaImageKey>,
     draw_inputs: Vec<DrawOnInput>,
-    root_dirty: TileSet,
+    dirty_edges: Vec<DirtyEdge>,
+    frame_draw_dirty: Vec<TileSet>,
+    doc_dirty: HashMap<ImageId, TileSet>,
+    root_demand: TileSet,
     images: GlaImages,
     tiles: Tiles,
     renderer: Renderer,
@@ -160,17 +182,26 @@ impl DrawSession {
 
         let write_starts = collect_write_starts(&doc_roles, &doc_access, &session_decls, &ir)?;
         let active_ids = compute_active_chain(doc_root, &doc_roles, &write_starts);
+        let doc_write_ids = doc_access
+            .iter()
+            .filter_map(|(id, access)| (*access == DocumentImageAccess::ReadWrite).then_some(*id))
+            .collect::<HashSet<_>>();
+        let dirty_edges = collect_dirty_edges(&doc_roles, &session_decls, &ir);
 
         let mut self_ = Self {
             doc_root,
             doc_roles: doc_roles.clone(),
             doc_bindings: doc_bindings.clone(),
+            doc_write_ids,
             local_keys: HashMap::new(),
             local_commands: HashMap::new(),
             key_to_id: HashMap::new(),
             active_chain: HashSet::new(),
             draw_inputs: Vec::new(),
-            root_dirty: TileSet::default(),
+            dirty_edges,
+            frame_draw_dirty: Vec::new(),
+            doc_dirty: HashMap::new(),
+            root_demand: TileSet::default(),
             images,
             tiles,
             renderer,
@@ -270,6 +301,7 @@ impl DrawSession {
                     .get(&id)
                     .ok_or(SessionError::MissingImage { id })?;
                 Ok(DrawOnInput {
+                    dst_id: id,
                     dst_key: entry.key,
                     input_mapping: cmd.input_mapping,
                     _tool: cmd.tool,
@@ -278,12 +310,13 @@ impl DrawSession {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self_.draw_inputs = draw_inputs;
+        self_.frame_draw_dirty = vec![TileSet::default(); self_.draw_inputs.len()];
 
         Ok(self_)
     }
 
-    pub fn draw(&mut self, input: CanvasInput) -> Result<(), SessionError> {
-        for di in self.draw_inputs.clone() {
+    pub fn draw_dab(&mut self, input: CanvasInput) -> Result<(), SessionError> {
+        for (draw_on_index, di) in self.draw_inputs.clone().into_iter().enumerate() {
             let layout = self.layout_of(di.dst_key)?;
             let tile_index = input_to_tile_index(di.input_mapping, input, layout);
 
@@ -293,9 +326,28 @@ impl DrawSession {
                 self.renderer.clear(pos);
             }
 
-            self.mark_dirty(di.dst_key, tile_index);
+            self.record_frame_draw_dirty(draw_on_index, tile_index);
         }
-        self.flush_dirty_to_root()
+        Ok(())
+    }
+
+    pub fn flush_frame(&mut self) -> Result<(), SessionError> {
+        if self.frame_draw_dirty.iter().all(TileSet::is_empty) {
+            return Ok(());
+        }
+
+        self.root_demand.clear();
+        for draw_on_index in 0..self.frame_draw_dirty.len() {
+            let mut dirty = std::mem::take(&mut self.frame_draw_dirty[draw_on_index]);
+            if !dirty.is_empty() {
+                let dst_id = self.draw_inputs[draw_on_index].dst_id;
+                self.upload_dirty_from(dst_id, &dirty)?;
+            }
+            dirty.clear();
+            self.frame_draw_dirty[draw_on_index] = dirty;
+        }
+
+        self.render_root_demand()
     }
 
     pub fn commit(self, doc: &mut Document) -> Result<DrawCommit, SessionError> {
@@ -317,7 +369,7 @@ impl DrawSession {
             }
         }
 
-        let patch = DrawPatch::new(bindings, self.root_dirty.clone());
+        let patch = DrawPatch::new(bindings, self.doc_dirty.clone());
         let patch = DrawPatch { tile_keys, ..patch };
         let session_id = doc.commit_draw(patch)?;
         Ok(DrawCommit {
@@ -326,8 +378,24 @@ impl DrawSession {
         })
     }
 
-    pub fn root_dirty(&self) -> &TileSet {
-        &self.root_dirty
+    pub fn doc_dirty(&self) -> &HashMap<ImageId, TileSet> {
+        &self.doc_dirty
+    }
+
+    pub fn pending_render_passes(&self) -> &[gla_renderer::Pass] {
+        self.renderer.passes()
+    }
+
+    pub fn renderer_mut(&mut self) -> &mut Renderer {
+        &mut self.renderer
+    }
+
+    pub fn execute_renderer(
+        &mut self,
+        gpu: &mut gla_renderer::GpuRenderer,
+    ) -> Result<(), SessionError> {
+        self.renderer.execute(gpu)?;
+        Ok(())
     }
 
     fn layout_of(&self, key: GlaImageKey) -> Result<GlaImageLayout, SessionError> {
@@ -335,8 +403,26 @@ impl DrawSession {
         Ok(image.layout)
     }
 
-    fn mark_dirty(&mut self, _key: GlaImageKey, tile_index: u32) {
-        self.root_dirty.union_assign(&TileSet::single(tile_index));
+    fn layout_of_id(&self, id: ImageId) -> Result<GlaImageLayout, SessionError> {
+        let key = self
+            .local_keys
+            .get(&id)
+            .map(|entry| entry.key)
+            .or_else(|| self.doc_bindings.get(&id).copied())
+            .ok_or(SessionError::MissingImage { id })?;
+        self.layout_of(key)
+    }
+
+    fn record_frame_draw_dirty(&mut self, draw_on_index: usize, tile_index: u32) {
+        if let Some(tiles) = self.frame_draw_dirty.get_mut(draw_on_index) {
+            tiles.insert(tile_index);
+        }
+    }
+
+    fn record_doc_dirty(&mut self, id: ImageId, dirty: &TileSet) {
+        if self.doc_write_ids.contains(&id) {
+            self.doc_dirty.entry(id).or_default().union_assign(dirty);
+        }
     }
 
     fn local_entry_for_key(&self, key: GlaImageKey) -> Option<&LocalKeyEntry> {
@@ -363,11 +449,6 @@ impl DrawSession {
             if existing == source_tile {
                 let new_key = self.tiles.alloc_from(self.atlas_id)?;
                 self.images.set_tile(image, tile_index, new_key)?;
-                if source_tile != TileKey::INVALID {
-                    let src = self.tiles.acquire_for_read(source_tile)?;
-                    let dst = self.tiles.acquire_for_write(new_key)?;
-                    self.renderer.copy(src, dst);
-                }
                 return Ok(new_key);
             }
         }
@@ -381,7 +462,70 @@ impl DrawSession {
         Ok(existing)
     }
 
-    fn flush_dirty_to_root(&mut self) -> Result<(), SessionError> {
+    fn upload_dirty_from(&mut self, id: ImageId, dirty: &TileSet) -> Result<(), SessionError> {
+        self.record_doc_dirty(id, dirty);
+        if id == self.doc_root {
+            self.root_demand.union_assign(dirty);
+        }
+
+        for index in 0..self.dirty_edges.len() {
+            let edge = self.dirty_edges[index];
+            if edge.src != id {
+                continue;
+            }
+
+            if self.can_upload_dirty_without_projection(edge)? {
+                self.upload_dirty_from(edge.dst, dirty)?;
+            } else {
+                let mut projected = TileSet::default();
+                self.upload_dirty_edge(dirty, edge, &mut projected)?;
+                if !projected.is_empty() {
+                    self.upload_dirty_from(edge.dst, &projected)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn can_upload_dirty_without_projection(&self, edge: DirtyEdge) -> Result<bool, SessionError> {
+        Ok(matches!(
+            (edge.mapping, edge.modifier),
+            (Mapping::Identity, FootprintModifier::None)
+        ) && self.layout_of_id(edge.src)? == self.layout_of_id(edge.dst)?)
+    }
+
+    fn upload_dirty_edge(
+        &self,
+        src_dirty: &TileSet,
+        edge: DirtyEdge,
+        dst_dirty: &mut TileSet,
+    ) -> Result<(), SessionError> {
+        dst_dirty.clear();
+        match (edge.mapping, edge.modifier) {
+            (Mapping::Identity, FootprintModifier::None) => {
+                let dst_tile_count = self.layout_of_id(edge.dst)?.tile_count();
+                match src_dirty {
+                    TileSet::Full => *dst_dirty = TileSet::Full,
+                    TileSet::Tiles(tiles) => {
+                        for tile in tiles.iter().copied() {
+                            if tile < dst_tile_count {
+                                dst_dirty.insert(tile);
+                            }
+                        }
+                    }
+                }
+            }
+            // First version keeps the mapping seam explicit and falls back to a
+            // conservative upload until expanded/matrix footprints are wired.
+            (Mapping::Identity, FootprintModifier::Expand(_)) | (Mapping::Matrix(_), _) => {
+                *dst_dirty = TileSet::Full;
+            }
+        }
+        Ok(())
+    }
+
+    fn render_root_demand(&mut self) -> Result<(), SessionError> {
         let root_key = self
             .local_keys
             .get(&self.doc_root)
@@ -391,26 +535,41 @@ impl DrawSession {
 
         let root_layout = self.layout_of(root_key)?;
         let tile_count = root_layout.tile_count();
-        let tiles: Vec<u32> = match &self.root_dirty {
-            TileSet::Full => (0..tile_count).collect(),
-            TileSet::Tiles(t) => t.clone(),
-        };
-        for tile in tiles {
-            self.render_impl(root_key, tile)?;
+        let demand = std::mem::take(&mut self.root_demand);
+        match demand {
+            TileSet::Full => {
+                for tile in 0..tile_count {
+                    self.render_impl(root_key, tile)?;
+                }
+                self.root_demand = TileSet::default();
+            }
+            TileSet::Tiles(mut tiles) => {
+                for tile in tiles.iter().copied() {
+                    self.render_impl(root_key, tile)?;
+                }
+                tiles.clear();
+                self.root_demand = TileSet::Tiles(tiles);
+            }
         }
         Ok(())
     }
 
     fn render_impl(&mut self, key: GlaImageKey, tile_index: u32) -> Result<TileKey, SessionError> {
-        if let Some(cmd) = self.local_commands.get(&key).cloned() {
-            cmd.exec_tile(self, tile_index)?;
-            return Ok(self.images.tile(key, tile_index)?);
-        }
-
         if let Some(entry) = self.local_entry_for_key(key) {
+            if let Some(cmd) = self.local_commands.get(&key).cloned() {
+                // Local shadows are session-owned execution results. A shadow
+                // with a command must be recomputed on demand even when its tile
+                // slot currently holds a valid key shared from the source image.
+                // This keeps CoW resource sharing out of command semantics. The
+                // tradeoff is possible repeated passes for expanded/matrix
+                // mappings until local derived caching is made more precise.
+                cmd.exec_tile(self, tile_index)?;
+                return Ok(self.images.tile(key, tile_index)?);
+            }
             if matches!(entry.storage, LocalStorage::Owned) {
                 return Ok(self.images.tile(key, tile_index)?);
             }
+            return Ok(self.images.tile(key, tile_index)?);
         }
 
         let id = self
@@ -427,10 +586,13 @@ impl DrawSession {
                     return Ok(self.images.tile(key, tile_index)?);
                 }
                 ImageRole::Derived(command) => {
+                    let tile = self.images.tile(key, tile_index)?;
+                    if tile != TileKey::INVALID {
+                        return Ok(tile);
+                    }
                     let ops = self.lower_graph_command(command)?;
                     let layout = self.layout_of(key)?;
                     let cmd = DeriveCommand::new(key, layout, ops);
-                    self.local_commands.insert(key, cmd.clone());
                     cmd.exec_tile(self, tile_index)?;
                     return Ok(self.images.tile(key, tile_index)?);
                 }
@@ -758,6 +920,54 @@ fn compute_active_chain(
     sorted
 }
 
+fn collect_dirty_edges(
+    doc_roles: &HashMap<ImageId, ImageRole>,
+    session_decls: &HashMap<ImageId, LocalImageDeclaration>,
+    ir: &DrawSessionIR,
+) -> Vec<DirtyEdge> {
+    let mut edges = Vec::new();
+
+    for (dst, decl) in session_decls {
+        if let LocalImageDeclaration::Derived { command, .. } = decl {
+            collect_session_command_dirty_edges(*dst, command, &mut edges);
+        }
+    }
+    for cmd in &ir.derive {
+        collect_session_command_dirty_edges(cmd.dst, &cmd.command, &mut edges);
+    }
+    for (dst, role) in doc_roles {
+        if let ImageRole::Derived(command) = role {
+            for read in &command.reads {
+                edges.push(DirtyEdge {
+                    src: read.image,
+                    dst: *dst,
+                    mapping: read.mapping,
+                    modifier: read.modifier,
+                });
+            }
+        }
+    }
+
+    edges
+}
+
+fn collect_session_command_dirty_edges(
+    dst: ImageId,
+    command: &SessionCommand,
+    edges: &mut Vec<DirtyEdge>,
+) {
+    for read in &command.reads {
+        if let SessionReadImage::Current(src) = read.image {
+            edges.push(DirtyEdge {
+                src,
+                dst,
+                mapping: read.mapping,
+                modifier: read.modifier,
+            });
+        }
+    }
+}
+
 fn input_to_tile_index(_mapping: Mapping, input: CanvasInput, layout: GlaImageLayout) -> u32 {
     let tx = (input.x / 64.0) as u32;
     let ty = (input.y / 64.0) as u32;
@@ -782,17 +992,23 @@ mod tests {
         GlaImageLayout::new(64, 64)
     }
 
+    fn new_test_atlas(tiles: &mut Tiles) -> u8 {
+        let mut textures = atlas::NoAtlasTextures;
+        tiles
+            .new_atlas(atlas::AtlasLayout::TINY8, format(), &mut textures)
+            .unwrap()
+    }
+
     #[test]
     fn draw_on_cow_shadow_allocates_fresh_tile_before_write() {
         let root = ImageId::new(1);
         let mut images = GlaImages::new();
         let mut tiles = Tiles::new();
-        let atlas_id = tiles.new_atlas(atlas::AtlasLayout::TINY8, format());
+        let atlas_id = new_test_atlas(&mut tiles);
         let doc_key = images
             .alloc(format(), layout(), &mut tiles, atlas_id)
             .unwrap();
         let source_tile = images.tile(doc_key, 0).unwrap();
-        let source_pos = tiles.acquire_for_write(source_tile).unwrap();
         let doc = Document::new(
             root,
             HashMap::from([(root, ImageRole::Primitive)]),
@@ -814,7 +1030,7 @@ mod tests {
         assert_eq!(session.images.tile(shadow_key, 0).unwrap(), source_tile);
 
         session
-            .draw(CanvasInput {
+            .draw_dab(CanvasInput {
                 x: 0.0,
                 y: 0.0,
                 pressure: 1.0,
@@ -826,14 +1042,102 @@ mod tests {
         assert_ne!(shadow_tile, source_tile);
         let shadow_pos = session.tiles.acquire_for_read(shadow_tile).unwrap();
         assert_eq!(
-            session.renderer.passes(),
-            &[
-                Pass::Copy {
-                    src: source_pos,
-                    dst: shadow_pos,
-                },
-                Pass::Clear { dst: shadow_pos },
-            ]
+            session.pending_render_passes(),
+            &[Pass::Clear { dst: shadow_pos }]
+        );
+        session.flush_frame().unwrap();
+        assert_eq!(
+            session.doc_dirty(),
+            &HashMap::from([(root, TileSet::single(0))])
+        );
+    }
+
+    #[test]
+    fn draw_dab_defers_root_render_until_frame_flush_and_merges_frame_dirty() {
+        let paint = ImageId::new(1);
+        let root = ImageId::new(2);
+        let mut images = GlaImages::new();
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let paint_key = images
+            .alloc(format(), layout(), &mut tiles, atlas_id)
+            .unwrap();
+        let root_key = images.insert_invalid(format(), layout()).unwrap();
+        let doc = Document::new(
+            root,
+            HashMap::from([
+                (paint, ImageRole::Primitive),
+                (
+                    root,
+                    ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(paint)])),
+                ),
+            ]),
+            HashMap::from([(paint, paint_key), (root, root_key)]),
+        )
+        .unwrap();
+        let ir = DrawSessionIR {
+            expected_document_version: doc.version(),
+            doc_images: vec![DocImageUse::read_write(paint)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(paint)],
+            derive: Vec::new(),
+        };
+
+        let mut session =
+            DrawSession::new(ir, &doc, images, tiles, Renderer::new(), atlas_id).unwrap();
+        session
+            .draw_dab(CanvasInput {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+            })
+            .unwrap();
+        session
+            .draw_dab(CanvasInput {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            session
+                .pending_render_passes()
+                .iter()
+                .filter(|pass| matches!(pass, Pass::Clear { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            session
+                .pending_render_passes()
+                .iter()
+                .filter(|pass| matches!(pass, Pass::Copy { .. }))
+                .count(),
+            0
+        );
+
+        session.flush_frame().unwrap();
+
+        assert_eq!(
+            session
+                .pending_render_passes()
+                .iter()
+                .filter(|pass| matches!(pass, Pass::Clear { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            session
+                .pending_render_passes()
+                .iter()
+                .filter(|pass| matches!(pass, Pass::Copy { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            session.doc_dirty(),
+            &HashMap::from([(paint, TileSet::single(0))])
         );
     }
 
@@ -845,7 +1149,7 @@ mod tests {
         let doc_layout = GlaImageLayout::new(128, 64);
         let mut images = GlaImages::new();
         let mut tiles = Tiles::new();
-        let atlas_id = tiles.new_atlas(atlas::AtlasLayout::TINY8, format());
+        let atlas_id = new_test_atlas(&mut tiles);
         let doc_key = images
             .alloc(format(), doc_layout, &mut tiles, atlas_id)
             .unwrap();
@@ -893,7 +1197,7 @@ mod tests {
         let soft_coverage = ImageId::new(3);
         let mut images = GlaImages::new();
         let mut tiles = Tiles::new();
-        let atlas_id = tiles.new_atlas(atlas::AtlasLayout::TINY8, format());
+        let atlas_id = new_test_atlas(&mut tiles);
         let doc_key = images
             .alloc(format(), layout(), &mut tiles, atlas_id)
             .unwrap();
@@ -931,12 +1235,13 @@ mod tests {
             DrawSession::new(ir, &doc, images, tiles, Renderer::new(), atlas_id).unwrap();
 
         session
-            .draw(CanvasInput {
+            .draw_dab(CanvasInput {
                 x: 0.0,
                 y: 0.0,
                 pressure: 1.0,
             })
             .unwrap();
+        session.flush_frame().unwrap();
 
         let soft_key = session.local_keys.get(&soft_coverage).unwrap().key;
         assert_ne!(session.images.tile(soft_key, 0).unwrap(), TileKey::INVALID);
@@ -951,7 +1256,7 @@ mod tests {
         let soft_coverage = ImageId::new(2);
         let mut images = GlaImages::new();
         let mut tiles = Tiles::new();
-        let atlas_id = tiles.new_atlas(atlas::AtlasLayout::TINY8, format());
+        let atlas_id = new_test_atlas(&mut tiles);
         let doc_key = images
             .alloc(format(), layout(), &mut tiles, atlas_id)
             .unwrap();
