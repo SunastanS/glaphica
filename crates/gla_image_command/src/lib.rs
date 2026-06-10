@@ -95,6 +95,8 @@ impl<K> DeriveCommand<K> {
         for op in self.ops.iter().copied() {
             op.exec_tile(ctx, self.layout, dst, tile_index)?;
         }
+        let pos = ctx.acquire_for_write(dst)?;
+        ctx.renderer().fix_gutter(pos);
         Ok(())
     }
 }
@@ -335,6 +337,7 @@ mod tests {
                     src: source_pos,
                     dst: dst_pos,
                 },
+                Pass::FixGutter { dst: dst_pos },
             ]
         );
     }
@@ -368,12 +371,15 @@ mod tests {
         assert_eq!(ctx.write_calls, vec![(dst_image, 11)]);
         assert_eq!(
             ctx.renderer.passes(),
-            &[Pass::RenderTo {
-                src: source_pos,
-                dst: dst_pos,
-                blend_mode: BlendMode::Overlay,
-                opacity: 0.25,
-            }]
+            &[
+                Pass::RenderTo {
+                    src: source_pos,
+                    dst: dst_pos,
+                    blend_mode: BlendMode::Overlay,
+                    opacity: 0.25,
+                },
+                Pass::FixGutter { dst: dst_pos },
+            ]
         );
     }
 
@@ -404,12 +410,15 @@ mod tests {
 
         assert_eq!(
             ctx.renderer.passes(),
-            &[Pass::RenderTo {
-                src: source_pos,
-                dst: dst_pos,
-                blend_mode: BlendMode::MaskAlpha,
-                opacity: 0.75,
-            }]
+            &[
+                Pass::RenderTo {
+                    src: source_pos,
+                    dst: dst_pos,
+                    blend_mode: BlendMode::MaskAlpha,
+                    opacity: 0.75,
+                },
+                Pass::FixGutter { dst: dst_pos },
+            ]
         );
     }
 
@@ -427,6 +436,9 @@ mod tests {
 
         assert!(ctx.calls.is_empty());
         assert_eq!(ctx.write_calls, vec![(dst_image, 5)]);
-        assert_eq!(ctx.renderer.passes(), &[Pass::Clear { dst: dst_pos }]);
+        assert_eq!(
+            ctx.renderer.passes(),
+            &[Pass::Clear { dst: dst_pos }, Pass::FixGutter { dst: dst_pos }]
+        );
     }
 }

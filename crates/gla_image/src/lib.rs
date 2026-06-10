@@ -1,5 +1,6 @@
 use gla_color::GlaFormat;
-use gla_core::{IMAGE_TILE_SIZE, Pool, PoolError};
+use gla_core::{Pool, PoolError};
+pub use gla_core::IMAGE_TILE_SIZE;
 use std::fmt::{Display, Formatter};
 use tile_key::{TileKey, Tiles, TilesError};
 

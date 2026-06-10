@@ -21,6 +21,9 @@ pub enum Pass {
         blend_mode: BlendMode,
         opacity: f32,
     },
+    FixGutter {
+        dst: TilePos,
+    },
 }
 
 #[derive(Default)]
@@ -67,6 +70,10 @@ impl Renderer {
             blend_mode,
             opacity,
         });
+    }
+
+    pub fn fix_gutter(&mut self, dst: TilePos) {
+        self.passes.push(Pass::FixGutter { dst });
     }
 }
 

@@ -5,7 +5,7 @@ use atlas::{AtlasLayout, AtlasTextureStore, TilePos};
 use gla_color::{
     BlendMode, CompositeKind, GlaFormat, RgbaBlendMode, ValueToRgbaBlendMode, composite_kind,
 };
-use gla_core::ATLAS_TILE_SIZE;
+use gla_core::{ATLAS_TILE_SIZE, GUTTER_SIZE, IMAGE_TILE_SIZE};
 use wgpu::util::DeviceExt;
 
 use crate::Pass;
@@ -405,6 +405,9 @@ impl GpuRenderer {
                         blend_mode,
                         opacity,
                     )?,
+                    Pass::FixGutter { dst } => {
+                        encode_fix_gutter(&mut ctx, &self.atlases, dst)?
+                    }
                 }
             }
         }
@@ -579,6 +582,111 @@ fn encode_render_to(
             blend_mode,
         }),
     }
+}
+
+fn encode_fix_gutter(
+    ctx: &mut GpuEncodeCtx<'_, '_>,
+    atlases: &AtlasTextureSet,
+    dst: TilePos,
+) -> Result<(), GpuRendererError> {
+    let dst = atlases.resolve_non_empty(dst)?;
+    let texture = &dst.texture.texture;
+    let ox = dst.origin.x;
+    let oy = dst.origin.y;
+    let z = dst.origin.z;
+    let layer = z;
+
+    let g = GUTTER_SIZE;
+    let i = IMAGE_TILE_SIZE;
+
+    let tc = |x, y| wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d { x, y, z: layer },
+        aspect: wgpu::TextureAspect::All,
+    };
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + g, oy + g),
+        tc(ox + g, oy),
+        wgpu::Extent3d {
+            width: i,
+            height: g,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + g, oy + ATLAS_TILE_SIZE - g - 1),
+        tc(ox + g, oy + ATLAS_TILE_SIZE - g),
+        wgpu::Extent3d {
+            width: i,
+            height: g,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + g, oy + g),
+        tc(ox, oy + g),
+        wgpu::Extent3d {
+            width: g,
+            height: i,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + ATLAS_TILE_SIZE - g - 1, oy + g),
+        tc(ox + ATLAS_TILE_SIZE - g, oy + g),
+        wgpu::Extent3d {
+            width: g,
+            height: i,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + g, oy + g),
+        tc(ox, oy),
+        wgpu::Extent3d {
+            width: g,
+            height: g,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + ATLAS_TILE_SIZE - g - 1, oy + g),
+        tc(ox + ATLAS_TILE_SIZE - g, oy),
+        wgpu::Extent3d {
+            width: g,
+            height: g,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + g, oy + ATLAS_TILE_SIZE - g - 1),
+        tc(ox, oy + ATLAS_TILE_SIZE - g),
+        wgpu::Extent3d {
+            width: g,
+            height: g,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    ctx.encoder.copy_texture_to_texture(
+        tc(ox + ATLAS_TILE_SIZE - g - 1, oy + ATLAS_TILE_SIZE - g - 1),
+        tc(ox + ATLAS_TILE_SIZE - g, oy + ATLAS_TILE_SIZE - g),
+        wgpu::Extent3d {
+            width: g,
+            height: g,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    Ok(())
 }
 
 impl AtlasTextureStore for GpuRenderer {

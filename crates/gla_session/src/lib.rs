@@ -1,5 +1,5 @@
 use gla_doc::{DocError, Document};
-use gla_image::{GlaImageKey, GlaImageLayout, GlaImages, GlaImagesError, TileSet};
+use gla_image::{GlaImageKey, GlaImageLayout, GlaImages, GlaImagesError, IMAGE_TILE_SIZE, TileSet};
 use gla_image_command::{Derive, DeriveCommand, ImageRef, RenderCtx};
 use gla_ir::*;
 use gla_renderer::Renderer;
@@ -1426,8 +1426,8 @@ fn collect_session_command_dirty_edges(
 }
 
 fn input_to_tile_index(_mapping: Mapping, input: CanvasInput, layout: GlaImageLayout) -> u32 {
-    let tx = (input.x / 64.0) as u32;
-    let ty = (input.y / 64.0) as u32;
+    let tx = (input.x / IMAGE_TILE_SIZE as f32) as u32;
+    let ty = (input.y / IMAGE_TILE_SIZE as f32) as u32;
     let idx = ty * layout.tile_count_x() + tx;
     idx.min(layout.tile_count().saturating_sub(1))
 }
@@ -1889,5 +1889,82 @@ mod tests {
             err,
             SessionError::DuplicateWriter { id } if id == soft_coverage
         ));
+    }
+
+    #[test]
+    fn input_to_tile_index_uses_image_tile_size_as_divisor() {
+        let layout = GlaImageLayout::new(186, 1);
+
+        let input_at = |x: f32| {
+            input_to_tile_index(
+                Mapping::Identity,
+                CanvasInput {
+                    x,
+                    y: 0.0,
+                    pressure: 1.0,
+                },
+                layout,
+            )
+        };
+
+        assert_eq!(input_at(0.0), 0, "x=0 in tile 0");
+        assert_eq!(input_at(30.0), 0, "x=30 in tile 0");
+        assert_eq!(input_at(61.0), 0, "x=61 in tile 0");
+        assert_eq!(input_at(62.0), 1, "x=62 in tile 1 (boundary)");
+        assert_eq!(input_at(100.0), 1, "x=100 in tile 1");
+        assert_eq!(input_at(123.0), 1, "x=123 in tile 1");
+        assert_eq!(input_at(124.0), 2, "x=124 in tile 2 (boundary)");
+        assert_eq!(input_at(185.0), 2, "x=185 in tile 2");
+    }
+
+    #[test]
+    fn input_to_tile_index_multi_row_tile_grid() {
+        let layout = GlaImageLayout::new(186, 124);
+        let tile_count_x = layout.tile_count_x();
+
+        let tile_of = |x: f32, y: f32| -> (u32, u32) {
+            let idx = input_to_tile_index(
+                Mapping::Identity,
+                CanvasInput {
+                    x,
+                    y,
+                    pressure: 1.0,
+                },
+                layout,
+            );
+            (idx / tile_count_x, idx % tile_count_x)
+        };
+
+        assert_eq!(tile_of(0.0, 0.0), (0, 0));
+        assert_eq!(tile_of(61.0, 0.0), (0, 0));
+        assert_eq!(tile_of(62.0, 0.0), (0, 1));
+        assert_eq!(tile_of(124.0, 0.0), (0, 2));
+        assert_eq!(tile_of(0.0, 62.0), (1, 0));
+        assert_eq!(tile_of(62.0, 62.0), (1, 1));
+        assert_eq!(tile_of(124.0, 62.0), (1, 2));
+        assert_eq!(tile_of(62.0, 123.0), (1, 1));
+        assert_eq!(tile_of(124.0, 123.0), (1, 2));
+    }
+
+    #[test]
+    fn input_to_tile_index_clamps_out_of_bounds() {
+        let layout = GlaImageLayout::new(62, 62);
+
+        let idx = |x: f32, y: f32| -> u32 {
+            input_to_tile_index(
+                Mapping::Identity,
+                CanvasInput {
+                    x,
+                    y,
+                    pressure: 1.0,
+                },
+                layout,
+            )
+        };
+
+        assert_eq!(idx(100.0, 0.0), 0, "x beyond image clamped");
+        assert_eq!(idx(0.0, 100.0), 0, "y beyond image clamped");
+        assert_eq!(idx(-1.0, 0.0), 0, "negative x clamped");
+        assert_eq!(idx(0.0, -1.0), 0, "negative y clamped");
     }
 }
