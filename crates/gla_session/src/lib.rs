@@ -22,7 +22,35 @@ pub struct CanvasInput {
 
 #[derive(Clone, Debug)]
 pub struct DrawCommit {
+    pub record_id: DrawRecordId,
     pub version: DocumentVersionId,
+}
+
+pub type DrawRecordId = u64;
+
+pub struct CommittedDraw {
+    pub commit: DrawCommit,
+    pub images: GlaImages,
+    pub tiles: Tiles,
+    pub renderer: Renderer,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageEdit {
+    pub source: GlaImageKey,
+    pub edits: Vec<(u32, TileKey)>,
+}
+
+#[derive(Clone, Debug)]
+struct StoredImageEditPatch {
+    version: DocumentVersionId,
+    edits: HashMap<ImageId, ImageEdit>,
+}
+
+#[derive(Default, Debug)]
+pub struct DrawHistory {
+    patches: HashMap<DrawRecordId, StoredImageEditPatch>,
+    next_id: DrawRecordId,
 }
 
 #[derive(Debug)]
@@ -32,6 +60,13 @@ pub enum SessionError {
     Tile(TilesError),
     Renderer(gla_renderer::GpuRendererError),
     ExpectedDocumentVersion {
+        expected: DocumentVersionId,
+        actual: DocumentVersionId,
+    },
+    InvalidDrawRecord {
+        id: DrawRecordId,
+    },
+    VersionMismatch {
         expected: DocumentVersionId,
         actual: DocumentVersionId,
     },
@@ -81,6 +116,14 @@ pub enum SessionError {
     EditMiss {
         source: GlaImageKey,
     },
+    InvalidEditTile {
+        id: ImageId,
+        tile_index: u32,
+    },
+    PrimitiveImageHasInvalidTile {
+        id: ImageId,
+        tile_index: u32,
+    },
 }
 
 impl From<DocError> for SessionError {
@@ -104,6 +147,47 @@ impl From<TilesError> for SessionError {
 impl From<gla_renderer::GpuRendererError> for SessionError {
     fn from(e: gla_renderer::GpuRendererError) -> Self {
         SessionError::Renderer(e)
+    }
+}
+
+impl DrawHistory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply_stored_patch(
+        &mut self,
+        id: DrawRecordId,
+        doc: &mut Document,
+        images: &mut GlaImages,
+    ) -> Result<DrawRecordId, SessionError> {
+        let stored = self
+            .patches
+            .get(&id)
+            .cloned()
+            .ok_or(SessionError::InvalidDrawRecord { id })?;
+        if stored.version != doc.version() {
+            return Err(SessionError::VersionMismatch {
+                expected: stored.version,
+                actual: doc.version(),
+            });
+        }
+
+        let inverse = apply_image_edit_patch(doc, images, &stored.edits)?;
+        let version = doc.bump_version();
+        Ok(self.store_inverse(version, inverse))
+    }
+
+    fn store_inverse(
+        &mut self,
+        version: DocumentVersionId,
+        edits: HashMap<ImageId, ImageEdit>,
+    ) -> DrawRecordId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.patches
+            .insert(id, StoredImageEditPatch { version, edits });
+        id
     }
 }
 
@@ -190,9 +274,11 @@ struct DirtyEdge {
 
 pub struct DrawSession {
     doc_root: ImageId,
+    doc_version: DocumentVersionId,
     doc_roles: HashMap<ImageId, ImageRole>,
     doc_bindings: HashMap<ImageId, GlaImageKey>,
     doc_write_ids: HashSet<ImageId>,
+    doc_shadow_ids: HashSet<ImageId>,
     local_images: Vec<SessionImage>,
     local_keys: HashMap<ImageId, LocalKeyEntry>,
     local_commands: HashMap<SessionImageKey, DeriveCommand<SessionImageKey>>,
@@ -227,6 +313,7 @@ impl DrawSession {
         let doc_roles = doc.roles().clone();
         let doc_bindings = doc.bindings().clone();
         let doc_root = doc.root();
+        let doc_version = doc.version();
 
         let doc_access = validate_doc_image_uses(&doc_roles, &ir.doc_images)?;
         let session_decls = resolve_session_declarations(
@@ -247,9 +334,11 @@ impl DrawSession {
 
         let mut self_ = Self {
             doc_root,
+            doc_version,
             doc_roles: doc_roles.clone(),
             doc_bindings: doc_bindings.clone(),
             doc_write_ids,
+            doc_shadow_ids: HashSet::new(),
             local_images: Vec::new(),
             local_keys: HashMap::new(),
             local_commands: HashMap::new(),
@@ -285,6 +374,7 @@ impl DrawSession {
                             layout,
                         },
                     );
+                    self_.doc_shadow_ids.insert(*id);
                 }
             }
             for (id, decl) in &session_decls {
@@ -410,9 +500,32 @@ impl DrawSession {
         self.render_root_demand()
     }
 
-    pub fn commit(self, doc: &mut Document) -> Result<DrawCommit, SessionError> {
+    pub fn commit(
+        mut self,
+        doc: &mut Document,
+        history: &mut DrawHistory,
+    ) -> Result<CommittedDraw, SessionError> {
+        if self.doc_version != doc.version() {
+            return Err(SessionError::ExpectedDocumentVersion {
+                expected: self.doc_version,
+                actual: doc.version(),
+            });
+        }
+
+        let (primitive_edits, derived_edits) = self.take_doc_shadow_edits()?;
+        self.validate_derived_edits(doc, &derived_edits)?;
+        let inverse = apply_image_edit_patch(doc, &mut self.images, &primitive_edits)?;
+        self.apply_derived_edits(doc, derived_edits)?;
         let version = doc.bump_version();
-        Ok(DrawCommit { version })
+        let record_id = history.store_inverse(version, inverse);
+        self.discard_remaining_local_tiles();
+
+        Ok(CommittedDraw {
+            commit: DrawCommit { record_id, version },
+            images: self.images,
+            tiles: self.tiles,
+            renderer: self.renderer,
+        })
     }
 
     pub fn doc_dirty(&self) -> &HashMap<ImageId, TileSet> {
@@ -433,6 +546,121 @@ impl DrawSession {
     ) -> Result<(), SessionError> {
         self.renderer.execute(gpu)?;
         Ok(())
+    }
+
+    fn take_doc_shadow_edits(
+        &mut self,
+    ) -> Result<(HashMap<ImageId, ImageEdit>, Vec<(ImageId, ImageEdit)>), SessionError> {
+        let mut primitive_edits = HashMap::new();
+        let mut derived_edits = Vec::new();
+        for id in self.doc_shadow_ids.clone() {
+            let Some(entry) = self.local_keys.get(&id).copied() else {
+                continue;
+            };
+            let SessionImageKey::Local(local_key) = entry.key else {
+                continue;
+            };
+            let edit = self.take_local_edit(local_key)?;
+            if edit.edits.is_empty() {
+                continue;
+            }
+            match self.doc_roles.get(&id) {
+                Some(ImageRole::Primitive) => {
+                    primitive_edits.insert(id, edit);
+                }
+                Some(ImageRole::Derived(_)) => {
+                    derived_edits.push((id, edit));
+                }
+                None => return Err(SessionError::MissingImage { id }),
+            }
+        }
+        Ok((primitive_edits, derived_edits))
+    }
+
+    fn take_local_edit(&mut self, key: GlaLocalImageKey) -> Result<ImageEdit, SessionError> {
+        match self.local_image_mut(key)? {
+            SessionImage::Edit { source, edits, .. } => Ok(ImageEdit {
+                source: *source,
+                edits: std::mem::take(edits),
+            }),
+            SessionImage::Raw { .. } => Err(SessionError::DestinationNotWritable {
+                id: ImageId::new(u64::from(key.0)),
+            }),
+        }
+    }
+
+    fn validate_derived_edits(
+        &self,
+        doc: &Document,
+        edits: &[(ImageId, ImageEdit)],
+    ) -> Result<(), SessionError> {
+        for (id, edit) in edits {
+            if !matches!(doc.role(*id), Some(ImageRole::Derived(_))) {
+                return Err(SessionError::DestinationNotWritable { id: *id });
+            }
+            let key = doc
+                .binding(*id)
+                .ok_or(SessionError::MissingImage { id: *id })?;
+            let image = self.images.get(key)?;
+            let tile_count = image.layout.tile_count();
+            let mut last_index = None;
+            for (tile_index, new_tile) in edit.edits.iter().copied() {
+                if last_index.is_some_and(|last| tile_index <= last) || tile_index >= tile_count {
+                    return Err(SessionError::InvalidEditTile {
+                        id: *id,
+                        tile_index,
+                    });
+                }
+                if new_tile == TileKey::INVALID {
+                    return Err(SessionError::InvalidEditTile {
+                        id: *id,
+                        tile_index,
+                    });
+                }
+                last_index = Some(tile_index);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_derived_edits(
+        &mut self,
+        doc: &Document,
+        edits: Vec<(ImageId, ImageEdit)>,
+    ) -> Result<(), SessionError> {
+        for (id, edit) in edits {
+            let key = doc.binding(id).ok_or(SessionError::MissingImage { id })?;
+            for (tile_index, new_tile) in edit.edits {
+                let old_tile = self.images.tile(key, tile_index)?;
+                self.images.set_tile(key, tile_index, new_tile)?;
+                if old_tile != TileKey::INVALID && old_tile != new_tile {
+                    self.tiles.discard(old_tile);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn discard_remaining_local_tiles(&mut self) {
+        for image in &mut self.local_images {
+            match image {
+                SessionImage::Raw { tiles, .. } => {
+                    for tile in tiles.iter().copied() {
+                        if tile != TileKey::INVALID {
+                            self.tiles.discard(tile);
+                        }
+                    }
+                    tiles.fill(TileKey::INVALID);
+                }
+                SessionImage::Edit { edits, .. } => {
+                    for (_, tile) in edits.drain(..) {
+                        if tile != TileKey::INVALID {
+                            self.tiles.discard(tile);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn push_local_image(&mut self, image: SessionImage) -> GlaLocalImageKey {
@@ -820,6 +1048,76 @@ impl RenderCtx for DrawSession {
     fn renderer(&mut self) -> &mut Renderer {
         &mut self.renderer
     }
+}
+
+fn apply_image_edit_patch(
+    doc: &Document,
+    images: &mut GlaImages,
+    edits: &HashMap<ImageId, ImageEdit>,
+) -> Result<HashMap<ImageId, ImageEdit>, SessionError> {
+    struct PreparedEdit {
+        id: ImageId,
+        key: GlaImageKey,
+        inverse: ImageEdit,
+        forward: Vec<(u32, TileKey)>,
+    }
+
+    let mut prepared = Vec::new();
+    for (id, edit) in edits {
+        if !matches!(doc.role(*id), Some(ImageRole::Primitive)) {
+            return Err(SessionError::DestinationNotWritable { id: *id });
+        }
+        let key = doc
+            .binding(*id)
+            .ok_or(SessionError::MissingImage { id: *id })?;
+        let image = images.get(key)?;
+        let tile_count = image.layout.tile_count();
+        let mut inverse = ImageEdit {
+            source: key,
+            edits: Vec::with_capacity(edit.edits.len()),
+        };
+        let mut last_index = None;
+        for (tile_index, new_tile) in edit.edits.iter().copied() {
+            if last_index.is_some_and(|last| tile_index <= last) || tile_index >= tile_count {
+                return Err(SessionError::InvalidEditTile {
+                    id: *id,
+                    tile_index,
+                });
+            }
+            if new_tile == TileKey::INVALID {
+                return Err(SessionError::InvalidEditTile {
+                    id: *id,
+                    tile_index,
+                });
+            }
+            let old_tile = image.tiles[tile_index as usize];
+            if old_tile == TileKey::INVALID {
+                return Err(SessionError::PrimitiveImageHasInvalidTile {
+                    id: *id,
+                    tile_index,
+                });
+            }
+            inverse.edits.push((tile_index, old_tile));
+            last_index = Some(tile_index);
+        }
+        prepared.push(PreparedEdit {
+            id: *id,
+            key,
+            inverse,
+            forward: edit.edits.clone(),
+        });
+    }
+
+    let mut inverse = HashMap::new();
+    for edit in prepared {
+        for (tile_index, new_tile) in edit.forward {
+            images.set_tile(edit.key, tile_index, new_tile)?;
+        }
+        if !edit.inverse.edits.is_empty() {
+            inverse.insert(edit.id, edit.inverse);
+        }
+    }
+    Ok(inverse)
 }
 
 fn validate_doc_image_uses(
@@ -1307,6 +1605,129 @@ mod tests {
         assert_eq!(
             session.doc_dirty(),
             &HashMap::from([(paint, TileSet::single(0))])
+        );
+    }
+
+    #[test]
+    fn commit_applies_edit_in_place_and_history_undo_redo_restores_tiles() {
+        let root = ImageId::new(1);
+        let mut images = GlaImages::new();
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let doc_key = images
+            .alloc(format(), layout(), &mut tiles, atlas_id)
+            .unwrap();
+        let source_tile = images.tile(doc_key, 0).unwrap();
+        let doc = Document::new(
+            root,
+            HashMap::from([(root, ImageRole::Primitive)]),
+            HashMap::from([(root, doc_key)]),
+        )
+        .unwrap();
+        let ir = DrawSessionIR {
+            expected_document_version: doc.version(),
+            doc_images: vec![DocImageUse::read_write(root)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(root)],
+            derive: Vec::new(),
+        };
+        let mut doc = doc;
+        let mut history = DrawHistory::new();
+        let mut session =
+            DrawSession::new(ir, &doc, images, tiles, Renderer::new(), atlas_id).unwrap();
+
+        session
+            .draw_dab(CanvasInput {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+            })
+            .unwrap();
+        session.flush_frame().unwrap();
+        let committed = session.commit(&mut doc, &mut history).unwrap();
+        let record_id = committed.commit.record_id;
+        let mut images = committed.images;
+
+        assert_eq!(doc.binding(root), Some(doc_key));
+        assert_eq!(doc.version(), DocumentVersionId::new(1));
+        let edited_tile = images.tile(doc_key, 0).unwrap();
+        assert_ne!(edited_tile, source_tile);
+        let stored = history.patches.get(&record_id).unwrap();
+        assert_eq!(
+            stored.edits.get(&root).unwrap().edits,
+            vec![(0, source_tile)]
+        );
+
+        let redo_id = history
+            .apply_stored_patch(record_id, &mut doc, &mut images)
+            .unwrap();
+        assert_eq!(doc.version(), DocumentVersionId::new(2));
+        assert_eq!(images.tile(doc_key, 0).unwrap(), source_tile);
+
+        history
+            .apply_stored_patch(redo_id, &mut doc, &mut images)
+            .unwrap();
+        assert_eq!(doc.version(), DocumentVersionId::new(3));
+        assert_eq!(images.tile(doc_key, 0).unwrap(), edited_tile);
+    }
+
+    #[test]
+    fn commit_discards_session_raw_tiles_after_applying_doc_edit() {
+        let root = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut images = GlaImages::new();
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let doc_key = images
+            .alloc(format(), layout(), &mut tiles, atlas_id)
+            .unwrap();
+        let doc = Document::new(
+            root,
+            HashMap::from([(root, ImageRole::Primitive)]),
+            HashMap::from([(root, doc_key)]),
+        )
+        .unwrap();
+        let ir = DrawSessionIR {
+            expected_document_version: doc.version(),
+            doc_images: vec![DocImageUse::read_write(root)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::current(coverage)],
+                root,
+            )],
+        };
+        let mut doc = doc;
+        let mut history = DrawHistory::new();
+        let mut session =
+            DrawSession::new(ir, &doc, images, tiles, Renderer::new(), atlas_id).unwrap();
+
+        session
+            .draw_dab(CanvasInput {
+                x: 0.0,
+                y: 0.0,
+                pressure: 1.0,
+            })
+            .unwrap();
+        session.flush_frame().unwrap();
+        let coverage_key = session.local_keys.get(&coverage).unwrap().key;
+        let coverage_tile = session.read_session_tile(coverage_key, 0).unwrap();
+
+        let committed = session.commit(&mut doc, &mut history).unwrap();
+
+        assert!(committed.tiles.ensure_valid(coverage_tile).is_err());
+        assert_eq!(doc.version(), DocumentVersionId::new(1));
+        assert!(
+            history
+                .patches
+                .get(&committed.commit.record_id)
+                .unwrap()
+                .edits
+                .contains_key(&root)
         );
     }
 
