@@ -4,8 +4,8 @@ The upper management layer owns the document tree. It may contain concepts such
 as groups, layers, masks, filters, blend modes, transforms, and UI names.
 
 Rust sessions do not execute against that tree directly. The document tree is
-compiled into image-level state: a registry of image roles plus an image-key
-binding table.
+compiled into image-level state: document image roles, document image bindings,
+and session-local execution rows.
 
 ## Ids And Keys
 
@@ -15,17 +15,31 @@ identity. It is not an image storage key.
 Rust stores resources behind generation-checked keys:
 
 ```text
-ImageKey              // image tile array / content version
+GlaImageKey       // row in GlaImages: format, layout, tile slots
+TileKey           // row in Tiles: atlas position or empty binding
+GlaLocalImageKey  // row in one DrawSession local image table
 ```
 
-`ImageId -> ImageKey` binding tables are doc/session-layer state. Runtime role
-lookup is keyed by `ImageKey`: `ImageKey -> Primitive | Derived(command)`. This
-matches `render(image_key, tile_index)` and avoids reverse lookup from image key
-back to image id. The image storage layer works in `ImageKey` and `TileKey`; the
-image-command layer works in key-level executable commands.
+Document bindings are `ImageId -> GlaImageKey`. A draw commit does not normally
+replace these bindings. Instead it edits selected tile slots of the currently
+bound document images.
+
+Image command execution uses a session key wrapper:
+
+```text
+SessionImageKey =
+  Doc(GlaImageKey)
+  Local(GlaLocalImageKey)
+```
+
+`Doc` keys read and repair document image rows. `Local` keys address
+session-owned raw images and document shadows. The image-command layer is
+generic over this key type, so recursive render can use the same command code
+for document rows and session-local rows.
 
 Doc-level `ImageId`s are not reused during a document lifetime. Session-local
-images use the same id type and may shadow doc ids within a draw session.
+images use the same id type in IR and may shadow doc ids within a draw session;
+after lowering, local rows live in an independent `GlaLocalImageKey` namespace.
 
 ## Document Model
 
@@ -35,7 +49,7 @@ images use the same id type and may shadow doc ids within a draw session.
 Document {
   root: ImageId,
   roles: ImageId -> ImageRole,
-  bindings: ImageId -> ImageKey,
+  bindings: ImageId -> GlaImageKey,
   version: DocumentVersionId,
 }
 ```
@@ -44,81 +58,124 @@ Document {
 The binding table must contain a key for every image id in roles, and every
 binding must correspond to a declared role.
 
-`gla_doc` supports two state transitions:
+In the current implementation `gla_doc` is intentionally small. It validates the
+graph, exposes role and binding lookup, and owns the document version counter.
+It does not own draw history, undo/redo, or draw-session commit logic.
+`gla_session` applies draw commits to `GlaImages` and asks `Document` only to
+bump the version after a successful commit.
 
-- `commit_draw(patch) -> inverse_patch` — replaces bindings for write
-  targets, bumps version. Purely id-key level; does not touch roles.
-- `apply_registry_patch(patch, images, tiles) -> inverse_patch` —
-  applies registry ops through a local-first overlay, sweeps unreachable
-  images from the overlaid graph, validates the whole result, publishes the
-  graph and binding changes, and generates an inverse patch for undo.
+## Image Rows And Tile Slots
 
-## Patch Resource Invariant
+An image is an array of tile keys. Empty tile bindings are valid zero content.
+`TileKey::INVALID` means a cache tile has not been built yet.
 
-Patch history owns resource keys only when they are needed to restore document
-truth or root presentation cache:
+Primitive document images must never contain `TileKey::INVALID`. Derived
+document images may contain `TileKey::INVALID`; filling an invalid derived cache
+tile is cache repair, not document content change.
 
-- Primitive image keys replaced or swept by registry changes are retained by
-  `InsertImage` inverse ops.
-- The derived cache key for the current root image is retained by `InsertImage`
-  inverse ops as undo/redo presentation cache.
-- Non-root derived cache keys are not history-owned. When they are replaced or
-  swept by a successfully published registry patch, their image key and valid
-  tile keys are released; undo recreates them from graph commands when needed.
+Session-local raw images are allocated with full valid empty tile keys. This is
+true for both session primitive declarations and session derived declarations.
+The tradeoff is a few more tile keys in exchange for a simpler hot path: if a
+session-local tile is written or read, it already has a valid key.
 
-Draw patches are id-key binding patches. Their image keys represent document
-content versions; primitive old keys and tile keys follow the stored patch
-lifetime. No separate orphan-tracking data is needed for derived cache keys.
+## Session Local Rows
 
-`gla_session` is the app-loop entry point. It owns draw-session execution state,
-including the local key overlay, active-chain tracking, and key-level derive
-commands used while executing a session.
-
-## Image Declarations
-
-The registry graph declares document images:
+Each draw session has a local image table:
 
 ```text
-ImageRole =
-  Primitive
-  Derived(GraphCommand)
+SessionImage =
+  Raw {
+    format,
+    layout,
+    tiles: Box<[TileKey]>,
+  }
+
+  Edit {
+    format,
+    layout,
+    source: GlaImageKey,
+    edits: Vec<(u32, TileKey)>,
+  }
 ```
 
-`Primitive` is editable or externally supplied document image content. It
-is a valid `ReadWrite` draw target, has no graph command, and never
-contains `TileKey::INVALID`.
+`Raw` is for session-created private images, such as brush coverage or pigment
+images. `Raw` rows are discarded at session end and never enter document
+bindings or history.
 
-`Derived(GraphCommand)` is document cache or output image content. It has
-exactly one graph command, is not a direct draw target, and may contain
-`TileKey::INVALID`.
+`Edit` is for document shadows. It records the source document image key and the
+tile slots modified by the session. A read checks `edits` first and then falls
+back to `source`. A write checks `edits` first; if the tile was not touched yet,
+the session allocates a new tile key, copies the source tile when the source is
+valid, inserts the edit, and writes into the new tile.
 
-Examples:
+If the source tile is `TileKey::INVALID`, the copy pass is skipped. This is
+correct under the current invariants:
+
+- a document derived image is not shadowed as a DrawOn primitive target;
+- derive commands fully overwrite their destination tiles.
+
+If either invariant changes, first-write initialization for `Edit` rows must
+become command-aware or materialize the source first.
+
+## ImageEdit
+
+Committed draw changes are represented as tile-level edits:
 
 ```text
-Layer image       -> Primitive
-Group cache       -> Derived(GraphCommand)
-Filter cache      -> Derived(GraphCommand)
-Root display      -> Primitive or Derived(GraphCommand)
-Mask image        -> Primitive or Derived(GraphCommand), depending on ownership
+ImageEdit {
+  source: GlaImageKey,
+  edits: Vec<(u32, TileKey)>,
+}
 ```
 
-The graph has exactly one root image. The binding table must contain a binding
-for every image id that remains in the graph after registry patch garbage
-collection.
+`source` is retained for now as the image row the edit was derived from. The
+commit path still applies edits by `ImageId` against the current document
+binding, because document versioning is session-level and a draw commit does not
+allocate a new document image key.
 
-## Session Images
+`edits` stores sorted unique tile-index replacements. Each pair means: replace
+tile slot `u32` with `TileKey`.
 
-Draw sessions may declare session-local images:
+For primitive document images, commit applies `ImageEdit` in place to the
+currently bound `GlaImageKey`. The binding remains stable. Before mutation,
+the session validates tile indices and records the old primitive tile keys in
+an inverse `ImageEdit`. `DrawHistory` stores that inverse patch.
+
+For derived document images shadowed by the active chain, commit also writes the
+edited tile slots back to the currently bound cache image. These edits are cache
+publication, not document truth history. Replaced valid cache tiles are released
+when they are no longer referenced by the new slot.
+
+Dirty does not need a separate history shape for draw undo. The edited tile
+indices in `ImageEdit` are the dirty tile indices. `DrawSession::doc_dirty`
+still exists as frame/session execution information for repaint demand, not as
+the durable undo record.
+
+## Draw History
+
+`DrawHistory` lives in `gla_session`:
 
 ```text
-Session Primitive:
-  Full empty valid image, released at session end.
+DrawHistory {
+  patches: DrawRecordId -> StoredImageEditPatch,
+  next_id: DrawRecordId,
+}
 
-Session Derived:
-  Local cache with one SessionCommand, released at session end.
+StoredImageEditPatch {
+  version: DocumentVersionId,
+  edits: ImageId -> ImageEdit,
+}
 ```
 
-Session images do not enter the document binding table or undo records.
+Undo and redo both apply a stored `ImageEdit` patch to primitive document
+images in place. Applying a patch returns a new inverse patch id, so redo is the
+same operation as applying the inverse produced by undo. The operation checks
+the document version before applying, bumps the version after applying, and does
+not replay brush input or image commands.
+
+Only primitive document edits enter draw history. Derived document caches can be
+repaired or recomputed from their graph commands and are not history-owned in
+this round.
 
 ## Command Layers
 
@@ -144,49 +201,18 @@ SessionCommand:
   reads: [SessionRead]     // current image or backup document image
 ```
 
-`DrawOnCommand` is a different IR form. It is an input-driven atomic draw into
-one `ReadWrite` destination and has no read list in the first design stage.
-
-Document truth stays in id-level IR. At draw-session start, `gla_session`
-lowers id-level graph/session declarations through the active local-first image
-tables into key-level image-command programs:
-
-```text
-GraphCommand + current table -> gla_image_command::DeriveCommand
-SessionCommand + current/backup table -> gla_image_command::DeriveCommand
-DrawOnCommand + writable target lookup -> Draw task
-```
-
-`gla_image_command::DeriveCommand` is not document truth and is not stored in
-records. It holds the destination `ImageKey`, destination layout, and ordered
-operations. Its operations hold key-level `ImageRef`s with source `ImageKey`,
-source layout, mapping, and footprint metadata. When a session creates new cache
-shadows, downstream commands are re-lowered so their refs point at the new keys.
+At draw-session start, `gla_session` lowers id-level graph/session declarations
+through the completed local-first table into
+`gla_image_command::DeriveCommand<SessionImageKey>`.
 
 At execution time, `gla_image_command` owns only key-level ordering. A command
 uses a `RenderCtx` to request `render(image_key, tile_index)` for read
 dependencies, asks the same context for the destination tile key, then appends
-tile passes directly to `gla_renderer`. The context also owns tile-key
-acquisition, so session code can keep renderer, tile resources, and recursive
-command lookup in one reentrant state machine.
+tile passes directly to `gla_renderer`. The context owns tile-key acquisition,
+so session code can keep renderer, tile resources, and recursive command lookup
+in one reentrant state machine.
 
-Session code must enter image commands with an owned command value, normally by
+Session code enters image commands with an owned command value, normally by
 cloning the row's `DeriveCommand` before execution. This prevents a recursive
-`render` call from borrowing the command binding table while the current command
-is still borrowed from that table.
-
-## Tile Resources
-
-An image is an array of tile keys. Empty tile bindings are valid zero content.
-`TileKey::INVALID` means a derived cache tile has not been built yet.
-
-Tile write paths do not own history semantics. Session cleanup compares old and
-new image tile arrays by index to release replaced cache resources. Primitive
-history and root presentation caches are retained by history patches; other
-derived cache resources can be released when replaced or swept.
-Unshadowed derived cache repair may fill `TileKey::INVALID` slots in an
-existing document cache key without creating history; it is cache residency for
-the same graph and binding state, not document content change.
-When a shadowed derived cache replaces an older cache at commit, any
-`TileKey::INVALID` slots in the new cache are first backfilled from the old
-cache if the old slot is valid.
+`render` call from borrowing the command table while the current command is
+still borrowed from that table.

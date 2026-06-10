@@ -40,7 +40,7 @@ doc_images:
   source_group_cache: Read
 ```
 
-`ReadWrite` document images must be primitive images in the active registry
+`ReadWrite` document images must be primitive images in the active document
 graph. Derived document images may be read, but they cannot be direct draw
 targets. Their writes come from graph commands.
 
@@ -69,7 +69,8 @@ order.
 
 Session images are released when the draw session ends. They are not stored in
 the document binding table and are not retained for undo or replay. Undo uses
-document image CoW versions, not brush replay.
+`ImageEdit` inverse tile patches for document primitive images, not brush
+replay.
 
 ## DrawOn And Derive
 
@@ -120,8 +121,9 @@ DrawRadialKernel1D:
 
 The user brush or tool program owns spacing, interpolation, smoothing, jitter,
 pressure mapping, and tool presets. The session receives input samples from the
-Rust app loop, applies input mappings, invokes DrawOn primitives, marks dirty,
-and drains downstream Derive and registry commands.
+Rust app loop, applies input mappings, invokes DrawOn primitives, records frame
+dirty, uploads dirty through session/document graph edges on flush, and
+materializes root repaint demand.
 
 DrawOn primitives have one `ReadWrite` destination and no image read edges in
 the first version. Current-reading stamp or smudge behavior that requires
@@ -158,14 +160,15 @@ The merge command does not copy backup into target first. It reads backup and
 coverage and writes the current `base_paint` image.
 
 Downstream group cache and root updates are not part of the brush IR. They come
-from the registry graph:
+from the document graph:
 
 ```text
 base_paint -> paint_group_cache -> character_cache -> root_image
 ```
 
-The resulting `DrawRecord.doc_dirty` records dirty tiles for `base_paint`, not
-for `coverage` or downstream caches.
+The session `doc_dirty` records dirty tiles for `base_paint`, not for
+`coverage` or downstream caches. The durable draw history stores the committed
+`ImageEdit` tile replacements for `base_paint`.
 
 ## Watercolor Example
 
@@ -214,8 +217,8 @@ doc_dirty:
   wetness_layer -> Tiles(...)
 ```
 
-Root repaint is the union of uploading each dirty set through the active
-registry graph.
+Root repaint is the union of uploading each dirty set through the active session
+and document graph edges.
 
 ## Input Mapping
 
@@ -231,23 +234,25 @@ input_mapping:
 Read edges use mappings from derive destination space to read source space. The
 same coordinate relationship is used for read footprints and dirty upload.
 
-Stage 1 supports `Identity`, affine `Matrix`, and the `Expand(px)` footprint
-modifier.
+The IR admits `Identity`, affine `Matrix`, and the `Expand(px)` footprint
+modifier. The current executable source-footprint path handles
+`Identity + None` precisely; expanded and matrix source footprints remain TODOs.
+Dirty upload for expanded and matrix paths currently falls back conservatively.
 
 ## Frame Flow
 
 For a drawing session, each frame follows this image-level flow:
 
 ```text
-1. accept source input groups under the DrawOn budget
-2. invoke DrawOn primitives and mark written images dirty
-3. drain session-local Derive commands
-4. drain registry-derived cache and root commands
-5. submit root repaint work
+1. accept source input groups under the app-loop FrameBudget
+2. invoke DrawOn primitives and mark per-DrawOn frame dirty
+3. flush frame dirty by uploading each DrawOn dirty set toward root
+4. recursively render root demand through session and document commands
+5. submit renderer passes
 ```
 
 Frame budgeting gates only input/DrawOn acceptance. Once a source group is
-accepted, all downstream derive and render work is drained in the same frame.
+accepted, downstream derive and render work is drained by `flush_frame`.
 
 ## Records
 
@@ -257,13 +262,10 @@ brush record.
 A draw record stores:
 
 ```text
-graph
-bindings_before
-bindings_after
-doc_dirty for ReadWrite document images
-root_cache_before
-root_cache_after
+version
+ImageId -> ImageEdit inverse patch for committed primitive document edits
 ```
 
-If a draw session produces no document dirty, its dirty set is empty. The
-session may still commit active-chain binding or cache replacements.
+Draw commit edits the tile slots of the current document bindings in place. It
+does not replace `ImageId -> GlaImageKey` bindings. Derived document cache edits
+are published as cache updates and are not retained by draw history.
