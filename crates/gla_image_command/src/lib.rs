@@ -6,25 +6,30 @@ use gla_renderer::Renderer;
 use tile_key::TileKey;
 
 pub trait RenderCtx {
+    type ImageKey: std::marker::Copy;
     type Error;
 
-    fn render(&mut self, image: GlaImageKey, tile_index: u32) -> Result<TileKey, Self::Error>;
-    fn write_tile(&mut self, image: GlaImageKey, tile_index: u32) -> Result<TileKey, Self::Error>;
+    fn render(&mut self, image: Self::ImageKey, tile_index: u32) -> Result<TileKey, Self::Error>;
+    fn write_tile(
+        &mut self,
+        image: Self::ImageKey,
+        tile_index: u32,
+    ) -> Result<TileKey, Self::Error>;
     fn acquire_for_read(&mut self, key: TileKey) -> Result<TilePos, Self::Error>;
     fn acquire_for_write(&mut self, key: TileKey) -> Result<TilePos, Self::Error>;
     fn renderer(&mut self) -> &mut Renderer;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ImageRef {
-    pub key: GlaImageKey,
+pub struct ImageRef<K = GlaImageKey> {
+    pub key: K,
     pub layout: GlaImageLayout,
     pub mapping: Mapping,
     pub modifier: FootprintModifier,
 }
 
-impl ImageRef {
-    pub fn new(key: GlaImageKey, layout: GlaImageLayout) -> Self {
+impl<K> ImageRef<K> {
+    pub fn new(key: K, layout: GlaImageLayout) -> Self {
         Self {
             key,
             layout,
@@ -34,7 +39,7 @@ impl ImageRef {
     }
 
     pub fn with_footprint(
-        key: GlaImageKey,
+        key: K,
         layout: GlaImageLayout,
         mapping: Mapping,
         modifier: FootprintModifier,
@@ -66,14 +71,14 @@ impl ImageRef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DeriveCommand {
-    pub dst: GlaImageKey,
+pub struct DeriveCommand<K = GlaImageKey> {
+    pub dst: K,
     pub layout: GlaImageLayout,
-    pub ops: Box<[Derive]>,
+    pub ops: Box<[Derive<K>]>,
 }
 
-impl DeriveCommand {
-    pub fn new(dst: GlaImageKey, layout: GlaImageLayout, ops: impl Into<Box<[Derive]>>) -> Self {
+impl<K> DeriveCommand<K> {
+    pub fn new(dst: K, layout: GlaImageLayout, ops: impl Into<Box<[Derive<K>]>>) -> Self {
         Self {
             dst,
             layout,
@@ -83,7 +88,8 @@ impl DeriveCommand {
 
     pub fn exec_tile<C>(&self, ctx: &mut C, tile_index: u32) -> Result<(), C::Error>
     where
-        C: RenderCtx,
+        C: RenderCtx<ImageKey = K>,
+        K: std::marker::Copy,
     {
         let dst = ctx.write_tile(self.dst, tile_index)?;
         for op in self.ops.iter().copied() {
@@ -94,13 +100,13 @@ impl DeriveCommand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Derive {
-    Copy(Copy),
+pub enum Derive<K = GlaImageKey> {
+    Copy(Copy<K>),
     Clear(Clear),
-    RenderTo(RenderTo),
+    RenderTo(RenderTo<K>),
 }
 
-impl Derive {
+impl<K> Derive<K> {
     pub fn exec_tile<C>(
         self,
         ctx: &mut C,
@@ -109,7 +115,8 @@ impl Derive {
         tile_index: u32,
     ) -> Result<(), C::Error>
     where
-        C: RenderCtx,
+        C: RenderCtx<ImageKey = K>,
+        K: std::marker::Copy,
     {
         match self {
             Self::Copy(op) => op.exec_tile(ctx, dst_layout, dst, tile_index),
@@ -120,12 +127,12 @@ impl Derive {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Copy {
-    pub src: ImageRef,
+pub struct Copy<K = GlaImageKey> {
+    pub src: ImageRef<K>,
 }
 
-impl Copy {
-    pub fn new(src: ImageRef) -> Self {
+impl<K> Copy<K> {
+    pub fn new(src: ImageRef<K>) -> Self {
         Self { src }
     }
 
@@ -137,7 +144,8 @@ impl Copy {
         tile_index: u32,
     ) -> Result<(), C::Error>
     where
-        C: RenderCtx,
+        C: RenderCtx<ImageKey = K>,
+        K: std::marker::Copy,
     {
         self.src
             .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
@@ -165,14 +173,14 @@ impl Clear {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RenderTo {
-    pub src: ImageRef,
+pub struct RenderTo<K = GlaImageKey> {
+    pub src: ImageRef<K>,
     pub blend_mode: BlendMode,
     pub opacity: f32,
 }
 
-impl RenderTo {
-    pub fn new(src: ImageRef, blend_mode: BlendMode, opacity: f32) -> Self {
+impl<K> RenderTo<K> {
+    pub fn new(src: ImageRef<K>, blend_mode: BlendMode, opacity: f32) -> Self {
         Self {
             src,
             blend_mode,
@@ -188,7 +196,8 @@ impl RenderTo {
         tile_index: u32,
     ) -> Result<(), C::Error>
     where
-        C: RenderCtx,
+        C: RenderCtx<ImageKey = K>,
+        K: std::marker::Copy,
     {
         self.src
             .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
@@ -227,6 +236,7 @@ mod tests {
     }
 
     impl RenderCtx for TestCtx {
+        type ImageKey = GlaImageKey;
         type Error = TestError;
 
         fn render(&mut self, image: GlaImageKey, tile_index: u32) -> Result<TileKey, Self::Error> {
