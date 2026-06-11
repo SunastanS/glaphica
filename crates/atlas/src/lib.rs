@@ -244,9 +244,41 @@ impl Atlas {
     }
 
     pub fn free(&mut self, position: TilePos) {
-        if position.atlas_id() != self.id {
-            return;
-        }
+        assert_eq!(
+            position.atlas_id(),
+            self.id,
+            "tile position atlas id does not match atlas"
+        );
         self.tile_pool.free(position.tile_index() as u32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Atlas, AtlasLayout, TilePos};
+    use gla_color::{ChannelCount, ChannelType, GlaFormat};
+
+    fn format() -> GlaFormat {
+        GlaFormat {
+            channel_count: ChannelCount::D4,
+            channel_type: ChannelType::U8,
+        }
+    }
+
+    #[test]
+    fn allocated_binding_uses_one_based_generation() {
+        let mut atlas = Atlas::new(3, AtlasLayout::TINY8, format());
+        let binding = atlas.alloc().unwrap();
+
+        assert_eq!(binding.tile_generation(), 1);
+        assert!(atlas.check(binding));
+    }
+
+    #[test]
+    #[should_panic(expected = "tile position atlas id does not match atlas")]
+    fn free_panics_on_atlas_id_mismatch() {
+        let mut atlas = Atlas::new(3, AtlasLayout::TINY8, format());
+
+        atlas.free(TilePos::new(4, 0));
     }
 }

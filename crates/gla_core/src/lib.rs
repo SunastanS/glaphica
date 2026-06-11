@@ -110,9 +110,9 @@ impl Pool {
 
         let index = self.next;
         self.next = self.next.checked_add(1).ok_or(PoolError::Full)?;
-        self.generations.push(0);
+        self.generations.push(1);
         self.used = self.used.checked_add(1).ok_or(PoolError::Full)?;
-        Ok((index, 0))
+        Ok((index, 1))
     }
 
     pub fn remaining(&self) -> u32 {
@@ -121,11 +121,14 @@ impl Pool {
 
     /// caller should check before free
     pub fn free(&mut self, index: u32) {
-        debug_assert!(!self.free.contains(&index), "double free of index {index}");
-        debug_assert!(index < self.next, "free of never-allocated index {index}");
+        assert!(!self.free.contains(&index), "double free of index {index}");
+        assert!(index < self.next, "free of never-allocated index {index}");
 
         let generation = self.generations.get_mut(index as usize).unwrap();
         *generation = (*generation).wrapping_add(1);
+        if *generation == 0 {
+            *generation = 1;
+        }
 
         self.free.push(index);
         self.used -= 1;
@@ -139,12 +142,21 @@ mod tests {
     #[test]
     fn alloc_reuses_freed_slots_after_pool_reaches_capacity() {
         let mut pool = Pool::new(1);
-        assert_eq!(pool.alloc().unwrap(), (0, 0));
+        assert_eq!(pool.alloc().unwrap(), (0, 1));
         assert!(matches!(pool.alloc(), Err(PoolError::Full)));
 
         pool.free(0);
 
-        assert_eq!(pool.alloc().unwrap(), (0, 1));
+        assert_eq!(pool.alloc().unwrap(), (0, 2));
         assert_eq!(pool.remaining(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "double free of index 0")]
+    fn free_panics_on_double_free() {
+        let mut pool = Pool::new(1);
+        let (index, _) = pool.alloc().unwrap();
+        pool.free(index);
+        pool.free(index);
     }
 }

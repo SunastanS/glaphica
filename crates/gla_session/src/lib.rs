@@ -37,7 +37,6 @@ pub struct CommittedDraw {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageEdit {
-    pub source: GlaImageKey,
     pub edits: Vec<(u32, TileKey)>,
 }
 
@@ -579,8 +578,7 @@ impl DrawSession {
 
     fn take_local_edit(&mut self, key: GlaLocalImageKey) -> Result<ImageEdit, SessionError> {
         match self.local_image_mut(key)? {
-            SessionImage::Edit { source, edits, .. } => Ok(ImageEdit {
-                source: *source,
+            SessionImage::Edit { edits, .. } => Ok(ImageEdit {
                 edits: std::mem::take(edits),
             }),
             SessionImage::Raw { .. } => Err(SessionError::DestinationNotWritable {
@@ -1073,7 +1071,6 @@ fn apply_image_edit_patch(
         let image = images.get(key)?;
         let tile_count = image.layout.tile_count();
         let mut inverse = ImageEdit {
-            source: key,
             edits: Vec::with_capacity(edit.edits.len()),
         };
         let mut last_index = None;
