@@ -7,3 +7,6 @@ edition = "2024"
 gla_color = { path = "../gla_color" }
 tile_key = { path = "../tile_key" }
 gla_core = { path = "../gla_core" }
+
+[dev-dependencies]
+atlas = { path = "../atlas" }

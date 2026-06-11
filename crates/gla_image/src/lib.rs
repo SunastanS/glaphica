@@ -1,34 +1,8 @@
 use gla_color::GlaFormat;
-use gla_core::{Pool, PoolError};
 pub use gla_core::IMAGE_TILE_SIZE;
+use std::error::Error;
 use std::fmt::{Display, Formatter};
-use tile_key::{TileKey, Tiles, TilesError};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct GlaImageKey(u64);
-
-impl GlaImageKey {
-    const INDEX_BITS: u32 = 32;
-    const INDEX_MASK: u64 = (1 << Self::INDEX_BITS) - 1;
-    const GENERATION_SHIFT: u32 = Self::INDEX_BITS;
-
-    #[inline]
-    pub fn new(index: u32, generation: u32) -> Self {
-        debug_assert!(index as u64 <= Self::INDEX_MASK);
-        Self(((generation as u64) << Self::GENERATION_SHIFT) | index as u64)
-    }
-
-    #[inline]
-    pub fn index(self) -> u32 {
-        (self.0 & Self::INDEX_MASK) as u32
-    }
-
-    #[inline]
-    pub fn generation(self) -> u32 {
-        (self.0 >> Self::GENERATION_SHIFT) as u32
-    }
-}
+use tile_key::{Tile, Tiles, TilesError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlaImageLayout {
@@ -121,74 +95,23 @@ impl Default for TileSet {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct GlaImage {
-    pub format: GlaFormat,
-    pub layout: GlaImageLayout,
-    pub tiles: Box<[TileKey]>, // tiles.len() == layout.tile_count()
-}
-
-impl GlaImage {
-    pub fn new(
-        format: GlaFormat,
-        layout: GlaImageLayout,
-        tiles: Box<[TileKey]>,
-    ) -> Result<Self, GlaImagesError> {
-        let expected = layout.tile_count();
-        let actual = tiles.len();
-        if actual != expected as usize {
-            return Err(GlaImagesError::TileCountMisMatch { expected, actual });
-        }
-
-        Ok(Self {
-            format,
-            layout,
-            tiles,
-        })
-    }
-}
-
 #[derive(Debug)]
-pub enum GlaImagesError {
-    KeyPoolFull,
-    InvalidKey {
-        key: GlaImageKey,
-    },
-    KeyGenMisMatch {
-        key: GlaImageKey,
-    },
-    TileCountMisMatch {
-        expected: u32,
-        actual: usize,
-    },
-    TileIndexOutOfBounds {
-        key: GlaImageKey,
-        tile_index: u32,
-        tile_count: u32,
-    },
-    TileAllocFailed {
-        source: TilesError,
-    },
+pub enum ImageError {
+    ZeroSizeImage,
+    TileIndexOutOfBounds { tile_index: u32, tile_count: u32 },
+    TileAllocFailed { source: TilesError },
 }
 
-impl Display for GlaImagesError {
+impl Display for ImageError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::KeyPoolFull => f.write_str("image key pool is full"),
-            Self::InvalidKey { key } => write!(f, "invalid image key {key:?}"),
-            Self::KeyGenMisMatch { key } => {
-                write!(f, "image key generation mismatch for {key:?}")
-            }
-            Self::TileCountMisMatch { expected, actual } => {
-                write!(f, "image expected {expected} tiles, got {actual}")
-            }
+            Self::ZeroSizeImage => f.write_str("image must contain at least one tile"),
             Self::TileIndexOutOfBounds {
-                key,
                 tile_index,
                 tile_count,
             } => write!(
                 f,
-                "tile index {tile_index} out of bounds for image {key:?} with {tile_count} tiles"
+                "tile index {tile_index} out of bounds for image with {tile_count} tiles"
             ),
             Self::TileAllocFailed { source } => {
                 write!(f, "tile allocation failed while creating image: {source}")
@@ -197,178 +120,254 @@ impl Display for GlaImagesError {
     }
 }
 
-pub struct GlaImages {
-    images: Vec<Option<GlaImage>>,
-    pool: Pool,
+impl Error for ImageError {}
+
+impl From<TilesError> for ImageError {
+    fn from(source: TilesError) -> Self {
+        ImageError::TileAllocFailed { source }
+    }
 }
 
-impl GlaImages {
-    pub fn new() -> Self {
-        Self {
-            images: Vec::new(),
-            pool: Pool::new(u32::MAX),
-        }
+#[derive(Debug)]
+pub struct TileReplaceError {
+    kind: ImageError,
+    tile: Tile,
+}
+
+impl TileReplaceError {
+    fn new(kind: ImageError, tile: Tile) -> Self {
+        Self { kind, tile }
     }
 
-    pub fn remaining(&self) -> u32 {
-        self.pool.remaining()
+    pub fn kind(&self) -> &ImageError {
+        &self.kind
     }
 
-    pub fn alloc(
-        &mut self,
+    pub fn into_tile(self) -> Tile {
+        self.tile
+    }
+
+    pub fn into_parts(self) -> (ImageError, Tile) {
+        (self.kind, self.tile)
+    }
+}
+
+impl Display for TileReplaceError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.kind, f)
+    }
+}
+
+impl Error for TileReplaceError {}
+
+#[derive(Debug)]
+pub struct PrimitiveImage {
+    format: GlaFormat,
+    layout: GlaImageLayout,
+    tiles: Box<[Tile]>,
+}
+
+impl PrimitiveImage {
+    pub fn allocate(
         format: GlaFormat,
         layout: GlaImageLayout,
         tiles: &mut Tiles,
         atlas_id: u8,
-    ) -> Result<GlaImageKey, GlaImagesError> {
-        if self.pool.remaining() == 0 {
-            return Err(GlaImagesError::KeyPoolFull);
-        }
-
-        let tile_keys = tiles
-            .alloc_batch_from(atlas_id, layout.tile_count())
-            .map_err(|source| GlaImagesError::TileAllocFailed { source })?;
-        self.insert(format, layout, tile_keys.into_boxed_slice())
+    ) -> Result<Self, ImageError> {
+        validate_non_zero_layout(layout)?;
+        let image_tiles = tiles.reserve_batch(atlas_id, layout.tile_count())?;
+        Ok(Self {
+            format,
+            layout,
+            tiles: image_tiles.into_boxed_slice(),
+        })
     }
 
-    pub fn insert(
-        &mut self,
-        format: GlaFormat,
-        layout: GlaImageLayout,
-        tiles: Box<[TileKey]>,
-    ) -> Result<GlaImageKey, GlaImagesError> {
-        let image = GlaImage::new(format, layout, tiles)?;
-        self.insert_image(image)
+    pub fn format(&self) -> GlaFormat {
+        self.format
     }
 
-    fn insert_image(&mut self, image: GlaImage) -> Result<GlaImageKey, GlaImagesError> {
-        let (index, generation) = self.pool.alloc()?;
-        let key = GlaImageKey::new(index, generation);
-        self.bind_image(key, image);
-        Ok(key)
+    pub fn layout(&self) -> GlaImageLayout {
+        self.layout
     }
 
-    pub fn insert_invalid(
-        &mut self,
-        format: GlaFormat,
-        layout: GlaImageLayout,
-    ) -> Result<GlaImageKey, GlaImagesError> {
-        let tiles = vec![TileKey::INVALID; layout.tile_count() as usize].into_boxed_slice();
-        self.insert(format, layout, tiles)
+    pub fn tile_count(&self) -> u32 {
+        self.layout.tile_count()
     }
 
-    pub fn free(&mut self, key: GlaImageKey) -> Result<(), GlaImagesError> {
-        self.ensure_valid(key)?;
-        self.images[key.index() as usize] = None;
-        self.pool.free(key.index());
-        Ok(())
-    }
-
-    pub fn ensure_valid(&self, key: GlaImageKey) -> Result<(), GlaImagesError> {
-        self.pool
-            .check(key.index(), key.generation())
-            .then_some(())
-            .ok_or(GlaImagesError::KeyGenMisMatch { key })?;
-
-        self.images
-            .get(key.index() as usize)
-            .and_then(Option::as_ref)
-            .ok_or(GlaImagesError::InvalidKey { key })?;
-
-        Ok(())
-    }
-
-    pub fn get(&self, key: GlaImageKey) -> Result<&GlaImage, GlaImagesError> {
-        self.ensure_valid(key)?;
-        self.images[key.index() as usize]
-            .as_ref()
-            .ok_or(GlaImagesError::InvalidKey { key })
-    }
-
-    pub fn get_mut(&mut self, key: GlaImageKey) -> Result<&mut GlaImage, GlaImagesError> {
-        self.ensure_valid(key)?;
-        self.images[key.index() as usize]
-            .as_mut()
-            .ok_or(GlaImagesError::InvalidKey { key })
-    }
-
-    pub fn tile(&self, key: GlaImageKey, tile_index: u32) -> Result<TileKey, GlaImagesError> {
-        let image = self.get(key)?;
-        image
-            .tiles
+    pub fn tile(&self, tile_index: u32) -> Result<&Tile, ImageError> {
+        let tile_count = self.tile_count();
+        self.tiles
             .get(tile_index as usize)
-            .copied()
-            .ok_or(GlaImagesError::TileIndexOutOfBounds {
-                key,
+            .ok_or(ImageError::TileIndexOutOfBounds {
                 tile_index,
-                tile_count: image.layout.tile_count(),
+                tile_count,
             })
     }
 
-    pub fn set_tile(
-        &mut self,
-        key: GlaImageKey,
-        tile_index: u32,
-        tile_key: TileKey,
-    ) -> Result<(), GlaImagesError> {
-        let image = self.get_mut(key)?;
-        let tile_count = image.layout.tile_count();
-        let tile = image.tiles.get_mut(tile_index as usize).ok_or(
-            GlaImagesError::TileIndexOutOfBounds {
-                key,
+    pub fn tile_mut(&mut self, tile_index: u32) -> Result<&mut Tile, ImageError> {
+        let tile_count = self.tile_count();
+        self.tiles
+            .get_mut(tile_index as usize)
+            .ok_or(ImageError::TileIndexOutOfBounds {
                 tile_index,
                 tile_count,
-            },
-        )?;
-        *tile = tile_key;
-        Ok(())
+            })
     }
 
-    fn bind_image(&mut self, key: GlaImageKey, image: GlaImage) {
-        let index = key.index() as usize;
-        if self.images.len() <= index {
-            self.images.resize_with(index + 1, || None);
-        }
-
-        debug_assert!(
-            self.images[index].is_none(),
-            "binding image key {key:?} over an occupied slot"
-        );
-        self.images[index] = Some(image);
+    pub fn replace_tile(
+        &mut self,
+        tile_index: u32,
+        new_tile: Tile,
+    ) -> Result<Tile, TileReplaceError> {
+        let tile_count = self.tile_count();
+        let Some(tile) = self.tiles.get_mut(tile_index as usize) else {
+            return Err(TileReplaceError::new(
+                ImageError::TileIndexOutOfBounds {
+                    tile_index,
+                    tile_count,
+                },
+                new_tile,
+            ));
+        };
+        Ok(std::mem::replace(tile, new_tile))
     }
-}
 
-impl Default for GlaImages {
-    fn default() -> Self {
-        Self::new()
+    pub fn into_tiles(self) -> Box<[Tile]> {
+        self.tiles
     }
-}
 
-impl From<PoolError> for GlaImagesError {
-    fn from(error: PoolError) -> Self {
-        match error {
-            PoolError::Full => GlaImagesError::KeyPoolFull,
+    pub fn release_tiles(self, tiles: &mut Tiles) {
+        for tile in self.tiles.into_vec() {
+            tiles.release(tile);
         }
     }
 }
 
-impl From<TilesError> for GlaImagesError {
-    fn from(source: TilesError) -> Self {
-        GlaImagesError::TileAllocFailed { source }
+#[derive(Debug)]
+pub struct DerivedImage {
+    format: GlaFormat,
+    layout: GlaImageLayout,
+    tiles: Box<[Option<Tile>]>,
+}
+
+impl DerivedImage {
+    pub fn new_invalid(format: GlaFormat, layout: GlaImageLayout) -> Result<Self, ImageError> {
+        validate_non_zero_layout(layout)?;
+        let tiles = (0..layout.tile_count())
+            .map(|_| None)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(Self {
+            format,
+            layout,
+            tiles,
+        })
     }
+
+    pub fn format(&self) -> GlaFormat {
+        self.format
+    }
+
+    pub fn layout(&self) -> GlaImageLayout {
+        self.layout
+    }
+
+    pub fn tile_count(&self) -> u32 {
+        self.layout.tile_count()
+    }
+
+    pub fn tile(&self, tile_index: u32) -> Result<Option<&Tile>, ImageError> {
+        let tile_count = self.tile_count();
+        self.tiles
+            .get(tile_index as usize)
+            .map(Option::as_ref)
+            .ok_or(ImageError::TileIndexOutOfBounds {
+                tile_index,
+                tile_count,
+            })
+    }
+
+    pub fn tile_mut(&mut self, tile_index: u32) -> Result<Option<&mut Tile>, ImageError> {
+        let tile_count = self.tile_count();
+        self.tiles
+            .get_mut(tile_index as usize)
+            .map(Option::as_mut)
+            .ok_or(ImageError::TileIndexOutOfBounds {
+                tile_index,
+                tile_count,
+            })
+    }
+
+    pub fn replace_tile(
+        &mut self,
+        tile_index: u32,
+        new_tile: Tile,
+    ) -> Result<Option<Tile>, TileReplaceError> {
+        let tile_count = self.tile_count();
+        let Some(slot) = self.tiles.get_mut(tile_index as usize) else {
+            return Err(TileReplaceError::new(
+                ImageError::TileIndexOutOfBounds {
+                    tile_index,
+                    tile_count,
+                },
+                new_tile,
+            ));
+        };
+        Ok(slot.replace(new_tile))
+    }
+
+    pub fn take_tile(&mut self, tile_index: u32) -> Result<Option<Tile>, ImageError> {
+        let tile_count = self.tile_count();
+        let slot =
+            self.tiles
+                .get_mut(tile_index as usize)
+                .ok_or(ImageError::TileIndexOutOfBounds {
+                    tile_index,
+                    tile_count,
+                })?;
+        Ok(slot.take())
+    }
+
+    pub fn into_tiles(self) -> Box<[Option<Tile>]> {
+        self.tiles
+    }
+
+    pub fn release_tiles(self, tiles: &mut Tiles) {
+        for tile in self.tiles.into_vec() {
+            tiles.release_optional(tile);
+        }
+    }
+}
+
+fn validate_non_zero_layout(layout: GlaImageLayout) -> Result<(), ImageError> {
+    if layout.tile_count() == 0 {
+        return Err(ImageError::ZeroSizeImage);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GlaImageLayout, GlaImages, GlaImagesError, IMAGE_TILE_SIZE};
+    use super::{
+        DerivedImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, PrimitiveImage, TileSet,
+    };
+    use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
-    use tile_key::TileKey;
+    use tile_key::{TileReadRef, Tiles};
 
     fn format() -> GlaFormat {
         GlaFormat {
             channel_count: ChannelCount::D4,
             channel_type: ChannelType::U8,
         }
+    }
+
+    fn new_test_atlas(tiles: &mut Tiles) -> u8 {
+        let mut textures = NoAtlasTextures;
+        tiles
+            .new_atlas(AtlasLayout::TINY8, format(), &mut textures)
+            .unwrap()
     }
 
     #[test]
@@ -382,49 +381,147 @@ mod tests {
     }
 
     #[test]
-    fn insert_validates_tile_count() {
-        let mut images = GlaImages::new();
-        let err = images
-            .insert(
-                format(),
-                GlaImageLayout::new(1, 1),
-                Vec::new().into_boxed_slice(),
-            )
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            GlaImagesError::TileCountMisMatch {
-                expected: 1,
-                actual: 0
-            }
-        ));
+    fn tile_set_sorts_and_deduplicates_tiles() {
+        assert_eq!(TileSet::tiles([3, 1, 3, 2]), TileSet::Tiles(vec![1, 2, 3]));
     }
 
     #[test]
-    fn free_reuses_image_slot_with_new_generation() {
-        let mut images = GlaImages::new();
-        let layout = GlaImageLayout::new(1, 1);
-        let first_tile = TileKey::new(7, 0);
-        let second_tile = TileKey::new(9, 0);
+    fn primitive_allocate_reserves_full_valid_zero_tiles() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let image = PrimitiveImage::allocate(
+            format(),
+            GlaImageLayout::new(IMAGE_TILE_SIZE + 1, IMAGE_TILE_SIZE),
+            &mut tiles,
+            atlas_id,
+        )
+        .unwrap();
 
-        let first = images
-            .insert(format(), layout, vec![first_tile].into_boxed_slice())
-            .unwrap();
-        assert_eq!(images.tile(first, 0).unwrap(), first_tile);
-
-        images.free(first).unwrap();
-        assert!(matches!(
-            images.get(first),
-            Err(GlaImagesError::KeyGenMisMatch { .. })
-        ));
-
-        let second = images
-            .insert(format(), layout, vec![second_tile].into_boxed_slice())
-            .unwrap();
-        assert_eq!(second.index(), first.index());
-        assert_eq!(second.generation(), first.generation() + 1);
-        assert_eq!(images.tile(second, 0).unwrap(), second_tile);
+        assert_eq!(image.tile_count(), 2);
+        assert_eq!(tiles.atlas(atlas_id).unwrap().remaining(), 256);
+        assert_eq!(
+            tiles.read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
+        assert_eq!(
+            tiles.read_ref(image.tile(1).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
     }
 
+    #[test]
+    fn primitive_replace_tile_moves_previous_owner_out() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let mut image =
+            PrimitiveImage::allocate(format(), GlaImageLayout::new(1, 1), &mut tiles, atlas_id)
+                .unwrap();
+        let replacement = tiles.reserve(atlas_id).unwrap();
+
+        let old = image.replace_tile(0, replacement).unwrap();
+
+        tiles.release(old);
+        assert_eq!(
+            tiles.read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
+    }
+
+    #[test]
+    fn primitive_replace_tile_returns_new_owner_on_out_of_bounds() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let mut image =
+            PrimitiveImage::allocate(format(), GlaImageLayout::new(1, 1), &mut tiles, atlas_id)
+                .unwrap();
+        let replacement = tiles.reserve(atlas_id).unwrap();
+
+        let err = image.replace_tile(1, replacement).unwrap_err();
+
+        assert!(matches!(
+            err.kind(),
+            ImageError::TileIndexOutOfBounds {
+                tile_index: 1,
+                tile_count: 1
+            }
+        ));
+        tiles.release(err.into_tile());
+    }
+
+    #[test]
+    fn derived_invalid_image_starts_with_cache_misses() {
+        let image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+
+        assert_eq!(image.tile_count(), 1);
+        assert!(image.tile(0).unwrap().is_none());
+    }
+
+    #[test]
+    fn derived_replace_tile_returns_previous_optional_owner() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let mut image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+        let first = tiles.reserve(atlas_id).unwrap();
+        let second = tiles.reserve(atlas_id).unwrap();
+
+        assert!(image.replace_tile(0, first).unwrap().is_none());
+        let old = image.replace_tile(0, second).unwrap().unwrap();
+
+        tiles.release(old);
+        assert_eq!(
+            tiles.read_ref(image.tile(0).unwrap().unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
+    }
+
+    #[test]
+    fn derived_replace_tile_returns_new_owner_on_out_of_bounds() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let mut image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+        let replacement = tiles.reserve(atlas_id).unwrap();
+
+        let err = image.replace_tile(1, replacement).unwrap_err();
+
+        assert!(matches!(
+            err.kind(),
+            ImageError::TileIndexOutOfBounds {
+                tile_index: 1,
+                tile_count: 1
+            }
+        ));
+        tiles.release(err.into_tile());
+    }
+
+    #[test]
+    fn derived_take_tile_clears_slot() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let mut image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+        let tile = tiles.reserve(atlas_id).unwrap();
+        image.replace_tile(0, tile).unwrap();
+
+        let taken = image.take_tile(0).unwrap().unwrap();
+
+        assert!(image.tile(0).unwrap().is_none());
+        tiles.release(taken);
+    }
+
+    #[test]
+    fn image_constructors_reject_zero_size_layouts() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let primitive = PrimitiveImage::allocate(
+            format(),
+            GlaImageLayout::new(0, IMAGE_TILE_SIZE),
+            &mut tiles,
+            atlas_id,
+        )
+        .unwrap_err();
+        let derived = DerivedImage::new_invalid(format(), GlaImageLayout::new(IMAGE_TILE_SIZE, 0))
+            .unwrap_err();
+
+        assert!(matches!(primitive, ImageError::ZeroSizeImage));
+        assert!(matches!(derived, ImageError::ZeroSizeImage));
+    }
 }

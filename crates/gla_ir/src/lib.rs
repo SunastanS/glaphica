@@ -305,13 +305,6 @@ pub enum RegistryPatchOp {
         layout: GlaImageLayout,
         role: ImageRole,
     },
-    InsertImage {
-        id: ImageId,
-        key: gla_image::GlaImageKey,
-        role: ImageRole,
-        format: GlaFormat,
-        layout: GlaImageLayout,
-    },
     SetPrimitive(ImageId),
     SetDerived {
         id: ImageId,

@@ -41,11 +41,32 @@ make the initial tile-slot state explicit:
 - optional slots for derived/cache images that start invalid;
 - non-optional valid slots for primitive/raw images that start as zero content.
 
-The open constructor design is whether this should be represented as separate
-constructors such as `new_none(...)` and `new_empty(...)`, or as staged
-construction such as `new_none(...).valid_all(...)`.
+The constructor direction is now explicit at the image value layer:
 
-Another open design option is to split image storage by role:
+- `PrimitiveImage::allocate(...)` reserves a full valid tile array initialized
+  as zero/empty content through the tile resource layer.
+- `DerivedImage::new_invalid(...)` creates a full cache-miss array with
+  `None` slots.
+
+Image constructors reject zero-tile layouts. `GlaImageLayout` can still compute
+`tile_count() == 0`; the resource-owning image values are the layer that rejects
+zero-size images.
+
+Do not expose public constructors that accept raw tile arrays such as
+`Box<[Tile]>` or `Box<[Option<Tile>]>`. With move-only tile owners, any fallible
+constructor that accepts raw owned tiles needs an awkward error path that returns
+the owners to the caller. The cleaner boundary is for image constructors to
+validate layout before allocating or initializing slots. Whole-image migration,
+deserialization, or test fixture paths can be added later as restricted helpers
+with a clearly trusted precondition.
+
+The same rule applies to slot mutation APIs that accept a replacement `Tile`.
+If a method accepts a new owner and can fail before installing it, its error
+type must return that owner. `PrimitiveImage::replace_tile` and
+`DerivedImage::replace_tile` therefore return a tile-carrying error on
+out-of-bounds indices instead of dropping the replacement tile.
+
+Image storage is split by role:
 
 ```rust
 enum DocumentImage {
@@ -54,12 +75,11 @@ enum DocumentImage {
 }
 ```
 
-or an equivalent enum that stores the derive command with the derived image
-value. The current code already ties role and command at the metadata level with
-`ImageRole::Derived(GraphCommand)`, but storage remains separate through
-`Document.roles` and `Document.bindings`. In the target architecture, storing
-the command inside a derived image may improve locality: the cache tiles and the
-only command that can materialize them live together.
+or an equivalent map-level enum that stores the derive command next to the
+derived image value. The current `gla_image` crate intentionally stops before
+that map: it owns only `PrimitiveImage` and `DerivedImage` values and their tile
+slot invariants. The `ImageId -> DocumentImage` map and command locality decision
+belong to the next layer.
 
 This split should not wrap a shared `GlaImage` storage type. The role split is
 valuable because the two images have different slot representations:
@@ -109,17 +129,25 @@ This is a large refactor, not a small fix:
 - `gla_image_command` lowering currently uses key-level image identity and would
   need a new render context seam if `GlaImageKey` goes away.
 - `RegistryPatch` remains relevant for Rust-owned derived image definitions, but
-  its storage target may change from image rows to image-id map entries.
+  it must not carry arena row keys. The old `InsertImage { key: GlaImageKey,
+  ... }` operation is removed with the arena; patch operations are image-id and
+  metadata/role declarations.
+- Session construction and commit currently take large resource stores by value
+  (`GlaImages`, `Tiles`, `Renderer`) and then return `Result`. Under move-only
+  resource ownership, these APIs need a sharper failure contract: validate before
+  moving stores, borrow an external resource context, or return the resource
+  bundle on failure. Otherwise an initialization or commit error can drop the
+  caller's resource owners.
 
 ## Current Recommendation
 
-Do not spend effort preserving the current `GlaImages::free` semantics. The
-current function releases an arena row but does not release tile resources, so it
-does not match the ownership model under review.
+Do not preserve the current `GlaImages`/`GlaImageKey` arena. Once the bottom
+`Tile` resource layer is move-only, `gla_image` should be added back as a
+role-specific image value crate, not as an arena compatibility layer.
 
-When this refactor is scheduled, define image removal around owned
-`PrimitiveImage`/`DerivedImage` values and their tile arrays. Until then, leave
-`free` as known legacy code rather than expanding it.
+Image removal is defined around owned `PrimitiveImage`/`DerivedImage` values and
+their tile arrays. The value layer can move all owned tiles into
+`Tiles::release`/`release_optional`; it does not need row-generation cleanup.
 
 Do not use a shared inner `GlaImage` for both primitive and derived images. That
 would preserve the exact ambiguity the role-specific types are meant to remove.
