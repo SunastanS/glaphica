@@ -2,7 +2,8 @@ use atlas::TilePos;
 use gla_color::GlaFormat;
 use gla_core::CanvasInput;
 use gla_image::{
-    DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, TileReplaceError, TileSet,
+    DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, ImageLayoutError, TileReplaceError,
+    TileSet,
 };
 use gla_image_command::{Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef, RenderCtx};
 use gla_ir::{
@@ -33,6 +34,7 @@ pub type DrawRecordId = u64;
 struct StoredImageEditPatch {
     version: DocumentVersionId,
     edits: HashMap<ImageId, ImageEdit>,
+    dirty: HashMap<ImageId, TileSet>,
 }
 
 #[derive(Default, Debug)]
@@ -67,7 +69,9 @@ impl DrawHistory {
             .patches
             .remove(&id)
             .expect("validated history patch must still exist");
+        let dirty = stored.dirty;
         let inverse = global.apply_primitive_edits(stored.edits);
+        refresh_global_dirty(global, dirty)?;
         let version = global.bump_version();
         Ok(self.store_inverse(version, inverse))
     }
@@ -79,8 +83,15 @@ impl DrawHistory {
     ) -> DrawRecordId {
         let id = self.next_id;
         self.next_id += 1;
-        self.patches
-            .insert(id, StoredImageEditPatch { version, edits });
+        let dirty = dirty_from_edits(&edits);
+        self.patches.insert(
+            id,
+            StoredImageEditPatch {
+                version,
+                edits,
+                dirty,
+            },
+        );
         id
     }
 }
@@ -155,7 +166,8 @@ pub enum SessionError {
         id: ImageId,
         source: TilesError,
     },
-    Renderer(gla_renderer::GpuRendererError),
+    Renderer(gla_renderer::RendererError),
+    GpuRenderer(gla_renderer::GpuRendererError),
 }
 
 impl Display for SessionError {
@@ -219,7 +231,8 @@ impl Display for SessionError {
             }
             Self::Image { id, source } => write!(f, "image {id:?} access failed: {source}"),
             Self::Tile { id, source } => write!(f, "tile access for image {id:?} failed: {source}"),
-            Self::Renderer(source) => write!(f, "renderer execution failed: {source}"),
+            Self::Renderer(source) => write!(f, "renderer pass recording failed: {source}"),
+            Self::GpuRenderer(source) => write!(f, "GPU renderer execution failed: {source}"),
         }
     }
 }
@@ -230,14 +243,21 @@ impl Error for SessionError {
             Self::Image { source, .. } => Some(source),
             Self::Tile { source, .. } => Some(source),
             Self::Renderer(source) => Some(source),
+            Self::GpuRenderer(source) => Some(source),
             _ => None,
         }
     }
 }
 
+impl From<gla_renderer::RendererError> for SessionError {
+    fn from(source: gla_renderer::RendererError) -> Self {
+        Self::Renderer(source)
+    }
+}
+
 impl From<gla_renderer::GpuRendererError> for SessionError {
     fn from(source: gla_renderer::GpuRendererError) -> Self {
-        Self::Renderer(source)
+        Self::GpuRenderer(source)
     }
 }
 
@@ -470,6 +490,11 @@ impl DrawSession {
             return Err(SessionError::ExpectedDocumentVersion { expected, actual });
         }
 
+        if let Err(error) = self.flush_frame(global) {
+            self.release_tiles(global.tiles_mut());
+            return Err(error);
+        }
+
         let edits = self.take_commit_edits();
         match global.apply_session_edits(edits) {
             Ok(inverse) => {
@@ -489,6 +514,26 @@ impl DrawSession {
 
     pub fn discard(self, global: &mut GlobalStorage) {
         self.release_tiles(global.tiles_mut());
+    }
+
+    fn apply_cache_refresh_edits(mut self, global: &mut GlobalStorage) -> Result<(), SessionError> {
+        let edits = self.take_commit_edits();
+        match global.apply_session_edits(edits) {
+            Ok(inverse) => {
+                assert!(
+                    inverse.is_empty(),
+                    "cache refresh session must only write derived cache images"
+                );
+                self.release_tiles(global.tiles_mut());
+                Ok(())
+            }
+            Err(error) => {
+                let (error, edits) = error.into_parts();
+                release_image_edits(global.tiles_mut(), edits);
+                self.release_tiles(global.tiles_mut());
+                Err(error.into())
+            }
+        }
     }
 
     fn render_ctx<'a>(&'a mut self, global: &'a mut GlobalStorage) -> SessionRenderCtx<'a> {
@@ -577,15 +622,16 @@ impl DrawSession {
                 .get(&id)
                 .ok_or(SessionError::MissingLocalImage { id })?
                 .layout();
+            let tile_count = checked_layout_tile_count(id, layout)?;
             match dirty {
                 TileSet::Full => {
-                    for tile_index in 0..layout.tile_count() {
+                    for tile_index in 0..tile_count {
                         ctx.render(SessionImageId::Current(id), tile_index)?;
                     }
                 }
                 TileSet::Tiles(tiles) => {
                     for tile_index in tiles {
-                        if tile_index < layout.tile_count() {
+                        if tile_index < tile_count {
                             ctx.render(SessionImageId::Current(id), tile_index)?;
                         }
                     }
@@ -644,7 +690,8 @@ impl DrawSession {
 
         match (edge.mapping, edge.modifier) {
             (Mapping::Identity, FootprintModifier::None) => {
-                let dst_tile_count = self.layout_of_id(edge.dst, global)?.tile_count();
+                let dst_tile_count =
+                    checked_layout_tile_count(edge.dst, self.layout_of_id(edge.dst, global)?)?;
                 let mut projected = TileSet::default();
                 match src_dirty {
                     TileSet::Full => Ok(TileSet::Full),
@@ -835,12 +882,13 @@ impl SessionRenderCtx<'_> {
                     .map_err(|source| SessionError::Tile { id, source })
             }
             SessionImageContent::Edit(edit) => {
-                if tile_index >= image.layout.tile_count() {
+                let tile_count = checked_layout_tile_count(id, image.layout)?;
+                if tile_index >= tile_count {
                     return Err(SessionError::Image {
                         id,
                         source: ImageError::TileIndexOutOfBounds {
                             tile_index,
-                            tile_count: image.layout.tile_count(),
+                            tile_count,
                         },
                     });
                 }
@@ -923,7 +971,7 @@ fn draw_on_input_from_canvas(writer: DrawOnWriter, input: CanvasInput) -> DrawOn
                 center_x,
                 center_y,
                 radius: non_negative_finite(writer.tool_params.radius).max(1.0),
-                flow: input.pressure,
+                flow: finite_or_zero(input.pressure).clamp(0.0, 1.0),
             }
         }
     }
@@ -939,14 +987,24 @@ fn draw_radial_kernel_1d(
     flow: f32,
 ) -> Result<(), SessionError> {
     let radius = non_negative_finite(radius);
-    let flow = finite_or_zero(flow);
+    let flow = finite_or_zero(flow).clamp(0.0, 1.0);
 
-    for tile in radial_footprint_tiles(layout, center_x, center_y, radius) {
+    for tile in radial_footprint_tiles(layout, center_x, center_y, radius).map_err(|source| {
+        SessionError::Image {
+            id,
+            source: ImageError::InvalidLayout { source },
+        }
+    })? {
         let dst = ctx.draw_on_write_pos(id, tile.index)?;
         let center_in_tile_x = center_x - tile.origin_x as f32;
         let center_in_tile_y = center_y - tile.origin_y as f32;
-        ctx.renderer()
-            .draw_radial_kernel_1d(dst, center_in_tile_x, center_in_tile_y, radius, flow);
+        ctx.renderer().draw_radial_kernel_1d(
+            dst,
+            center_in_tile_x,
+            center_in_tile_y,
+            radius,
+            flow,
+        )?;
         ctx.renderer().fix_gutter(dst);
     }
 
@@ -967,10 +1025,10 @@ fn radial_footprint_tiles(
     center_x: f32,
     center_y: f32,
     radius: f32,
-) -> Vec<DabTile> {
-    if layout.tile_count() == 0 || !footprint_intersects_layout(layout, center_x, center_y, radius)
-    {
-        return Vec::new();
+) -> Result<Vec<DabTile>, ImageLayoutError> {
+    layout.checked_tile_count()?;
+    if !footprint_intersects_layout(layout, center_x, center_y, radius) {
+        return Ok(Vec::new());
     }
 
     let min_tx = tile_coord_for_px(center_x - radius, layout.width_px, layout.tile_count_x());
@@ -990,7 +1048,7 @@ fn radial_footprint_tiles(
         }
     }
 
-    tiles
+    Ok(tiles)
 }
 
 fn footprint_intersects_layout(
@@ -1024,6 +1082,15 @@ fn non_negative_finite(value: f32) -> f32 {
 
 fn finite_or_zero(value: f32) -> f32 {
     if value.is_finite() { value } else { 0.0 }
+}
+
+fn checked_layout_tile_count(id: ImageId, layout: GlaImageLayout) -> Result<u32, SessionError> {
+    layout
+        .checked_tile_count()
+        .map_err(|source| SessionError::Image {
+            id,
+            source: ImageError::InvalidLayout { source },
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1236,7 +1303,16 @@ fn activate_global_derived_chain(
     session_specs: &HashMap<ImageId, LocalImageSpec>,
     global: &GlobalStorage,
 ) -> Result<(), SessionError> {
-    let mut frontier: Vec<ImageId> = images.keys().copied().collect();
+    let frontier: Vec<ImageId> = images.keys().copied().collect();
+    activate_global_derived_chain_from(frontier, images, session_specs, global)
+}
+
+fn activate_global_derived_chain_from(
+    mut frontier: Vec<ImageId>,
+    images: &mut HashMap<ImageId, PendingSessionImage>,
+    session_specs: &HashMap<ImageId, LocalImageSpec>,
+    global: &GlobalStorage,
+) -> Result<(), SessionError> {
     let mut scanned = HashSet::new();
 
     while let Some(active_id) = frontier.pop() {
@@ -1270,6 +1346,40 @@ fn activate_global_derived_chain(
     }
 
     Ok(())
+}
+
+fn refresh_global_dirty(
+    global: &mut GlobalStorage,
+    dirty: HashMap<ImageId, TileSet>,
+) -> Result<(), SessionError> {
+    if dirty.values().all(TileSet::is_empty) {
+        return Ok(());
+    }
+
+    let mut session = build_global_cache_refresh_session(global, dirty)?;
+    session.flush_frame(global)?;
+    session.apply_cache_refresh_edits(global)
+}
+
+fn build_global_cache_refresh_session(
+    global: &mut GlobalStorage,
+    dirty: HashMap<ImageId, TileSet>,
+) -> Result<DrawSession, SessionError> {
+    let session_specs = HashMap::new();
+    let mut pending = HashMap::new();
+    let frontier = dirty.keys().copied().collect();
+    activate_global_derived_chain_from(frontier, &mut pending, &session_specs, global)?;
+    validate_writer_cycles(&pending)?;
+    let images = allocate_images(pending, global)?;
+
+    Ok(DrawSession {
+        expected_document_version: global.version(),
+        doc_write_ids: HashSet::new(),
+        draw_on_order: Vec::new(),
+        frame_dirty: dirty,
+        doc_dirty: HashMap::new(),
+        images,
+    })
 }
 
 fn lower_writer(
@@ -1493,6 +1603,16 @@ fn release_image_edits(tiles: &mut Tiles, edits: HashMap<ImageId, ImageEdit>) {
     }
 }
 
+fn dirty_from_edits(edits: &HashMap<ImageId, ImageEdit>) -> HashMap<ImageId, TileSet> {
+    edits
+        .iter()
+        .filter_map(|(id, edit)| {
+            let dirty = TileSet::tiles(edit.edits().iter().map(|(tile_index, _)| *tile_index));
+            (!dirty.is_empty()).then_some((*id, dirty))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1500,7 +1620,7 @@ mod tests {
     use gla_color::{ChannelCount, ChannelType};
     use gla_core::CanvasCoordF;
     use gla_ir::{DocImageUse, GraphRead, RegistryPatch, RegistryPatchOp, SessionRead, ToolParams};
-    use gla_renderer::Pass;
+    use gla_renderer::{Pass, RendererCapabilities};
     use tile_key::{TileReadRef, Tiles};
 
     fn rgba_format() -> GlaFormat {
@@ -1536,6 +1656,23 @@ mod tests {
     }
 
     fn storage_with_atlases() -> GlobalStorage {
+        let mut tiles = Tiles::new();
+        let mut textures = NoAtlasTextures;
+        tiles
+            .new_atlas(AtlasLayout::TINY8, rgba_format(), &mut textures)
+            .unwrap();
+        tiles
+            .new_atlas(AtlasLayout::TINY8, value_format(), &mut textures)
+            .unwrap();
+        GlobalStorage::new(
+            tiles,
+            Renderer::with_capabilities(RendererCapabilities {
+                draw_radial_kernel_1d: true,
+            }),
+        )
+    }
+
+    fn storage_without_radial_capability() -> GlobalStorage {
         let mut tiles = Tiles::new();
         let mut textures = NoAtlasTextures;
         tiles
@@ -1637,6 +1774,66 @@ mod tests {
     }
 
     #[test]
+    fn draw_dab_requires_radial_renderer_capability() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_without_radial_capability();
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+
+        let err = session
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 0.25))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::Renderer(gla_renderer::RendererError::UnsupportedDrawRadialKernel1D)
+        ));
+        assert!(global.renderer().passes().is_empty());
+    }
+
+    #[test]
+    fn draw_dab_clamps_radial_flow_to_unit_interval() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let mut draw = DrawOnCommand::new(coverage);
+        draw.tool_params = ToolParams { radius: 2.0 };
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![draw],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+
+        session
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 4.0))
+            .unwrap();
+
+        assert!(
+            global
+                .renderer()
+                .passes()
+                .iter()
+                .any(|pass| matches!(pass, Pass::DrawRadialKernel1D { flow, .. } if *flow == 1.0))
+        );
+    }
+
+    #[test]
     fn flush_frame_uploads_dirty_and_materializes_downstream_derive() {
         let base = ImageId::new(1);
         let coverage = ImageId::new(2);
@@ -1700,6 +1897,101 @@ mod tests {
             global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
             TileReadRef::Zero
         );
+    }
+
+    #[test]
+    fn commit_flushes_pending_scratch_derive_before_applying_edits() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), SessionRead::current(coverage)],
+                base,
+            )],
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        session
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 0.6))
+            .unwrap();
+        let mut history = DrawHistory::new();
+
+        let commit = session.commit(&mut global, &mut history).unwrap();
+
+        assert_eq!(commit.version, DocumentVersionId::new(1));
+        assert!(history.patches.contains_key(&commit.record_id));
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert!(matches!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Physical(_)
+        ));
+    }
+
+    #[test]
+    fn stored_patch_replay_refreshes_downstream_derived_cache() {
+        let base = ImageId::new(1);
+        let group = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        add_global_derived(&mut global, group, vec![GraphRead::current(base)]);
+
+        let reader_ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read(base)],
+            session_images: Vec::new(),
+            draw_on: Vec::new(),
+            derive: Vec::new(),
+        };
+        let mut reader = DrawSession::begin(&reader_ir, &mut global).unwrap();
+        let _old_group_pos = {
+            let mut ctx = reader.render_ctx(&mut global);
+            let TileReadRef::Physical(pos) = ctx.render(SessionImageId::Global(group), 0).unwrap()
+            else {
+                panic!("global derived cache should materialize before undo");
+            };
+            pos
+        };
+
+        global.renderer_mut().clear_passes();
+        let draw_ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&draw_ir, &mut global).unwrap();
+        session
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+        let mut history = DrawHistory::new();
+        let commit = session.commit(&mut global, &mut history).unwrap();
+
+        global.renderer_mut().clear_passes();
+        let undo_record = history
+            .apply_stored_patch(commit.record_id, &mut global)
+            .unwrap();
+        let TileReadRef::Physical(new_group_pos) = global.read_global_ref(group, 0).unwrap() else {
+            panic!("global derived cache should remain materialized after undo refresh");
+        };
+
+        assert_eq!(
+            global.renderer().passes(),
+            &[
+                Pass::Clear { dst: new_group_pos },
+                Pass::FixGutter { dst: new_group_pos },
+            ]
+        );
+        assert!(history.patches.contains_key(&undo_record));
     }
 
     #[test]

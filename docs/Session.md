@@ -332,7 +332,9 @@ DrawSession::commit(doc, history) -> CommittedDraw
 ```
 
 Commit requires that the document version still matches the version captured at
-session start. It then gathers `ImageEdit`s from document shadows.
+session start. It first flushes any pending frame dirty, so callers do not need
+to remember a separate `flush_frame` call before commit. It then gathers
+`ImageEdit`s from document shadows.
 
 Primitive document edits are applied in place to the currently bound
 `GlaImageKey` for each `ImageId`. Before applying, commit validates edit tile

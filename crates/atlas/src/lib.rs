@@ -112,6 +112,7 @@ pub struct AtlasLayout {
 }
 
 impl AtlasLayout {
+    // Names encode total slot exponent: TINY8 has 2^8 slots, not edge length 8.
     pub const TINY8: AtlasLayout = AtlasLayout {
         tiles_per_edge: 16,
         layer_num: 1,
@@ -137,6 +138,14 @@ impl AtlasLayout {
         self.tiles_per_edge * self.tiles_per_edge * self.layer_num
     }
 
+    pub const fn tiles_per_edge(self) -> usize {
+        self.tiles_per_edge
+    }
+
+    pub const fn layer_num(self) -> usize {
+        self.layer_num
+    }
+
     pub fn index_to_address(self, index: usize) -> Result<TileAddress, AtlasLayoutError> {
         if index >= self.total_slots() {
             return Err(AtlasLayoutError::OutOfBounds);
@@ -154,6 +163,13 @@ impl AtlasLayout {
     }
 
     pub fn address_to_index(self, address: TileAddress) -> Result<usize, AtlasLayoutError> {
+        if address.layer >= self.layer_num
+            || address.tile_y >= self.tiles_per_edge
+            || address.tile_x >= self.tiles_per_edge
+        {
+            return Err(AtlasLayoutError::OutOfBounds);
+        }
+
         let tiles_per_edge = self.tiles_per_edge;
         let index = address
             .layer
@@ -255,7 +271,7 @@ impl Atlas {
 
 #[cfg(test)]
 mod tests {
-    use super::{Atlas, AtlasLayout, TilePos};
+    use super::{Atlas, AtlasLayout, AtlasLayoutError, TileAddress, TilePos};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
 
     fn format() -> GlaFormat {
@@ -280,5 +296,38 @@ mod tests {
         let mut atlas = Atlas::new(3, AtlasLayout::TINY8, format());
 
         atlas.free(TilePos::new(4, 0));
+    }
+
+    #[test]
+    fn address_to_index_rejects_component_out_of_bounds() {
+        let layout = AtlasLayout::TINY8;
+        let edge = layout.tiles_per_edge();
+
+        assert_eq!(
+            layout.address_to_index(TileAddress {
+                layer: 0,
+                tile_x: edge,
+                tile_y: 0,
+            }),
+            Err(AtlasLayoutError::OutOfBounds)
+        );
+
+        assert_eq!(
+            layout.address_to_index(TileAddress {
+                layer: 0,
+                tile_x: 0,
+                tile_y: edge,
+            }),
+            Err(AtlasLayoutError::OutOfBounds)
+        );
+
+        assert_eq!(
+            layout.address_to_index(TileAddress {
+                layer: layout.layer_num(),
+                tile_x: 0,
+                tile_y: 0,
+            }),
+            Err(AtlasLayoutError::OutOfBounds)
+        );
     }
 }

@@ -8,11 +8,11 @@ use gla_color::{
 use gla_core::{ATLAS_TILE_SIZE, GUTTER_SIZE, IMAGE_TILE_SIZE};
 use wgpu::util::DeviceExt;
 
-use crate::Pass;
 use crate::texture::{
     RendererTexture, RendererTextureDescriptor, TextureFormatRuntime, TextureResourceError,
     runtime_format,
 };
+use crate::{Pass, RendererCapabilities};
 
 const RGBA_COMPOSITE_SHADER: &str = r#"
 struct CompositeUniforms {
@@ -369,6 +369,10 @@ impl GpuRenderer {
             tile_buffers,
             composite,
         })
+    }
+
+    pub fn capabilities(&self) -> RendererCapabilities {
+        RendererCapabilities::default()
     }
 
     pub fn execute_passes(&mut self, passes: &[Pass]) -> Result<(), GpuRendererError> {

@@ -26,10 +26,42 @@ impl GlaImageLayout {
         self.height_px.div_ceil(IMAGE_TILE_SIZE)
     }
 
+    pub fn checked_tile_count(&self) -> Result<u32, ImageLayoutError> {
+        if self.width_px == 0 || self.height_px == 0 {
+            return Err(ImageLayoutError::Empty);
+        }
+        self.tile_count_x()
+            .checked_mul(self.tile_count_y())
+            .ok_or(ImageLayoutError::TooLarge)
+    }
+
     pub fn tile_count(&self) -> u32 {
-        self.tile_count_x() * self.tile_count_y()
+        match self.checked_tile_count() {
+            Ok(tile_count) => tile_count,
+            Err(ImageLayoutError::Empty) => 0,
+            Err(ImageLayoutError::TooLarge) => {
+                panic!("image layout tile count must fit in u32")
+            }
+        }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageLayoutError {
+    Empty,
+    TooLarge,
+}
+
+impl Display for ImageLayoutError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("image layout must contain at least one tile"),
+            Self::TooLarge => f.write_str("image layout tile count overflows u32"),
+        }
+    }
+}
+
+impl Error for ImageLayoutError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TileSet {
@@ -97,7 +129,7 @@ impl Default for TileSet {
 
 #[derive(Debug)]
 pub enum ImageError {
-    ZeroSizeImage,
+    InvalidLayout { source: ImageLayoutError },
     TileIndexOutOfBounds { tile_index: u32, tile_count: u32 },
     TileAllocFailed { source: TilesError },
 }
@@ -105,7 +137,7 @@ pub enum ImageError {
 impl Display for ImageError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ZeroSizeImage => f.write_str("image must contain at least one tile"),
+            Self::InvalidLayout { source } => write!(f, "invalid image layout: {source}"),
             Self::TileIndexOutOfBounds {
                 tile_index,
                 tile_count,
@@ -120,7 +152,15 @@ impl Display for ImageError {
     }
 }
 
-impl Error for ImageError {}
+impl Error for ImageError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidLayout { source } => Some(source),
+            Self::TileAllocFailed { source } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl From<TilesError> for ImageError {
     fn from(source: TilesError) -> Self {
@@ -173,8 +213,8 @@ impl DenseImage {
         layout: GlaImageLayout,
         tiles: &mut Tiles,
     ) -> Result<Self, ImageError> {
-        validate_non_zero_layout(layout)?;
-        let image_tiles = tiles.reserve_batch_for_format(format, layout.tile_count())?;
+        let tile_count = checked_tile_count(layout)?;
+        let image_tiles = tiles.reserve_batch_for_format(format, tile_count)?;
         Ok(Self {
             format,
             layout,
@@ -191,7 +231,10 @@ impl DenseImage {
     }
 
     pub fn tile_count(&self) -> u32 {
-        self.layout.tile_count()
+        self.tiles
+            .len()
+            .try_into()
+            .expect("dense image tile count must fit in u32")
     }
 
     pub fn tile(&self, tile_index: u32) -> Result<&Tile, ImageError> {
@@ -252,8 +295,8 @@ pub struct CacheImage {
 
 impl CacheImage {
     pub fn new_invalid(format: GlaFormat, layout: GlaImageLayout) -> Result<Self, ImageError> {
-        validate_non_zero_layout(layout)?;
-        let tiles = (0..layout.tile_count())
+        let tile_count = checked_tile_count(layout)?;
+        let tiles = (0..tile_count)
             .map(|_| None)
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -273,7 +316,10 @@ impl CacheImage {
     }
 
     pub fn tile_count(&self) -> u32 {
-        self.layout.tile_count()
+        self.tiles
+            .len()
+            .try_into()
+            .expect("cache image tile count must fit in u32")
     }
 
     pub fn tile(&self, tile_index: u32) -> Result<Option<&Tile>, ImageError> {
@@ -339,16 +385,18 @@ impl CacheImage {
     }
 }
 
-fn validate_non_zero_layout(layout: GlaImageLayout) -> Result<(), ImageError> {
-    if layout.tile_count() == 0 {
-        return Err(ImageError::ZeroSizeImage);
-    }
-    Ok(())
+fn checked_tile_count(layout: GlaImageLayout) -> Result<u32, ImageError> {
+    layout
+        .checked_tile_count()
+        .map_err(|source| ImageError::InvalidLayout { source })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheImage, DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, TileSet};
+    use super::{
+        CacheImage, DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, ImageLayoutError,
+        TileSet,
+    };
     use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use tile_key::{TileReadRef, Tiles};
@@ -370,11 +418,23 @@ mod tests {
     #[test]
     fn layout_tile_count_covers_partial_edge_tiles() {
         assert_eq!(GlaImageLayout::new(0, 0).tile_count(), 0);
+        assert!(matches!(
+            GlaImageLayout::new(0, 0).checked_tile_count(),
+            Err(ImageLayoutError::Empty)
+        ));
         assert_eq!(GlaImageLayout::new(1, 1).tile_count(), 1);
         assert_eq!(
             GlaImageLayout::new(IMAGE_TILE_SIZE + 1, IMAGE_TILE_SIZE).tile_count(),
             2
         );
+    }
+
+    #[test]
+    fn checked_tile_count_rejects_overflowing_layout() {
+        assert!(matches!(
+            GlaImageLayout::new(u32::MAX, u32::MAX).checked_tile_count(),
+            Err(ImageLayoutError::TooLarge)
+        ));
     }
 
     #[test]
@@ -514,7 +574,38 @@ mod tests {
         let cache =
             CacheImage::new_invalid(format(), GlaImageLayout::new(IMAGE_TILE_SIZE, 0)).unwrap_err();
 
-        assert!(matches!(dense, ImageError::ZeroSizeImage));
-        assert!(matches!(cache, ImageError::ZeroSizeImage));
+        assert!(matches!(
+            dense,
+            ImageError::InvalidLayout {
+                source: ImageLayoutError::Empty
+            }
+        ));
+        assert!(matches!(
+            cache,
+            ImageError::InvalidLayout {
+                source: ImageLayoutError::Empty
+            }
+        ));
+    }
+
+    #[test]
+    fn image_constructors_reject_overflowing_layouts_before_allocation() {
+        let mut tiles = Tiles::new();
+        let layout = GlaImageLayout::new(u32::MAX, u32::MAX);
+        let dense = DenseImage::allocate(format(), layout, &mut tiles).unwrap_err();
+        let cache = CacheImage::new_invalid(format(), layout).unwrap_err();
+
+        assert!(matches!(
+            dense,
+            ImageError::InvalidLayout {
+                source: ImageLayoutError::TooLarge
+            }
+        ));
+        assert!(matches!(
+            cache,
+            ImageError::InvalidLayout {
+                source: ImageLayoutError::TooLarge
+            }
+        ));
     }
 }

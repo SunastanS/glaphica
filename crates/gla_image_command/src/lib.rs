@@ -57,8 +57,16 @@ impl<K> ImageRef<K> {
         tile_index: u32,
         mut f: impl FnMut(u32) -> Result<(), E>,
     ) -> Result<(), E> {
-        debug_assert!(tile_index < dst_layout.tile_count());
-        debug_assert!(tile_index < self.layout.tile_count());
+        debug_assert!(
+            dst_layout
+                .checked_tile_count()
+                .is_ok_and(|tile_count| tile_index < tile_count)
+        );
+        debug_assert!(
+            self.layout
+                .checked_tile_count()
+                .is_ok_and(|tile_count| tile_index < tile_count)
+        );
         match (self.mapping, self.modifier) {
             (Mapping::Identity, FootprintModifier::None) => f(tile_index),
             (Mapping::Identity, FootprintModifier::Expand(_)) => {

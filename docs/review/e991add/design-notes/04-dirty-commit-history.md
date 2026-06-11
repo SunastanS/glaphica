@@ -87,6 +87,14 @@ global image role:
 Remaining session-local `Raw` tiles and uncommitted `Edit` tiles are released
 after successful commit or explicit discard.
 
+TODO: `commit` and `discard` are resource-release boundaries. Because renderer
+passes store `TilePos` rather than tile owners, the app loop must not call either
+boundary while passes from the same draw session are still pending. The intended
+short-term rule is: drain or clear the renderer pass recorder for the active
+session before commit/discard, and do not begin a replacement session that can
+reuse released tiles until that drain has completed. A later app-loop design
+should make this sequencing explicit instead of relying on caller discipline.
+
 `DrawHistory` records move-only tile owners. Applying a stored patch therefore
 cannot clone the record like the old `TileKey` implementation did. The new
 behavior validates a record by reference, removes and consumes it on successful
