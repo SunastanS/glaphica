@@ -405,9 +405,7 @@ impl GpuRenderer {
                         blend_mode,
                         opacity,
                     )?,
-                    Pass::FixGutter { dst } => {
-                        encode_fix_gutter(&mut ctx, &self.atlases, dst)?
-                    }
+                    Pass::FixGutter { dst } => encode_fix_gutter(&mut ctx, &self.atlases, dst)?,
                 }
             }
         }
@@ -1331,12 +1329,12 @@ mod tests {
         let value_atlas_id = tiles
             .new_atlas(AtlasLayout::TINY8, value_format, &mut gpu)
             .unwrap();
-        let rgba_src = tiles.alloc_from(rgba_atlas_id).unwrap();
-        let rgba_src = tiles.acquire_for_write(rgba_src).unwrap();
-        let rgba_dst = tiles.alloc_from(rgba_atlas_id).unwrap();
-        let rgba_dst = tiles.acquire_for_write(rgba_dst).unwrap();
-        let value_src = tiles.alloc_from(value_atlas_id).unwrap();
-        let value_src = tiles.acquire_for_write(value_src).unwrap();
+        let mut rgba_src_tile = tiles.reserve(rgba_atlas_id).unwrap();
+        let rgba_src = tiles.write_pos(&mut rgba_src_tile).unwrap();
+        let mut rgba_dst_tile = tiles.reserve(rgba_atlas_id).unwrap();
+        let rgba_dst = tiles.write_pos(&mut rgba_dst_tile).unwrap();
+        let mut value_src_tile = tiles.reserve(value_atlas_id).unwrap();
+        let value_src = tiles.write_pos(&mut value_src_tile).unwrap();
         let mut renderer = Renderer::new();
 
         renderer.clear(rgba_src);

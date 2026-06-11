@@ -1,4 +1,3 @@
-use gla_image::GlaImageKey;
 use gla_ir::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
@@ -14,8 +13,6 @@ pub enum DocError {
     UnreachableImage { id: ImageId },
     RegistryCommandReadsDestination { dst: ImageId },
     RegistryCycle { id: ImageId },
-    BindingMissing { id: ImageId },
-    BindingExtra { id: ImageId },
 }
 
 impl Display for DocError {
@@ -33,8 +30,6 @@ impl Display for DocError {
             Self::RegistryCycle { id } => {
                 write!(f, "registry graph has a dependency cycle at {id:?}")
             }
-            Self::BindingMissing { id } => write!(f, "binding table is missing {id:?}"),
-            Self::BindingExtra { id } => write!(f, "binding table has extra image {id:?}"),
         }
     }
 }
@@ -43,31 +38,15 @@ impl Display for DocError {
 pub struct Document {
     root: ImageId,
     roles: HashMap<ImageId, ImageRole>,
-    bindings: HashMap<ImageId, GlaImageKey>,
     version: DocumentVersionId,
 }
 
 impl Document {
-    pub fn new(
-        root: ImageId,
-        roles: HashMap<ImageId, ImageRole>,
-        bindings: HashMap<ImageId, GlaImageKey>,
-    ) -> Result<Self, DocError> {
+    pub fn new(root: ImageId, roles: HashMap<ImageId, ImageRole>) -> Result<Self, DocError> {
         validate_document(root, &roles)?;
-        for id in roles.keys() {
-            if !bindings.contains_key(id) {
-                return Err(DocError::BindingMissing { id: *id });
-            }
-        }
-        for id in bindings.keys() {
-            if !roles.contains_key(id) {
-                return Err(DocError::BindingExtra { id: *id });
-            }
-        }
         Ok(Self {
             root,
             roles,
-            bindings,
             version: DocumentVersionId::default(),
         })
     }
@@ -84,20 +63,8 @@ impl Document {
         self.roles.get(&id)
     }
 
-    pub fn bindings(&self) -> &HashMap<ImageId, GlaImageKey> {
-        &self.bindings
-    }
-
-    pub fn binding(&self, id: ImageId) -> Option<GlaImageKey> {
-        self.bindings.get(&id).copied()
-    }
-
     pub fn version(&self) -> DocumentVersionId {
         self.version
-    }
-
-    pub fn root_binding(&self) -> Option<GlaImageKey> {
-        self.bindings.get(&self.root).copied()
     }
 
     pub fn bump_version(&mut self) -> DocumentVersionId {
@@ -207,21 +174,12 @@ fn validate_no_cycles_or_self_reads(roles: &HashMap<ImageId, ImageRole>) -> Resu
 mod tests {
     use super::*;
 
-    fn key(value: u32) -> GlaImageKey {
-        GlaImageKey::new(value, 0)
-    }
-
     fn primitive_role() -> ImageRole {
         ImageRole::Primitive
     }
 
     fn simple_doc(root: ImageId) -> Document {
-        Document::new(
-            root,
-            HashMap::from([(root, primitive_role())]),
-            HashMap::from([(root, key(10))]),
-        )
-        .unwrap()
+        Document::new(root, HashMap::from([(root, primitive_role())])).unwrap()
     }
 
     #[test]
@@ -230,7 +188,7 @@ mod tests {
         let extra = ImageId::new(2);
         let roles = HashMap::from([(root, primitive_role()), (extra, primitive_role())]);
 
-        let err = Document::new(root, roles, HashMap::new()).unwrap_err();
+        let err = Document::new(root, roles).unwrap_err();
         assert!(matches!(err, DocError::UnreachableImage { id } if id == extra));
     }
 
@@ -249,7 +207,7 @@ mod tests {
             ),
         ]);
 
-        let err = Document::new(a, roles, HashMap::new()).unwrap_err();
+        let err = Document::new(a, roles).unwrap_err();
         assert!(matches!(err, DocError::RegistryCycle { .. }));
     }
 
@@ -262,7 +220,7 @@ mod tests {
             ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(missing)])),
         )]);
 
-        let err = Document::new(root, roles, HashMap::new()).unwrap_err();
+        let err = Document::new(root, roles).unwrap_err();
         assert!(matches!(err, DocError::MissingImage { id } if id == missing));
     }
 
@@ -274,33 +232,11 @@ mod tests {
             ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(root)])),
         )]);
 
-        let err = Document::new(root, roles, HashMap::new()).unwrap_err();
+        let err = Document::new(root, roles).unwrap_err();
         assert!(matches!(
             err,
             DocError::RegistryCommandReadsDestination { .. }
         ));
-    }
-
-    #[test]
-    fn document_checks_binding_coverage() {
-        let root = ImageId::new(1);
-        let extra = ImageId::new(2);
-
-        let err = Document::new(
-            root,
-            HashMap::from([(root, primitive_role())]),
-            HashMap::new(),
-        )
-        .unwrap_err();
-        assert!(matches!(err, DocError::BindingMissing { id } if id == root));
-
-        let err = Document::new(
-            root,
-            HashMap::from([(root, primitive_role())]),
-            HashMap::from([(root, key(1)), (extra, key(2))]),
-        )
-        .unwrap_err();
-        assert!(matches!(err, DocError::BindingExtra { id } if id == extra));
     }
 
     #[test]

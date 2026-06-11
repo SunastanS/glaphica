@@ -1,27 +1,26 @@
 use atlas::TilePos;
 use gla_color::BlendMode;
 use gla_command_core::{FootprintModifier, Mapping};
-use gla_image::{GlaImageKey, GlaImageLayout};
+use gla_image::GlaImageLayout;
 use gla_renderer::Renderer;
-use tile_key::TileKey;
+use tile_key::TileReadRef;
 
 pub trait RenderCtx {
     type ImageKey: std::marker::Copy;
     type Error;
 
-    fn render(&mut self, image: Self::ImageKey, tile_index: u32) -> Result<TileKey, Self::Error>;
-    fn write_tile(
+    fn render(
         &mut self,
         image: Self::ImageKey,
         tile_index: u32,
-    ) -> Result<TileKey, Self::Error>;
-    fn acquire_for_read(&mut self, key: TileKey) -> Result<TilePos, Self::Error>;
-    fn acquire_for_write(&mut self, key: TileKey) -> Result<TilePos, Self::Error>;
+    ) -> Result<TileReadRef, Self::Error>;
+    fn write_pos(&mut self, image: Self::ImageKey, tile_index: u32)
+    -> Result<TilePos, Self::Error>;
     fn renderer(&mut self) -> &mut Renderer;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ImageRef<K = GlaImageKey> {
+pub struct ImageRef<K> {
     pub key: K,
     pub layout: GlaImageLayout,
     pub mapping: Mapping,
@@ -71,7 +70,7 @@ impl<K> ImageRef<K> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DeriveCommand<K = GlaImageKey> {
+pub struct DeriveCommand<K> {
     pub dst: K,
     pub layout: GlaImageLayout,
     pub ops: Box<[Derive<K>]>,
@@ -91,18 +90,17 @@ impl<K> DeriveCommand<K> {
         C: RenderCtx<ImageKey = K>,
         K: std::marker::Copy,
     {
-        let dst = ctx.write_tile(self.dst, tile_index)?;
+        let dst = ctx.write_pos(self.dst, tile_index)?;
         for op in self.ops.iter().copied() {
             op.exec_tile(ctx, self.layout, dst, tile_index)?;
         }
-        let pos = ctx.acquire_for_write(dst)?;
-        ctx.renderer().fix_gutter(pos);
+        ctx.renderer().fix_gutter(dst);
         Ok(())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Derive<K = GlaImageKey> {
+pub enum Derive<K> {
     Copy(Copy<K>),
     Clear(Clear),
     RenderTo(RenderTo<K>),
@@ -113,7 +111,7 @@ impl<K> Derive<K> {
         self,
         ctx: &mut C,
         dst_layout: GlaImageLayout,
-        dst: TileKey,
+        dst: TilePos,
         tile_index: u32,
     ) -> Result<(), C::Error>
     where
@@ -129,7 +127,7 @@ impl<K> Derive<K> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Copy<K = GlaImageKey> {
+pub struct Copy<K> {
     pub src: ImageRef<K>,
 }
 
@@ -142,7 +140,7 @@ impl<K> Copy<K> {
         self,
         ctx: &mut C,
         dst_layout: GlaImageLayout,
-        dst: TileKey,
+        dst: TilePos,
         tile_index: u32,
     ) -> Result<(), C::Error>
     where
@@ -152,9 +150,10 @@ impl<K> Copy<K> {
         self.src
             .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
                 let src = ctx.render(self.src.key, source_tile_index)?;
-                let src = ctx.acquire_for_read(src)?;
-                let dst = ctx.acquire_for_write(dst)?;
-                ctx.renderer().copy(src, dst);
+                match src {
+                    TileReadRef::Zero => ctx.renderer().clear(dst),
+                    TileReadRef::Physical(src) => ctx.renderer().copy(src, dst),
+                }
                 Ok(())
             })
     }
@@ -164,18 +163,17 @@ impl<K> Copy<K> {
 pub struct Clear;
 
 impl Clear {
-    pub fn exec_tile<C>(self, ctx: &mut C, dst: TileKey) -> Result<(), C::Error>
+    pub fn exec_tile<C>(self, ctx: &mut C, dst: TilePos) -> Result<(), C::Error>
     where
         C: RenderCtx,
     {
-        let dst = ctx.acquire_for_write(dst)?;
         ctx.renderer().clear(dst);
         Ok(())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RenderTo<K = GlaImageKey> {
+pub struct RenderTo<K> {
     pub src: ImageRef<K>,
     pub blend_mode: BlendMode,
     pub opacity: f32,
@@ -194,7 +192,7 @@ impl<K> RenderTo<K> {
         self,
         ctx: &mut C,
         dst_layout: GlaImageLayout,
-        dst: TileKey,
+        dst: TilePos,
         tile_index: u32,
     ) -> Result<(), C::Error>
     where
@@ -204,10 +202,18 @@ impl<K> RenderTo<K> {
         self.src
             .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
                 let src = ctx.render(self.src.key, source_tile_index)?;
-                let src = ctx.acquire_for_read(src)?;
-                let dst = ctx.acquire_for_write(dst)?;
-                ctx.renderer()
-                    .render_to(src, dst, self.blend_mode, self.opacity);
+                match src {
+                    TileReadRef::Zero => {
+                        // The first materialized command seam only defines zero-source
+                        // semantics for copy. Composite zero-source behavior is operation
+                        // specific and must be made explicit before execution reaches here.
+                        todo!("zero-source RenderTo semantics are operation-specific")
+                    }
+                    TileReadRef::Physical(src) => {
+                        ctx.renderer()
+                            .render_to(src, dst, self.blend_mode, self.opacity);
+                    }
+                }
                 Ok(())
             })
     }
@@ -216,32 +222,35 @@ impl<K> RenderTo<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas::{AtlasLayout, NoAtlasTextures, TilePos};
-    use gla_color::{ChannelCount, ChannelType, GlaFormat};
+    use atlas::TilePos;
     use gla_renderer::Pass;
-    use tile_key::Tiles;
 
     #[derive(Debug)]
     enum TestError {
         MissingReturn,
-        Tiles(tile_key::TilesError),
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct TestImageKey(u32);
+
     struct TestCtx {
-        tiles: Tiles,
         renderer: Renderer,
-        calls: Vec<(GlaImageKey, u32)>,
-        write_calls: Vec<(GlaImageKey, u32)>,
-        returns: Vec<TileKey>,
-        dst_tile: Option<TileKey>,
+        calls: Vec<(TestImageKey, u32)>,
+        write_calls: Vec<(TestImageKey, u32)>,
+        returns: Vec<TileReadRef>,
+        dst_pos: Option<TilePos>,
         nested_pass: Option<TilePos>,
     }
 
     impl RenderCtx for TestCtx {
-        type ImageKey = GlaImageKey;
+        type ImageKey = TestImageKey;
         type Error = TestError;
 
-        fn render(&mut self, image: GlaImageKey, tile_index: u32) -> Result<TileKey, Self::Error> {
+        fn render(
+            &mut self,
+            image: TestImageKey,
+            tile_index: u32,
+        ) -> Result<TileReadRef, Self::Error> {
             self.calls.push((image, tile_index));
             if let Some(dst) = self.nested_pass {
                 self.renderer.clear(dst);
@@ -249,21 +258,13 @@ mod tests {
             self.returns.pop().ok_or(TestError::MissingReturn)
         }
 
-        fn write_tile(
+        fn write_pos(
             &mut self,
-            image: GlaImageKey,
+            image: TestImageKey,
             tile_index: u32,
-        ) -> Result<TileKey, Self::Error> {
+        ) -> Result<TilePos, Self::Error> {
             self.write_calls.push((image, tile_index));
-            self.dst_tile.ok_or(TestError::MissingReturn)
-        }
-
-        fn acquire_for_read(&mut self, key: TileKey) -> Result<TilePos, Self::Error> {
-            self.tiles.acquire_for_read(key).map_err(TestError::Tiles)
-        }
-
-        fn acquire_for_write(&mut self, key: TileKey) -> Result<TilePos, Self::Error> {
-            self.tiles.acquire_for_write(key).map_err(TestError::Tiles)
+            self.dst_pos.ok_or(TestError::MissingReturn)
         }
 
         fn renderer(&mut self) -> &mut Renderer {
@@ -271,21 +272,13 @@ mod tests {
         }
     }
 
-    fn format() -> GlaFormat {
-        GlaFormat {
-            channel_count: ChannelCount::D4,
-            channel_type: ChannelType::U8,
-        }
-    }
-
-    fn ctx_with_tiles(returns: Vec<TileKey>) -> TestCtx {
+    fn ctx_with_tiles(returns: Vec<TileReadRef>) -> TestCtx {
         TestCtx {
-            tiles: Tiles::new(),
             renderer: Renderer::new(),
             calls: Vec::new(),
             write_calls: Vec::new(),
             returns,
-            dst_tile: None,
+            dst_pos: None,
             nested_pass: None,
         }
     }
@@ -294,28 +287,18 @@ mod tests {
         GlaImageLayout::new(4096, 4096)
     }
 
-    fn new_test_atlas(tiles: &mut Tiles) -> u8 {
-        let mut textures = NoAtlasTextures;
-        tiles
-            .new_atlas(AtlasLayout::TINY8, format(), &mut textures)
-            .unwrap()
-    }
-
     #[test]
     fn copy_renders_source_before_recording_copy_pass() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = new_test_atlas(&mut ctx.tiles);
-        let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let nested_dst = ctx.tiles.acquire_for_write(dst_tile).unwrap();
-        let source_pos = ctx.tiles.acquire_for_read(source_tile).unwrap();
-        let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
-        ctx.returns.push(source_tile);
-        ctx.dst_tile = Some(dst_tile);
+        let nested_dst = TilePos::new(0, 6);
+        let source_pos = TilePos::new(0, 7);
+        let dst_pos = TilePos::new(0, 8);
+        ctx.returns.push(TileReadRef::Physical(source_pos));
+        ctx.dst_pos = Some(dst_pos);
         ctx.nested_pass = Some(nested_dst);
 
-        let source_image = GlaImageKey::new(7, 0);
-        let dst_image = GlaImageKey::new(8, 0);
+        let source_image = TestImageKey(7);
+        let dst_image = TestImageKey(8);
         let command = DeriveCommand::new(
             dst_image,
             layout(),
@@ -345,16 +328,13 @@ mod tests {
     #[test]
     fn render_to_records_blend_mode_and_opacity() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = new_test_atlas(&mut ctx.tiles);
-        let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let source_pos = ctx.tiles.acquire_for_read(source_tile).unwrap();
-        let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
-        ctx.returns.push(source_tile);
-        ctx.dst_tile = Some(dst_tile);
+        let source_pos = TilePos::new(0, 9);
+        let dst_pos = TilePos::new(0, 10);
+        ctx.returns.push(TileReadRef::Physical(source_pos));
+        ctx.dst_pos = Some(dst_pos);
 
-        let source_image = GlaImageKey::new(9, 0);
-        let dst_image = GlaImageKey::new(10, 0);
+        let source_image = TestImageKey(9);
+        let dst_image = TestImageKey(10);
         let command = DeriveCommand::new(
             dst_image,
             layout(),
@@ -386,16 +366,13 @@ mod tests {
     #[test]
     fn render_to_records_value_to_rgba_mask_mode() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = new_test_atlas(&mut ctx.tiles);
-        let source_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let source_pos = ctx.tiles.acquire_for_read(source_tile).unwrap();
-        let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
-        ctx.returns.push(source_tile);
-        ctx.dst_tile = Some(dst_tile);
+        let source_pos = TilePos::new(0, 13);
+        let dst_pos = TilePos::new(0, 14);
+        ctx.returns.push(TileReadRef::Physical(source_pos));
+        ctx.dst_pos = Some(dst_pos);
 
-        let source_image = GlaImageKey::new(13, 0);
-        let dst_image = GlaImageKey::new(14, 0);
+        let source_image = TestImageKey(13);
+        let dst_image = TestImageKey(14);
         let command = DeriveCommand::new(
             dst_image,
             layout(),
@@ -425,11 +402,9 @@ mod tests {
     #[test]
     fn clear_writes_without_rendering_source() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let atlas = new_test_atlas(&mut ctx.tiles);
-        let dst_tile = ctx.tiles.alloc_from(atlas).unwrap();
-        let dst_pos = ctx.tiles.acquire_for_write(dst_tile).unwrap();
-        ctx.dst_tile = Some(dst_tile);
-        let dst_image = GlaImageKey::new(12, 0);
+        let dst_pos = TilePos::new(0, 12);
+        ctx.dst_pos = Some(dst_pos);
+        let dst_image = TestImageKey(12);
         let command = DeriveCommand::new(dst_image, layout(), [Derive::Clear(Clear)]);
 
         command.exec_tile(&mut ctx, 5).unwrap();
@@ -438,7 +413,38 @@ mod tests {
         assert_eq!(ctx.write_calls, vec![(dst_image, 5)]);
         assert_eq!(
             ctx.renderer.passes(),
-            &[Pass::Clear { dst: dst_pos }, Pass::FixGutter { dst: dst_pos }]
+            &[
+                Pass::Clear { dst: dst_pos },
+                Pass::FixGutter { dst: dst_pos }
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_zero_source_records_clear() {
+        let mut ctx = ctx_with_tiles(vec![TileReadRef::Zero]);
+        let dst_pos = TilePos::new(0, 15);
+        ctx.dst_pos = Some(dst_pos);
+
+        let source_image = TestImageKey(15);
+        let dst_image = TestImageKey(16);
+        let command = DeriveCommand::new(
+            dst_image,
+            layout(),
+            [Derive::Copy(Copy::new(ImageRef::new(
+                source_image,
+                layout(),
+            )))],
+        );
+
+        command.exec_tile(&mut ctx, 2).unwrap();
+
+        assert_eq!(
+            ctx.renderer.passes(),
+            &[
+                Pass::Clear { dst: dst_pos },
+                Pass::FixGutter { dst: dst_pos }
+            ]
         );
     }
 }

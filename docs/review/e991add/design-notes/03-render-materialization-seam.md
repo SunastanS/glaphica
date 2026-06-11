@@ -91,6 +91,18 @@ enum TileReadRef {
 `Copy(Zero)` means copying valid zero content into the destination. The current
 implementation strategy can lower this to `renderer.clear(dst)`.
 
+The command crate should not import durable tile owners. The refactored
+`gla_image_command::RenderCtx` seam is:
+
+```rust
+fn render(image, tile_index) -> TileReadRef;
+fn write_pos(image, tile_index) -> TilePos;
+```
+
+`DeriveCommand` and its operations work with the resolved source view and
+writable destination position. They no longer receive or return `Tile`, and they
+do not acquire resource-layer positions themselves.
+
 `RenderTo(Zero)` must not receive one blanket rule. Its behavior depends on the
 operation/blend mode. Some composites may treat a zero source as no-op, while
 others, such as mask-style operations, may produce a meaningful change. Each
@@ -139,6 +151,10 @@ first refactor.
 This direction fits the larger image-storage refactor:
 
 - document image references should move toward `ImageId`, not `GlaImageKey`;
+- Rust-side presentation should not treat a single document root image as the
+  durable display concept. Registered views select which `ImageId`s are rendered
+  to windows/surfaces; the current `Document.root` shape is only a temporary
+  graph-validation anchor until view registration is introduced.
 - the command-layer session image id should model current-vs-document lookup:
 
 ```rust

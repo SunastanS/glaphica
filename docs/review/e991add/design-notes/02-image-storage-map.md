@@ -122,7 +122,9 @@ which is currently fragile when multiple ids could bind the same key.
 This is a large refactor, not a small fix:
 
 - `Document.bindings: ImageId -> GlaImageKey` would need to disappear or become
-  a temporary compatibility layer.
+  a temporary compatibility layer. The first migration removes document
+  bindings from `gla_doc`; document image storage is no longer represented as
+  `ImageId -> GlaImageKey`.
 - `SessionImageKey::Doc(GlaImageKey)` would need a replacement, likely based on
   document `ImageId` or a resolved document image reference.
 - `ImageEdit.source: GlaImageKey` may become unnecessary or change meaning.
