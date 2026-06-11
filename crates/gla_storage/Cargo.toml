@@ -1,0 +1,15 @@
+[package]
+name = "gla_storage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_color = { path = "../gla_color" }
+gla_image = { path = "../gla_image" }
+gla_image_command = { path = "../gla_image_command" }
+gla_ir = { path = "../gla_ir" }
+gla_renderer = { path = "../gla_renderer" }
+tile_key = { path = "../tile_key" }
+
+[dev-dependencies]
+atlas = { path = "../atlas" }

@@ -160,15 +160,23 @@ This direction fits the larger image-storage refactor:
 ```rust
 enum SessionImageId {
     Current(ImageId),
-    Doc(ImageId),
+    Global(ImageId),
 }
 ```
 
 `Current(ImageId)` resolves through the session-local shadow table first. If the
 image has a local shadow, that shadow is used; otherwise resolution falls back
-to the current document image. `Doc(ImageId)` resolves only to the session-start
-document image and never sees local shadows. This preserves the existing
-`image` vs `image.backup` design from `docs/Session.md`.
+to the current global image. `Global(ImageId)` resolves only to the
+session-start/global image and never sees local shadows. This preserves the
+existing `image` vs `image.backup` design from `docs/Session.md`.
+
+Session lowering should make this explicit:
+
+- session `Current(id)` reads lower to `SessionImageId::Current(id)`;
+- session `Backup(id)` reads lower to `SessionImageId::Global(id)`;
+- global graph commands used for active-chain shadows lower their reads to
+  `Current(id)`;
+- global cache repair outside a local shadow uses global-only resolution.
 
 - session-local state should be keyed like `HashMap<ImageId, SessionImage>`,
   where `SessionImage` can be a session-local full image or an `ImageEdit`

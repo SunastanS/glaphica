@@ -161,21 +161,20 @@ impl Display for TileReplaceError {
 impl Error for TileReplaceError {}
 
 #[derive(Debug)]
-pub struct PrimitiveImage {
+pub struct DenseImage {
     format: GlaFormat,
     layout: GlaImageLayout,
     tiles: Box<[Tile]>,
 }
 
-impl PrimitiveImage {
+impl DenseImage {
     pub fn allocate(
         format: GlaFormat,
         layout: GlaImageLayout,
         tiles: &mut Tiles,
-        atlas_id: u8,
     ) -> Result<Self, ImageError> {
         validate_non_zero_layout(layout)?;
-        let image_tiles = tiles.reserve_batch(atlas_id, layout.tile_count())?;
+        let image_tiles = tiles.reserve_batch_for_format(format, layout.tile_count())?;
         Ok(Self {
             format,
             layout,
@@ -245,13 +244,13 @@ impl PrimitiveImage {
 }
 
 #[derive(Debug)]
-pub struct DerivedImage {
+pub struct CacheImage {
     format: GlaFormat,
     layout: GlaImageLayout,
     tiles: Box<[Option<Tile>]>,
 }
 
-impl DerivedImage {
+impl CacheImage {
     pub fn new_invalid(format: GlaFormat, layout: GlaImageLayout) -> Result<Self, ImageError> {
         validate_non_zero_layout(layout)?;
         let tiles = (0..layout.tile_count())
@@ -349,9 +348,7 @@ fn validate_non_zero_layout(layout: GlaImageLayout) -> Result<(), ImageError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DerivedImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, PrimitiveImage, TileSet,
-    };
+    use super::{CacheImage, DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, TileSet};
     use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use tile_key::{TileReadRef, Tiles};
@@ -386,14 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn primitive_allocate_reserves_full_valid_zero_tiles() {
+    fn dense_allocate_reserves_full_valid_zero_tiles() {
         let mut tiles = Tiles::new();
         let atlas_id = new_test_atlas(&mut tiles);
-        let image = PrimitiveImage::allocate(
+        let image = DenseImage::allocate(
             format(),
             GlaImageLayout::new(IMAGE_TILE_SIZE + 1, IMAGE_TILE_SIZE),
             &mut tiles,
-            atlas_id,
         )
         .unwrap();
 
@@ -410,12 +406,11 @@ mod tests {
     }
 
     #[test]
-    fn primitive_replace_tile_moves_previous_owner_out() {
+    fn dense_replace_tile_moves_previous_owner_out() {
         let mut tiles = Tiles::new();
         let atlas_id = new_test_atlas(&mut tiles);
         let mut image =
-            PrimitiveImage::allocate(format(), GlaImageLayout::new(1, 1), &mut tiles, atlas_id)
-                .unwrap();
+            DenseImage::allocate(format(), GlaImageLayout::new(1, 1), &mut tiles).unwrap();
         let replacement = tiles.reserve(atlas_id).unwrap();
 
         let old = image.replace_tile(0, replacement).unwrap();
@@ -428,12 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn primitive_replace_tile_returns_new_owner_on_out_of_bounds() {
+    fn dense_replace_tile_returns_new_owner_on_out_of_bounds() {
         let mut tiles = Tiles::new();
         let atlas_id = new_test_atlas(&mut tiles);
         let mut image =
-            PrimitiveImage::allocate(format(), GlaImageLayout::new(1, 1), &mut tiles, atlas_id)
-                .unwrap();
+            DenseImage::allocate(format(), GlaImageLayout::new(1, 1), &mut tiles).unwrap();
         let replacement = tiles.reserve(atlas_id).unwrap();
 
         let err = image.replace_tile(1, replacement).unwrap_err();
@@ -449,18 +443,18 @@ mod tests {
     }
 
     #[test]
-    fn derived_invalid_image_starts_with_cache_misses() {
-        let image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+    fn cache_invalid_image_starts_with_cache_misses() {
+        let image = CacheImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
 
         assert_eq!(image.tile_count(), 1);
         assert!(image.tile(0).unwrap().is_none());
     }
 
     #[test]
-    fn derived_replace_tile_returns_previous_optional_owner() {
+    fn cache_replace_tile_returns_previous_optional_owner() {
         let mut tiles = Tiles::new();
         let atlas_id = new_test_atlas(&mut tiles);
-        let mut image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+        let mut image = CacheImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
         let first = tiles.reserve(atlas_id).unwrap();
         let second = tiles.reserve(atlas_id).unwrap();
 
@@ -475,10 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn derived_replace_tile_returns_new_owner_on_out_of_bounds() {
+    fn cache_replace_tile_returns_new_owner_on_out_of_bounds() {
         let mut tiles = Tiles::new();
         let atlas_id = new_test_atlas(&mut tiles);
-        let mut image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+        let mut image = CacheImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
         let replacement = tiles.reserve(atlas_id).unwrap();
 
         let err = image.replace_tile(1, replacement).unwrap_err();
@@ -494,10 +488,10 @@ mod tests {
     }
 
     #[test]
-    fn derived_take_tile_clears_slot() {
+    fn cache_take_tile_clears_slot() {
         let mut tiles = Tiles::new();
         let atlas_id = new_test_atlas(&mut tiles);
-        let mut image = DerivedImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
+        let mut image = CacheImage::new_invalid(format(), GlaImageLayout::new(1, 1)).unwrap();
         let tile = tiles.reserve(atlas_id).unwrap();
         image.replace_tile(0, tile).unwrap();
 
@@ -510,18 +504,17 @@ mod tests {
     #[test]
     fn image_constructors_reject_zero_size_layouts() {
         let mut tiles = Tiles::new();
-        let atlas_id = new_test_atlas(&mut tiles);
-        let primitive = PrimitiveImage::allocate(
+        let _atlas_id = new_test_atlas(&mut tiles);
+        let dense = DenseImage::allocate(
             format(),
             GlaImageLayout::new(0, IMAGE_TILE_SIZE),
             &mut tiles,
-            atlas_id,
         )
         .unwrap_err();
-        let derived = DerivedImage::new_invalid(format(), GlaImageLayout::new(IMAGE_TILE_SIZE, 0))
-            .unwrap_err();
+        let cache =
+            CacheImage::new_invalid(format(), GlaImageLayout::new(IMAGE_TILE_SIZE, 0)).unwrap_err();
 
-        assert!(matches!(primitive, ImageError::ZeroSizeImage));
-        assert!(matches!(derived, ImageError::ZeroSizeImage));
+        assert!(matches!(dense, ImageError::ZeroSizeImage));
+        assert!(matches!(cache, ImageError::ZeroSizeImage));
     }
 }

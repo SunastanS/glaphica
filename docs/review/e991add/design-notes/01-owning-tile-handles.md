@@ -20,19 +20,19 @@ level: store tile identity with a non-zero type such as
 encoding invalid/cache-miss as `None`.
 
 Long-lived image tile arrays should not all share the same optional slot
-representation. The target representation differs by image role:
+representation. The target representation differs by storage shape:
 
 ```rust
-// Primitive/raw: every slot is valid and owns a tile.
+// Dense/raw: every slot is valid and owns a tile.
 Box<[Tile]>
 
-// Derived/cache: each slot may be invalid/cache-miss.
+// Cache: each slot may be invalid/cache-miss.
 Box<[Option<Tile>]>
 ```
 
-This is the point of distinguishing `PrimitiveImage` from `DerivedImage`: the
-primitive representation cannot express per-tile invalid/cache-miss state, while
-the derived representation can.
+This is the point of distinguishing `DenseImage` from `CacheImage`: the
+dense representation cannot express per-tile invalid/cache-miss state, while
+the cache representation can.
 
 When `Tile` is backed by a non-zero integer, `Option<Tile>` uses the
 standard-library niche representation for the empty sentinel. This keeps
@@ -59,6 +59,15 @@ cache-miss state.
 `Atlas` remains simple: atlas allocation is physical slot allocation. Empty
 bindings are not an atlas concept; they are a tile-resource layer wrapper around
 a valid tile identity that has not acquired a physical slot yet.
+
+`Tiles` owns the atlas list and is the layer that maps image storage format to
+an atlas id. Dense image allocation should ask `Tiles` for tiles by `GlaFormat`,
+not receive an arbitrary caller-selected `atlas_id`. If no matching atlas exists,
+allocation fails with a normal `Result` error. This prevents a D1 or F32 image
+from being silently backed by a D4/U8 atlas during upper-layer migration.
+This is format selection only, not a complete atlas overflow strategy. A later
+AtlasRegistry policy still needs to decide when to create additional atlases for
+the same format and how empty tile bindings choose among them.
 
 The public tile resource interface should not expose a direct physical
 allocation call. Callers that want a writable physical slot first reserve a
@@ -93,7 +102,7 @@ The type system should make common lifecycle bugs harder to express:
 ## Open Questions
 
 1. What is the exact staged migration path from the resource layer into
-   role-specific image storage?
+   storage-specific image values?
 2. What is the non-owning view type passed to renderer commands once
    `gla_image_command::RenderCtx` stops exchanging durable tile owners?
 

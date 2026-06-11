@@ -85,6 +85,7 @@ pub enum TilesError {
     AtlasOutOfTiles { atlas_id: u8 },
     KeyPoolFull,
     InvalidAtlasId { atlas_id: u8 },
+    MissingAtlasForFormat { format: GlaFormat },
     InvalidTile { tile: TileId },
     TileGenerationMismatch { tile: TileId },
     TileBindingMismatch { tile: TileId },
@@ -96,6 +97,9 @@ impl Display for TilesError {
             Self::AtlasOutOfTiles { atlas_id } => write!(f, "atlas {atlas_id} out of tiles"),
             Self::KeyPoolFull => f.write_str("key pool is full"),
             Self::InvalidAtlasId { atlas_id } => write!(f, "invalid atlas id {atlas_id}"),
+            Self::MissingAtlasForFormat { format } => {
+                write!(f, "missing atlas for format {format:?}")
+            }
             Self::InvalidTile { tile } => write!(f, "invalid tile {tile:?}"),
             Self::TileGenerationMismatch { tile } => {
                 write!(f, "tile generation mismatch for {tile:?}")
@@ -142,6 +146,31 @@ impl Tiles {
 
     pub fn atlases(&self) -> &[Atlas] {
         &self.atlases
+    }
+
+    pub fn atlas_for_format(&self, format: GlaFormat) -> Option<u8> {
+        self.atlases
+            .iter()
+            .find(|atlas| atlas.format == format)
+            .map(|atlas| atlas.id)
+    }
+
+    pub fn reserve_for_format(&mut self, format: GlaFormat) -> Result<Tile, TilesError> {
+        let atlas_id = self
+            .atlas_for_format(format)
+            .ok_or(TilesError::MissingAtlasForFormat { format })?;
+        self.reserve(atlas_id)
+    }
+
+    pub fn reserve_batch_for_format(
+        &mut self,
+        format: GlaFormat,
+        count: u32,
+    ) -> Result<Vec<Tile>, TilesError> {
+        let atlas_id = self
+            .atlas_for_format(format)
+            .ok_or(TilesError::MissingAtlasForFormat { format })?;
+        self.reserve_batch(atlas_id, count)
     }
 
     pub fn reserve(&mut self, atlas_id: u8) -> Result<Tile, TilesError> {
@@ -324,6 +353,29 @@ mod tests {
         assert_eq!(tile.generation(), 1);
         assert_eq!(tiles.atlas(atlas_id).unwrap().remaining(), 256);
         assert_eq!(tiles.read_ref(&tile).unwrap(), TileReadRef::Zero);
+    }
+
+    #[test]
+    fn reserve_for_format_uses_matching_atlas() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+
+        let tile = tiles.reserve_for_format(format()).unwrap();
+
+        assert_eq!(tiles.atlas_for_format(format()), Some(atlas_id));
+        assert_eq!(tiles.read_ref(&tile).unwrap(), TileReadRef::Zero);
+    }
+
+    #[test]
+    fn reserve_for_format_rejects_missing_atlas() {
+        let mut tiles = Tiles::new();
+
+        let err = tiles.reserve_for_format(format()).unwrap_err();
+
+        assert!(matches!(
+            err,
+            TilesError::MissingAtlasForFormat { format: missing } if missing == format()
+        ));
     }
 
     #[test]
