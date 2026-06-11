@@ -54,27 +54,27 @@ impl ImageEdit {
         self.edits
     }
 
-    fn take(&mut self) -> Self {
+    pub fn take(&mut self) -> Self {
         Self {
             edits: std::mem::take(&mut self.edits),
         }
     }
 
-    fn tile(&self, tile_index: u32) -> Option<&Tile> {
+    pub fn tile(&self, tile_index: u32) -> Option<&Tile> {
         self.edits
             .binary_search_by_key(&tile_index, |(index, _)| *index)
             .ok()
             .map(|index| &self.edits[index].1)
     }
 
-    fn tile_mut(&mut self, tile_index: u32) -> Option<&mut Tile> {
+    pub fn tile_mut(&mut self, tile_index: u32) -> Option<&mut Tile> {
         self.edits
             .binary_search_by_key(&tile_index, |(index, _)| *index)
             .ok()
             .map(|index| &mut self.edits[index].1)
     }
 
-    fn insert_tile(&mut self, tile_index: u32, tile: Tile) -> &mut Tile {
+    pub fn insert_tile(&mut self, tile_index: u32, tile: Tile) -> &mut Tile {
         let index = self
             .edits
             .binary_search_by_key(&tile_index, |(index, _)| *index)
@@ -83,7 +83,7 @@ impl ImageEdit {
         &mut self.edits[index].1
     }
 
-    fn release_tiles(self, tiles: &mut Tiles) {
+    pub fn release_tiles(self, tiles: &mut Tiles) {
         for (_, tile) in self.edits {
             tiles.release(tile);
         }
