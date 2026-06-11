@@ -1,13 +1,14 @@
 mod local;
 
 pub use local::{
-    DrawOnWriter, ImageEdit, ImageEditCreateError, LocalStorage, LocalStorageError, SessionImage,
-    SessionImageContent, SessionImageId, SessionImageWriter,
+    DrawCommit, DrawHistory, DrawOnWriter, DrawRecordId, ImageEdit, ImageEditCreateError,
+    LocalCommitError, LocalRenderCtx, LocalRenderError, LocalStorage, LocalStorageError,
+    SessionImage, SessionImageContent, SessionImageId, SessionImageWriter,
 };
 
 use gla_color::GlaFormat;
 use gla_image::{CacheImage, DenseImage, GlaImageLayout, ImageError};
-use gla_ir::{GraphCommand, ImageId, ImageRole, RegistryPatch, RegistryPatchOp};
+use gla_ir::{DocumentVersionId, GraphCommand, ImageId, ImageRole, RegistryPatch, RegistryPatchOp};
 use gla_renderer::Renderer;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -111,6 +112,7 @@ impl Error for GlobalStorageError {
 }
 
 pub struct GlobalStorage {
+    version: DocumentVersionId,
     root: Option<ImageId>,
     images: HashMap<ImageId, GlobalImage>,
     tiles: Tiles,
@@ -120,11 +122,21 @@ pub struct GlobalStorage {
 impl GlobalStorage {
     pub fn new(tiles: Tiles, renderer: Renderer) -> Self {
         Self {
+            version: DocumentVersionId::default(),
             root: None,
             images: HashMap::new(),
             tiles,
             renderer,
         }
+    }
+
+    pub fn version(&self) -> DocumentVersionId {
+        self.version
+    }
+
+    pub(crate) fn bump_version(&mut self) -> DocumentVersionId {
+        self.version = self.version.next();
+        self.version
     }
 
     pub fn root(&self) -> Option<ImageId> {
@@ -155,15 +167,32 @@ impl GlobalStorage {
         &mut self.renderer
     }
 
+    pub(crate) fn resources_mut(
+        &mut self,
+    ) -> (
+        &mut HashMap<ImageId, GlobalImage>,
+        &mut Tiles,
+        &mut Renderer,
+    ) {
+        (&mut self.images, &mut self.tiles, &mut self.renderer)
+    }
+
     pub fn into_parts(
         self,
     ) -> (
+        DocumentVersionId,
         Option<ImageId>,
         HashMap<ImageId, GlobalImage>,
         Tiles,
         Renderer,
     ) {
-        (self.root, self.images, self.tiles, self.renderer)
+        (
+            self.version,
+            self.root,
+            self.images,
+            self.tiles,
+            self.renderer,
+        )
     }
 
     pub fn apply_registry_patch(&mut self, patch: RegistryPatch) -> Result<(), GlobalStorageError> {

@@ -118,6 +118,7 @@ history.
 
 ```rust
 struct GlobalStorage {
+    version: DocumentVersionId,
     root: Option<ImageId>, // temporary SetRoot compatibility, later views
     images: HashMap<ImageId, GlobalImage>,
     tiles: Tiles,
@@ -136,6 +137,13 @@ enum GlobalImage {
 Do not keep a separate authoritative registry table beside this image map.
 Dependency indexes may be cached later, but they must be derived from
 `GlobalStorage.images`.
+
+`GlobalStorage.version` is the storage-side version gate for draw sessions and
+history patch application. Janet still owns the business document/IR layer, but
+Rust storage must reject tile/resource commits whose expected version no longer
+matches the global image store. Registry patch versioning is separate follow-up
+work; this migration introduces the version gate for draw commit and history
+first.
 
 `GlobalStorage.root` is only a temporary compatibility field for the existing
 `RegistryPatchOp::SetRoot`. It is not the long-term presentation model. Registered

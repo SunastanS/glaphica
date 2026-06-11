@@ -1,15 +1,18 @@
 use crate::{GlobalImage, GlobalStorage};
+use atlas::TilePos;
 use gla_color::GlaFormat;
-use gla_image::{DenseImage, GlaImageLayout, ImageError};
+use gla_image::{CacheImage, DenseImage, GlaImageLayout, ImageError, TileReplaceError, TileSet};
+use gla_image_command::RenderCtx;
 use gla_image_command::{Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef};
 use gla_ir::{
-    DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawSessionIR, GraphCommand, ImageId,
-    MetadataRef, SessionCommand, SessionImageDecl, SessionReadImage,
+    DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawSessionIR, FootprintModifier,
+    GraphCommand, ImageId, Mapping, MetadataRef, SessionCommand, SessionImageDecl,
+    SessionReadImage,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use tile_key::{Tile, Tiles};
+use tile_key::{Tile, TileReadRef, Tiles, TilesError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SessionImageId {
@@ -48,6 +51,35 @@ impl ImageEdit {
         self.edits
     }
 
+    fn take(&mut self) -> Self {
+        Self {
+            edits: std::mem::take(&mut self.edits),
+        }
+    }
+
+    fn tile(&self, tile_index: u32) -> Option<&Tile> {
+        self.edits
+            .binary_search_by_key(&tile_index, |(index, _)| *index)
+            .ok()
+            .map(|index| &self.edits[index].1)
+    }
+
+    fn tile_mut(&mut self, tile_index: u32) -> Option<&mut Tile> {
+        self.edits
+            .binary_search_by_key(&tile_index, |(index, _)| *index)
+            .ok()
+            .map(|index| &mut self.edits[index].1)
+    }
+
+    fn insert_tile(&mut self, tile_index: u32, tile: Tile) -> &mut Tile {
+        let index = self
+            .edits
+            .binary_search_by_key(&tile_index, |(index, _)| *index)
+            .expect_err("image edit tile must not already exist");
+        self.edits.insert(index, (tile_index, tile));
+        &mut self.edits[index].1
+    }
+
     fn release_tiles(self, tiles: &mut Tiles) {
         for (_, tile) in self.edits {
             tiles.release(tile);
@@ -79,6 +111,70 @@ impl Display for ImageEditCreateError {
 }
 
 impl Error for ImageEditCreateError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrawCommit {
+    pub record_id: DrawRecordId,
+    pub version: DocumentVersionId,
+}
+
+pub type DrawRecordId = u64;
+
+#[derive(Debug)]
+struct StoredImageEditPatch {
+    version: DocumentVersionId,
+    edits: HashMap<ImageId, ImageEdit>,
+}
+
+#[derive(Default, Debug)]
+pub struct DrawHistory {
+    patches: HashMap<DrawRecordId, StoredImageEditPatch>,
+    next_id: DrawRecordId,
+}
+
+impl DrawHistory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply_stored_patch(
+        &mut self,
+        id: DrawRecordId,
+        global: &mut GlobalStorage,
+    ) -> Result<DrawRecordId, LocalCommitError> {
+        let stored = self
+            .patches
+            .get(&id)
+            .ok_or(LocalCommitError::InvalidDrawRecord { id })?;
+        if stored.version != global.version() {
+            return Err(LocalCommitError::VersionMismatch {
+                expected: stored.version,
+                actual: global.version(),
+            });
+        }
+        validate_primitive_edits(global, &stored.edits)?;
+
+        let stored = self
+            .patches
+            .remove(&id)
+            .expect("validated history patch must still exist");
+        let inverse = apply_primitive_edits(global, stored.edits);
+        let version = global.bump_version();
+        Ok(self.store_inverse(version, inverse))
+    }
+
+    fn store_inverse(
+        &mut self,
+        version: DocumentVersionId,
+        edits: HashMap<ImageId, ImageEdit>,
+    ) -> DrawRecordId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.patches
+            .insert(id, StoredImageEditPatch { version, edits });
+        id
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DrawOnWriter {
@@ -158,24 +254,158 @@ impl SessionImage {
 
 #[derive(Debug)]
 pub enum LocalStorageError {
-    DuplicateDocImage { id: ImageId },
-    MissingGlobalImage { id: ImageId },
-    ReadWriteRequiresPrimitive { id: ImageId },
-    DuplicateSessionImage { id: ImageId },
-    SessionImageConflictsWithReadWriteDoc { id: ImageId },
-    MissingMetadataRef { id: ImageId },
-    DuplicateWriter { id: ImageId },
-    MissingWriter { id: ImageId },
-    DestinationNotWritable { id: ImageId },
-    BackupReadRequiresDocImage { id: ImageId },
-    CurrentReadRequiresDeclaredImage { id: ImageId },
-    WriterCycle { id: ImageId },
-    ImageCreate { id: ImageId, source: ImageError },
+    ExpectedDocumentVersion {
+        expected: DocumentVersionId,
+        actual: DocumentVersionId,
+    },
+    DuplicateDocImage {
+        id: ImageId,
+    },
+    MissingGlobalImage {
+        id: ImageId,
+    },
+    ReadWriteRequiresPrimitive {
+        id: ImageId,
+    },
+    DuplicateSessionImage {
+        id: ImageId,
+    },
+    SessionImageConflictsWithReadWriteDoc {
+        id: ImageId,
+    },
+    MissingMetadataRef {
+        id: ImageId,
+    },
+    DuplicateWriter {
+        id: ImageId,
+    },
+    MissingWriter {
+        id: ImageId,
+    },
+    DestinationNotWritable {
+        id: ImageId,
+    },
+    BackupReadRequiresDocImage {
+        id: ImageId,
+    },
+    CurrentReadRequiresDeclaredImage {
+        id: ImageId,
+    },
+    WriterCycle {
+        id: ImageId,
+    },
+    ImageCreate {
+        id: ImageId,
+        source: ImageError,
+    },
 }
+
+#[derive(Debug)]
+pub enum LocalRenderError {
+    MissingLocalImage { id: ImageId },
+    MissingGlobalImage { id: ImageId },
+    MissingMaterializedTile { id: ImageId },
+    DestinationNotWritable { id: ImageId },
+    GlobalPrimitiveWrite { id: ImageId },
+    Image { id: ImageId, source: ImageError },
+    Tile { id: ImageId, source: TilesError },
+}
+
+impl Display for LocalRenderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingLocalImage { id } => write!(f, "local image {id:?} is not declared"),
+            Self::MissingGlobalImage { id } => write!(f, "global image {id:?} is not declared"),
+            Self::MissingMaterializedTile { id } => {
+                write!(f, "image {id:?} did not materialize a tile")
+            }
+            Self::DestinationNotWritable { id } => {
+                write!(
+                    f,
+                    "image {id:?} is not writable in the current render context"
+                )
+            }
+            Self::GlobalPrimitiveWrite { id } => {
+                write!(
+                    f,
+                    "global primitive image {id:?} cannot be written by render"
+                )
+            }
+            Self::Image { id, source } => write!(f, "image {id:?} access failed: {source}"),
+            Self::Tile { id, source } => write!(f, "tile access for image {id:?} failed: {source}"),
+        }
+    }
+}
+
+impl Error for LocalRenderError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Image { source, .. } => Some(source),
+            Self::Tile { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LocalCommitError {
+    ExpectedDocumentVersion {
+        expected: DocumentVersionId,
+        actual: DocumentVersionId,
+    },
+    VersionMismatch {
+        expected: DocumentVersionId,
+        actual: DocumentVersionId,
+    },
+    InvalidDrawRecord {
+        id: DrawRecordId,
+    },
+    MissingGlobalImage {
+        id: ImageId,
+    },
+    DestinationNotWritable {
+        id: ImageId,
+    },
+    InvalidEditTile {
+        id: ImageId,
+        tile_index: u32,
+    },
+}
+
+impl Display for LocalCommitError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExpectedDocumentVersion { expected, actual } => write!(
+                f,
+                "session expected document version {expected:?}, but storage is at {actual:?}"
+            ),
+            Self::VersionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "patch expected version {expected:?}, but storage is at {actual:?}"
+                )
+            }
+            Self::InvalidDrawRecord { id } => write!(f, "draw record {id} does not exist"),
+            Self::MissingGlobalImage { id } => write!(f, "global image {id:?} is not declared"),
+            Self::DestinationNotWritable { id } => {
+                write!(f, "image {id:?} is not a writable commit target")
+            }
+            Self::InvalidEditTile { id, tile_index } => {
+                write!(f, "edit tile {tile_index} is invalid for image {id:?}")
+            }
+        }
+    }
+}
+
+impl Error for LocalCommitError {}
 
 impl Display for LocalStorageError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ExpectedDocumentVersion { expected, actual } => write!(
+                f,
+                "session expected document version {expected:?}, but storage is at {actual:?}"
+            ),
             Self::DuplicateDocImage { id } => write!(f, "doc image {id:?} is declared twice"),
             Self::MissingGlobalImage { id } => write!(f, "global image {id:?} is not declared"),
             Self::ReadWriteRequiresPrimitive { id } => {
@@ -227,7 +457,18 @@ impl Error for LocalStorageError {
 #[derive(Debug)]
 pub struct LocalStorage {
     expected_document_version: DocumentVersionId,
+    doc_write_ids: HashSet<ImageId>,
+    frame_dirty: HashMap<ImageId, TileSet>,
+    doc_dirty: HashMap<ImageId, TileSet>,
     images: HashMap<ImageId, SessionImage>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DirtyEdge {
+    src: ImageId,
+    dst: ImageId,
+    mapping: Mapping,
+    modifier: FootprintModifier,
 }
 
 impl LocalStorage {
@@ -235,7 +476,17 @@ impl LocalStorage {
         ir: &DrawSessionIR,
         global: &mut GlobalStorage,
     ) -> Result<Self, LocalStorageError> {
+        if ir.expected_document_version != global.version() {
+            return Err(LocalStorageError::ExpectedDocumentVersion {
+                expected: ir.expected_document_version,
+                actual: global.version(),
+            });
+        }
         let doc_access = collect_doc_access(ir, global)?;
+        let doc_write_ids = doc_access
+            .iter()
+            .filter_map(|(id, access)| (*access == DocumentImageAccess::ReadWrite).then_some(*id))
+            .collect();
         let session_specs = resolve_session_specs(ir, global, &doc_access)?;
         let writers = collect_writers(ir)?;
         let mut plans = build_plans(&doc_access, &session_specs, writers, global)?;
@@ -244,6 +495,9 @@ impl LocalStorage {
         let images = allocate_plans(plans, global)?;
         Ok(Self {
             expected_document_version: ir.expected_document_version,
+            doc_write_ids,
+            frame_dirty: HashMap::new(),
+            doc_dirty: HashMap::new(),
             images,
         })
     }
@@ -260,9 +514,580 @@ impl LocalStorage {
         &self.images
     }
 
+    pub fn doc_dirty(&self) -> &HashMap<ImageId, TileSet> {
+        &self.doc_dirty
+    }
+
     pub fn into_images(self) -> HashMap<ImageId, SessionImage> {
         self.images
     }
+
+    pub fn render_ctx<'a>(&'a mut self, global: &'a mut GlobalStorage) -> LocalRenderCtx<'a> {
+        LocalRenderCtx {
+            local: self,
+            global,
+        }
+    }
+
+    pub fn flush_frame(&mut self, global: &mut GlobalStorage) -> Result<(), LocalRenderError> {
+        if self.frame_dirty.values().all(TileSet::is_empty) {
+            return Ok(());
+        }
+
+        let frame_dirty = std::mem::take(&mut self.frame_dirty);
+        let mut render_demand = HashMap::new();
+        for (id, dirty) in frame_dirty {
+            if !dirty.is_empty() {
+                self.upload_dirty_from(id, &dirty, global, &mut render_demand)?;
+            }
+        }
+
+        self.render_terminal_demand(global, render_demand)
+    }
+
+    pub fn commit(
+        mut self,
+        global: &mut GlobalStorage,
+        history: &mut DrawHistory,
+    ) -> Result<DrawCommit, LocalCommitError> {
+        if self.expected_document_version != global.version() {
+            let expected = self.expected_document_version;
+            let actual = global.version();
+            self.release_tiles(global.tiles_mut());
+            return Err(LocalCommitError::ExpectedDocumentVersion { expected, actual });
+        }
+
+        if let Err(error) = self.validate_commit_edits(global) {
+            self.release_tiles(global.tiles_mut());
+            return Err(error);
+        }
+
+        let inverse = self.apply_commit_edits(global);
+        let version = global.bump_version();
+        let record_id = history.store_inverse(version, inverse);
+        self.release_tiles(global.tiles_mut());
+        Ok(DrawCommit { record_id, version })
+    }
+
+    pub fn discard(self, global: &mut GlobalStorage) {
+        self.release_tiles(global.tiles_mut());
+    }
+
+    fn release_tiles(self, tiles: &mut Tiles) {
+        for (_, image) in self.images {
+            image.release_tiles(tiles);
+        }
+    }
+
+    fn record_frame_dirty(&mut self, id: ImageId, tile_index: u32) {
+        self.frame_dirty.entry(id).or_default().insert(tile_index);
+    }
+
+    fn record_doc_dirty(&mut self, id: ImageId, dirty: &TileSet) {
+        if self.doc_write_ids.contains(&id) {
+            self.doc_dirty.entry(id).or_default().union_assign(dirty);
+        }
+    }
+
+    fn upload_dirty_from(
+        &mut self,
+        id: ImageId,
+        dirty: &TileSet,
+        global: &GlobalStorage,
+        render_demand: &mut HashMap<ImageId, TileSet>,
+    ) -> Result<(), LocalRenderError> {
+        self.record_doc_dirty(id, dirty);
+        if self.is_local_derive(id) {
+            render_demand.entry(id).or_default().union_assign(dirty);
+        }
+
+        for edge in self.dirty_edges_from(id) {
+            let projected = self.project_dirty_edge(dirty, edge, global)?;
+            if !projected.is_empty() {
+                self.upload_dirty_from(edge.dst, &projected, global, render_demand)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_local_derive(&self, id: ImageId) -> bool {
+        matches!(
+            self.images.get(&id).map(SessionImage::writer),
+            Some(SessionImageWriter::Derive(_))
+        )
+    }
+
+    fn render_terminal_demand(
+        &mut self,
+        global: &mut GlobalStorage,
+        demand: HashMap<ImageId, TileSet>,
+    ) -> Result<(), LocalRenderError> {
+        let terminals = demand
+            .iter()
+            .filter_map(|(id, dirty)| {
+                (!dirty.is_empty() && !self.has_demand_successor(*id, &demand))
+                    .then(|| (*id, dirty.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        let mut ctx = self.render_ctx(global);
+        for (id, dirty) in terminals {
+            let layout = ctx
+                .local
+                .images
+                .get(&id)
+                .ok_or(LocalRenderError::MissingLocalImage { id })?
+                .layout();
+            match dirty {
+                TileSet::Full => {
+                    for tile_index in 0..layout.tile_count() {
+                        ctx.render(SessionImageId::Current(id), tile_index)?;
+                    }
+                }
+                TileSet::Tiles(tiles) => {
+                    for tile_index in tiles {
+                        if tile_index < layout.tile_count() {
+                            ctx.render(SessionImageId::Current(id), tile_index)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn has_demand_successor(&self, id: ImageId, demand: &HashMap<ImageId, TileSet>) -> bool {
+        self.dirty_edges_from(id)
+            .into_iter()
+            .any(|edge| demand.contains_key(&edge.dst))
+    }
+
+    fn dirty_edges_from(&self, src: ImageId) -> Vec<DirtyEdge> {
+        let mut edges = Vec::new();
+        for image in self.images.values() {
+            let SessionImageWriter::Derive(command) = image.writer() else {
+                continue;
+            };
+            let SessionImageId::Current(dst) = command.dst else {
+                continue;
+            };
+            for op in command.ops.iter().copied() {
+                let Some(read) = derive_image_ref(op) else {
+                    continue;
+                };
+                if read.key == SessionImageId::Current(src) {
+                    edges.push(DirtyEdge {
+                        src,
+                        dst,
+                        mapping: read.mapping,
+                        modifier: read.modifier,
+                    });
+                }
+            }
+        }
+        edges
+    }
+
+    fn project_dirty_edge(
+        &self,
+        src_dirty: &TileSet,
+        edge: DirtyEdge,
+        global: &GlobalStorage,
+    ) -> Result<TileSet, LocalRenderError> {
+        if matches!(
+            (edge.mapping, edge.modifier),
+            (Mapping::Identity, FootprintModifier::None)
+        ) && self.layout_of_id(edge.src, global)? == self.layout_of_id(edge.dst, global)?
+        {
+            return Ok(src_dirty.clone());
+        }
+
+        match (edge.mapping, edge.modifier) {
+            (Mapping::Identity, FootprintModifier::None) => {
+                let dst_tile_count = self.layout_of_id(edge.dst, global)?.tile_count();
+                let mut projected = TileSet::default();
+                match src_dirty {
+                    TileSet::Full => Ok(TileSet::Full),
+                    TileSet::Tiles(tiles) => {
+                        for tile_index in tiles.iter().copied() {
+                            if tile_index < dst_tile_count {
+                                projected.insert(tile_index);
+                            }
+                        }
+                        Ok(projected)
+                    }
+                }
+            }
+            (Mapping::Identity, FootprintModifier::Expand(_)) | (Mapping::Matrix(_), _) => {
+                Ok(TileSet::Full)
+            }
+        }
+    }
+
+    fn layout_of_id(
+        &self,
+        id: ImageId,
+        global: &GlobalStorage,
+    ) -> Result<GlaImageLayout, LocalRenderError> {
+        self.images
+            .get(&id)
+            .map(SessionImage::layout)
+            .or_else(|| global.image(id).map(GlobalImage::layout))
+            .ok_or(LocalRenderError::MissingGlobalImage { id })
+    }
+
+    fn validate_commit_edits(&self, global: &GlobalStorage) -> Result<(), LocalCommitError> {
+        for (id, session_image) in &self.images {
+            let SessionImageContent::Edit(edit) = session_image.content() else {
+                continue;
+            };
+            if edit.is_empty() {
+                continue;
+            }
+            match global
+                .image(*id)
+                .ok_or(LocalCommitError::MissingGlobalImage { id: *id })?
+            {
+                GlobalImage::Primitive(image) => validate_dense_edit(*id, image, edit)?,
+                GlobalImage::Derived { image, .. } => validate_cache_edit(*id, image, edit)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_commit_edits(&mut self, global: &mut GlobalStorage) -> HashMap<ImageId, ImageEdit> {
+        let mut inverse = HashMap::new();
+        let (images, tiles, _) = global.resources_mut();
+        for (id, session_image) in &mut self.images {
+            let SessionImageContent::Edit(edit) = &mut session_image.content else {
+                continue;
+            };
+            if edit.is_empty() {
+                continue;
+            }
+            let edit = edit.take();
+            match images
+                .get_mut(id)
+                .expect("commit edits were validated against global storage")
+            {
+                GlobalImage::Primitive(image) => {
+                    let old = apply_dense_edit(image, edit);
+                    if !old.is_empty() {
+                        inverse.insert(*id, old);
+                    }
+                }
+                GlobalImage::Derived { image, .. } => {
+                    let old = apply_cache_edit(image, edit);
+                    old.release_tiles(tiles);
+                }
+            }
+        }
+        inverse
+    }
+}
+
+pub struct LocalRenderCtx<'a> {
+    local: &'a mut LocalStorage,
+    global: &'a mut GlobalStorage,
+}
+
+impl LocalRenderCtx<'_> {
+    pub fn draw_on_write_pos(
+        &mut self,
+        id: ImageId,
+        tile_index: u32,
+    ) -> Result<TilePos, LocalRenderError> {
+        let first_edit_write = {
+            let image = self
+                .local
+                .images
+                .get(&id)
+                .ok_or(LocalRenderError::MissingLocalImage { id })?;
+            if !matches!(image.writer(), SessionImageWriter::DrawOn(_)) {
+                return Err(LocalRenderError::DestinationNotWritable { id });
+            }
+            match image.content() {
+                SessionImageContent::Raw(_) => false,
+                SessionImageContent::Edit(edit) => edit.tile(tile_index).is_none(),
+            }
+        };
+
+        let dst = self.write_current(id, tile_index)?;
+
+        if first_edit_write {
+            match self.read_global(id, tile_index)? {
+                TileReadRef::Zero => self.global.renderer_mut().clear(dst),
+                TileReadRef::Physical(src) => self.global.renderer_mut().copy(src, dst),
+            }
+        }
+
+        self.local.record_frame_dirty(id, tile_index);
+        Ok(dst)
+    }
+
+    fn render_image(
+        &mut self,
+        image: SessionImageId,
+        tile_index: u32,
+    ) -> Result<TileReadRef, LocalRenderError> {
+        match image {
+            SessionImageId::Current(id) if self.local.images.contains_key(&id) => {
+                self.render_local(id, tile_index)
+            }
+            SessionImageId::Current(id) | SessionImageId::Global(id) => {
+                self.render_global(id, tile_index)
+            }
+        }
+    }
+
+    fn render_local(
+        &mut self,
+        id: ImageId,
+        tile_index: u32,
+    ) -> Result<TileReadRef, LocalRenderError> {
+        let command = match self
+            .local
+            .images
+            .get(&id)
+            .ok_or(LocalRenderError::MissingLocalImage { id })?
+            .writer()
+        {
+            SessionImageWriter::DrawOn(_) => None,
+            SessionImageWriter::Derive(command) => Some(command.clone()),
+        };
+
+        if let Some(command) = command {
+            command.exec_tile(self, tile_index)?;
+        }
+
+        self.read_local(id, tile_index)
+    }
+
+    fn read_local(
+        &mut self,
+        id: ImageId,
+        tile_index: u32,
+    ) -> Result<TileReadRef, LocalRenderError> {
+        let image = self
+            .local
+            .images
+            .get(&id)
+            .ok_or(LocalRenderError::MissingLocalImage { id })?;
+        match image.content() {
+            SessionImageContent::Raw(raw) => {
+                let tile = raw
+                    .tile(tile_index)
+                    .map_err(|source| LocalRenderError::Image { id, source })?;
+                self.global
+                    .tiles()
+                    .read_ref(tile)
+                    .map_err(|source| LocalRenderError::Tile { id, source })
+            }
+            SessionImageContent::Edit(edit) => {
+                if let Some(tile) = edit.tile(tile_index) {
+                    self.global
+                        .tiles()
+                        .read_ref(tile)
+                        .map_err(|source| LocalRenderError::Tile { id, source })
+                } else {
+                    self.render_global(id, tile_index)
+                }
+            }
+        }
+    }
+
+    fn render_global(
+        &mut self,
+        id: ImageId,
+        tile_index: u32,
+    ) -> Result<TileReadRef, LocalRenderError> {
+        let command = {
+            let image = self
+                .global
+                .image(id)
+                .ok_or(LocalRenderError::MissingGlobalImage { id })?;
+            match image {
+                GlobalImage::Primitive(_) => None,
+                GlobalImage::Derived { command, image }
+                    if image
+                        .tile(tile_index)
+                        .map_err(|source| LocalRenderError::Image { id, source })?
+                        .is_none() =>
+                {
+                    Some(lower_global_command(
+                        command,
+                        id,
+                        image.layout(),
+                        self.global,
+                    )?)
+                }
+                GlobalImage::Derived { .. } => None,
+            }
+        };
+
+        if let Some(command) = command {
+            command.exec_tile(self, tile_index)?;
+        }
+
+        self.read_global(id, tile_index)
+    }
+
+    fn read_global(
+        &mut self,
+        id: ImageId,
+        tile_index: u32,
+    ) -> Result<TileReadRef, LocalRenderError> {
+        let image = self
+            .global
+            .image(id)
+            .ok_or(LocalRenderError::MissingGlobalImage { id })?;
+        match image {
+            GlobalImage::Primitive(image) => {
+                let tile = image
+                    .tile(tile_index)
+                    .map_err(|source| LocalRenderError::Image { id, source })?;
+                self.global
+                    .tiles()
+                    .read_ref(tile)
+                    .map_err(|source| LocalRenderError::Tile { id, source })
+            }
+            GlobalImage::Derived { image, .. } => {
+                let tile = image
+                    .tile(tile_index)
+                    .map_err(|source| LocalRenderError::Image { id, source })?
+                    .ok_or(LocalRenderError::MissingMaterializedTile { id })?;
+                self.global
+                    .tiles()
+                    .read_ref(tile)
+                    .map_err(|source| LocalRenderError::Tile { id, source })
+            }
+        }
+    }
+
+    fn write_image(
+        &mut self,
+        image: SessionImageId,
+        tile_index: u32,
+    ) -> Result<TilePos, LocalRenderError> {
+        match image {
+            SessionImageId::Current(id) => self.write_current(id, tile_index),
+            SessionImageId::Global(id) => self.write_global(id, tile_index),
+        }
+    }
+
+    fn write_current(&mut self, id: ImageId, tile_index: u32) -> Result<TilePos, LocalRenderError> {
+        if !self.local.images.contains_key(&id) {
+            return Err(LocalRenderError::DestinationNotWritable { id });
+        }
+        let (_, tiles, _) = self.global.resources_mut();
+        let image = self
+            .local
+            .images
+            .get_mut(&id)
+            .ok_or(LocalRenderError::MissingLocalImage { id })?;
+        match &mut image.content {
+            SessionImageContent::Raw(raw) => {
+                let tile = raw
+                    .tile_mut(tile_index)
+                    .map_err(|source| LocalRenderError::Image { id, source })?;
+                tiles
+                    .write_pos(tile)
+                    .map_err(|source| LocalRenderError::Tile { id, source })
+            }
+            SessionImageContent::Edit(edit) => {
+                if tile_index >= image.layout.tile_count() {
+                    return Err(LocalRenderError::Image {
+                        id,
+                        source: ImageError::TileIndexOutOfBounds {
+                            tile_index,
+                            tile_count: image.layout.tile_count(),
+                        },
+                    });
+                }
+                let tile = if edit.tile(tile_index).is_some() {
+                    edit.tile_mut(tile_index)
+                        .expect("checked edit tile must exist")
+                } else {
+                    let tile = tiles
+                        .reserve_for_format(image.format)
+                        .map_err(|source| LocalRenderError::Tile { id, source })?;
+                    edit.insert_tile(tile_index, tile)
+                };
+                tiles
+                    .write_pos(tile)
+                    .map_err(|source| LocalRenderError::Tile { id, source })
+            }
+        }
+    }
+
+    fn write_global(&mut self, id: ImageId, tile_index: u32) -> Result<TilePos, LocalRenderError> {
+        let (images, tiles, _) = self.global.resources_mut();
+        let image = images
+            .get_mut(&id)
+            .ok_or(LocalRenderError::MissingGlobalImage { id })?;
+        match image {
+            GlobalImage::Primitive(_) => Err(LocalRenderError::GlobalPrimitiveWrite { id }),
+            GlobalImage::Derived { image, .. } => {
+                if image
+                    .tile(tile_index)
+                    .map_err(|source| LocalRenderError::Image { id, source })?
+                    .is_none()
+                {
+                    let tile = tiles
+                        .reserve_for_format(image.format())
+                        .map_err(|source| LocalRenderError::Tile { id, source })?;
+                    if let Err(error) = image.replace_tile(tile_index, tile) {
+                        return Err(release_replace_error(id, tiles, error));
+                    }
+                }
+
+                let tile = image
+                    .tile_mut(tile_index)
+                    .map_err(|source| LocalRenderError::Image { id, source })?
+                    .expect("global cache tile was materialized before write");
+                tiles
+                    .write_pos(tile)
+                    .map_err(|source| LocalRenderError::Tile { id, source })
+            }
+        }
+    }
+}
+
+impl RenderCtx for LocalRenderCtx<'_> {
+    type ImageKey = SessionImageId;
+    type Error = LocalRenderError;
+
+    fn render(
+        &mut self,
+        image: Self::ImageKey,
+        tile_index: u32,
+    ) -> Result<TileReadRef, Self::Error> {
+        self.render_image(image, tile_index)
+    }
+
+    fn write_pos(
+        &mut self,
+        image: Self::ImageKey,
+        tile_index: u32,
+    ) -> Result<TilePos, Self::Error> {
+        self.write_image(image, tile_index)
+    }
+
+    fn renderer(&mut self) -> &mut gla_renderer::Renderer {
+        self.global.renderer_mut()
+    }
+}
+
+fn release_replace_error(
+    id: ImageId,
+    tiles: &mut Tiles,
+    error: TileReplaceError,
+) -> LocalRenderError {
+    let (source, tile) = error.into_parts();
+    tiles.release(tile);
+    LocalRenderError::Image { id, source }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -598,6 +1423,32 @@ fn lower_graph_command(
     ))
 }
 
+fn lower_global_command(
+    command: &GraphCommand,
+    dst: ImageId,
+    dst_layout: GlaImageLayout,
+    global: &GlobalStorage,
+) -> Result<ImageDeriveCommand<SessionImageId>, LocalRenderError> {
+    let mut ops = Vec::with_capacity(command.reads.len());
+    for read in &command.reads {
+        let image = global
+            .image(read.image)
+            .ok_or(LocalRenderError::MissingGlobalImage { id: read.image })?;
+        ops.push(Derive::Copy(Copy::new(ImageRef::with_footprint(
+            SessionImageId::Global(read.image),
+            image.layout(),
+            read.mapping,
+            read.modifier,
+        ))));
+    }
+
+    Ok(ImageDeriveCommand::new(
+        SessionImageId::Global(dst),
+        dst_layout,
+        ops,
+    ))
+}
+
 fn image_layout(
     id: ImageId,
     session_specs: &HashMap<ImageId, LocalImageSpec>,
@@ -654,11 +1505,108 @@ fn visit_writer(
 }
 
 fn derive_read(op: Derive<SessionImageId>) -> Option<SessionImageId> {
+    derive_image_ref(op).map(|read| read.key)
+}
+
+fn derive_image_ref(op: Derive<SessionImageId>) -> Option<ImageRef<SessionImageId>> {
     match op {
-        Derive::Copy(op) => Some(op.src.key),
-        Derive::RenderTo(op) => Some(op.src.key),
+        Derive::Copy(op) => Some(op.src),
+        Derive::RenderTo(op) => Some(op.src),
         Derive::Clear(_) => None,
     }
+}
+
+fn validate_primitive_edits(
+    global: &GlobalStorage,
+    edits: &HashMap<ImageId, ImageEdit>,
+) -> Result<(), LocalCommitError> {
+    for (id, edit) in edits {
+        let image = global
+            .image(*id)
+            .ok_or(LocalCommitError::MissingGlobalImage { id: *id })?;
+        let GlobalImage::Primitive(image) = image else {
+            return Err(LocalCommitError::DestinationNotWritable { id: *id });
+        };
+        validate_dense_edit(*id, image, edit)?;
+    }
+    Ok(())
+}
+
+fn validate_dense_edit(
+    id: ImageId,
+    image: &DenseImage,
+    edit: &ImageEdit,
+) -> Result<(), LocalCommitError> {
+    validate_edit_bounds(id, image.tile_count(), edit)
+}
+
+fn validate_cache_edit(
+    id: ImageId,
+    image: &CacheImage,
+    edit: &ImageEdit,
+) -> Result<(), LocalCommitError> {
+    validate_edit_bounds(id, image.tile_count(), edit)
+}
+
+fn validate_edit_bounds(
+    id: ImageId,
+    tile_count: u32,
+    edit: &ImageEdit,
+) -> Result<(), LocalCommitError> {
+    for (tile_index, _) in edit.edits() {
+        if *tile_index >= tile_count {
+            return Err(LocalCommitError::InvalidEditTile {
+                id,
+                tile_index: *tile_index,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn apply_primitive_edits(
+    global: &mut GlobalStorage,
+    edits: HashMap<ImageId, ImageEdit>,
+) -> HashMap<ImageId, ImageEdit> {
+    let mut inverse = HashMap::new();
+    for (id, edit) in edits {
+        let image = global
+            .images
+            .get_mut(&id)
+            .expect("primitive edit patch was validated against global storage");
+        let GlobalImage::Primitive(image) = image else {
+            panic!("primitive edit patch changed role after validation");
+        };
+        let old = apply_dense_edit(image, edit);
+        if !old.is_empty() {
+            inverse.insert(id, old);
+        }
+    }
+    inverse
+}
+
+fn apply_dense_edit(image: &mut DenseImage, edit: ImageEdit) -> ImageEdit {
+    let mut inverse = Vec::with_capacity(edit.edits().len());
+    for (tile_index, new_tile) in edit.into_edits() {
+        let old_tile = image
+            .replace_tile(tile_index, new_tile)
+            .expect("dense edit tile index was validated before apply");
+        inverse.push((tile_index, old_tile));
+    }
+    ImageEdit { edits: inverse }
+}
+
+fn apply_cache_edit(image: &mut CacheImage, edit: ImageEdit) -> ImageEdit {
+    let mut replaced = Vec::new();
+    for (tile_index, new_tile) in edit.into_edits() {
+        if let Some(old_tile) = image
+            .replace_tile(tile_index, new_tile)
+            .expect("cache edit tile index was validated before apply")
+        {
+            replaced.push((tile_index, old_tile));
+        }
+    }
+    ImageEdit { edits: replaced }
 }
 
 fn allocate_plans(
@@ -704,7 +1652,9 @@ mod tests {
     use crate::GlobalStorage;
     use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType};
+    use gla_image_command::RenderCtx;
     use gla_ir::{DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead};
+    use gla_renderer::Pass;
     use gla_renderer::Renderer;
     use tile_key::TileReadRef;
 
@@ -923,6 +1873,392 @@ mod tests {
                     ..
                 }
             }) if id == group
+        ));
+    }
+
+    #[test]
+    fn render_current_raw_drawon_returns_zero_content() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        let rendered = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.render(SessionImageId::Current(coverage), 0).unwrap()
+        };
+
+        assert_eq!(rendered, TileReadRef::Zero);
+        assert!(global.renderer().passes().is_empty());
+    }
+
+    #[test]
+    fn render_current_edit_derive_materializes_replacement_tile() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), SessionRead::current(coverage)],
+                base,
+            )],
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        let rendered = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.render(SessionImageId::Current(base), 0).unwrap()
+        };
+        let TileReadRef::Physical(dst) = rendered else {
+            panic!("derive render should materialize a physical destination");
+        };
+
+        assert_eq!(
+            global.renderer().passes(),
+            &[
+                Pass::Clear { dst },
+                Pass::Clear { dst },
+                Pass::FixGutter { dst },
+            ]
+        );
+        let SessionImageContent::Edit(edit) = local.image(base).unwrap().content() else {
+            panic!("base should be an edit shadow");
+        };
+        assert_eq!(edit.edits().len(), 1);
+    }
+
+    #[test]
+    fn render_global_derived_repairs_cache_miss() {
+        let base = ImageId::new(1);
+        let group = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        add_global_derived(&mut global, group, vec![GraphRead::current(base)]);
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read(base)],
+            session_images: Vec::new(),
+            draw_on: Vec::new(),
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        let rendered = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.render(SessionImageId::Global(group), 0).unwrap()
+        };
+        let TileReadRef::Physical(dst) = rendered else {
+            panic!("global cache repair should materialize a physical destination");
+        };
+
+        assert_eq!(
+            global.renderer().passes(),
+            &[Pass::Clear { dst }, Pass::FixGutter { dst }]
+        );
+        assert!(
+            global
+                .image(group)
+                .unwrap()
+                .as_cache()
+                .unwrap()
+                .tile(0)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn draw_on_edit_first_write_copies_global_source_once() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        let first = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(base, 0).unwrap()
+        };
+        assert_eq!(global.renderer().passes(), &[Pass::Clear { dst: first }]);
+        let SessionImageContent::Edit(edit) = local.image(base).unwrap().content() else {
+            panic!("base should be an edit shadow");
+        };
+        assert_eq!(edit.edits().len(), 1);
+
+        global.renderer_mut().clear_passes();
+        let second = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(base, 0).unwrap()
+        };
+
+        assert_eq!(second, first);
+        assert!(global.renderer().passes().is_empty());
+        let SessionImageContent::Edit(edit) = local.image(base).unwrap().content() else {
+            panic!("base should still be an edit shadow");
+        };
+        assert_eq!(edit.edits().len(), 1);
+    }
+
+    #[test]
+    fn draw_on_raw_write_does_not_emit_source_copy() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        let _dst = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(coverage, 0).unwrap()
+        };
+
+        assert!(global.renderer().passes().is_empty());
+    }
+
+    #[test]
+    fn flush_frame_uploads_draw_on_dirty_and_renders_terminal_derive() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), SessionRead::current(coverage)],
+                base,
+            )],
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        let coverage_pos = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(coverage, 0).unwrap()
+        };
+        global.renderer_mut().clear(coverage_pos);
+
+        local.flush_frame(&mut global).unwrap();
+
+        let base_pos = {
+            let SessionImageContent::Edit(edit) = local.image(base).unwrap().content() else {
+                panic!("base should be an edit shadow");
+            };
+            let (_, tile) = &edit.edits()[0];
+            let TileReadRef::Physical(pos) = global.tiles().read_ref(tile).unwrap() else {
+                panic!("flushed derive should materialize base");
+            };
+            pos
+        };
+        assert_eq!(local.doc_dirty().get(&base), Some(&TileSet::single(0)));
+        assert_eq!(
+            global.renderer().passes(),
+            &[
+                Pass::Clear { dst: coverage_pos },
+                Pass::Clear { dst: base_pos },
+                Pass::Copy {
+                    src: coverage_pos,
+                    dst: base_pos,
+                },
+                Pass::FixGutter { dst: base_pos },
+            ]
+        );
+    }
+
+    #[test]
+    fn commit_applies_primitive_edit_and_stores_inverse_history() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+        let edited_pos = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(base, 0).unwrap()
+        };
+        let mut history = DrawHistory::new();
+
+        let commit = local.commit(&mut global, &mut history).unwrap();
+
+        assert_eq!(commit.version, DocumentVersionId::new(1));
+        assert_eq!(global.version(), DocumentVersionId::new(1));
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert_eq!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Physical(edited_pos)
+        );
+        let stored = history.patches.get(&commit.record_id).unwrap();
+        assert_eq!(stored.version, DocumentVersionId::new(1));
+        assert_eq!(stored.edits.get(&base).unwrap().edits().len(), 1);
+    }
+
+    #[test]
+    fn commit_publishes_derived_cache_without_history_entry() {
+        let base = ImageId::new(1);
+        let group = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        add_global_derived(&mut global, group, vec![GraphRead::current(base)]);
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+        let base_pos = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(base, 0).unwrap()
+        };
+        global.renderer_mut().clear(base_pos);
+        local.flush_frame(&mut global).unwrap();
+        let mut history = DrawHistory::new();
+
+        let commit = local.commit(&mut global, &mut history).unwrap();
+
+        assert!(
+            global
+                .image(group)
+                .unwrap()
+                .as_cache()
+                .unwrap()
+                .tile(0)
+                .unwrap()
+                .is_some()
+        );
+        let stored = history.patches.get(&commit.record_id).unwrap();
+        assert!(stored.edits.contains_key(&base));
+        assert!(!stored.edits.contains_key(&group));
+    }
+
+    #[test]
+    fn history_apply_patch_consumes_record_and_returns_redo_record() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+        let edited_pos = {
+            let mut ctx = local.render_ctx(&mut global);
+            ctx.draw_on_write_pos(base, 0).unwrap()
+        };
+        let mut history = DrawHistory::new();
+        let commit = local.commit(&mut global, &mut history).unwrap();
+
+        let undo_record = history
+            .apply_stored_patch(commit.record_id, &mut global)
+            .unwrap();
+
+        assert_eq!(global.version(), DocumentVersionId::new(2));
+        assert!(!history.patches.contains_key(&commit.record_id));
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert_eq!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
+
+        let redo_record = history
+            .apply_stored_patch(undo_record, &mut global)
+            .unwrap();
+
+        assert_eq!(global.version(), DocumentVersionId::new(3));
+        assert!(!history.patches.contains_key(&undo_record));
+        assert!(history.patches.contains_key(&redo_record));
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert_eq!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Physical(edited_pos)
+        );
+    }
+
+    #[test]
+    fn local_build_rejects_stale_expected_storage_version() {
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: Vec::new(),
+            draw_on: Vec::new(),
+            derive: Vec::new(),
+        };
+        let local = LocalStorage::build(&ir, &mut global).unwrap();
+        let mut history = DrawHistory::new();
+        local.commit(&mut global, &mut history).unwrap();
+
+        let err = LocalStorage::build(&ir, &mut global).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LocalStorageError::ExpectedDocumentVersion {
+                expected,
+                actual
+            } if expected == DocumentVersionId::new(0)
+                && actual == DocumentVersionId::new(1)
         ));
     }
 

@@ -2,7 +2,8 @@
 
 - **Status**: Open
 - **Layer**: Image rendering, tile materialization, and command execution
-- **Related code**: `gla_session`, `gla_image_command`, `gla_image`, `tile_key`
+- **Related code**: `gla_storage`, `gla_session`, `gla_image_command`,
+  `gla_image`, `tile_key`
 
 ## Current Direction
 
@@ -103,6 +104,24 @@ fn write_pos(image, tile_index) -> TilePos;
 writable destination position. They no longer receive or return `Tile`, and they
 do not acquire resource-layer positions themselves.
 
+The first storage-side implementation is `gla_storage::LocalRenderCtx`. It
+borrows `LocalStorage` and `GlobalStorage` together and implements
+`gla_image_command::RenderCtx` for `SessionImageId`.
+
+Current behavior:
+
+- `Current(id)` resolves to a local shadow first and falls back to global
+  storage when no local image exists.
+- `Global(id)` resolves only through global storage.
+- session-local `Raw` reads return the dense tile's `TileReadRef`.
+- session-local `Edit` reads return the edited tile when present, otherwise
+  fall back to the global image.
+- local `Derive` writers execute on demand before returning the current tile.
+- global derived cache misses are repaired through a global-only lowered graph
+  command.
+- derive writes to `Edit` allocate a replacement tile and do not copy source
+  first, because derive commands are full-overwrite.
+
 `RenderTo(Zero)` must not receive one blanket rule. Its behavior depends on the
 operation/blend mode. Some composites may treat a zero source as no-op, while
 others, such as mask-style operations, may produce a meaningful change. Each
@@ -139,6 +158,15 @@ and verifies that the call chain materializes the edit tile correctly.
 
 This DrawOn first-write copy path is distinct from derive materialization.
 Derived images still must not be shadowed as primitive DrawOn targets.
+
+`LocalRenderCtx::write_pos` is therefore not the public DrawOn first-write API.
+It supports derive command execution. DrawOn uses
+`LocalRenderCtx::draw_on_write_pos(id, tile_index)` instead. For session `Raw`
+targets this only materializes a writable physical position. For `ImageEdit`
+primitive shadows it allocates the replacement tile on first write, copies the
+global source tile into that replacement, and then returns the writable
+position. Repeated writes to the same edited tile reuse the replacement and do
+not repeat the source copy.
 
 TODO: when the resource layer has a suitable way to communicate "destination is
 now an empty binding" back to the owning image/session layer, `Copy(Zero)` could
