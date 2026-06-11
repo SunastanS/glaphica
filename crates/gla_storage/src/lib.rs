@@ -1,12 +1,13 @@
 mod local;
 
 pub use local::{
-    DrawCommit, DrawHistory, DrawOnWriter, DrawRecordId, ImageEdit, ImageEditCreateError,
-    LocalCommitError, LocalRenderCtx, LocalRenderError, LocalStorage, LocalStorageError,
-    SessionImage, SessionImageContent, SessionImageId, SessionImageWriter,
+    DrawCommit, DrawHistory, DrawOnInput, DrawOnWriter, DrawRecordId, ImageEdit,
+    ImageEditCreateError, LocalCommitError, LocalRenderCtx, LocalRenderError, LocalStorage,
+    LocalStorageError, SessionImage, SessionImageContent, SessionImageId, SessionImageWriter,
 };
 
 use gla_color::GlaFormat;
+pub use gla_core::CanvasInput;
 use gla_image::{CacheImage, DenseImage, GlaImageLayout, ImageError};
 use gla_ir::{DocumentVersionId, GraphCommand, ImageId, ImageRole, RegistryPatch, RegistryPatchOp};
 use gla_renderer::Renderer;

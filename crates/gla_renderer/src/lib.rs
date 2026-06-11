@@ -24,6 +24,15 @@ pub enum Pass {
     FixGutter {
         dst: TilePos,
     },
+    /// Accumulates a linear radial kernel into `dst`:
+    /// `dst += max(0, 1 - d / max(radius, 1px)) * flow`.
+    DrawRadialKernel1D {
+        dst: TilePos,
+        center_in_tile_x: f32,
+        center_in_tile_y: f32,
+        radius: f32,
+        flow: f32,
+    },
 }
 
 #[derive(Default)]
@@ -75,6 +84,23 @@ impl Renderer {
     pub fn fix_gutter(&mut self, dst: TilePos) {
         self.passes.push(Pass::FixGutter { dst });
     }
+
+    pub fn draw_radial_kernel_1d(
+        &mut self,
+        dst: TilePos,
+        center_in_tile_x: f32,
+        center_in_tile_y: f32,
+        radius: f32,
+        flow: f32,
+    ) {
+        self.passes.push(Pass::DrawRadialKernel1D {
+            dst,
+            center_in_tile_x,
+            center_in_tile_y,
+            radius,
+            flow,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -91,6 +117,7 @@ mod tests {
         renderer.copy(src, dst);
         renderer.render_to(src, dst, BlendMode::Multiply, 0.5);
         renderer.render_to(src, dst, BlendMode::MaskAlpha, 1.0);
+        renderer.draw_radial_kernel_1d(dst, 8.0, 8.0, 12.0, 0.75);
 
         assert_eq!(
             renderer.passes(),
@@ -108,6 +135,13 @@ mod tests {
                     dst,
                     blend_mode: BlendMode::MaskAlpha,
                     opacity: 1.0,
+                },
+                Pass::DrawRadialKernel1D {
+                    dst,
+                    center_in_tile_x: 8.0,
+                    center_in_tile_y: 8.0,
+                    radius: 12.0,
+                    flow: 0.75,
                 },
             ]
         );

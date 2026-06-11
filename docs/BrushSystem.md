@@ -113,10 +113,10 @@ round brush is not itself a primitive. Its coverage can be produced by:
 ```text
 DrawRadialKernel1D:
   dst: coverage
-  kernel: linear-clamped compact gaussian approximation
+  kernel: w(d, r) = max(0, 1 - d / max(r, 1px))
   input: center, radius, flow
   footprint: circle bounds in dst image space
-  semantics: accumulate with zero initialization
+  semantics: dst += kernel * flow, without clamping
 ```
 
 The user brush or tool program owns spacing, interpolation, smoothing, jitter,
@@ -124,6 +124,13 @@ pressure mapping, and tool presets. The session receives input samples from the
 Rust app loop, applies input mappings, invokes DrawOn primitives, records frame
 dirty, uploads dirty through session/document graph edges on flush, and
 materializes root repaint demand.
+
+The first storage-backed implementation keeps that layering but uses a temporary
+fallback mapper for `RadialKernel1D`: mapped canvas position becomes center,
+`tool_params.radius` becomes dab radius with a 1px minimum, and pressure becomes
+flow. This fallback is not the primitive contract. The primitive receives a
+tool-specific engine input and the renderer pass only reads center, radius, and
+flow after mapping.
 
 DrawOn primitives have one `ReadWrite` destination and no image read edges in
 the first version. Current-reading stamp or smudge behavior that requires

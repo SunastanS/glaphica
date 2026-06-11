@@ -1,13 +1,16 @@
 use crate::{GlobalImage, GlobalStorage};
 use atlas::TilePos;
 use gla_color::GlaFormat;
-use gla_image::{CacheImage, DenseImage, GlaImageLayout, ImageError, TileReplaceError, TileSet};
+use gla_core::CanvasInput;
+use gla_image::{
+    CacheImage, DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, TileReplaceError, TileSet,
+};
 use gla_image_command::RenderCtx;
 use gla_image_command::{Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef};
 use gla_ir::{
     DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawSessionIR, FootprintModifier,
     GraphCommand, ImageId, Mapping, MetadataRef, SessionCommand, SessionImageDecl,
-    SessionReadImage,
+    SessionReadImage, Tool,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -191,6 +194,18 @@ impl DrawOnWriter {
             tool_params: command.tool_params,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DrawOnInput {
+    RadialKernel1D {
+        center_x: f32,
+        center_y: f32,
+        /// Engine-space radius. Primitive execution does not read tool config.
+        radius: f32,
+        /// Engine-space flow after app input, pressure, preset, and curve mapping.
+        flow: f32,
+    },
 }
 
 #[derive(Debug)]
@@ -458,6 +473,7 @@ impl Error for LocalStorageError {
 pub struct LocalStorage {
     expected_document_version: DocumentVersionId,
     doc_write_ids: HashSet<ImageId>,
+    draw_on_order: Vec<ImageId>,
     frame_dirty: HashMap<ImageId, TileSet>,
     doc_dirty: HashMap<ImageId, TileSet>,
     images: HashMap<ImageId, SessionImage>,
@@ -487,6 +503,7 @@ impl LocalStorage {
             .iter()
             .filter_map(|(id, access)| (*access == DocumentImageAccess::ReadWrite).then_some(*id))
             .collect();
+        let draw_on_order = ir.draw_on.iter().map(|command| command.dst).collect();
         let session_specs = resolve_session_specs(ir, global, &doc_access)?;
         let writers = collect_writers(ir)?;
         let mut plans = build_plans(&doc_access, &session_specs, writers, global)?;
@@ -496,6 +513,7 @@ impl LocalStorage {
         Ok(Self {
             expected_document_version: ir.expected_document_version,
             doc_write_ids,
+            draw_on_order,
             frame_dirty: HashMap::new(),
             doc_dirty: HashMap::new(),
             images,
@@ -527,6 +545,47 @@ impl LocalStorage {
             local: self,
             global,
         }
+    }
+
+    pub fn draw_dab(
+        &mut self,
+        global: &mut GlobalStorage,
+        input: CanvasInput,
+    ) -> Result<(), LocalRenderError> {
+        self.draw_input(global, input)
+    }
+
+    fn draw_input(
+        &mut self,
+        global: &mut GlobalStorage,
+        input: CanvasInput,
+    ) -> Result<(), LocalRenderError> {
+        let draws = self
+            .draw_on_order
+            .iter()
+            .copied()
+            .map(|id| {
+                let image = self
+                    .images
+                    .get(&id)
+                    .ok_or(LocalRenderError::MissingLocalImage { id })?;
+                let SessionImageWriter::DrawOn(writer) = image.writer() else {
+                    return Err(LocalRenderError::DestinationNotWritable { id });
+                };
+                Ok((
+                    id,
+                    *writer,
+                    image.layout(),
+                    draw_on_input_from_canvas(*writer, input),
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut ctx = self.render_ctx(global);
+        for (id, writer, layout, input) in draws {
+            draw_on(&mut ctx, id, writer, layout, input)?;
+        }
+        Ok(())
     }
 
     pub fn flush_frame(&mut self, global: &mut GlobalStorage) -> Result<(), LocalRenderError> {
@@ -786,6 +845,146 @@ impl LocalStorage {
         }
         inverse
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DabTile {
+    index: u32,
+    origin_x: u32,
+    origin_y: u32,
+}
+
+fn draw_on(
+    ctx: &mut LocalRenderCtx<'_>,
+    id: ImageId,
+    writer: DrawOnWriter,
+    layout: GlaImageLayout,
+    input: DrawOnInput,
+) -> Result<(), LocalRenderError> {
+    match (writer.tool, input) {
+        (
+            Tool::RadialKernel1D,
+            DrawOnInput::RadialKernel1D {
+                center_x,
+                center_y,
+                radius,
+                flow,
+            },
+        ) => draw_radial_kernel_1d(ctx, id, layout, center_x, center_y, radius, flow),
+    }
+}
+
+fn draw_on_input_from_canvas(writer: DrawOnWriter, input: CanvasInput) -> DrawOnInput {
+    match writer.tool {
+        Tool::RadialKernel1D => {
+            let (center_x, center_y) =
+                map_input_to_dst(writer.input_mapping, input.position.x, input.position.y);
+            // Temporary fallback mapper until the app/tool layer owns custom curves.
+            DrawOnInput::RadialKernel1D {
+                center_x,
+                center_y,
+                radius: non_negative_finite(writer.tool_params.radius).max(1.0),
+                flow: input.pressure,
+            }
+        }
+    }
+}
+
+fn draw_radial_kernel_1d(
+    ctx: &mut LocalRenderCtx<'_>,
+    id: ImageId,
+    layout: GlaImageLayout,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    flow: f32,
+) -> Result<(), LocalRenderError> {
+    let radius = non_negative_finite(radius);
+    let flow = finite_or_zero(flow);
+
+    for tile in radial_footprint_tiles(layout, center_x, center_y, radius) {
+        let dst = ctx.draw_on_write_pos(id, tile.index)?;
+        let center_in_tile_x = center_x - tile.origin_x as f32;
+        let center_in_tile_y = center_y - tile.origin_y as f32;
+        ctx.renderer()
+            .draw_radial_kernel_1d(dst, center_in_tile_x, center_in_tile_y, radius, flow);
+        ctx.renderer().fix_gutter(dst);
+    }
+
+    Ok(())
+}
+
+fn map_input_to_dst(mapping: Mapping, x: f32, y: f32) -> (f32, f32) {
+    let x = finite_or_zero(x);
+    let y = finite_or_zero(y);
+    match mapping {
+        Mapping::Identity => (x, y),
+        Mapping::Matrix(m) => (m.m11 * x + m.m12 * y + m.tx, m.m21 * x + m.m22 * y + m.ty),
+    }
+}
+
+fn radial_footprint_tiles(
+    layout: GlaImageLayout,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+) -> Vec<DabTile> {
+    if layout.tile_count() == 0 || !footprint_intersects_layout(layout, center_x, center_y, radius)
+    {
+        return Vec::new();
+    }
+
+    let min_tx = tile_coord_for_px(center_x - radius, layout.width_px, layout.tile_count_x());
+    let max_tx = tile_coord_for_px(center_x + radius, layout.width_px, layout.tile_count_x());
+    let min_ty = tile_coord_for_px(center_y - radius, layout.height_px, layout.tile_count_y());
+    let max_ty = tile_coord_for_px(center_y + radius, layout.height_px, layout.tile_count_y());
+    let tile_count_x = layout.tile_count_x();
+    let mut tiles = Vec::new();
+
+    for ty in min_ty..=max_ty {
+        for tx in min_tx..=max_tx {
+            tiles.push(DabTile {
+                index: ty * tile_count_x + tx,
+                origin_x: tx * IMAGE_TILE_SIZE,
+                origin_y: ty * IMAGE_TILE_SIZE,
+            });
+        }
+    }
+
+    tiles
+}
+
+fn footprint_intersects_layout(
+    layout: GlaImageLayout,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+) -> bool {
+    let max_x = layout.width_px as f32;
+    let max_y = layout.height_px as f32;
+    center_x + radius >= 0.0
+        && center_y + radius >= 0.0
+        && center_x - radius < max_x
+        && center_y - radius < max_y
+}
+
+fn tile_coord_for_px(px: f32, extent_px: u32, tile_count: u32) -> u32 {
+    debug_assert!(tile_count > 0);
+    let max_px = extent_px.saturating_sub(1) as f32;
+    let clamped = finite_or_zero(px).max(0.0).min(max_px);
+    ((clamped / IMAGE_TILE_SIZE as f32).floor() as u32).min(tile_count - 1)
+}
+
+fn non_negative_finite(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        0.0
+    }
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 pub struct LocalRenderCtx<'a> {
@@ -1652,8 +1851,12 @@ mod tests {
     use crate::GlobalStorage;
     use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType};
+    use gla_core::CanvasCoordF;
     use gla_image_command::RenderCtx;
-    use gla_ir::{DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead};
+    use gla_ir::{
+        Affine2D, DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead,
+        ToolParams,
+    };
     use gla_renderer::Pass;
     use gla_renderer::Renderer;
     use tile_key::TileReadRef;
@@ -1676,6 +1879,20 @@ mod tests {
         GlaImageLayout::new(1, 1)
     }
 
+    fn multi_tile_layout() -> GlaImageLayout {
+        GlaImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2)
+    }
+
+    fn canvas_input(x: f32, y: f32, pressure: f32) -> CanvasInput {
+        CanvasInput {
+            time_ns: 0,
+            position: CanvasCoordF::new(x, y),
+            pressure,
+            tilt: (0.0, 0.0),
+            twist: 0.0,
+        }
+    }
+
     fn storage_with_atlases() -> GlobalStorage {
         let mut tiles = Tiles::new();
         let mut textures = NoAtlasTextures;
@@ -1689,11 +1906,20 @@ mod tests {
     }
 
     fn add_global_primitive(storage: &mut GlobalStorage, id: ImageId, format: GlaFormat) {
+        add_global_primitive_with_layout(storage, id, format, layout());
+    }
+
+    fn add_global_primitive_with_layout(
+        storage: &mut GlobalStorage,
+        id: ImageId,
+        format: GlaFormat,
+        layout: GlaImageLayout,
+    ) {
         storage
             .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
                 id,
                 format,
-                layout: layout(),
+                layout,
                 role: ImageRole::Primitive,
             }]))
             .unwrap();
@@ -2056,6 +2282,299 @@ mod tests {
         };
 
         assert!(global.renderer().passes().is_empty());
+    }
+
+    #[test]
+    fn draw_dab_applies_affine_input_mapping_to_touched_tile() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let mut draw = DrawOnCommand::new(coverage);
+        draw.input_mapping = Mapping::Matrix(Affine2D {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            tx: IMAGE_TILE_SIZE as f32 + 4.0,
+            ty: IMAGE_TILE_SIZE as f32 + 4.0,
+        });
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(multi_tile_layout()),
+            }],
+            draw_on: vec![draw],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        local
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 0.5))
+            .unwrap();
+
+        let passes = global.renderer().passes();
+        assert_eq!(passes.len(), 2);
+        assert!(matches!(
+            passes[0],
+            Pass::DrawRadialKernel1D {
+                dst,
+                center_in_tile_x,
+                center_in_tile_y,
+                radius,
+                flow: _,
+                ..
+            } if center_in_tile_x == 4.0
+                && center_in_tile_y == 4.0
+                && radius == 1.0
+                && matches!(passes[1], Pass::FixGutter { dst: gutter_dst } if gutter_dst == dst)
+        ));
+    }
+
+    #[test]
+    fn draw_dab_fallback_mapper_radius_footprint_touches_each_overlapped_tile() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let mut draw = DrawOnCommand::new(coverage);
+        draw.tool_params = ToolParams { radius: 2.0 };
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(multi_tile_layout()),
+            }],
+            draw_on: vec![draw],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        local
+            .draw_dab(&mut global, canvas_input(IMAGE_TILE_SIZE as f32, 4.0, 0.25))
+            .unwrap();
+
+        let centers = global
+            .renderer()
+            .passes()
+            .iter()
+            .filter_map(|pass| match *pass {
+                Pass::DrawRadialKernel1D {
+                    center_in_tile_x,
+                    center_in_tile_y,
+                    radius,
+                    flow: _,
+                    ..
+                } => {
+                    assert_eq!(radius, 2.0);
+                    Some((center_in_tile_x, center_in_tile_y))
+                }
+                Pass::FixGutter { .. } => None,
+                _ => {
+                    panic!("draw dab should emit brush and gutter passes only for local raw images")
+                }
+            })
+            .collect::<Vec<_>>();
+        let gutter_count = global
+            .renderer()
+            .passes()
+            .iter()
+            .filter(|pass| matches!(pass, Pass::FixGutter { .. }))
+            .count();
+
+        assert_eq!(centers, vec![(IMAGE_TILE_SIZE as f32, 4.0), (0.0, 4.0)]);
+        assert_eq!(gutter_count, 2);
+    }
+
+    #[test]
+    fn draw_dab_tile_local_center_can_be_outside_touched_tile() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let mut draw = DrawOnCommand::new(coverage);
+        draw.tool_params = ToolParams { radius: 2.0 };
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(multi_tile_layout()),
+            }],
+            draw_on: vec![draw],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        local
+            .draw_dab(
+                &mut global,
+                canvas_input(IMAGE_TILE_SIZE as f32 - 1.0, 4.0, 0.25),
+            )
+            .unwrap();
+
+        let centers = global
+            .renderer()
+            .passes()
+            .iter()
+            .map(|pass| match *pass {
+                Pass::DrawRadialKernel1D {
+                    center_in_tile_x,
+                    center_in_tile_y,
+                    radius: _,
+                    flow: _,
+                    ..
+                } => Some((center_in_tile_x, center_in_tile_y)),
+                Pass::FixGutter { .. } => None,
+                _ => {
+                    panic!("draw dab should emit brush and gutter passes only for local raw images")
+                }
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            centers,
+            vec![(IMAGE_TILE_SIZE as f32 - 1.0, 4.0), (-1.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn primitive_execution_uses_engine_radius_not_writer_config() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let mut draw = DrawOnCommand::new(coverage);
+        draw.tool_params = ToolParams { radius: 40.0 };
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(multi_tile_layout()),
+            }],
+            draw_on: vec![draw],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+        let writer = *match local.image(coverage).unwrap().writer() {
+            SessionImageWriter::DrawOn(writer) => writer,
+            SessionImageWriter::Derive(_) => panic!("coverage should be a DrawOn target"),
+        };
+
+        {
+            let mut ctx = local.render_ctx(&mut global);
+            draw_on(
+                &mut ctx,
+                coverage,
+                writer,
+                multi_tile_layout(),
+                DrawOnInput::RadialKernel1D {
+                    center_x: IMAGE_TILE_SIZE as f32,
+                    center_y: 4.0,
+                    radius: 2.0,
+                    flow: 0.5,
+                },
+            )
+            .unwrap();
+        }
+
+        let radii = global
+            .renderer()
+            .passes()
+            .iter()
+            .filter_map(|pass| match *pass {
+                Pass::DrawRadialKernel1D { radius, .. } => Some(radius),
+                Pass::FixGutter { .. } => None,
+                _ => panic!("primitive execution should emit brush and gutter passes"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(radii, vec![2.0, 2.0]);
+    }
+
+    #[test]
+    fn draw_dab_edit_first_write_copy_precedes_brush_pass() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        local
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+
+        let passes = global.renderer().passes();
+        assert_eq!(passes.len(), 3);
+        let Pass::Clear { dst } = passes[0] else {
+            panic!("first edit write must copy or clear the source before brush mutation");
+        };
+        assert!(matches!(
+            passes[1],
+            Pass::DrawRadialKernel1D {
+                dst: brush_dst,
+                center_in_tile_x: 0.0,
+                center_in_tile_y: 0.0,
+                radius: 1.0,
+                flow: _,
+                ..
+            } if brush_dst == dst
+        ));
+        assert!(matches!(passes[2], Pass::FixGutter { dst: gutter_dst } if gutter_dst == dst));
+    }
+
+    #[test]
+    fn draw_dab_flush_frame_uploads_dirty_to_downstream_derive() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), SessionRead::current(coverage)],
+                base,
+            )],
+        };
+        let mut local = LocalStorage::build(&ir, &mut global).unwrap();
+
+        local
+            .draw_dab(&mut global, canvas_input(0.0, 0.0, 0.6))
+            .unwrap();
+        local.flush_frame(&mut global).unwrap();
+
+        assert_eq!(local.doc_dirty().get(&base), Some(&TileSet::single(0)));
+        assert!(matches!(
+            global.renderer().passes()[0],
+            Pass::DrawRadialKernel1D { .. }
+        ));
+        assert!(
+            global
+                .renderer()
+                .passes()
+                .iter()
+                .any(|pass| matches!(pass, Pass::FixGutter { .. }))
+        );
     }
 
     #[test]

@@ -184,6 +184,7 @@ pub enum GpuRendererError {
         dst: GlaFormat,
         blend_mode: BlendMode,
     },
+    UnsupportedDrawRadialKernel1D,
 }
 
 impl Display for GpuRendererError {
@@ -239,6 +240,9 @@ impl Display for GpuRendererError {
                     f,
                     "unsupported render_to composite from {src:?} into {dst:?} with {blend_mode:?}"
                 )
+            }
+            Self::UnsupportedDrawRadialKernel1D => {
+                write!(f, "GPU draw_radial_kernel_1d pass is not implemented")
             }
         }
     }
@@ -406,6 +410,9 @@ impl GpuRenderer {
                         opacity,
                     )?,
                     Pass::FixGutter { dst } => encode_fix_gutter(&mut ctx, &self.atlases, dst)?,
+                    Pass::DrawRadialKernel1D { .. } => {
+                        return Err(GpuRendererError::UnsupportedDrawRadialKernel1D);
+                    }
                 }
             }
         }
