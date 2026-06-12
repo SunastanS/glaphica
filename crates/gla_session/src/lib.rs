@@ -229,7 +229,7 @@ impl<'s, 'g> DrawFrame<'s, 'g> {
 
         if self.pending_flush_passes.is_none() {
             let frame_dirty = self.frame_dirty.clone();
-            let mut passes = self.dab_passes.clone();
+            let mut passes = finalize_dab_passes(&self.dab_passes);
             self.session.flush_frame_dirty(&frame_dirty, &mut passes)?;
             self.pending_flush_passes = Some(passes);
         }
@@ -247,6 +247,46 @@ impl<'s, 'g> DrawFrame<'s, 'g> {
         self.dab_passes.clear();
         self.pending_flush_passes = None;
         Ok(())
+    }
+}
+
+fn finalize_dab_passes(passes: &[Pass]) -> Vec<Pass> {
+    let mut finalized = Vec::with_capacity(passes.len());
+    let mut touched = Vec::new();
+    let mut seen = HashSet::new();
+
+    for pass in passes.iter().copied() {
+        if let Some(dst) = draw_on_pass_dst(pass) {
+            finalized.push(pass);
+            if seen.insert(dst) {
+                touched.push(dst);
+            }
+        } else {
+            flush_draw_on_gutters(&mut finalized, &mut touched, &mut seen);
+            finalized.push(pass);
+        }
+    }
+    flush_draw_on_gutters(&mut finalized, &mut touched, &mut seen);
+    finalized
+}
+
+fn flush_draw_on_gutters(
+    finalized: &mut Vec<Pass>,
+    touched: &mut Vec<TilePos>,
+    seen: &mut HashSet<TilePos>,
+) {
+    for dst in touched.drain(..) {
+        finalized.push(Pass::FixGutter { dst });
+    }
+    seen.clear();
+}
+
+fn draw_on_pass_dst(pass: Pass) -> Option<TilePos> {
+    match pass {
+        Pass::DrawRadialKernel1D { dst, .. } | Pass::ReplaceCircle4D { dst, .. } => Some(dst),
+        Pass::Clear { .. } | Pass::Copy { .. } | Pass::RenderTo { .. } | Pass::FixGutter { .. } => {
+            None
+        }
     }
 }
 
@@ -1372,7 +1412,6 @@ fn draw_radial_kernel_1d(
             radius_px,
             amplitude,
         });
-        ctx.fix_gutter(dst);
     }
 
     Ok(())
@@ -1420,7 +1459,6 @@ fn draw_replace_circle_4d(
             radius_px,
             color,
         });
-        ctx.fix_gutter(dst);
     }
 
     Ok(())
@@ -2358,7 +2396,7 @@ mod tests {
             .filter(|pass| matches!(pass, Pass::FixGutter { .. }))
             .count();
         assert_eq!(brush_passes, 2);
-        assert_eq!(gutter_passes, 2);
+        assert_eq!(gutter_passes, 0);
     }
 
     #[test]
@@ -2569,7 +2607,7 @@ mod tests {
                 ..
             } if radius_px == 2.0 && pass_color == color
         ));
-        assert!(matches!(frame.dab_passes()[2], Pass::FixGutter { .. }));
+        assert_eq!(frame.dab_passes().len(), 2);
     }
 
     #[test]
@@ -2785,7 +2823,7 @@ mod tests {
             passes[1],
             Pass::DrawRadialKernel1D { dst: draw_dst, .. } if draw_dst == dst
         ));
-        assert_eq!(passes[2], Pass::FixGutter { dst });
+        assert_eq!(passes.len(), 2);
     }
 
     #[test]
@@ -2825,6 +2863,60 @@ mod tests {
             .count();
         assert_eq!(clear_count, 1);
         assert_eq!(draw_count, 2);
+    }
+
+    #[test]
+    fn flush_adds_one_gutter_per_touched_draw_on_tile() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = session.begin_frame();
+        let mut backend = TestBackend::default();
+
+        frame
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+        frame
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+        let Pass::DrawRadialKernel1D { dst, .. } = frame.dab_passes()[1] else {
+            panic!("first draw should produce a radial pass after materialization clear");
+        };
+
+        frame.flush(&mut backend).unwrap();
+
+        assert_eq!(
+            backend.submitted_passes(),
+            vec![
+                Pass::Clear { dst },
+                Pass::DrawRadialKernel1D {
+                    dst,
+                    center_in_tile_x: 0.0,
+                    center_in_tile_y: 0.0,
+                    radius_px: 1.0,
+                    amplitude: 0.4,
+                },
+                Pass::DrawRadialKernel1D {
+                    dst,
+                    center_in_tile_x: 0.0,
+                    center_in_tile_y: 0.0,
+                    radius_px: 1.0,
+                    amplitude: 0.4,
+                },
+                Pass::FixGutter { dst },
+            ]
+        );
     }
 
     #[test]
