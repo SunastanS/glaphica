@@ -135,6 +135,7 @@ impl DrawHistory {
 pub struct DrawFrame {
     frame_dirty: HashMap<ImageId, TileSet>,
     dab_passes: Vec<Pass>,
+    pending_flush_passes: Option<Vec<Pass>>,
 }
 
 impl DrawFrame {
@@ -146,11 +147,14 @@ impl DrawFrame {
         Self {
             frame_dirty,
             dab_passes: Vec::new(),
+            pending_flush_passes: None,
         }
     }
 
     pub fn is_clean(&self) -> bool {
-        self.frame_dirty.values().all(TileSet::is_empty) && self.dab_passes.is_empty()
+        self.frame_dirty.values().all(TileSet::is_empty)
+            && self.dab_passes.is_empty()
+            && self.pending_flush_passes.is_none()
     }
 
     pub fn dab_passes(&self) -> &[Pass] {
@@ -163,6 +167,9 @@ impl DrawFrame {
         shown_image: ImageId,
         input: CanvasInput,
     ) -> Result<(), SessionError> {
+        if self.pending_flush_passes.is_some() {
+            return Err(SessionError::PendingFrameSubmit);
+        }
         session.draw_dab_into_frame(
             &mut self.frame_dirty,
             &mut self.dab_passes,
@@ -180,16 +187,25 @@ impl DrawFrame {
             return Ok(());
         }
 
-        let frame_dirty = self.frame_dirty.clone();
-        let mut passes = self.dab_passes.clone();
-        session.flush_frame_dirty(&frame_dirty, &mut passes)?;
+        if self.pending_flush_passes.is_none() {
+            let frame_dirty = self.frame_dirty.clone();
+            let mut passes = self.dab_passes.clone();
+            session.flush_frame_dirty(&frame_dirty, &mut passes)?;
+            self.pending_flush_passes = Some(passes);
+        }
+
+        let passes = self
+            .pending_flush_passes
+            .as_ref()
+            .expect("dirty frame must have pending flush passes before submit");
         backend
-            .submit(&passes)
+            .submit(passes)
             .map_err(|source| SessionError::RenderBackend {
                 source: Box::new(source),
             })?;
         self.frame_dirty.clear();
         self.dab_passes.clear();
+        self.pending_flush_passes = None;
         Ok(())
     }
 }
@@ -278,6 +294,7 @@ pub enum SessionError {
     RenderBackend {
         source: Box<dyn Error + 'static>,
     },
+    PendingFrameSubmit,
     ImageCommandFootprint {
         source: SourceFootprintError,
     },
@@ -357,6 +374,9 @@ impl Display for SessionError {
             Self::TileFootprint { source } => write!(f, "tile footprint failed: {source}"),
             Self::GpuRenderer(source) => write!(f, "GPU renderer execution failed: {source}"),
             Self::RenderBackend { source } => write!(f, "render backend submit failed: {source}"),
+            Self::PendingFrameSubmit => {
+                write!(f, "frame has pending passes from a failed submit")
+            }
             Self::ImageCommandFootprint { source } => {
                 write!(f, "image command footprint failed: {source}")
             }
@@ -2432,6 +2452,93 @@ mod tests {
         assert!(!frame.is_clean());
         assert_eq!(frame.dab_passes().len(), dab_pass_count);
         assert!(backend.submitted.is_empty());
+    }
+
+    #[test]
+    fn failed_flush_retries_same_generated_passes_without_mutating_session_again() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), SessionRead::current(coverage)],
+                base,
+            )],
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+        let mut backend = TestBackend {
+            fail: true,
+            ..Default::default()
+        };
+        frame
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.6))
+            .unwrap();
+
+        let err = frame.flush(&mut session, &mut backend).unwrap_err();
+        let pending = frame
+            .pending_flush_passes
+            .as_ref()
+            .expect("failed flush should keep generated passes")
+            .clone();
+
+        assert!(matches!(err, SessionError::RenderBackend { .. }));
+        assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
+
+        backend.fail = false;
+        frame.flush(&mut session, &mut backend).unwrap();
+
+        assert_eq!(backend.submitted, vec![pending]);
+        assert!(frame.is_clean());
+        assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
+    }
+
+    #[test]
+    fn draw_dab_after_failed_flush_is_rejected_until_pending_submit_succeeds() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+        let mut backend = TestBackend {
+            fail: true,
+            ..Default::default()
+        };
+        frame
+            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.6))
+            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap_err();
+
+        let err = frame
+            .draw_dab(&mut session, coverage, canvas_input(1.0, 1.0, 0.6))
+            .unwrap_err();
+
+        assert!(matches!(err, SessionError::PendingFrameSubmit));
+
+        backend.fail = false;
+        frame.flush(&mut session, &mut backend).unwrap();
+        frame
+            .draw_dab(&mut session, coverage, canvas_input(1.0, 1.0, 0.6))
+            .unwrap();
     }
 
     #[test]
