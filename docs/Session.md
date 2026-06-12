@@ -333,6 +333,12 @@ If `DrawFrame::flush` sees no frame dirty, it returns without rendering. In norm
 use there is no app loop while nothing is being drawn; this path mostly covers
 stationary stylus or timing-edge cases.
 
+Dropping a dirty `DrawFrame` means frame-level renderer work was abandoned after
+session-local tiles may already have been materialized. The session is then
+marked aborted: later DrawOn calls and commit return an error, and the caller
+must discard the session. This keeps unsubmitted GPU work from becoming durable
+document state.
+
 ## Commit
 
 A draw session commit consumes the session:

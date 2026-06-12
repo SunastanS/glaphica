@@ -291,7 +291,11 @@ fn draw_on_pass_dst(pass: Pass) -> Option<TilePos> {
 }
 
 impl Drop for DrawFrame<'_, '_> {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        if !self.is_clean() {
+            self.session.abort_unflushed_frame();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -389,6 +393,7 @@ pub enum SessionError {
         source: Box<dyn Error + 'static>,
     },
     PendingFrameSubmit,
+    UnflushedFrameDropped,
     ImageCommandFootprint {
         source: SourceFootprintError,
     },
@@ -482,6 +487,9 @@ impl Display for SessionError {
             Self::RenderBackend { source } => write!(f, "render backend submit failed: {source}"),
             Self::PendingFrameSubmit => {
                 write!(f, "frame has pending passes from a failed submit")
+            }
+            Self::UnflushedFrameDropped => {
+                write!(f, "an unflushed draw frame was dropped")
             }
             Self::ImageCommandFootprint { source } => {
                 write!(f, "image command footprint failed: {source}")
@@ -622,6 +630,7 @@ pub struct DrawSession<'g> {
     draw_on_order: Vec<ImageId>,
     doc_dirty: HashMap<ImageId, TileSet>,
     images: HashMap<ImageId, SessionImage>,
+    aborted_by_unflushed_frame: bool,
 }
 
 impl std::fmt::Debug for DrawSession<'_> {
@@ -632,6 +641,10 @@ impl std::fmt::Debug for DrawSession<'_> {
             .field("draw_on_order", &self.draw_on_order)
             .field("doc_dirty", &self.doc_dirty)
             .field("images", &self.images)
+            .field(
+                "aborted_by_unflushed_frame",
+                &self.aborted_by_unflushed_frame,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -663,6 +676,7 @@ impl<'g> DrawSession<'g> {
             draw_on_order,
             doc_dirty: HashMap::new(),
             images,
+            aborted_by_unflushed_frame: false,
         })
     }
 
@@ -685,6 +699,7 @@ impl<'g> DrawSession<'g> {
         target: ImageId,
         input: DrawOnInput,
     ) -> Result<(), SessionError> {
+        self.ensure_not_aborted()?;
         let image = self
             .images
             .get(&target)
@@ -705,6 +720,7 @@ impl<'g> DrawSession<'g> {
         x: f32,
         y: f32,
     ) -> Result<Vec<DrawOnRoute>, SessionError> {
+        self.ensure_not_aborted()?;
         if !self.images.contains_key(&shown_image) {
             return Err(SessionError::InputImageNotActive { id: shown_image });
         }
@@ -780,6 +796,10 @@ impl<'g> DrawSession<'g> {
     }
 
     pub fn commit(mut self, history: &mut DrawHistory) -> Result<Option<DrawCommit>, SessionError> {
+        if self.aborted_by_unflushed_frame {
+            self.release_local_tiles();
+            return Err(SessionError::UnflushedFrameDropped);
+        }
         if self.expected_document_version != self.global.version() {
             let expected = self.expected_document_version;
             let actual = self.global.version();
@@ -823,6 +843,18 @@ impl<'g> DrawSession<'g> {
             passes,
             frame_dirty,
         }
+    }
+
+    fn ensure_not_aborted(&self) -> Result<(), SessionError> {
+        if self.aborted_by_unflushed_frame {
+            Err(SessionError::UnflushedFrameDropped)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn abort_unflushed_frame(&mut self) {
+        self.aborted_by_unflushed_frame = true;
     }
 
     fn take_commit_edits(&mut self) -> HashMap<ImageId, ImageEdit> {
@@ -1855,6 +1887,7 @@ fn build_stored_patch_session<'g>(
         draw_on_order: Vec::new(),
         doc_dirty: HashMap::new(),
         images,
+        aborted_by_unflushed_frame: false,
     })
 }
 
@@ -3270,6 +3303,69 @@ mod tests {
             global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
             TileReadRef::Zero
         );
+    }
+
+    #[test]
+    fn dropping_unflushed_frame_aborts_commit_and_releases_local_tiles() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        let rgba_atlas = global.tiles().atlas_for_format(rgba_format()).unwrap();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![replace_draw(base)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        {
+            let mut frame = session.begin_frame();
+            frame.draw_on(base, replace_input(0.0, 0.0, 1.0)).unwrap();
+        }
+        let mut history = DrawHistory::new();
+
+        let err = session.commit(&mut history).unwrap_err();
+
+        assert!(matches!(err, SessionError::UnflushedFrameDropped));
+        assert!(history.patches.is_empty());
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert_eq!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
+        assert_eq!(global.tiles().atlas(rgba_atlas).unwrap().remaining(), 256);
+    }
+
+    #[test]
+    fn dropping_unflushed_frame_rejects_later_draws() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        {
+            let mut frame = session.begin_frame();
+            frame
+                .draw_dab(coverage, canvas_input(0.0, 0.0, 0.5))
+                .unwrap();
+        }
+        let mut frame = session.begin_frame();
+
+        let err = frame
+            .draw_dab(coverage, canvas_input(1.0, 1.0, 0.5))
+            .unwrap_err();
+
+        assert!(matches!(err, SessionError::UnflushedFrameDropped));
     }
 
     #[test]
