@@ -134,7 +134,6 @@ impl ImageRole {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawOnCommand {
     pub dst: ImageId,
-    pub input_mapping: Mapping,
     pub tool: Tool,
     pub tool_params: ToolParams,
 }
@@ -143,7 +142,6 @@ impl DrawOnCommand {
     pub fn new(dst: ImageId) -> Self {
         Self {
             dst,
-            input_mapping: Mapping::Identity,
             tool: Tool::default(),
             tool_params: ToolParams::default(),
         }

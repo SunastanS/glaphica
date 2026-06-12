@@ -1,10 +1,12 @@
 use atlas::TilePos;
-use gla_color::GlaFormat;
-use gla_core::CanvasInput;
+use gla_color::{BlendMode, GlaFormat};
+use gla_core::{CanvasInput, TileGridError, tile_rect, tiles_covering_rect};
 use gla_image::{
     DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, ImageLayoutError, TileSet,
 };
-use gla_image_command::{Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef, RenderCtx};
+use gla_image_command::{
+    Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef, RenderCtx, SourceFootprintError,
+};
 use gla_ir::{
     DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawSessionIR, FootprintModifier,
     GraphCommand, ImageId, Mapping, MetadataRef, SessionCommand, SessionImageDecl,
@@ -126,9 +128,16 @@ impl DrawFrame {
         &mut self,
         session: &mut DrawSession,
         global: &mut GlobalStorage,
+        shown_image: ImageId,
         input: CanvasInput,
     ) -> Result<(), SessionError> {
-        session.draw_dab_into_frame(global, &mut self.frame_dirty, &mut self.dab_passes, input)
+        session.draw_dab_into_frame(
+            global,
+            &mut self.frame_dirty,
+            &mut self.dab_passes,
+            shown_image,
+            input,
+        )
     }
 
     pub fn flush<B: RenderBackend>(
@@ -207,6 +216,13 @@ pub enum SessionError {
     MissingLocalImage {
         id: ImageId,
     },
+    InputImageNotActive {
+        id: ImageId,
+    },
+    AmbiguousInputRoute {
+        shown: ImageId,
+        target: ImageId,
+    },
     MissingMaterializedTile {
         id: ImageId,
     },
@@ -225,9 +241,18 @@ pub enum SessionError {
         id: ImageId,
         source: TilesError,
     },
+    TileFootprint {
+        source: TileGridError,
+    },
     GpuRenderer(gla_renderer::GpuRendererError),
     RenderBackend {
         source: Box<dyn Error + 'static>,
+    },
+    ImageCommandFootprint {
+        source: SourceFootprintError,
+    },
+    UnsupportedZeroSourceRenderTo {
+        blend_mode: BlendMode,
     },
 }
 
@@ -278,6 +303,13 @@ impl Display for SessionError {
             }
             Self::WriterCycle { id } => write!(f, "session writer graph has a cycle at {id:?}"),
             Self::MissingLocalImage { id } => write!(f, "local image {id:?} is not declared"),
+            Self::InputImageNotActive { id } => {
+                write!(f, "input image {id:?} is not active in this session")
+            }
+            Self::AmbiguousInputRoute { shown, target } => write!(
+                f,
+                "input image {shown:?} reaches draw target {target:?} through multiple routes"
+            ),
             Self::MissingMaterializedTile { id } => {
                 write!(f, "image {id:?} did not materialize a tile")
             }
@@ -292,8 +324,18 @@ impl Display for SessionError {
             }
             Self::Image { id, source } => write!(f, "image {id:?} access failed: {source}"),
             Self::Tile { id, source } => write!(f, "tile access for image {id:?} failed: {source}"),
+            Self::TileFootprint { source } => write!(f, "tile footprint failed: {source}"),
             Self::GpuRenderer(source) => write!(f, "GPU renderer execution failed: {source}"),
             Self::RenderBackend { source } => write!(f, "render backend submit failed: {source}"),
+            Self::ImageCommandFootprint { source } => {
+                write!(f, "image command footprint failed: {source}")
+            }
+            Self::UnsupportedZeroSourceRenderTo { blend_mode } => {
+                write!(
+                    f,
+                    "RenderTo with zero source is unsupported for {blend_mode:?}"
+                )
+            }
         }
     }
 }
@@ -303,8 +345,10 @@ impl Error for SessionError {
         match self {
             Self::Image { source, .. } => Some(source),
             Self::Tile { source, .. } => Some(source),
+            Self::TileFootprint { source } => Some(source),
             Self::GpuRenderer(source) => Some(source),
             Self::RenderBackend { source } => Some(source.as_ref()),
+            Self::ImageCommandFootprint { source } => Some(source),
             _ => None,
         }
     }
@@ -348,7 +392,6 @@ enum SessionImageId {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DrawOnWriter {
-    input_mapping: Mapping,
     tool: Tool,
     tool_params: gla_ir::ToolParams,
 }
@@ -356,7 +399,6 @@ struct DrawOnWriter {
 impl DrawOnWriter {
     fn from_command(command: &DrawOnCommand) -> Self {
         Self {
-            input_mapping: command.input_mapping,
             tool: command.tool,
             tool_params: command.tool_params,
         }
@@ -439,14 +481,6 @@ pub struct DrawSession {
     images: HashMap<ImageId, SessionImage>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct DirtyEdge {
-    src: ImageId,
-    dst: ImageId,
-    mapping: Mapping,
-    modifier: FootprintModifier,
-}
-
 impl DrawSession {
     pub fn begin(ir: &DrawSessionIR, global: &mut GlobalStorage) -> Result<Self, SessionError> {
         if ir.expected_document_version != global.version() {
@@ -489,34 +523,79 @@ impl DrawSession {
         global: &mut GlobalStorage,
         frame_dirty: &mut HashMap<ImageId, TileSet>,
         dab_passes: &mut Vec<Pass>,
+        shown_image: ImageId,
         input: CanvasInput,
     ) -> Result<(), SessionError> {
-        let draws = self
-            .draw_on_order
-            .iter()
-            .copied()
-            .map(|id| {
-                let image = self
-                    .images
-                    .get(&id)
-                    .ok_or(SessionError::MissingLocalImage { id })?;
-                let SessionImageWriter::DrawOn(writer) = image.writer() else {
-                    return Err(SessionError::DestinationNotWritable { id });
-                };
-                Ok((
-                    id,
-                    *writer,
-                    image.layout(),
-                    draw_on_input_from_canvas(*writer, input),
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let draws = self.route_draw_inputs(shown_image, input)?;
 
         let mut ctx = self.render_ctx(global, dab_passes, Some(frame_dirty));
         for (id, writer, layout, input) in draws {
             draw_on(&mut ctx, id, writer, layout, input)?;
         }
         Ok(())
+    }
+
+    fn route_draw_inputs(
+        &self,
+        shown_image: ImageId,
+        input: CanvasInput,
+    ) -> Result<Vec<(ImageId, DrawOnWriter, GlaImageLayout, DrawOnInput)>, SessionError> {
+        if !self.images.contains_key(&shown_image) {
+            return Err(SessionError::InputImageNotActive { id: shown_image });
+        }
+
+        let mut targets = HashMap::new();
+        let mut stack = vec![(
+            shown_image,
+            finite_or_zero(input.position.x),
+            finite_or_zero(input.position.y),
+        )];
+        while let Some((id, x, y)) = stack.pop() {
+            let image = self
+                .images
+                .get(&id)
+                .ok_or(SessionError::MissingLocalImage { id })?;
+            match image.writer() {
+                SessionImageWriter::DrawOn(_) => {
+                    if targets.insert(id, (x, y)).is_some() {
+                        return Err(SessionError::AmbiguousInputRoute {
+                            shown: shown_image,
+                            target: id,
+                        });
+                    }
+                }
+                SessionImageWriter::Derive(command) => {
+                    let SessionImageId::Current(dst) = command.dst else {
+                        continue;
+                    };
+                    for (src, read) in self.current_reads_from_dst(dst) {
+                        let (src_x, src_y) = map_point(read.mapping, x, y);
+                        stack.push((src, src_x, src_y));
+                    }
+                }
+            }
+        }
+
+        let mut draws = Vec::new();
+        for id in self.draw_on_order.iter().copied() {
+            let Some((x, y)) = targets.remove(&id) else {
+                continue;
+            };
+            let image = self
+                .images
+                .get(&id)
+                .ok_or(SessionError::MissingLocalImage { id })?;
+            let SessionImageWriter::DrawOn(writer) = image.writer() else {
+                return Err(SessionError::DestinationNotWritable { id });
+            };
+            draws.push((
+                id,
+                *writer,
+                image.layout(),
+                draw_on_input_from_target(*writer, input, x, y),
+            ));
+        }
+        Ok(draws)
     }
 
     fn flush_frame_dirty(
@@ -648,10 +727,10 @@ impl DrawSession {
             render_demand.entry(id).or_default().union_assign(dirty);
         }
 
-        for edge in self.dirty_edges_from(id) {
-            let projected = self.project_dirty_edge(dirty, edge, global)?;
+        for (dst, read) in self.current_reads_to_src(id) {
+            let projected = self.project_dirty_read(id, dirty, dst, read, global)?;
             if !projected.is_empty() {
-                self.upload_dirty_from(edge.dst, &projected, global, render_demand)?;
+                self.upload_dirty_from(dst, &projected, global, render_demand)?;
             }
         }
 
@@ -708,13 +787,32 @@ impl DrawSession {
     }
 
     fn has_demand_successor(&self, id: ImageId, demand: &HashMap<ImageId, TileSet>) -> bool {
-        self.dirty_edges_from(id)
+        self.current_reads_to_src(id)
             .into_iter()
-            .any(|edge| demand.contains_key(&edge.dst))
+            .any(|(dst, _)| demand.contains_key(&dst))
     }
 
-    fn dirty_edges_from(&self, src: ImageId) -> Vec<DirtyEdge> {
-        let mut edges = Vec::new();
+    fn current_reads_from_dst(&self, dst: ImageId) -> Vec<(ImageId, ImageRef<SessionImageId>)> {
+        let mut reads = Vec::new();
+        self.for_each_current_read(|read_dst, src, read| {
+            if read_dst == dst {
+                reads.push((src, read));
+            }
+        });
+        reads
+    }
+
+    fn current_reads_to_src(&self, src: ImageId) -> Vec<(ImageId, ImageRef<SessionImageId>)> {
+        let mut reads = Vec::new();
+        self.for_each_current_read(|dst, read_src, read| {
+            if read_src == src {
+                reads.push((dst, read));
+            }
+        });
+        reads
+    }
+
+    fn for_each_current_read(&self, mut f: impl FnMut(ImageId, ImageId, ImageRef<SessionImageId>)) {
         for image in self.images.values() {
             let SessionImageWriter::Derive(command) = image.writer() else {
                 continue;
@@ -726,44 +824,45 @@ impl DrawSession {
                 let Some(read) = derive_image_ref(op) else {
                     continue;
                 };
-                if read.key == SessionImageId::Current(src) {
-                    edges.push(DirtyEdge {
-                        src,
-                        dst,
-                        mapping: read.mapping,
-                        modifier: read.modifier,
-                    });
-                }
+                let SessionImageId::Current(src) = read.key else {
+                    continue;
+                };
+                f(dst, src, read);
             }
         }
-        edges
     }
 
-    fn project_dirty_edge(
+    fn project_dirty_read(
         &self,
+        src: ImageId,
         src_dirty: &TileSet,
-        edge: DirtyEdge,
+        dst: ImageId,
+        read: ImageRef<SessionImageId>,
         global: &GlobalStorage,
     ) -> Result<TileSet, SessionError> {
         if matches!(
-            (edge.mapping, edge.modifier),
+            (read.mapping, read.modifier),
             (Mapping::Identity, FootprintModifier::None)
-        ) && self.layout_of_id(edge.src, global)? == self.layout_of_id(edge.dst, global)?
+        ) && self.layout_of_id(src, global)? == self.layout_of_id(dst, global)?
         {
             return Ok(src_dirty.clone());
         }
 
-        match (edge.mapping, edge.modifier) {
+        match (read.mapping, read.modifier) {
             (Mapping::Identity, FootprintModifier::None) => {
-                let dst_tile_count =
-                    checked_layout_tile_count(edge.dst, self.layout_of_id(edge.dst, global)?)?;
-                let mut projected = TileSet::default();
+                let src_layout = self.layout_of_id(src, global)?;
+                let dst_layout = self.layout_of_id(dst, global)?;
                 match src_dirty {
                     TileSet::Full => Ok(TileSet::Full),
                     TileSet::Tiles(tiles) => {
+                        let mut projected = TileSet::default();
                         for tile_index in tiles.iter().copied() {
-                            if tile_index < dst_tile_count {
-                                projected.insert(tile_index);
+                            let rect = tile_rect(src_layout.tile_grid(), tile_index)
+                                .map_err(|source| SessionError::TileFootprint { source })?;
+                            for dst_tile_index in tiles_covering_rect(dst_layout.tile_grid(), rect)
+                                .map_err(|source| SessionError::TileFootprint { source })?
+                            {
+                                projected.insert(dst_tile_index);
                             }
                         }
                         Ok(projected)
@@ -930,11 +1029,11 @@ impl SessionRenderCtx<'_> {
             SessionImageId::Current(id) => self.write_current(id, tile_index),
             SessionImageId::Global(id) => {
                 let passes = &mut *self.passes;
-                Ok(self.global.write_global_cache_pos_with_zero_init(
-                    id,
-                    tile_index,
-                    |dst| passes.push(Pass::Clear { dst }),
-                )?)
+                Ok(self
+                    .global
+                    .write_global_cache_pos_with_zero_init(id, tile_index, |dst| {
+                        passes.push(Pass::Clear { dst })
+                    })?)
             }
         }
     }
@@ -1038,6 +1137,14 @@ impl RenderCtx for SessionRenderCtx<'_> {
     fn fix_gutter(&mut self, dst: TilePos) {
         self.passes.push(Pass::FixGutter { dst });
     }
+
+    fn footprint_error(&mut self, source: SourceFootprintError) -> Self::Error {
+        SessionError::ImageCommandFootprint { source }
+    }
+
+    fn unsupported_zero_source_render_to(&mut self, blend_mode: BlendMode) -> Self::Error {
+        SessionError::UnsupportedZeroSourceRenderTo { blend_mode }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1067,18 +1174,19 @@ fn draw_on(
     }
 }
 
-fn draw_on_input_from_canvas(writer: DrawOnWriter, input: CanvasInput) -> DrawOnInput {
+fn draw_on_input_from_target(
+    writer: DrawOnWriter,
+    input: CanvasInput,
+    target_x: f32,
+    target_y: f32,
+) -> DrawOnInput {
     match writer.tool {
-        Tool::RadialKernel1D => {
-            let (center_x, center_y) =
-                map_input_to_dst(writer.input_mapping, input.position.x, input.position.y);
-            DrawOnInput::RadialKernel1D {
-                center_x,
-                center_y,
-                radius: non_negative_finite(writer.tool_params.radius).max(1.0),
-                flow: finite_or_zero(input.pressure).clamp(0.0, 1.0),
-            }
-        }
+        Tool::RadialKernel1D => DrawOnInput::RadialKernel1D {
+            center_x: finite_or_zero(target_x),
+            center_y: finite_or_zero(target_y),
+            radius: non_negative_finite(writer.tool_params.radius).max(1.0),
+            flow: finite_or_zero(input.pressure).clamp(0.0, 1.0),
+        },
     }
 }
 
@@ -1116,13 +1224,14 @@ fn draw_radial_kernel_1d(
     Ok(())
 }
 
-fn map_input_to_dst(mapping: Mapping, x: f32, y: f32) -> (f32, f32) {
+fn map_point(mapping: Mapping, x: f32, y: f32) -> (f32, f32) {
     let x = finite_or_zero(x);
     let y = finite_or_zero(y);
-    match mapping {
+    let (x, y) = match mapping {
         Mapping::Identity => (x, y),
         Mapping::Matrix(m) => (m.m11 * x + m.m12 * y + m.tx, m.m21 * x + m.m22 * y + m.ty),
-    }
+    };
+    (finite_or_zero(x), finite_or_zero(y))
 }
 
 fn radial_footprint_tiles(
@@ -1727,7 +1836,8 @@ mod tests {
     use gla_color::{ChannelCount, ChannelType};
     use gla_core::CanvasCoordF;
     use gla_ir::{
-        DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead, ToolParams,
+        Affine2D, DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead,
+        ToolParams,
     };
     use gla_renderer::{Pass, RenderBackend};
     use std::fmt::{Display, Formatter};
@@ -1794,6 +1904,13 @@ mod tests {
         GlaImageLayout::new(IMAGE_TILE_SIZE * 3, IMAGE_TILE_SIZE * 2)
     }
 
+    fn layout_with_tiles(width_tiles: u32, height_tiles: u32) -> GlaImageLayout {
+        GlaImageLayout::new(
+            width_tiles * IMAGE_TILE_SIZE,
+            height_tiles * IMAGE_TILE_SIZE,
+        )
+    }
+
     fn canvas_input(x: f32, y: f32, pressure: f32) -> CanvasInput {
         CanvasInput {
             time_ns: 0,
@@ -1817,11 +1934,20 @@ mod tests {
     }
 
     fn add_global_primitive(storage: &mut GlobalStorage, id: ImageId, format: GlaFormat) {
+        add_global_primitive_with_layout(storage, id, format, layout());
+    }
+
+    fn add_global_primitive_with_layout(
+        storage: &mut GlobalStorage,
+        id: ImageId,
+        format: GlaFormat,
+        layout: GlaImageLayout,
+    ) {
         storage
             .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
                 id,
                 format,
-                layout: layout(),
+                layout,
                 role: ImageRole::Primitive,
             }]))
             .unwrap();
@@ -1843,7 +1969,7 @@ mod tests {
         let base = ImageId::new(1);
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
-        add_global_primitive(&mut global, base, rgba_format());
+        add_global_primitive_with_layout(&mut global, base, rgba_format(), layout_with_tiles(1, 1));
 
         let ir = DrawSessionIR {
             expected_document_version: global.version(),
@@ -1867,7 +1993,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_dab_broadcasts_canvas_input_and_records_brush_passes() {
+    fn draw_dab_routes_canvas_input_and_records_brush_passes() {
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
         let mut draw = DrawOnCommand::new(coverage);
@@ -1890,6 +2016,7 @@ mod tests {
             .draw_dab(
                 &mut session,
                 &mut global,
+                coverage,
                 canvas_input(IMAGE_TILE_SIZE as f32, 4.0, 0.25),
             )
             .unwrap();
@@ -1929,7 +2056,12 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 4.0))
+            .draw_dab(
+                &mut session,
+                &mut global,
+                coverage,
+                canvas_input(0.0, 0.0, 4.0),
+            )
             .unwrap();
 
         assert!(
@@ -1938,6 +2070,138 @@ mod tests {
                 .iter()
                 .any(|pass| matches!(pass, Pass::DrawRadialKernel1D { flow, .. } if *flow == 1.0))
         );
+    }
+
+    #[test]
+    fn draw_dab_routes_from_shown_image_through_matrix_to_draw_target() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive_with_layout(&mut global, base, rgba_format(), layout_with_tiles(1, 1));
+        let mut read = SessionRead::current(coverage);
+        read.mapping = Mapping::Matrix(Affine2D {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            tx: 5.0,
+            ty: 7.0,
+        });
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), read],
+                base,
+            )],
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+
+        frame
+            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.5))
+            .unwrap();
+
+        assert!(frame.dab_passes().iter().any(|pass| matches!(
+            pass,
+            Pass::DrawRadialKernel1D {
+                center_in_tile_x,
+                center_in_tile_y,
+                ..
+            } if *center_in_tile_x == 5.0 && *center_in_tile_y == 7.0
+        )));
+    }
+
+    #[test]
+    fn draw_dab_rejects_ambiguous_route_to_same_target() {
+        let paint = ImageId::new(1);
+        let left = ImageId::new(2);
+        let right = ImageId::new(3);
+        let shown = ImageId::new(4);
+        let mut global = storage_with_atlases();
+        let local_image = |id| SessionImageDecl::Primitive {
+            id,
+            format: MetadataRef::Concrete(value_format()),
+            layout: MetadataRef::Concrete(layout()),
+        };
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![
+                local_image(paint),
+                local_image(left),
+                local_image(right),
+                local_image(shown),
+            ],
+            draw_on: vec![DrawOnCommand::new(paint)],
+            derive: vec![
+                gla_ir::DeriveCommand::new(vec![SessionRead::current(paint)], left),
+                gla_ir::DeriveCommand::new(vec![SessionRead::current(paint)], right),
+                gla_ir::DeriveCommand::new(
+                    vec![SessionRead::current(left), SessionRead::current(right)],
+                    shown,
+                ),
+            ],
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+
+        let err = frame
+            .draw_dab(
+                &mut session,
+                &mut global,
+                shown,
+                canvas_input(0.0, 0.0, 0.5),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::AmbiguousInputRoute {
+                shown: err_shown,
+                target,
+            } if err_shown == shown && target == paint
+        ));
+    }
+
+    #[test]
+    fn draw_dab_rejects_input_image_outside_active_session() {
+        let coverage = ImageId::new(2);
+        let missing = ImageId::new(99);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+
+        let err = frame
+            .draw_dab(
+                &mut session,
+                &mut global,
+                missing,
+                canvas_input(0.0, 0.0, 0.5),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::InputImageNotActive { id } if id == missing
+        ));
     }
 
     #[test]
@@ -1959,7 +2223,12 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(
+                &mut session,
+                &mut global,
+                coverage,
+                canvas_input(0.0, 0.0, 0.4),
+            )
             .unwrap();
 
         let passes = frame.dab_passes();
@@ -1992,10 +2261,20 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(
+                &mut session,
+                &mut global,
+                coverage,
+                canvas_input(0.0, 0.0, 0.4),
+            )
             .unwrap();
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(
+                &mut session,
+                &mut global,
+                coverage,
+                canvas_input(0.0, 0.0, 0.4),
+            )
             .unwrap();
 
         let clear_count = frame
@@ -2037,7 +2316,7 @@ mod tests {
         let mut backend = TestBackend::default();
 
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
         frame
             .flush(&mut session, &mut global, &mut backend)
@@ -2050,6 +2329,45 @@ mod tests {
             panic!("base should be edit content");
         };
         assert_eq!(edit.edits().len(), 1);
+    }
+
+    #[test]
+    fn dirty_upload_identity_uses_layout_aware_tile_rects() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive_with_layout(&mut global, base, rgba_format(), layout_with_tiles(1, 2));
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout_with_tiles(2, 2)),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), SessionRead::current(coverage)],
+                base,
+            )],
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+        let mut backend = TestBackend::default();
+
+        frame
+            .draw_dab(
+                &mut session,
+                &mut global,
+                base,
+                canvas_input(1.0, IMAGE_TILE_SIZE as f32 + 1.0, 0.6),
+            )
+            .unwrap();
+        frame
+            .flush(&mut session, &mut global, &mut backend)
+            .unwrap();
+
+        assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(1)));
     }
 
     #[test]
@@ -2072,7 +2390,12 @@ mod tests {
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
         let mut frame = DrawFrame::new();
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(
+                &mut session,
+                &mut global,
+                coverage,
+                canvas_input(0.0, 0.0, 0.6),
+            )
             .unwrap();
         let dab_pass_count = frame.dab_passes().len();
         let mut backend = TestBackend {
@@ -2127,7 +2450,7 @@ mod tests {
         let mut frame = DrawFrame::new();
         let mut backend = TestBackend::default();
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
         frame
             .flush(&mut session, &mut global, &mut backend)
@@ -2174,7 +2497,7 @@ mod tests {
         let mut frame = DrawFrame::new();
         let mut backend = TestBackend::default();
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
         frame
             .flush(&mut session, &mut global, &mut backend)
@@ -2229,7 +2552,7 @@ mod tests {
         let mut frame = DrawFrame::new();
         let mut backend = TestBackend::default();
         frame
-            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
         frame
             .flush(&mut session, &mut global, &mut backend)

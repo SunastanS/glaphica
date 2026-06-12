@@ -220,22 +220,21 @@ FootprintModifier =
 For a command tile, the executor computes source tiles by taking destination
 tile bounds, applying the read edge mapping and modifier, and conservatively
 covering source tiles. The first executable source-footprint path supports
-`Identity + None` precisely. Expanded and matrix source footprints remain TODOs
-until layout-aware footprint enumeration and renderer sampling semantics are
-wired.
+`Identity + None` precisely with layout-aware tile rectangles. Expanded and
+matrix source footprints return explicit unsupported errors until renderer
+sampling semantics are wired.
 
 Dirty upload uses the same edge in the reverse conservative direction. In this
 document "upload" means moving dirty information from the written image toward
 the root. It does not mutate tile resources or copy tile content; it computes
 destination `TileSet` values and triggers recursive rendering.
 
-For a frame, dirty is first collected per `DrawOn` command. On flush, each
-DrawOn dirty set is uploaded through the graph and session command edges. The
-session records document dirty for `ReadWrite` document ids and unions root
-demand for repaint. The implementation intentionally keeps upload simple: each
-DrawOn dirty set is uploaded independently, and repeated paths are only unioned
-at the destination records. Expanded and matrix dirty uploads currently fall
-back to full destination dirty.
+For a frame, the app passes the shown image id with each dab. The session routes
+the input point through active `Current` read edges to reachable `DrawOn`
+targets, then records dirty per target. On flush, each DrawOn dirty set is
+uploaded through the graph and session command edges. The session records
+document dirty for `ReadWrite` document ids and unions root demand for repaint.
+Expanded and matrix dirty uploads currently fall back to full destination dirty.
 
 ## Tile Slot Values
 

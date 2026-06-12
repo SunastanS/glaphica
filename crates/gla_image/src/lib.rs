@@ -1,5 +1,6 @@
 use gla_color::GlaFormat;
 pub use gla_core::IMAGE_TILE_SIZE;
+use gla_core::TileGrid;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use tile_key::{Tile, Tiles, TilesError};
@@ -43,6 +44,10 @@ impl GlaImageLayout {
                 panic!("image layout tile count must fit in u32")
             }
         }
+    }
+
+    pub fn tile_grid(&self) -> TileGrid {
+        TileGrid::new(self.width_px, self.height_px, IMAGE_TILE_SIZE)
     }
 }
 

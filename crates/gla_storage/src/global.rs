@@ -452,7 +452,11 @@ impl GlobalStorage {
                     let GlobalImage::Derived { command, .. } = image else {
                         return None;
                     };
-                    command.reads.iter().any(|read| read.image == src).then_some(*id)
+                    command
+                        .reads
+                        .iter()
+                        .any(|read| read.image == src)
+                        .then_some(*id)
                 })
                 .collect::<Vec<_>>();
 

@@ -44,8 +44,8 @@ buffered dab passes, and uploads dirty through lowered derive commands:
 - reads lowered to `SessionImageId::Global(id)` are backup/global-only reads and
   do not propagate current-session dirty;
 - `Identity + None` with matching layouts passes the tile set through;
-- `Identity + None` with different layouts clamps tile indices to the
-  destination tile count;
+- `Identity + None` with different layouts projects dirty by source tile pixel
+  rectangles and destination tile coverage;
 - `Expand` and `Matrix` mappings conservatively become `TileSet::Full`.
 
 `doc_dirty` keeps the old meaning: it accumulates dirty sets only for

@@ -228,15 +228,19 @@ doc_dirty:
 Root repaint is the union of uploading each dirty set through the active session
 and document graph edges.
 
-## Input Mapping
+## Input Routing
 
-Every image has its own coordinate system. DrawOn input mapping maps app input
-coordinates into the destination image coordinate system:
+Every image has its own coordinate system. The app owns the view/window
+binding, so it passes the shown `ImageId` with each dab. The session routes the
+input point through the active session graph from that shown image toward
+reachable `DrawOn` targets.
 
 ```text
-input_mapping:
-  Identity
-  Matrix(canvas_to_draw_dst)
+draw_dab(shown_image, input)
+  shown image coord
+  -> active read edge Mapping(dst -> src)
+  -> DrawOn target image coord
+  -> tool input lowering
 ```
 
 Read edges use mappings from derive destination space to read source space. The
@@ -244,7 +248,8 @@ same coordinate relationship is used for read footprints and dirty upload.
 
 The IR admits `Identity`, affine `Matrix`, and the `Expand(px)` footprint
 modifier. The current executable source-footprint path handles
-`Identity + None` precisely; expanded and matrix source footprints remain TODOs.
+`Identity + None` precisely with layout-aware tile rectangles. Expanded and
+matrix source footprints return explicit unsupported errors during render.
 Dirty upload for expanded and matrix paths currently falls back conservatively.
 
 ## Frame Flow

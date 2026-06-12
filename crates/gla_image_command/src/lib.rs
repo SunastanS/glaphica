@@ -1,7 +1,10 @@
 use atlas::TilePos;
 use gla_color::BlendMode;
 use gla_command_core::{FootprintModifier, Mapping};
+use gla_core::{TileGridError, tile_rect, tiles_covering_rect};
 use gla_image::GlaImageLayout;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use tile_key::TileReadRef;
 
 pub trait RenderCtx {
@@ -19,6 +22,40 @@ pub trait RenderCtx {
     fn copy(&mut self, src: TilePos, dst: TilePos);
     fn render_to(&mut self, src: TilePos, dst: TilePos, blend_mode: BlendMode, opacity: f32);
     fn fix_gutter(&mut self, dst: TilePos);
+    fn footprint_error(&mut self, source: SourceFootprintError) -> Self::Error;
+    fn unsupported_zero_source_render_to(&mut self, blend_mode: BlendMode) -> Self::Error;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SourceFootprintError {
+    Unsupported {
+        mapping: Mapping,
+        modifier: FootprintModifier,
+    },
+    TileGrid {
+        source: TileGridError,
+    },
+}
+
+impl Display for SourceFootprintError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported { mapping, modifier } => write!(
+                f,
+                "unsupported source footprint mapping {mapping:?} modifier {modifier:?}"
+            ),
+            Self::TileGrid { source } => write!(f, "invalid source footprint grid: {source}"),
+        }
+    }
+}
+
+impl Error for SourceFootprintError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::TileGrid { source } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,28 +90,19 @@ impl<K> ImageRef<K> {
         }
     }
 
-    fn for_each_source_tile<E>(
+    fn source_tiles(
         self,
         dst_layout: GlaImageLayout,
         tile_index: u32,
-        mut f: impl FnMut(u32) -> Result<(), E>,
-    ) -> Result<(), E> {
-        debug_assert!(
-            dst_layout
-                .checked_tile_count()
-                .is_ok_and(|tile_count| tile_index < tile_count)
-        );
-        debug_assert!(
-            self.layout
-                .checked_tile_count()
-                .is_ok_and(|tile_count| tile_index < tile_count)
-        );
+    ) -> Result<Vec<u32>, SourceFootprintError> {
         match (self.mapping, self.modifier) {
-            (Mapping::Identity, FootprintModifier::None) => f(tile_index),
-            (Mapping::Identity, FootprintModifier::Expand(_)) => {
-                todo!("expanded identity footprints need image layouts")
+            (Mapping::Identity, FootprintModifier::None) => {
+                let dst_rect = tile_rect(dst_layout.tile_grid(), tile_index)
+                    .map_err(|source| SourceFootprintError::TileGrid { source })?;
+                tiles_covering_rect(self.layout.tile_grid(), dst_rect)
+                    .map_err(|source| SourceFootprintError::TileGrid { source })
             }
-            (Mapping::Matrix(_), _) => todo!("matrix footprints need image layouts"),
+            (mapping, modifier) => Err(SourceFootprintError::Unsupported { mapping, modifier }),
         }
     }
 }
@@ -157,15 +185,18 @@ impl<K> Copy<K> {
         C: RenderCtx<ImageKey = K>,
         K: std::marker::Copy,
     {
-        self.src
-            .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
-                let src = ctx.render(self.src.key, source_tile_index)?;
-                match src {
-                    TileReadRef::Zero => ctx.clear(dst),
-                    TileReadRef::Physical(src) => ctx.copy(src, dst),
-                }
-                Ok(())
-            })
+        let source_tiles = self
+            .src
+            .source_tiles(dst_layout, tile_index)
+            .map_err(|source| ctx.footprint_error(source))?;
+        for source_tile_index in source_tiles {
+            let src = ctx.render(self.src.key, source_tile_index)?;
+            match src {
+                TileReadRef::Zero => ctx.clear(dst),
+                TileReadRef::Physical(src) => ctx.copy(src, dst),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -209,22 +240,22 @@ impl<K> RenderTo<K> {
         C: RenderCtx<ImageKey = K>,
         K: std::marker::Copy,
     {
-        self.src
-            .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
-                let src = ctx.render(self.src.key, source_tile_index)?;
-                match src {
-                    TileReadRef::Zero => {
-                        // The first materialized command seam only defines zero-source
-                        // semantics for copy. Composite zero-source behavior is operation
-                        // specific and must be made explicit before execution reaches here.
-                        todo!("zero-source RenderTo semantics are operation-specific")
-                    }
-                    TileReadRef::Physical(src) => {
-                        ctx.render_to(src, dst, self.blend_mode, self.opacity);
-                    }
+        let source_tiles = self
+            .src
+            .source_tiles(dst_layout, tile_index)
+            .map_err(|source| ctx.footprint_error(source))?;
+        for source_tile_index in source_tiles {
+            let src = ctx.render(self.src.key, source_tile_index)?;
+            match src {
+                TileReadRef::Zero => {
+                    return Err(ctx.unsupported_zero_source_render_to(self.blend_mode));
                 }
-                Ok(())
-            })
+                TileReadRef::Physical(src) => {
+                    ctx.render_to(src, dst, self.blend_mode, self.opacity);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -237,6 +268,8 @@ mod tests {
     #[derive(Debug)]
     enum TestError {
         MissingReturn,
+        Footprint(SourceFootprintError),
+        UnsupportedZeroSourceRenderTo(BlendMode),
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -296,6 +329,14 @@ mod tests {
         fn fix_gutter(&mut self, dst: TilePos) {
             self.passes.push(Pass::FixGutter { dst });
         }
+
+        fn footprint_error(&mut self, source: SourceFootprintError) -> Self::Error {
+            TestError::Footprint(source)
+        }
+
+        fn unsupported_zero_source_render_to(&mut self, blend_mode: BlendMode) -> Self::Error {
+            TestError::UnsupportedZeroSourceRenderTo(blend_mode)
+        }
     }
 
     fn ctx_with_tiles(returns: Vec<TileReadRef>) -> TestCtx {
@@ -311,6 +352,13 @@ mod tests {
 
     fn layout() -> GlaImageLayout {
         GlaImageLayout::new(4096, 4096)
+    }
+
+    fn layout_with_tiles(width_tiles: u32, height_tiles: u32) -> GlaImageLayout {
+        GlaImageLayout::new(
+            width_tiles * gla_image::IMAGE_TILE_SIZE,
+            height_tiles * gla_image::IMAGE_TILE_SIZE,
+        )
     }
 
     #[test]
@@ -472,5 +520,94 @@ mod tests {
                 Pass::FixGutter { dst: dst_pos }
             ]
         );
+    }
+
+    #[test]
+    fn copy_identity_uses_layout_aware_source_tiles() {
+        let dst_pos = TilePos::new(0, 23);
+        let source_pos = TilePos::new(0, 21);
+        let mut ctx = ctx_with_tiles(vec![TileReadRef::Physical(source_pos)]);
+        ctx.dst_pos = Some(dst_pos);
+
+        let source_image = TestImageKey(21);
+        let dst_image = TestImageKey(22);
+        let command = DeriveCommand::new(
+            dst_image,
+            layout_with_tiles(1, 2),
+            [Derive::Copy(Copy::new(ImageRef::new(
+                source_image,
+                layout_with_tiles(2, 2),
+            )))],
+        );
+
+        command.exec_tile(&mut ctx, 1).unwrap();
+
+        assert_eq!(ctx.calls, vec![(source_image, 2)]);
+        assert_eq!(
+            ctx.passes,
+            vec![
+                Pass::Copy {
+                    src: source_pos,
+                    dst: dst_pos,
+                },
+                Pass::FixGutter { dst: dst_pos },
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_footprint_returns_explicit_error() {
+        let mut ctx = ctx_with_tiles(Vec::new());
+        ctx.dst_pos = Some(TilePos::new(0, 24));
+        let mapping = Mapping::Matrix(gla_command_core::Affine2D {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            tx: 2.0,
+            ty: 0.0,
+        });
+        let command = DeriveCommand::new(
+            TestImageKey(25),
+            layout(),
+            [Derive::Copy(Copy::new(ImageRef::with_footprint(
+                TestImageKey(24),
+                layout(),
+                mapping,
+                FootprintModifier::None,
+            )))],
+        );
+
+        let err = command.exec_tile(&mut ctx, 0).unwrap_err();
+
+        assert!(matches!(
+            err,
+            TestError::Footprint(SourceFootprintError::Unsupported {
+                mapping: err_mapping,
+                modifier: FootprintModifier::None,
+            }) if err_mapping == mapping
+        ));
+    }
+
+    #[test]
+    fn render_to_zero_source_returns_explicit_error() {
+        let mut ctx = ctx_with_tiles(vec![TileReadRef::Zero]);
+        ctx.dst_pos = Some(TilePos::new(0, 26));
+        let command = DeriveCommand::new(
+            TestImageKey(26),
+            layout(),
+            [Derive::RenderTo(RenderTo::new(
+                ImageRef::new(TestImageKey(27), layout()),
+                BlendMode::Overlay,
+                0.5,
+            ))],
+        );
+
+        let err = command.exec_tile(&mut ctx, 0).unwrap_err();
+
+        assert!(matches!(
+            err,
+            TestError::UnsupportedZeroSourceRenderTo(BlendMode::Overlay)
+        ));
     }
 }
