@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 atlas = { path = "../atlas" }
 gla_color = { path = "../gla_color" }
+gla_command_core = { path = "../gla_command_core" }
 gla_core = { path = "../gla_core" }
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "28.0.0"

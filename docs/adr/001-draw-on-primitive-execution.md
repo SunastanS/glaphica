@@ -37,15 +37,21 @@ routing and `DrawFrame::draw_on` for typed DrawOn execution. `CanvasInput`
 fallback mapping remains temporarily for the existing
 `draw_dab(shown_image, input)` path.
 
-GPU execution for DrawOn compute passes is intentionally not part of this
-decision. The renderer exposes the pass and capability vocabulary first; actual
-compute pipeline support lands separately.
+GPU execution uses compute pipelines over atlas layer views. The renderer
+encodes continuous DrawOn blocks, groups work by atlas layer and tool, builds
+per-tile ordered programs, and dispatches tool-specific compute shaders.
+`FixGutter` remains an explicit renderer pass emitted after DrawOn mutation by
+the session/frame layer.
 
 ## Consequences
 
 - `DrawOnCommand` no longer stores brush or tool parameters.
+- DrawOn target format mismatches are rejected during session initialization and
+  again defensively by the renderer.
+- `RadialKernel1D` requires native read-write storage texture support for
+  `R32Float`.
+- Renderer initialization can be based on the registered/required
+  `DrawOnToolKind` set; unregistered DrawOn passes fail at submit time.
 - Upper layers remain free to implement pressure, spacing, smoothing, jitter,
   and dynamic size by producing different typed inputs per invocation.
 - Session dirty scheduling is driven by declared input footprints.
-- Renderer initialization can later be based on the registered/required
-  `DrawOnToolKind` set.

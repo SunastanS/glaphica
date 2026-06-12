@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -5,6 +6,7 @@ use atlas::{AtlasLayout, AtlasTextureStore, TilePos};
 use gla_color::{
     BlendMode, CompositeKind, GlaFormat, RgbaBlendMode, ValueToRgbaBlendMode, composite_kind,
 };
+use gla_command_core::DrawOnToolKind;
 use gla_core::{ATLAS_TILE_SIZE, GUTTER_SIZE, IMAGE_TILE_SIZE};
 use wgpu::util::DeviceExt;
 
@@ -136,6 +138,110 @@ fn fs_main(@builtin(position) position: vec4f) -> @location(0) vec4f {
 }
 "#;
 
+const RADIAL_KERNEL_1D_SHADER: &str = r#"
+requires readonly_and_readwrite_storage_textures;
+
+const IMAGE_TILE_SIZE: u32 = 62u;
+const ATLAS_TILE_SIZE: u32 = 64u;
+const GUTTER_SIZE: u32 = 1u;
+
+struct TileProgram {
+    tile_x: u32,
+    tile_y: u32,
+    instance_start: u32,
+    instance_count: u32,
+};
+
+struct RadialInstance {
+    center_in_tile: vec2f,
+    radius_px: f32,
+    amplitude: f32,
+};
+
+@group(0) @binding(0) var dst_texture: texture_storage_2d<r32float, read_write>;
+@group(0) @binding(1) var<storage, read> tile_programs: array<TileProgram>;
+@group(0) @binding(2) var<storage, read> instances: array<RadialInstance>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= IMAGE_TILE_SIZE || id.y >= IMAGE_TILE_SIZE || id.z >= arrayLength(&tile_programs) {
+        return;
+    }
+
+    let program = tile_programs[id.z];
+    let coord = vec2i(
+        i32(program.tile_x * ATLAS_TILE_SIZE + GUTTER_SIZE + id.x),
+        i32(program.tile_y * ATLAS_TILE_SIZE + GUTTER_SIZE + id.y)
+    );
+    let pixel = vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5);
+    var value = textureLoad(dst_texture, coord).r;
+
+    for (var i = 0u; i < program.instance_count; i = i + 1u) {
+        let instance = instances[program.instance_start + i];
+        if instance.radius_px > 0.0 && instance.amplitude > 0.0 {
+            let d = distance(pixel, instance.center_in_tile);
+            if d <= instance.radius_px {
+                value = value + max(0.0, 1.0 - d / max(instance.radius_px, 1.0)) * instance.amplitude;
+            }
+        }
+    }
+
+    textureStore(dst_texture, coord, vec4f(value, 0.0, 0.0, 1.0));
+}
+"#;
+
+const REPLACE_CIRCLE_4D_SHADER: &str = r#"
+const IMAGE_TILE_SIZE: u32 = 62u;
+const ATLAS_TILE_SIZE: u32 = 64u;
+const GUTTER_SIZE: u32 = 1u;
+
+struct TileProgram {
+    tile_x: u32,
+    tile_y: u32,
+    instance_start: u32,
+    instance_count: u32,
+};
+
+struct ReplaceInstance {
+    center_in_tile: vec2f,
+    radius_px: f32,
+    _pad0: f32,
+    color: vec4f,
+};
+
+@group(0) @binding(0) var dst_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(1) var<storage, read> tile_programs: array<TileProgram>;
+@group(0) @binding(2) var<storage, read> instances: array<ReplaceInstance>;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= IMAGE_TILE_SIZE || id.y >= IMAGE_TILE_SIZE || id.z >= arrayLength(&tile_programs) {
+        return;
+    }
+
+    let program = tile_programs[id.z];
+    let coord = vec2i(
+        i32(program.tile_x * ATLAS_TILE_SIZE + GUTTER_SIZE + id.x),
+        i32(program.tile_y * ATLAS_TILE_SIZE + GUTTER_SIZE + id.y)
+    );
+    let pixel = vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5);
+    var hit = false;
+    var color = vec4f(0.0);
+
+    for (var i = 0u; i < program.instance_count; i = i + 1u) {
+        let instance = instances[program.instance_start + i];
+        if instance.radius_px > 0.0 && distance(pixel, instance.center_in_tile) <= instance.radius_px {
+            hit = true;
+            color = instance.color;
+        }
+    }
+
+    if hit {
+        textureStore(dst_texture, coord, color);
+    }
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeUniforms {
@@ -144,6 +250,32 @@ struct CompositeUniforms {
     blend_mode: u32,
     opacity: f32,
     _pad0: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct TileProgram {
+    tile_x: u32,
+    tile_y: u32,
+    instance_start: u32,
+    instance_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct RadialInstance {
+    center_in_tile: [f32; 2],
+    radius_px: f32,
+    amplitude: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ReplaceInstance {
+    center_in_tile: [f32; 2],
+    radius_px: f32,
+    _pad0: f32,
+    color: [f32; 4],
 }
 
 #[derive(Debug)]
@@ -184,8 +316,21 @@ pub enum GpuRendererError {
         dst: GlaFormat,
         blend_mode: BlendMode,
     },
-    UnsupportedDrawRadialKernel1D,
-    UnsupportedReplaceCircle4D,
+    MissingDrawOnFeature {
+        tool: DrawOnToolKind,
+        format: wgpu::TextureFormat,
+        feature: &'static str,
+    },
+    MissingDrawOnPipeline {
+        tool: DrawOnToolKind,
+    },
+    DrawOnFormatMismatch {
+        tool: DrawOnToolKind,
+        format: GlaFormat,
+    },
+    ReadbackPollFailed,
+    ReadbackChannelClosed,
+    ReadbackMapFailed,
 }
 
 impl Display for GpuRendererError {
@@ -242,12 +387,22 @@ impl Display for GpuRendererError {
                     "unsupported render_to composite from {src:?} into {dst:?} with {blend_mode:?}"
                 )
             }
-            Self::UnsupportedDrawRadialKernel1D => {
-                write!(f, "GPU draw_radial_kernel_1d pass is not implemented")
+            Self::MissingDrawOnFeature {
+                tool,
+                format,
+                feature,
+            } => {
+                write!(f, "{tool:?} requires {format:?} texture feature {feature}")
             }
-            Self::UnsupportedReplaceCircle4D => {
-                write!(f, "GPU replace_circle_4d pass is not implemented")
+            Self::MissingDrawOnPipeline { tool } => {
+                write!(f, "DrawOn pipeline for {tool:?} was not registered")
             }
+            Self::DrawOnFormatMismatch { tool, format } => {
+                write!(f, "{tool:?} cannot draw into atlas format {format:?}")
+            }
+            Self::ReadbackPollFailed => write!(f, "GPU readback polling failed"),
+            Self::ReadbackChannelClosed => write!(f, "GPU readback channel closed"),
+            Self::ReadbackMapFailed => write!(f, "GPU readback buffer mapping failed"),
         }
     }
 }
@@ -283,6 +438,7 @@ struct AtlasTexture {
     format: GlaFormat,
     runtime: TextureFormatRuntime,
     texture: RendererTexture,
+    layer_views: Vec<wgpu::TextureView>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -291,6 +447,7 @@ struct ResolvedTile<'a> {
     format: GlaFormat,
     runtime: TextureFormatRuntime,
     texture: &'a RendererTexture,
+    layer_views: &'a [wgpu::TextureView],
     origin: wgpu::Origin3d,
 }
 
@@ -354,29 +511,213 @@ impl TileTransferBuffers {
     }
 }
 
+struct DrawOnStages {
+    tools: BTreeSet<DrawOnToolKind>,
+    radial_kernel_1d: Option<DrawOnComputeStage>,
+    replace_circle_4d: Option<DrawOnComputeStage>,
+}
+
+struct DrawOnComputeStage {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl DrawOnStages {
+    fn disabled() -> Self {
+        Self {
+            tools: BTreeSet::new(),
+            radial_kernel_1d: None,
+            replace_circle_4d: None,
+        }
+    }
+
+    fn new(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        tools: impl IntoIterator<Item = DrawOnToolKind>,
+    ) -> Result<Self, GpuRendererError> {
+        let tools = tools.into_iter().collect::<BTreeSet<_>>();
+        if tools.contains(&DrawOnToolKind::RadialKernel1D) {
+            let format_features =
+                adapter.get_texture_format_features(wgpu::TextureFormat::R32Float);
+            if !device
+                .features()
+                .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+                || !format_features
+                    .flags
+                    .contains(wgpu::TextureFormatFeatureFlags::STORAGE_READ_WRITE)
+            {
+                return Err(GpuRendererError::MissingDrawOnFeature {
+                    tool: DrawOnToolKind::RadialKernel1D,
+                    format: wgpu::TextureFormat::R32Float,
+                    feature: "STORAGE_READ_WRITE",
+                });
+            }
+        }
+        if tools.contains(&DrawOnToolKind::ReplaceCircle4D) {
+            let format_features =
+                adapter.get_texture_format_features(wgpu::TextureFormat::Rgba32Float);
+            if !format_features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
+            {
+                return Err(GpuRendererError::MissingDrawOnFeature {
+                    tool: DrawOnToolKind::ReplaceCircle4D,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    feature: "STORAGE_WRITE_ONLY",
+                });
+            }
+        }
+
+        let radial_kernel_1d = if tools.contains(&DrawOnToolKind::RadialKernel1D) {
+            Some(DrawOnComputeStage::new(
+                device,
+                "glaphica-radial-kernel-1d",
+                RADIAL_KERNEL_1D_SHADER,
+                wgpu::TextureFormat::R32Float,
+                wgpu::StorageTextureAccess::ReadWrite,
+            ))
+        } else {
+            None
+        };
+        let replace_circle_4d = if tools.contains(&DrawOnToolKind::ReplaceCircle4D) {
+            Some(DrawOnComputeStage::new(
+                device,
+                "glaphica-replace-circle-4d",
+                REPLACE_CIRCLE_4D_SHADER,
+                wgpu::TextureFormat::Rgba32Float,
+                wgpu::StorageTextureAccess::WriteOnly,
+            ))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            tools,
+            radial_kernel_1d,
+            replace_circle_4d,
+        })
+    }
+}
+
+impl DrawOnComputeStage {
+    fn new(
+        device: &wgpu::Device,
+        label: &'static str,
+        shader_source: &'static str,
+        format: wgpu::TextureFormat,
+        access: wgpu::StorageTextureAccess,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("glaphica-draw-on-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access,
+                        format,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glaphica-draw-on-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("cs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     atlases: AtlasTextureSet,
     tile_buffers: TileTransferBuffers,
     composite: CompositeStages,
+    draw_on: DrawOnStages,
 }
 
 impl GpuRenderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Result<Self, GpuRendererError> {
         let tile_buffers = TileTransferBuffers::new(&device)?;
         let composite = CompositeStages::new(&device)?;
+        let draw_on = DrawOnStages::disabled();
         Ok(Self {
             device,
             queue,
             atlases: AtlasTextureSet::default(),
             tile_buffers,
             composite,
+            draw_on,
+        })
+    }
+
+    pub fn with_draw_on_tools(
+        adapter: &wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        draw_on_tools: impl IntoIterator<Item = DrawOnToolKind>,
+    ) -> Result<Self, GpuRendererError> {
+        let tile_buffers = TileTransferBuffers::new(&device)?;
+        let composite = CompositeStages::new(&device)?;
+        let draw_on = DrawOnStages::new(adapter, &device, draw_on_tools)?;
+        Ok(Self {
+            device,
+            queue,
+            atlases: AtlasTextureSet::default(),
+            tile_buffers,
+            composite,
+            draw_on,
         })
     }
 
     pub fn capabilities(&self) -> RendererCapabilities {
-        RendererCapabilities::default()
+        RendererCapabilities {
+            draw_radial_kernel_1d: self.draw_on.tools.contains(&DrawOnToolKind::RadialKernel1D),
+            replace_circle_4d: self
+                .draw_on
+                .tools
+                .contains(&DrawOnToolKind::ReplaceCircle4D),
+        }
     }
 
     pub fn execute_passes(&mut self, passes: &[Pass]) -> Result<(), GpuRendererError> {
@@ -395,8 +736,23 @@ impl GpuRenderer {
                 queue: &self.queue,
                 encoder: &mut encoder,
             };
-            for pass in passes {
-                match *pass {
+            let mut index = 0;
+            while index < passes.len() {
+                if draw_on_pass_tool(passes[index]).is_some() {
+                    let start = index;
+                    while index < passes.len() && draw_on_pass_tool(passes[index]).is_some() {
+                        index += 1;
+                    }
+                    encode_draw_on_block(
+                        &mut ctx,
+                        &self.atlases,
+                        &self.draw_on,
+                        &passes[start..index],
+                    )?;
+                    continue;
+                }
+
+                match passes[index] {
                     Pass::Clear { dst } => {
                         encode_clear_tile(&mut ctx, &self.atlases, &self.tile_buffers, dst)?
                     }
@@ -418,17 +774,79 @@ impl GpuRenderer {
                         opacity,
                     )?,
                     Pass::FixGutter { dst } => encode_fix_gutter(&mut ctx, &self.atlases, dst)?,
-                    Pass::DrawRadialKernel1D { .. } => {
-                        return Err(GpuRendererError::UnsupportedDrawRadialKernel1D);
-                    }
-                    Pass::ReplaceCircle4D { .. } => {
-                        return Err(GpuRendererError::UnsupportedReplaceCircle4D);
+                    Pass::DrawRadialKernel1D { .. } | Pass::ReplaceCircle4D { .. } => {
+                        unreachable!("DrawOn passes are handled as contiguous blocks")
                     }
                 }
+                index += 1;
             }
         }
         self.queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn read_tile_bytes(
+        &self,
+        position: TilePos,
+        bytes_per_pixel: u32,
+    ) -> Result<Vec<u8>, GpuRendererError> {
+        let resolved = self.atlases.resolve_non_empty(position)?;
+        let (padded_bytes_per_row, buffer_size) = tile_transfer_layout(bytes_per_pixel)?;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-readback-buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glaphica-readback-encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resolved.texture.texture,
+                mip_level: 0,
+                origin: resolved.origin,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(ATLAS_TILE_SIZE),
+                },
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|_| GpuRendererError::ReadbackPollFailed)?;
+        receiver
+            .recv()
+            .map_err(|_| GpuRendererError::ReadbackChannelClosed)?
+            .map_err(|_| GpuRendererError::ReadbackMapFailed)?;
+        let mapped = slice.get_mapped_range();
+        let bytes = mapped.to_vec();
+        drop(mapped);
+        buffer.unmap();
+        Ok(bytes)
     }
 }
 
@@ -444,6 +862,282 @@ struct GpuEncodeCtx<'device, 'encoder> {
     device: &'device wgpu::Device,
     queue: &'device wgpu::Queue,
     encoder: &'encoder mut wgpu::CommandEncoder,
+}
+
+fn draw_on_pass_tool(pass: Pass) -> Option<DrawOnToolKind> {
+    match pass {
+        Pass::DrawRadialKernel1D { .. } => Some(DrawOnToolKind::RadialKernel1D),
+        Pass::ReplaceCircle4D { .. } => Some(DrawOnToolKind::ReplaceCircle4D),
+        Pass::Clear { .. } | Pass::Copy { .. } | Pass::RenderTo { .. } | Pass::FixGutter { .. } => {
+            None
+        }
+    }
+}
+
+fn draw_on_pass_dst(pass: Pass) -> Option<TilePos> {
+    match pass {
+        Pass::DrawRadialKernel1D { dst, .. } | Pass::ReplaceCircle4D { dst, .. } => Some(dst),
+        Pass::Clear { .. } | Pass::Copy { .. } | Pass::RenderTo { .. } | Pass::FixGutter { .. } => {
+            None
+        }
+    }
+}
+
+fn encode_draw_on_block(
+    ctx: &mut GpuEncodeCtx<'_, '_>,
+    atlases: &AtlasTextureSet,
+    draw_on: &DrawOnStages,
+    passes: &[Pass],
+) -> Result<(), GpuRendererError> {
+    let mut layer_streams: BTreeMap<(u8, u32), Vec<Pass>> = BTreeMap::new();
+    for pass in passes.iter().copied() {
+        let dst = draw_on_pass_dst(pass).expect("DrawOn block only contains DrawOn passes");
+        atlases.resolve_non_empty(dst)?;
+        layer_streams
+            .entry((dst.atlas_id(), dst.layer))
+            .or_default()
+            .push(pass);
+    }
+
+    for ((_atlas_id, _layer), stream) in layer_streams {
+        let mut index = 0;
+        while index < stream.len() {
+            let tool = draw_on_pass_tool(stream[index])
+                .expect("DrawOn stream only contains DrawOn passes");
+            let start = index;
+            while index < stream.len() && draw_on_pass_tool(stream[index]) == Some(tool) {
+                index += 1;
+            }
+            match tool {
+                DrawOnToolKind::RadialKernel1D => {
+                    encode_radial_kernel_1d_run(ctx, atlases, draw_on, &stream[start..index])?
+                }
+                DrawOnToolKind::ReplaceCircle4D => {
+                    encode_replace_circle_4d_run(ctx, atlases, draw_on, &stream[start..index])?
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn encode_radial_kernel_1d_run(
+    ctx: &mut GpuEncodeCtx<'_, '_>,
+    atlases: &AtlasTextureSet,
+    draw_on: &DrawOnStages,
+    passes: &[Pass],
+) -> Result<(), GpuRendererError> {
+    let stage =
+        draw_on
+            .radial_kernel_1d
+            .as_ref()
+            .ok_or(GpuRendererError::MissingDrawOnPipeline {
+                tool: DrawOnToolKind::RadialKernel1D,
+            })?;
+    let Pass::DrawRadialKernel1D { dst: first, .. } = passes[0] else {
+        unreachable!("radial run starts with a radial pass");
+    };
+    let atlas = atlases.resolve_non_empty(first)?;
+    if atlas.format.channel_count != gla_color::ChannelCount::D1
+        || atlas.format.channel_type != gla_color::ChannelType::F32
+    {
+        return Err(GpuRendererError::DrawOnFormatMismatch {
+            tool: DrawOnToolKind::RadialKernel1D,
+            format: atlas.format,
+        });
+    }
+
+    let mut per_tile: BTreeMap<(u32, u32), Vec<RadialInstance>> = BTreeMap::new();
+    for pass in passes.iter().copied() {
+        let Pass::DrawRadialKernel1D {
+            dst,
+            center_in_tile_x,
+            center_in_tile_y,
+            radius_px,
+            amplitude,
+        } = pass
+        else {
+            unreachable!("radial run only contains radial passes");
+        };
+        if dst.atlas_id() != first.atlas_id() || dst.layer != first.layer {
+            return Err(GpuRendererError::InvalidTilePosition(dst));
+        }
+        per_tile
+            .entry((dst.tile_x, dst.tile_y))
+            .or_default()
+            .push(RadialInstance {
+                center_in_tile: [center_in_tile_x, center_in_tile_y],
+                radius_px,
+                amplitude,
+            });
+    }
+
+    let mut tile_programs = Vec::with_capacity(per_tile.len());
+    let mut instances = Vec::new();
+    for ((tile_x, tile_y), tile_instances) in per_tile {
+        let instance_start = instances.len() as u32;
+        let instance_count = tile_instances.len() as u32;
+        instances.extend(tile_instances);
+        tile_programs.push(TileProgram {
+            tile_x,
+            tile_y,
+            instance_start,
+            instance_count,
+        });
+    }
+
+    encode_draw_on_compute(
+        ctx,
+        atlas,
+        first.layer,
+        stage,
+        &tile_programs,
+        bytemuck::cast_slice(&instances),
+    )
+}
+
+fn encode_replace_circle_4d_run(
+    ctx: &mut GpuEncodeCtx<'_, '_>,
+    atlases: &AtlasTextureSet,
+    draw_on: &DrawOnStages,
+    passes: &[Pass],
+) -> Result<(), GpuRendererError> {
+    let stage =
+        draw_on
+            .replace_circle_4d
+            .as_ref()
+            .ok_or(GpuRendererError::MissingDrawOnPipeline {
+                tool: DrawOnToolKind::ReplaceCircle4D,
+            })?;
+    let Pass::ReplaceCircle4D { dst: first, .. } = passes[0] else {
+        unreachable!("replace run starts with a replace pass");
+    };
+    let atlas = atlases.resolve_non_empty(first)?;
+    if atlas.format.channel_count != gla_color::ChannelCount::D4
+        || atlas.format.channel_type != gla_color::ChannelType::F32
+    {
+        return Err(GpuRendererError::DrawOnFormatMismatch {
+            tool: DrawOnToolKind::ReplaceCircle4D,
+            format: atlas.format,
+        });
+    }
+
+    let mut per_tile: BTreeMap<(u32, u32), Vec<ReplaceInstance>> = BTreeMap::new();
+    for pass in passes.iter().copied() {
+        let Pass::ReplaceCircle4D {
+            dst,
+            center_in_tile_x,
+            center_in_tile_y,
+            radius_px,
+            color,
+        } = pass
+        else {
+            unreachable!("replace run only contains replace passes");
+        };
+        if dst.atlas_id() != first.atlas_id() || dst.layer != first.layer {
+            return Err(GpuRendererError::InvalidTilePosition(dst));
+        }
+        per_tile
+            .entry((dst.tile_x, dst.tile_y))
+            .or_default()
+            .push(ReplaceInstance {
+                center_in_tile: [center_in_tile_x, center_in_tile_y],
+                radius_px,
+                _pad0: 0.0,
+                color: [color.r, color.g, color.b, color.a],
+            });
+    }
+
+    let mut tile_programs = Vec::with_capacity(per_tile.len());
+    let mut instances = Vec::new();
+    for ((tile_x, tile_y), tile_instances) in per_tile {
+        let instance_start = instances.len() as u32;
+        let instance_count = tile_instances.len() as u32;
+        instances.extend(tile_instances);
+        tile_programs.push(TileProgram {
+            tile_x,
+            tile_y,
+            instance_start,
+            instance_count,
+        });
+    }
+
+    encode_draw_on_compute(
+        ctx,
+        atlas,
+        first.layer,
+        stage,
+        &tile_programs,
+        bytemuck::cast_slice(&instances),
+    )
+}
+
+fn encode_draw_on_compute(
+    ctx: &mut GpuEncodeCtx<'_, '_>,
+    atlas: ResolvedTile<'_>,
+    layer: u32,
+    stage: &DrawOnComputeStage,
+    tile_programs: &[TileProgram],
+    instance_bytes: &[u8],
+) -> Result<(), GpuRendererError> {
+    if tile_programs.is_empty() {
+        return Ok(());
+    }
+    let tile_program_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glaphica-draw-on-tile-programs"),
+            contents: bytemuck::cast_slice(tile_programs),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+    let instance_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("glaphica-draw-on-instances"),
+            contents: instance_bytes,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+    let view =
+        atlas
+            .layer_views
+            .get(layer as usize)
+            .ok_or(GpuRendererError::TextureLayerOutOfBounds {
+                layer,
+                layers: atlas.layer_views.len() as u32,
+            })?;
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("glaphica-draw-on-bind-group"),
+        layout: &stage.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: tile_program_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: instance_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    let mut pass = ctx
+        .encoder
+        .begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("glaphica-draw-on-compute-pass"),
+            timestamp_writes: None,
+        });
+    pass.set_pipeline(&stage.pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.dispatch_workgroups(
+        IMAGE_TILE_SIZE.div_ceil(8),
+        IMAGE_TILE_SIZE.div_ceil(8),
+        tile_programs.len() as u32,
+    );
+    Ok(())
 }
 
 fn encode_clear_tile(
@@ -611,6 +1305,7 @@ fn encode_fix_gutter(
 ) -> Result<(), GpuRendererError> {
     let dst = atlases.resolve_non_empty(dst)?;
     let texture = &dst.texture.texture;
+    let runtime = dst.runtime;
     let ox = dst.origin.x;
     let oy = dst.origin.y;
     let z = dst.origin.z;
@@ -626,7 +1321,9 @@ fn encode_fix_gutter(
         aspect: wgpu::TextureAspect::All,
     };
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + g, oy + g),
         tc(ox + g, oy),
         wgpu::Extent3d {
@@ -634,9 +1331,11 @@ fn encode_fix_gutter(
             height: g,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + g, oy + ATLAS_TILE_SIZE - g - 1),
         tc(ox + g, oy + ATLAS_TILE_SIZE - g),
         wgpu::Extent3d {
@@ -644,9 +1343,11 @@ fn encode_fix_gutter(
             height: g,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + g, oy + g),
         tc(ox, oy + g),
         wgpu::Extent3d {
@@ -654,9 +1355,11 @@ fn encode_fix_gutter(
             height: i,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + ATLAS_TILE_SIZE - g - 1, oy + g),
         tc(ox + ATLAS_TILE_SIZE - g, oy + g),
         wgpu::Extent3d {
@@ -664,9 +1367,11 @@ fn encode_fix_gutter(
             height: i,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + g, oy + g),
         tc(ox, oy),
         wgpu::Extent3d {
@@ -674,9 +1379,11 @@ fn encode_fix_gutter(
             height: g,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + ATLAS_TILE_SIZE - g - 1, oy + g),
         tc(ox + ATLAS_TILE_SIZE - g, oy),
         wgpu::Extent3d {
@@ -684,9 +1391,11 @@ fn encode_fix_gutter(
             height: g,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + g, oy + ATLAS_TILE_SIZE - g - 1),
         tc(ox, oy + ATLAS_TILE_SIZE - g),
         wgpu::Extent3d {
@@ -694,9 +1403,11 @@ fn encode_fix_gutter(
             height: g,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
-    ctx.encoder.copy_texture_to_texture(
+    encode_texture_self_copy_via_buffer(
+        ctx,
+        runtime,
         tc(ox + ATLAS_TILE_SIZE - g - 1, oy + ATLAS_TILE_SIZE - g - 1),
         tc(ox + ATLAS_TILE_SIZE - g, oy + ATLAS_TILE_SIZE - g),
         wgpu::Extent3d {
@@ -704,8 +1415,52 @@ fn encode_fix_gutter(
             height: g,
             depth_or_array_layers: 1,
         },
-    );
+    )?;
 
+    Ok(())
+}
+
+fn encode_texture_self_copy_via_buffer(
+    ctx: &mut GpuEncodeCtx<'_, '_>,
+    runtime: TextureFormatRuntime,
+    src: wgpu::TexelCopyTextureInfo<'_>,
+    dst: wgpu::TexelCopyTextureInfo<'_>,
+    extent: wgpu::Extent3d,
+) -> Result<(), GpuRendererError> {
+    let bytes_per_row = extent.width.checked_mul(runtime.bytes_per_pixel).ok_or(
+        GpuRendererError::UnsupportedTileTransferFormat {
+            bytes_per_pixel: runtime.bytes_per_pixel,
+        },
+    )?;
+    let padded_bytes_per_row = bytes_per_row.div_ceil(256) * 256;
+    let buffer_size = u64::from(padded_bytes_per_row) * u64::from(extent.height);
+    let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("glaphica-self-copy-staging-buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let layout = wgpu::TexelCopyBufferLayout {
+        offset: 0,
+        bytes_per_row: Some(padded_bytes_per_row),
+        rows_per_image: Some(extent.height),
+    };
+    ctx.encoder.copy_texture_to_buffer(
+        src,
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout,
+        },
+        extent,
+    );
+    ctx.encoder.copy_buffer_to_texture(
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout,
+        },
+        dst,
+        extent,
+    );
     Ok(())
 }
 
@@ -718,8 +1473,13 @@ impl AtlasTextureStore for GpuRenderer {
         layout: AtlasLayout,
         format: GlaFormat,
     ) -> Result<(), Self::Error> {
-        self.atlases
-            .create_atlas_texture(&self.device, atlas_id, layout, format)?;
+        self.atlases.create_atlas_texture(
+            &self.device,
+            &self.draw_on.tools,
+            atlas_id,
+            layout,
+            format,
+        )?;
         Ok(())
     }
 }
@@ -728,6 +1488,7 @@ impl AtlasTextureSet {
     fn create_atlas_texture(
         &mut self,
         device: &wgpu::Device,
+        draw_on_tools: &BTreeSet<DrawOnToolKind>,
         atlas_id: u8,
         layout: AtlasLayout,
         format: GlaFormat,
@@ -746,6 +1507,21 @@ impl AtlasTextureSet {
             let height = width;
             let layers = u32::try_from(layout.layer_num)
                 .map_err(|_| GpuRendererError::InvalidAtlasLayout { layout })?;
+            let mut usage = wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING;
+            if format.channel_count == gla_color::ChannelCount::D1
+                && format.channel_type == gla_color::ChannelType::F32
+                && draw_on_tools.contains(&DrawOnToolKind::RadialKernel1D)
+            {
+                usage |= wgpu::TextureUsages::STORAGE_BINDING;
+            }
+            if format.channel_count == gla_color::ChannelCount::D4
+                && format.channel_type == gla_color::ChannelType::F32
+                && draw_on_tools.contains(&DrawOnToolKind::ReplaceCircle4D)
+            {
+                usage |= wgpu::TextureUsages::STORAGE_BINDING;
+            }
             let texture = RendererTexture::new(
                 device,
                 &RendererTextureDescriptor {
@@ -754,16 +1530,19 @@ impl AtlasTextureSet {
                     height,
                     layers,
                     format: runtime.texture_format,
-                    usage: wgpu::TextureUsages::COPY_SRC
-                        | wgpu::TextureUsages::COPY_DST
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage,
                 },
             )?;
+            let mut layer_views = Vec::with_capacity(layers as usize);
+            for layer in 0..layers {
+                layer_views.push(texture.create_layer_view(layer)?);
+            }
             self.atlases[index] = Some(AtlasTexture {
                 layout,
                 format,
                 runtime,
                 texture,
+                layer_views,
             });
         }
 
@@ -801,6 +1580,7 @@ impl AtlasTextureSet {
             format: atlas.format,
             runtime: atlas.runtime,
             texture: &atlas.texture,
+            layer_views: &atlas.layer_views,
             origin: wgpu::Origin3d {
                 x: position.offset_x(),
                 y: position.offset_y(),
@@ -1296,11 +2076,18 @@ fn encode_value_to_rgba_blend_mode(blend_mode: ValueToRgbaBlendMode) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompositeUniforms, encode_rgba_blend_mode};
+    use super::{
+        CompositeUniforms, GpuRendererError, encode_rgba_blend_mode, tile_transfer_layout,
+    };
     use crate::{GpuRenderer, Pass, RenderBackend};
-    use atlas::AtlasLayout;
+    use atlas::{AtlasLayout, AtlasTextureStore, TilePos};
     use bytemuck::bytes_of;
-    use gla_color::{BlendMode, ChannelCount, ChannelType, GlaFormat, RgbaBlendMode};
+    use gla_color::{
+        BlendMode, ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32, RgbaBlendMode,
+    };
+    use gla_command_core::DrawOnToolKind;
+    use gla_core::GUTTER_SIZE;
+    use std::sync::{Mutex, OnceLock};
     use tile_key::Tiles;
 
     #[test]
@@ -1325,6 +2112,7 @@ mod tests {
 
     #[test]
     fn gpu_encodes_basic_passes_when_adapter_is_available() {
+        let _guard = gpu_test_lock().lock().unwrap();
         let (device, queue) = match pollster::block_on(test_device()) {
             Some(device) => device,
             None => {
@@ -1379,22 +2167,163 @@ mod tests {
         gpu.submit(&passes).unwrap();
     }
 
+    #[test]
+    fn gpu_draw_radial_kernel_1d_writes_r32float_when_supported() {
+        let _guard = gpu_test_lock().lock().unwrap();
+        let (adapter, device, queue) = match pollster::block_on(test_device_with_features(
+            wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+        )) {
+            Some(device) => device,
+            None => {
+                eprintln!("skipping radial kernel GPU test: required feature unavailable");
+                return;
+            }
+        };
+        let mut gpu = match GpuRenderer::with_draw_on_tools(
+            &adapter,
+            device,
+            queue,
+            [DrawOnToolKind::RadialKernel1D],
+        ) {
+            Ok(gpu) => gpu,
+            Err(GpuRendererError::MissingDrawOnFeature { .. }) => {
+                eprintln!("skipping radial kernel GPU test: storage read_write unavailable");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let format = GlaFormat {
+            channel_count: ChannelCount::D1,
+            channel_type: ChannelType::F32,
+        };
+        gpu.create_atlas_texture(0, AtlasLayout::TINY8, format)
+            .unwrap();
+        let dst = TilePos::new(0, 0, 0, 0);
+
+        gpu.submit(&[
+            Pass::Clear { dst },
+            Pass::DrawRadialKernel1D {
+                dst,
+                center_in_tile_x: 1.5,
+                center_in_tile_y: 1.5,
+                radius_px: 2.0,
+                amplitude: 3.0,
+            },
+        ])
+        .unwrap();
+
+        let bytes = gpu.read_tile_bytes(dst, 4).unwrap();
+        assert_eq!(read_f32_pixel(&bytes, 4, 1, 1), 3.0);
+        assert_eq!(read_f32_pixel(&bytes, 4, 10, 10), 0.0);
+    }
+
+    #[test]
+    fn gpu_replace_circle_4d_uses_last_matching_instance_when_supported() {
+        let _guard = gpu_test_lock().lock().unwrap();
+        let (adapter, device, queue) =
+            match pollster::block_on(test_device_with_features(wgpu::Features::empty())) {
+                Some(device) => device,
+                None => {
+                    eprintln!("skipping replace circle GPU test: no adapter available");
+                    return;
+                }
+            };
+        let mut gpu = match GpuRenderer::with_draw_on_tools(
+            &adapter,
+            device,
+            queue,
+            [DrawOnToolKind::ReplaceCircle4D],
+        ) {
+            Ok(gpu) => gpu,
+            Err(GpuRendererError::MissingDrawOnFeature { .. }) => {
+                eprintln!("skipping replace circle GPU test: storage write unavailable");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let format = GlaFormat {
+            channel_count: ChannelCount::D4,
+            channel_type: ChannelType::F32,
+        };
+        gpu.create_atlas_texture(0, AtlasLayout::TINY8, format)
+            .unwrap();
+        let dst = TilePos::new(0, 0, 0, 0);
+        let red = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+        let green = PremultipliedRgbaF32::new(0.0, 1.0, 0.0, 1.0);
+
+        gpu.submit(&[
+            Pass::Clear { dst },
+            Pass::ReplaceCircle4D {
+                dst,
+                center_in_tile_x: 5.5,
+                center_in_tile_y: 5.5,
+                radius_px: 3.0,
+                color: red,
+            },
+            Pass::ReplaceCircle4D {
+                dst,
+                center_in_tile_x: 5.5,
+                center_in_tile_y: 5.5,
+                radius_px: 1.0,
+                color: green,
+            },
+        ])
+        .unwrap();
+
+        let bytes = gpu.read_tile_bytes(dst, 16).unwrap();
+        assert_eq!(read_rgba_pixel(&bytes, 16, 5, 5), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(read_rgba_pixel(&bytes, 16, 7, 5), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(read_rgba_pixel(&bytes, 16, 20, 20), [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    fn read_f32_pixel(bytes: &[u8], bytes_per_pixel: u32, x: u32, y: u32) -> f32 {
+        let (padded_bytes_per_row, _) = tile_transfer_layout(bytes_per_pixel).unwrap();
+        let offset = ((y + GUTTER_SIZE) * padded_bytes_per_row
+            + (x + GUTTER_SIZE) * bytes_per_pixel) as usize;
+        f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn read_rgba_pixel(bytes: &[u8], bytes_per_pixel: u32, x: u32, y: u32) -> [f32; 4] {
+        let (padded_bytes_per_row, _) = tile_transfer_layout(bytes_per_pixel).unwrap();
+        let offset = ((y + GUTTER_SIZE) * padded_bytes_per_row
+            + (x + GUTTER_SIZE) * bytes_per_pixel) as usize;
+        [
+            f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+            f32::from_ne_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()),
+            f32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().unwrap()),
+            f32::from_ne_bytes(bytes[offset + 12..offset + 16].try_into().unwrap()),
+        ]
+    }
+
+    fn gpu_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     async fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let (_adapter, device, queue) = test_device_with_features(wgpu::Features::empty()).await?;
+        Some((device, queue))
+    }
+
+    async fn test_device_with_features(
+        required_features: wgpu::Features,
+    ) -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::default();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .ok()?;
-        adapter
+        let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("glaphica-renderer-test-device"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::default(),
             })
             .await
-            .ok()
+            .ok()?;
+        Some((adapter, device, queue))
     }
 }
