@@ -8,9 +8,9 @@ use gla_image_command::{
     Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef, RenderCtx, SourceFootprintError,
 };
 use gla_ir::{
-    DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawSessionIR, FootprintModifier,
-    GraphCommand, ImageId, Mapping, MetadataRef, SessionCommand, SessionImageDecl,
-    SessionReadImage, Tool,
+    DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawOnInput, DrawOnInputKind,
+    DrawOnToolKind, DrawSessionIR, FootprintModifier, GraphCommand, ImageId, Mapping, MetadataRef,
+    SessionCommand, SessionImageDecl, SessionReadImage,
 };
 use gla_renderer::{Pass, RenderBackend};
 use gla_storage::{GlobalEditError, GlobalImage, GlobalStorage, GlobalTileError, ImageEdit};
@@ -23,6 +23,8 @@ mod frame;
 
 pub use frame::FrameBudget;
 
+const CANVAS_DAB_COMPAT_RADIUS_PX: f32 = 1.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DrawCommit {
     pub record_id: DrawRecordId,
@@ -30,6 +32,14 @@ pub struct DrawCommit {
 }
 
 pub type DrawRecordId = u64;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawOnRoute {
+    pub target: ImageId,
+    pub tool: DrawOnToolKind,
+    pub target_x: f32,
+    pub target_y: f32,
+}
 
 #[derive(Debug)]
 struct StoredImageEditPatch {
@@ -174,6 +184,23 @@ impl<'s, 'g> DrawFrame<'s, 'g> {
         &self.dab_passes
     }
 
+    pub fn route_draw_targets(
+        &self,
+        shown_image: ImageId,
+        x: f32,
+        y: f32,
+    ) -> Result<Vec<DrawOnRoute>, SessionError> {
+        self.session.route_draw_targets(shown_image, x, y)
+    }
+
+    pub fn draw_on(&mut self, target: ImageId, input: DrawOnInput) -> Result<(), SessionError> {
+        if self.pending_flush_passes.is_some() {
+            return Err(SessionError::PendingFrameSubmit);
+        }
+        self.session
+            .draw_on_into_frame(&mut self.frame_dirty, &mut self.dab_passes, target, input)
+    }
+
     pub fn draw_dab(
         &mut self,
         shown_image: ImageId,
@@ -182,12 +209,17 @@ impl<'s, 'g> DrawFrame<'s, 'g> {
         if self.pending_flush_passes.is_some() {
             return Err(SessionError::PendingFrameSubmit);
         }
-        self.session.draw_dab_into_frame(
-            &mut self.frame_dirty,
-            &mut self.dab_passes,
-            shown_image,
-            input,
-        )
+        let routes = self.route_draw_targets(shown_image, input.position.x, input.position.y)?;
+        let draws = routes
+            .into_iter()
+            .map(|route| {
+                compat_draw_on_input_from_route(route, input).map(|input| (route.target, input))
+            })
+            .collect::<Result<Vec<_>, SessionError>>()?;
+        for (target, input) in draws {
+            self.draw_on(target, input)?;
+        }
+        Ok(())
     }
 
     pub fn flush<B: RenderBackend>(&mut self, backend: &mut B) -> Result<(), SessionError> {
@@ -261,6 +293,11 @@ pub enum SessionError {
     },
     DestinationNotWritable {
         id: ImageId,
+    },
+    DrawOnInputMismatch {
+        id: ImageId,
+        tool: DrawOnToolKind,
+        input: DrawOnToolKind,
     },
     BackupReadRequiresDocImage {
         id: ImageId,
@@ -350,6 +387,12 @@ impl Display for SessionError {
             Self::MissingWriter { id } => write!(f, "session image {id:?} has no writer"),
             Self::DestinationNotWritable { id } => {
                 write!(f, "image {id:?} is not a writable session destination")
+            }
+            Self::DrawOnInputMismatch { id, tool, input } => {
+                write!(
+                    f,
+                    "DrawOn target {id:?} uses {tool:?}, but received {input:?} input"
+                )
             }
             Self::BackupReadRequiresDocImage { id } => {
                 write!(f, "backup read {id:?} must reference a declared doc image")
@@ -454,27 +497,13 @@ enum SessionImageId {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DrawOnWriter {
-    tool: Tool,
-    tool_params: gla_ir::ToolParams,
+    tool: DrawOnToolKind,
 }
 
 impl DrawOnWriter {
     fn from_command(command: &DrawOnCommand) -> Self {
-        Self {
-            tool: command.tool,
-            tool_params: command.tool_params,
-        }
+        Self { tool: command.tool }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum DrawOnInput {
-    RadialKernel1D {
-        center_x: f32,
-        center_y: f32,
-        radius: f32,
-        flow: f32,
-    },
 }
 
 #[derive(Debug)]
@@ -598,37 +627,39 @@ impl<'g> DrawSession<'g> {
         DrawFrame::new(self)
     }
 
-    fn draw_dab_into_frame(
+    fn draw_on_into_frame(
         &mut self,
         frame_dirty: &mut HashMap<ImageId, TileSet>,
         dab_passes: &mut Vec<Pass>,
-        shown_image: ImageId,
-        input: CanvasInput,
+        target: ImageId,
+        input: DrawOnInput,
     ) -> Result<(), SessionError> {
-        let draws = self.route_draw_inputs(shown_image, input)?;
+        let image = self
+            .images
+            .get(&target)
+            .ok_or(SessionError::MissingLocalImage { id: target })?;
+        let SessionImageWriter::DrawOn(writer) = image.writer() else {
+            return Err(SessionError::DestinationNotWritable { id: target });
+        };
+        let writer = *writer;
+        let layout = image.layout();
 
         let mut ctx = self.render_ctx(dab_passes, Some(frame_dirty));
-        for (id, writer, layout, input) in draws {
-            draw_on(&mut ctx, id, writer, layout, input)?;
-        }
-        Ok(())
+        draw_on(&mut ctx, target, writer, layout, input)
     }
 
-    fn route_draw_inputs(
+    fn route_draw_targets(
         &self,
         shown_image: ImageId,
-        input: CanvasInput,
-    ) -> Result<Vec<(ImageId, DrawOnWriter, GlaImageLayout, DrawOnInput)>, SessionError> {
+        x: f32,
+        y: f32,
+    ) -> Result<Vec<DrawOnRoute>, SessionError> {
         if !self.images.contains_key(&shown_image) {
             return Err(SessionError::InputImageNotActive { id: shown_image });
         }
 
         let mut targets = HashMap::new();
-        let mut stack = vec![(
-            shown_image,
-            finite_or_zero(input.position.x),
-            finite_or_zero(input.position.y),
-        )];
+        let mut stack = vec![(shown_image, finite_or_zero(x), finite_or_zero(y))];
         while let Some((id, x, y)) = stack.pop() {
             let image = self
                 .images
@@ -668,12 +699,12 @@ impl<'g> DrawSession<'g> {
             let SessionImageWriter::DrawOn(writer) = image.writer() else {
                 return Err(SessionError::DestinationNotWritable { id });
             };
-            draws.push((
-                id,
-                *writer,
-                image.layout(),
-                draw_on_input_from_target(*writer, input, x, y),
-            ));
+            draws.push(DrawOnRoute {
+                target: id,
+                tool: writer.tool,
+                target_x: x,
+                target_y: y,
+            });
         }
         Ok(draws)
     }
@@ -1234,32 +1265,68 @@ fn draw_on(
     layout: GlaImageLayout,
     input: DrawOnInput,
 ) -> Result<(), SessionError> {
-    match (writer.tool, input) {
+    match (writer.tool, input.kind) {
         (
-            Tool::RadialKernel1D,
-            DrawOnInput::RadialKernel1D {
-                center_x,
-                center_y,
-                radius,
-                flow,
+            DrawOnToolKind::RadialKernel1D,
+            DrawOnInputKind::RadialKernel1D {
+                radius_px,
+                amplitude,
             },
-        ) => draw_radial_kernel_1d(ctx, id, layout, center_x, center_y, radius, flow),
+        ) => draw_radial_kernel_1d(
+            ctx,
+            id,
+            layout,
+            input.center_x,
+            input.center_y,
+            input.footprint_radius_px,
+            radius_px,
+            amplitude,
+        ),
+        (
+            DrawOnToolKind::ReplaceCircle4D,
+            DrawOnInputKind::ReplaceCircle4D { radius_px, color },
+        ) => draw_replace_circle_4d(
+            ctx,
+            id,
+            layout,
+            input.center_x,
+            input.center_y,
+            input.footprint_radius_px,
+            radius_px,
+            color,
+        ),
+        (tool, kind) => Err(SessionError::DrawOnInputMismatch {
+            id,
+            tool,
+            input: input_kind_tool(kind),
+        }),
     }
 }
 
-fn draw_on_input_from_target(
-    writer: DrawOnWriter,
+fn compat_draw_on_input_from_route(
+    route: DrawOnRoute,
     input: CanvasInput,
-    target_x: f32,
-    target_y: f32,
-) -> DrawOnInput {
-    match writer.tool {
-        Tool::RadialKernel1D => DrawOnInput::RadialKernel1D {
-            center_x: finite_or_zero(target_x),
-            center_y: finite_or_zero(target_y),
-            radius: non_negative_finite(writer.tool_params.radius).max(1.0),
-            flow: finite_or_zero(input.pressure).clamp(0.0, 1.0),
-        },
+) -> Result<DrawOnInput, SessionError> {
+    match route.tool {
+        DrawOnToolKind::RadialKernel1D => Ok(DrawOnInput::radial_kernel_1d(
+            finite_or_zero(route.target_x),
+            finite_or_zero(route.target_y),
+            CANVAS_DAB_COMPAT_RADIUS_PX,
+            CANVAS_DAB_COMPAT_RADIUS_PX,
+            finite_or_zero(input.pressure).clamp(0.0, 1.0),
+        )),
+        tool => Err(SessionError::DrawOnInputMismatch {
+            id: route.target,
+            tool,
+            input: DrawOnToolKind::RadialKernel1D,
+        }),
+    }
+}
+
+fn input_kind_tool(kind: DrawOnInputKind) -> DrawOnToolKind {
+    match kind {
+        DrawOnInputKind::RadialKernel1D { .. } => DrawOnToolKind::RadialKernel1D,
+        DrawOnInputKind::ReplaceCircle4D { .. } => DrawOnToolKind::ReplaceCircle4D,
     }
 }
 
@@ -1269,18 +1336,20 @@ fn draw_radial_kernel_1d(
     layout: GlaImageLayout,
     center_x: f32,
     center_y: f32,
-    radius: f32,
-    flow: f32,
+    footprint_radius_px: f32,
+    radius_px: f32,
+    amplitude: f32,
 ) -> Result<(), SessionError> {
-    let radius = non_negative_finite(radius);
-    let flow = finite_or_zero(flow).clamp(0.0, 1.0);
+    let footprint_radius_px = non_negative_finite(footprint_radius_px);
+    let radius_px = non_negative_finite(radius_px);
+    let amplitude = finite_or_zero(amplitude).clamp(0.0, 1.0);
 
-    for tile in radial_footprint_tiles(layout, center_x, center_y, radius).map_err(|source| {
-        SessionError::Image {
+    for tile in radial_footprint_tiles(layout, center_x, center_y, footprint_radius_px).map_err(
+        |source| SessionError::Image {
             id,
             source: ImageError::InvalidLayout { source },
-        }
-    })? {
+        },
+    )? {
         let dst = ctx.draw_on_write_pos(id, tile.index)?;
         let center_in_tile_x = center_x - tile.origin_x as f32;
         let center_in_tile_y = center_y - tile.origin_y as f32;
@@ -1288,8 +1357,43 @@ fn draw_radial_kernel_1d(
             dst,
             center_in_tile_x,
             center_in_tile_y,
-            radius,
-            flow,
+            radius_px,
+            amplitude,
+        });
+        ctx.fix_gutter(dst);
+    }
+
+    Ok(())
+}
+
+fn draw_replace_circle_4d(
+    ctx: &mut SessionRenderCtx<'_, '_>,
+    id: ImageId,
+    layout: GlaImageLayout,
+    center_x: f32,
+    center_y: f32,
+    footprint_radius_px: f32,
+    radius_px: f32,
+    color: gla_color::PremultipliedRgbaF32,
+) -> Result<(), SessionError> {
+    let footprint_radius_px = non_negative_finite(footprint_radius_px);
+    let radius_px = non_negative_finite(radius_px);
+
+    for tile in radial_footprint_tiles(layout, center_x, center_y, footprint_radius_px).map_err(
+        |source| SessionError::Image {
+            id,
+            source: ImageError::InvalidLayout { source },
+        },
+    )? {
+        let dst = ctx.draw_on_write_pos(id, tile.index)?;
+        let center_in_tile_x = center_x - tile.origin_x as f32;
+        let center_in_tile_y = center_y - tile.origin_y as f32;
+        ctx.passes.push(Pass::ReplaceCircle4D {
+            dst,
+            center_in_tile_x,
+            center_in_tile_y,
+            radius_px,
+            color,
         });
         ctx.fix_gutter(dst);
     }
@@ -1933,11 +2037,11 @@ fn dirty_from_edits(edits: &HashMap<ImageId, ImageEdit>) -> HashMap<ImageId, Til
 mod tests {
     use super::*;
     use atlas::{AtlasLayout, NoAtlasTextures};
-    use gla_color::{ChannelCount, ChannelType};
+    use gla_color::{ChannelCount, ChannelType, PremultipliedRgbaF32};
     use gla_core::CanvasCoordF;
     use gla_ir::{
-        Affine2D, DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead,
-        ToolParams,
+        Affine2D, DocImageUse, DrawOnToolKind, GraphRead, ImageRole, RegistryPatch,
+        RegistryPatchOp, SessionRead,
     };
     use gla_renderer::{Pass, RenderBackend};
     use std::fmt::{Display, Formatter};
@@ -2096,8 +2200,6 @@ mod tests {
     fn draw_dab_routes_canvas_input_and_records_brush_passes() {
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
-        let mut draw = DrawOnCommand::new(coverage);
-        draw.tool_params = ToolParams { radius: 2.0 };
         let ir = DrawSessionIR {
             expected_document_version: global.version(),
             doc_images: Vec::new(),
@@ -2106,7 +2208,7 @@ mod tests {
                 format: MetadataRef::Concrete(value_format()),
                 layout: MetadataRef::Concrete(multi_tile_layout()),
             }],
-            draw_on: vec![draw],
+            draw_on: vec![DrawOnCommand::new(coverage)],
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
@@ -2131,11 +2233,54 @@ mod tests {
     }
 
     #[test]
-    fn draw_dab_clamps_radial_flow_to_unit_interval() {
+    fn route_draw_targets_returns_target_space_coordinates_in_draw_order() {
+        let base = ImageId::new(1);
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
-        let mut draw = DrawOnCommand::new(coverage);
-        draw.tool_params = ToolParams { radius: 2.0 };
+        add_global_primitive_with_layout(&mut global, base, rgba_format(), layout_with_tiles(1, 1));
+        let mut read = SessionRead::current(coverage);
+        read.mapping = Mapping::Matrix(Affine2D {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            tx: 5.0,
+            ty: 7.0,
+        });
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Like(base),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::backup(base), read],
+                base,
+            )],
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let frame = session.begin_frame();
+
+        let routes = frame.route_draw_targets(base, 0.0, 0.0).unwrap();
+
+        assert_eq!(
+            routes,
+            vec![DrawOnRoute {
+                target: coverage,
+                tool: DrawOnToolKind::RadialKernel1D,
+                target_x: 5.0,
+                target_y: 7.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn draw_on_records_typed_radial_input_without_canvas_lowering() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
         let ir = DrawSessionIR {
             expected_document_version: global.version(),
             doc_images: Vec::new(),
@@ -2144,7 +2289,83 @@ mod tests {
                 format: MetadataRef::Concrete(value_format()),
                 layout: MetadataRef::Concrete(layout()),
             }],
-            draw_on: vec![draw],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = session.begin_frame();
+
+        frame
+            .draw_on(
+                coverage,
+                DrawOnInput::radial_kernel_1d(0.0, 0.0, 1.0, 3.0, 0.25),
+            )
+            .unwrap();
+
+        assert!(frame.dab_passes().iter().any(|pass| matches!(
+            pass,
+            Pass::DrawRadialKernel1D {
+                radius_px,
+                amplitude,
+                ..
+            } if *radius_px == 3.0 && *amplitude == 0.25
+        )));
+    }
+
+    #[test]
+    fn draw_on_records_typed_replace_circle_input() {
+        let paint = ImageId::new(2);
+        let color = PremultipliedRgbaF32::new(0.25, 0.5, 0.75, 1.0);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: paint,
+                format: MetadataRef::Concrete(rgba_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::with_tool(
+                paint,
+                DrawOnToolKind::ReplaceCircle4D,
+            )],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = session.begin_frame();
+
+        frame
+            .draw_on(
+                paint,
+                DrawOnInput::replace_circle_4d(0.0, 0.0, 1.0, 2.0, color),
+            )
+            .unwrap();
+
+        assert!(matches!(frame.dab_passes()[0], Pass::Clear { .. }));
+        assert!(matches!(
+            frame.dab_passes()[1],
+            Pass::ReplaceCircle4D {
+                radius_px,
+                color: pass_color,
+                ..
+            } if radius_px == 2.0 && pass_color == color
+        ));
+        assert!(matches!(frame.dab_passes()[2], Pass::FixGutter { .. }));
+    }
+
+    #[test]
+    fn draw_dab_clamps_radial_flow_to_unit_interval() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
@@ -2154,12 +2375,9 @@ mod tests {
             .draw_dab(coverage, canvas_input(0.0, 0.0, 4.0))
             .unwrap();
 
-        assert!(
-            frame
-                .dab_passes()
-                .iter()
-                .any(|pass| matches!(pass, Pass::DrawRadialKernel1D { flow, .. } if *flow == 1.0))
-        );
+        assert!(frame.dab_passes().iter().any(
+            |pass| matches!(pass, Pass::DrawRadialKernel1D { amplitude, .. } if *amplitude == 1.0)
+        ));
     }
 
     #[test]
@@ -2280,6 +2498,42 @@ mod tests {
             err,
             SessionError::InputImageNotActive { id } if id == missing
         ));
+    }
+
+    #[test]
+    fn draw_dab_rejects_non_radial_tool_during_compat_lowering() {
+        let paint = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: paint,
+                format: MetadataRef::Concrete(rgba_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::with_tool(
+                paint,
+                DrawOnToolKind::ReplaceCircle4D,
+            )],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = session.begin_frame();
+
+        let err = frame
+            .draw_dab(paint, canvas_input(0.0, 0.0, 0.5))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::DrawOnInputMismatch {
+                id,
+                tool: DrawOnToolKind::ReplaceCircle4D,
+                input: DrawOnToolKind::RadialKernel1D,
+            } if id == paint
+        ));
+        assert!(frame.is_clean());
     }
 
     #[test]
@@ -2428,8 +2682,6 @@ mod tests {
     fn flush_failure_keeps_frame_dirty_and_dab_passes_for_retry() {
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
-        let mut draw = DrawOnCommand::new(coverage);
-        draw.tool_params = ToolParams { radius: 2.0 };
         let ir = DrawSessionIR {
             expected_document_version: global.version(),
             doc_images: Vec::new(),
@@ -2438,7 +2690,7 @@ mod tests {
                 format: MetadataRef::Concrete(value_format()),
                 layout: MetadataRef::Concrete(layout()),
             }],
-            draw_on: vec![draw],
+            draw_on: vec![DrawOnCommand::new(coverage)],
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();

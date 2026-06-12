@@ -14,10 +14,10 @@ Render footprint enumeration starts from a destination tile and uses the read
 edge to find source tiles. Dirty upload walks the same read edge in the reverse
 conservative direction.
 
-Draw input is anchored by the app. Each shown image belongs to a window or view,
-and the app passes that shown `ImageId` when submitting a dab. The session then
-routes input through the active session graph from the shown image toward
-reachable `DrawOn` writers.
+Draw input is anchored by the app. Each shown image belongs to a window or view.
+The input mapping layer can call `DrawFrame::route_draw_targets` to route that
+shown `ImageId` and point through the active session graph toward reachable
+`DrawOn` writers.
 
 ## Input Routing
 
@@ -28,11 +28,14 @@ global-only sources and are not writable input routes.
 The route starts at the shown image. If the shown image itself is a `DrawOn`
 target, it receives input. If the shown image derives from one or more current
 images, input is passed down those read edges until `DrawOn` targets are found.
-Targets execute in `draw_on_order`.
+Targets are returned in `draw_on_order`.
 
-Tool input lowering combines raw input and tool config into the tool's standard
-input after route mapping has put the input point in the target image coordinate
-system. `DrawOnCommand` no longer carries a coordinate `input_mapping` field.
+The route query does not lower raw app input into tool input and does not execute
+DrawOn. Tool input lowering combines routed target coordinates, raw app input,
+and brush/tool config outside the session, producing typed per-DrawOn
+`DrawOnInput` values. The frame executes those inputs through
+`DrawFrame::draw_on`. `DrawOnCommand` no longer carries coordinate mapping or
+tool parameter fields.
 
 ## Ambiguity TODO
 

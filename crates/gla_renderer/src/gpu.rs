@@ -185,6 +185,7 @@ pub enum GpuRendererError {
         blend_mode: BlendMode,
     },
     UnsupportedDrawRadialKernel1D,
+    UnsupportedReplaceCircle4D,
 }
 
 impl Display for GpuRendererError {
@@ -243,6 +244,9 @@ impl Display for GpuRendererError {
             }
             Self::UnsupportedDrawRadialKernel1D => {
                 write!(f, "GPU draw_radial_kernel_1d pass is not implemented")
+            }
+            Self::UnsupportedReplaceCircle4D => {
+                write!(f, "GPU replace_circle_4d pass is not implemented")
             }
         }
     }
@@ -416,6 +420,9 @@ impl GpuRenderer {
                     Pass::FixGutter { dst } => encode_fix_gutter(&mut ctx, &self.atlases, dst)?,
                     Pass::DrawRadialKernel1D { .. } => {
                         return Err(GpuRendererError::UnsupportedDrawRadialKernel1D);
+                    }
+                    Pass::ReplaceCircle4D { .. } => {
+                        return Err(GpuRendererError::UnsupportedReplaceCircle4D);
                     }
                 }
             }

@@ -1,5 +1,7 @@
 use gla_color::GlaFormat;
-pub use gla_command_core::{Affine2D, FootprintModifier, Mapping, Tool, ToolParams};
+pub use gla_command_core::{
+    Affine2D, DrawOnInput, DrawOnInputKind, DrawOnToolKind, FootprintModifier, Mapping,
+};
 use gla_image::GlaImageLayout;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,17 +136,19 @@ impl ImageRole {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawOnCommand {
     pub dst: ImageId,
-    pub tool: Tool,
-    pub tool_params: ToolParams,
+    pub tool: DrawOnToolKind,
 }
 
 impl DrawOnCommand {
     pub fn new(dst: ImageId) -> Self {
         Self {
             dst,
-            tool: Tool::default(),
-            tool_params: ToolParams::default(),
+            tool: DrawOnToolKind::default(),
         }
+    }
+
+    pub fn with_tool(dst: ImageId, tool: DrawOnToolKind) -> Self {
+        Self { dst, tool }
     }
 }
 
@@ -233,6 +237,12 @@ pub struct DrawSessionIR {
     pub session_images: Vec<SessionImageDecl>,
     pub draw_on: Vec<DrawOnCommand>,
     pub derive: Vec<DeriveCommand>,
+}
+
+impl DrawSessionIR {
+    pub fn required_draw_on_tools(&self) -> std::collections::BTreeSet<DrawOnToolKind> {
+        self.draw_on.iter().map(|command| command.tool).collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

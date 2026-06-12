@@ -180,10 +180,11 @@ The executor has two image modification forms:
 
 ```text
 DrawOn:
-  input-driven
-  ordered by source invocation
+  typed per-dab input driven
+  ordered by source invocation where overlapping writes can interact
   may mutate or accumulate into one writable destination
-  has no image read edges in the first design stage
+  has no stroke-level parameters or internal state
+  has no image read edges
 
 Derive:
   dirty-driven
@@ -195,8 +196,15 @@ Derive:
 
 One image may have only one writer in the merged current session graph. A doc
 image cannot be both a `DrawOn` destination and a session `Derive` destination
-in the same draw session. Multiple dabs are multiple invocations of the same
-DrawOn writer, not multiple writers.
+in the same draw session. A `DrawOnCommand` declares only the destination and
+`DrawOnToolKind`; runtime execution uses typed `DrawOnInput` values.
+
+Each dab input declares its center and a `footprint_radius_px`. The footprint is
+a conservative scheduling contract used by the session to materialize writable
+tiles, mark dirty tiles, and decide which tile passes to emit. Tool-specific
+payload such as actual `radius_px`, amplitude, or replacement color remains
+private to the DrawOn executor. Multiple dabs are multiple invocations of the
+same DrawOn writer, not multiple writers.
 
 Local/session derived commands may write session images or doc images declared
 `ReadWrite`. They do not change the document graph. They are a session-scoped
@@ -229,12 +237,15 @@ document "upload" means moving dirty information from the written image toward
 the root. It does not mutate tile resources or copy tile content; it computes
 destination `TileSet` values and triggers recursive rendering.
 
-For a frame, the app passes the shown image id with each dab. The session routes
-the input point through active `Current` read edges to reachable `DrawOn`
-targets, then records dirty per target. On flush, each DrawOn dirty set is
-uploaded through the graph and session command edges. The session records
-document dirty for `ReadWrite` document ids and unions root demand for repaint.
-Expanded and matrix dirty uploads currently fall back to full destination dirty.
+For a frame, the input mapping layer may call
+`DrawFrame::route_draw_targets` to route a shown image id and point through
+active `Current` read edges to reachable `DrawOn` targets. That route query
+returns target ids, target tool kinds, and target-space coordinates. Typed
+per-DrawOn `DrawOnInput` values are then submitted with `DrawFrame::draw_on`,
+which records dirty per target. On flush, each DrawOn dirty set is uploaded
+through the graph and session command edges. The session records document dirty
+for `ReadWrite` document ids and unions root demand for repaint. Expanded and
+matrix dirty uploads currently fall back to full destination dirty.
 
 ## Tile Slot Values
 

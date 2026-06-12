@@ -114,24 +114,32 @@ round brush is not itself a primitive. Its coverage can be produced by:
 DrawRadialKernel1D:
   dst: coverage
   kernel: w(d, r) = max(0, 1 - d / max(r, 1px))
-  input: center, radius, flow
-  footprint: circle bounds in dst image space
-  semantics: dst += kernel * flow, without clamping
+  input: center, footprint_radius_px, radius_px, amplitude
+  footprint: declared conservative circle bounds in dst image space
+  semantics: dst += kernel * amplitude, without clamping
+
+ReplaceCircle4D:
+  dst: paint_layer
+  input: center, footprint_radius_px, radius_px, premultiplied_rgba_f32
+  footprint: declared conservative circle bounds in dst image space
+  semantics: matching D4 pixels are directly replaced
 ```
 
 The user brush or tool program owns spacing, interpolation, smoothing, jitter,
-pressure mapping, and tool presets. The session receives input samples from the
-Rust app loop. A `DrawFrame` applies input mappings through the active
-`DrawSession`, invokes DrawOn primitives, records frame dirty, uploads dirty
-through session/document graph edges on flush, materializes root repaint demand,
-and submits the resulting pass list to the render backend.
+pressure mapping, and tool presets. It broadcasts raw user input and lowers it
+to typed per-DrawOn inputs. The session does not own pressure, tilt, twist, or
+brush presets as document graph data. A `DrawFrame` invokes DrawOn primitives,
+records frame dirty from declared footprints, uploads dirty through
+session/document graph edges on flush, materializes root repaint demand, and
+submits the resulting pass list to the render backend.
 
-The first storage-backed implementation keeps that layering but uses a temporary
-fallback mapper for `RadialKernel1D`: mapped canvas position becomes center,
-`tool_params.radius` becomes dab radius with a 1px minimum, and pressure becomes
-flow. This fallback is not the primitive contract. The primitive receives a
-tool-specific engine input and the renderer pass only reads center, radius, and
-flow after mapping.
+`DrawFrame::route_draw_targets` routes shown-image coordinates through the
+session graph. The app/tool layer can then lower raw input to typed
+`DrawOnInput` values and submit them with `DrawFrame::draw_on`. The older
+`draw_dab(shown_image, CanvasInput)` entry point remains as a compatibility
+wrapper: it routes the shown-image coordinate, then lowers to
+`DrawOnInput::radial_kernel_1d` with a fixed compatibility radius and pressure
+as amplitude.
 
 DrawOn primitives have one `ReadWrite` destination and no image read edges in
 the first version. Current-reading stamp or smudge behavior that requires
@@ -231,16 +239,22 @@ and document graph edges.
 ## Input Routing
 
 Every image has its own coordinate system. The app owns the view/window
-binding, so it passes the shown `ImageId` with each dab. The session routes the
-input point through the active session graph from that shown image toward
-reachable `DrawOn` targets.
+binding, so the input mapping layer can ask the session to route a shown
+`ImageId` and point through the active session graph toward reachable `DrawOn`
+targets.
 
 ```text
-draw_dab(shown_image, input)
+DrawFrame::route_draw_targets(shown_image, point)
   shown image coord
   -> active read edge Mapping(dst -> src)
   -> DrawOn target image coord
-  -> tool input lowering
+
+input mapping
+  routed DrawOn target coord + raw app input
+  -> typed per-DrawOn DrawOnInput
+
+DrawFrame::draw_on(target, DrawOnInput)
+  -> records DrawOn passes and dirty from declared footprint
 ```
 
 Read edges use mappings from derive destination space to read source space. The
