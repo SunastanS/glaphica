@@ -204,6 +204,14 @@ impl Tiles {
     }
 
     pub fn write_pos(&mut self, tile: &mut Tile) -> Result<TilePos, TilesError> {
+        self.write_pos_with_zero_init(tile, |_| {})
+    }
+
+    pub fn write_pos_with_zero_init(
+        &mut self,
+        tile: &mut Tile,
+        init_zero: impl FnOnce(TilePos),
+    ) -> Result<TilePos, TilesError> {
         self.ensure_valid(tile)?;
         let binding = self.bindings[tile.index() as usize];
         let position = binding.position();
@@ -223,6 +231,7 @@ impl Tiles {
         let binding = atlas.alloc()?;
         let position = binding.position();
         self.bind_tile(tile, binding);
+        init_zero(position);
         Ok(position)
     }
 
@@ -384,6 +393,25 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(tiles.atlas(atlas_id).unwrap().remaining(), 255);
+        assert_eq!(tiles.read_ref(&tile).unwrap(), TileReadRef::Physical(first));
+    }
+
+    #[test]
+    fn write_pos_with_zero_init_initializes_only_on_first_materialization() {
+        let mut tiles = Tiles::new();
+        let atlas_id = new_test_atlas(&mut tiles);
+        let mut tile = tiles.reserve(atlas_id).unwrap();
+        let mut initialized = Vec::new();
+
+        let first = tiles
+            .write_pos_with_zero_init(&mut tile, |pos| initialized.push(pos))
+            .unwrap();
+        let second = tiles
+            .write_pos_with_zero_init(&mut tile, |pos| initialized.push(pos))
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(initialized, vec![first]);
         assert_eq!(tiles.read_ref(&tile).unwrap(), TileReadRef::Physical(first));
     }
 

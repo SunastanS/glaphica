@@ -3,7 +3,7 @@ use crate::error::{GlobalEditApplyError, GlobalEditError, GlobalStorageError, Gl
 use crate::graph::{ImageSpec, validate_specs};
 use atlas::TilePos;
 use gla_color::GlaFormat;
-use gla_image::{CacheImage, DenseImage, GlaImageLayout, ImageError};
+use gla_image::{CacheImage, DenseImage, GlaImageLayout};
 use gla_ir::{DocumentVersionId, GraphCommand, ImageId, ImageRole, RegistryPatch, RegistryPatchOp};
 use std::collections::HashMap;
 use tile_key::{Tile, TileReadRef, Tiles, TilesError};
@@ -128,6 +128,14 @@ impl GlobalStorage {
         self.tiles.write_pos(tile)
     }
 
+    pub fn write_tile_pos_with_zero_init(
+        &mut self,
+        tile: &mut Tile,
+        init_zero: impl FnOnce(TilePos),
+    ) -> Result<TilePos, TilesError> {
+        self.tiles.write_pos_with_zero_init(tile, init_zero)
+    }
+
     pub fn reserve_tile_for_format(&mut self, format: GlaFormat) -> Result<Tile, TilesError> {
         self.tiles.reserve_for_format(format)
     }
@@ -168,6 +176,15 @@ impl GlobalStorage {
         id: ImageId,
         tile_index: u32,
     ) -> Result<TilePos, GlobalTileError> {
+        self.write_global_cache_pos_with_zero_init(id, tile_index, |_| {})
+    }
+
+    pub fn write_global_cache_pos_with_zero_init(
+        &mut self,
+        id: ImageId,
+        tile_index: u32,
+        init_zero: impl FnOnce(TilePos),
+    ) -> Result<TilePos, GlobalTileError> {
         let image = self
             .images
             .get_mut(&id)
@@ -196,7 +213,7 @@ impl GlobalStorage {
                     .map_err(|source| GlobalTileError::Image { id, source })?
                     .expect("global cache tile was materialized before write");
                 self.tiles
-                    .write_pos(tile)
+                    .write_pos_with_zero_init(tile, init_zero)
                     .map_err(|source| GlobalTileError::Tile { id, source })
             }
         }
@@ -484,6 +501,7 @@ mod tests {
     use super::*;
     use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
+    use gla_image::ImageError;
     use gla_ir::{GraphRead, RegistryPatch, RegistryPatchOp};
     use std::collections::HashMap;
     use tile_key::{TileReadRef, TilesError};

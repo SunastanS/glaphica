@@ -2,13 +2,12 @@ use atlas::TilePos;
 use gla_color::GlaFormat;
 use gla_core::CanvasInput;
 use gla_image::{
-    DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, ImageLayoutError, TileReplaceError,
-    TileSet,
+    DenseImage, GlaImageLayout, IMAGE_TILE_SIZE, ImageError, ImageLayoutError, TileSet,
 };
 use gla_image_command::{Copy, Derive, DeriveCommand as ImageDeriveCommand, ImageRef, RenderCtx};
 use gla_ir::{
     DocumentImageAccess, DocumentVersionId, DrawOnCommand, DrawSessionIR, FootprintModifier,
-    GraphCommand, ImageId, ImageRole, Mapping, MetadataRef, SessionCommand, SessionImageDecl,
+    GraphCommand, ImageId, Mapping, MetadataRef, SessionCommand, SessionImageDecl,
     SessionReadImage, Tool,
 };
 use gla_renderer::{Pass, RenderBackend};
@@ -381,10 +380,12 @@ enum SessionImageContent {
 }
 
 impl SessionImageContent {
+    #[cfg(test)]
     fn is_raw(&self) -> bool {
         matches!(self, Self::Raw(_))
     }
 
+    #[cfg(test)]
     fn is_edit(&self) -> bool {
         matches!(self, Self::Edit(_))
     }
@@ -927,7 +928,14 @@ impl SessionRenderCtx<'_> {
     ) -> Result<TilePos, SessionError> {
         match image {
             SessionImageId::Current(id) => self.write_current(id, tile_index),
-            SessionImageId::Global(id) => Ok(self.global.write_global_cache_pos(id, tile_index)?),
+            SessionImageId::Global(id) => {
+                let passes = &mut *self.passes;
+                Ok(self.global.write_global_cache_pos_with_zero_init(
+                    id,
+                    tile_index,
+                    |dst| passes.push(Pass::Clear { dst }),
+                )?)
+            }
         }
     }
 
@@ -945,8 +953,11 @@ impl SessionRenderCtx<'_> {
                 let tile = raw
                     .tile_mut(tile_index)
                     .map_err(|source| SessionError::Image { id, source })?;
+                let passes = &mut *self.passes;
                 self.global
-                    .write_tile_pos(tile)
+                    .write_tile_pos_with_zero_init(tile, |dst| {
+                        passes.push(Pass::Clear { dst });
+                    })
                     .map_err(|source| SessionError::Tile { id, source })
             }
             SessionImageContent::Edit(edit) => {
@@ -970,8 +981,11 @@ impl SessionRenderCtx<'_> {
                         .map_err(|source| SessionError::Tile { id, source })?;
                     edit.insert_tile(tile_index, tile)
                 };
+                let passes = &mut *self.passes;
                 self.global
-                    .write_tile_pos(tile)
+                    .write_tile_pos_with_zero_init(tile, |dst| {
+                        passes.push(Pass::Clear { dst });
+                    })
                     .map_err(|source| SessionError::Tile { id, source })
             }
         }
@@ -1712,7 +1726,9 @@ mod tests {
     use atlas::{AtlasLayout, NoAtlasTextures};
     use gla_color::{ChannelCount, ChannelType};
     use gla_core::CanvasCoordF;
-    use gla_ir::{DocImageUse, GraphRead, RegistryPatch, RegistryPatchOp, SessionRead, ToolParams};
+    use gla_ir::{
+        DocImageUse, GraphRead, ImageRole, RegistryPatch, RegistryPatchOp, SessionRead, ToolParams,
+    };
     use gla_renderer::{Pass, RenderBackend};
     use std::fmt::{Display, Formatter};
     use tile_key::{TileReadRef, Tiles};
@@ -1922,6 +1938,78 @@ mod tests {
                 .iter()
                 .any(|pass| matches!(pass, Pass::DrawRadialKernel1D { flow, .. } if *flow == 1.0))
         );
+    }
+
+    #[test]
+    fn raw_first_draw_records_clear_before_radial_kernel() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+
+        frame
+            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+
+        let passes = frame.dab_passes();
+        let Pass::Clear { dst } = passes[0] else {
+            panic!("first raw draw must clear newly materialized tile before additive draw");
+        };
+        assert!(matches!(
+            passes[1],
+            Pass::DrawRadialKernel1D { dst: draw_dst, .. } if draw_dst == dst
+        ));
+        assert_eq!(passes[2], Pass::FixGutter { dst });
+    }
+
+    #[test]
+    fn repeated_raw_draw_does_not_repeat_materialization_clear() {
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: Default::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: coverage,
+                format: MetadataRef::Concrete(value_format()),
+                layout: MetadataRef::Concrete(layout()),
+            }],
+            draw_on: vec![DrawOnCommand::new(coverage)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+
+        frame
+            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+        frame
+            .draw_dab(&mut session, &mut global, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+
+        let clear_count = frame
+            .dab_passes()
+            .iter()
+            .filter(|pass| matches!(pass, Pass::Clear { .. }))
+            .count();
+        let draw_count = frame
+            .dab_passes()
+            .iter()
+            .filter(|pass| matches!(pass, Pass::DrawRadialKernel1D { .. }))
+            .count();
+        assert_eq!(clear_count, 1);
+        assert_eq!(draw_count, 2);
     }
 
     #[test]
@@ -2157,6 +2245,7 @@ mod tests {
         assert_eq!(
             backend.submitted_passes(),
             vec![
+                Pass::Clear { dst: new_group_pos },
                 Pass::Clear { dst: new_group_pos },
                 Pass::FixGutter { dst: new_group_pos },
             ]
