@@ -164,14 +164,16 @@ DrawHistory {
 StoredImageEditPatch {
   version: DocumentVersionId,
   edits: ImageId -> ImageEdit,
+  dirty: ImageId -> TileSet,
 }
 ```
 
 Undo and redo both apply a stored `ImageEdit` patch to primitive document
 images in place. Applying a patch returns a new inverse patch id, so redo is the
 same operation as applying the inverse produced by undo. The operation checks
-the document version before applying, bumps the version after applying, and does
-not replay brush input or image commands.
+the document version before applying, refreshes downstream cache dirty through
+the normal frame flush path, bumps the version after applying, and does not
+replay brush input.
 
 Only primitive document edits enter draw history. Derived document caches can be
 repaired or recomputed from their graph commands and are not history-owned in
@@ -207,10 +209,11 @@ through the completed local-first table into
 
 At execution time, `gla_image_command` owns only key-level ordering. A command
 uses a `RenderCtx` to request `render(image_key, tile_index)` for read
-dependencies, asks the same context for the destination tile key, then appends
-tile passes directly to `gla_renderer`. The context owns tile-key acquisition,
-so session code can keep renderer, tile resources, and recursive command lookup
-in one reentrant state machine.
+dependencies, asks the same context for the destination tile key, then emits
+pass-sink operations such as `clear`, `copy`, `render_to`, and `fix_gutter`.
+The context owns tile-key acquisition and appends those pass operations to the
+current frame's submit list, so image commands do not know about storage,
+recorders, or GPU backend ownership.
 
 Session code enters image commands with an owned command value, normally by
 cloning the row's `DeriveCommand` before execution. This prevents a recursive

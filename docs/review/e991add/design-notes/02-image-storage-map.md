@@ -43,10 +43,12 @@ make the initial tile-slot state explicit:
 - non-optional valid slots for primitive/raw images that start as zero content.
 
 The Rust-side owner should be named around storage, not document truth. Use
-`GlobalStorage` for session-independent Rust resources and `LocalStorage` for
-draw-session-local shadows and temporary images. Janet owns business/document
-IR; Rust storage owns images, commands, tiles, renderer resources, and cache
-materialization state.
+`GlobalStorage` for session-independent image and tile resources,
+`DrawSession` for draw-session-local shadows and temporary images, and
+`DrawFrame` for frame dirty plus dab pass buffering. Janet owns
+business/document IR. Rust storage owns images, commands, tiles, and cache
+materialization state; GPU execution resources live behind the render backend,
+not in global storage.
 
 The constructor direction is now explicit at the image value layer:
 
@@ -122,7 +124,6 @@ struct GlobalStorage {
     root: Option<ImageId>, // temporary SetRoot compatibility, later views
     images: HashMap<ImageId, GlobalImage>,
     tiles: Tiles,
-    renderer: Renderer,
 }
 
 enum GlobalImage {
@@ -197,12 +198,10 @@ This is a large refactor, not a small fix:
   it must not carry arena row keys. The old `InsertImage { key: GlaImageKey,
   ... }` operation is removed with the arena; patch operations are image-id and
   metadata/role declarations.
-- Session construction and commit currently take large resource stores by value
-  (`GlaImages`, `Tiles`, `Renderer`) and then return `Result`. Under move-only
-  resource ownership, these APIs need a sharper failure contract: validate before
-  moving stores, borrow an external resource context, or return the resource
-  bundle on failure. Otherwise an initialization or commit error can drop the
-  caller's resource owners.
+- Session construction and commit now borrow `GlobalStorage` instead of moving
+  large resource bundles. Frame execution is separate: `DrawFrame::flush`
+  borrows a `RenderBackend`, submits the frame pass list, and only then clears
+  frame dirty and dab-pass state.
 
 ## Current Recommendation
 
@@ -266,7 +265,7 @@ not distinguish whether the command came from Janet session IR (`SessionCommand`
 or from a global graph command (`GraphCommand`). Those differences are resolved
 during session initialization/lowering.
 
-The `gla_storage::LocalStorage` build starts from explicit writer targets:
+`DrawSession::begin` starts from explicit writer targets:
 
 - session `Primitive` declarations become `Raw + DrawOn` or `Raw + Derive`
   depending on their explicit writer;
@@ -296,12 +295,12 @@ as upper-layer brush pseudocode, not the concrete `gla_ir::DrawSessionIR` shape.
 In the concrete Rust IR, a session derived declaration already owns its command;
 an additional explicit `derive` targeting the same image is a duplicate writer.
 
-`LocalStorage::build` should validate and lower before allocating image content.
+`DrawSession::begin` should validate and lower before allocating image content.
 The current implementation collects doc access, resolves session metadata in
 declaration order, collects explicit writers, appends conservative active-chain
 graph shadows, lowers derive reads to `SessionImageId::{Current, Global}`,
 checks local writer cycles, and only then allocates `DenseImage` raw content. If
-allocation fails, any staged raw tile owners are released and no local storage is
+allocation fails, any staged raw tile owners are released and no draw session is
 returned.
 
 When image storage moves away from `GlaImageKey`, remove `ImageEdit.source`.
@@ -312,10 +311,10 @@ Do not treat the active session `ImageEdit` as a pure storage patch. It is a
 session-layer object, so first-write materialization for primitive DrawOn
 shadows belongs inside `ImageEdit`. When DrawOn requests a tile that is not yet
 present in the edit, `ImageEdit` may allocate the replacement tile, record the
-edit entry, use renderer/tile resources to copy source content into the new
-tile, and then return the writable tile. This keeps the copy-before-mutate
-logic colocated with the edit state that decides whether a write is first-write
-or a repeat write.
+edit entry, use tile resources plus the current frame pass list to copy source
+content into the new tile, and then return the writable tile. This keeps the
+copy-before-mutate logic colocated with the edit state that decides whether a
+write is first-write or a repeat write.
 
 Use the same `ImageEdit` type for active edits, history patches, and inverse
 patches. The data shape stays the same in all cases; only the methods used

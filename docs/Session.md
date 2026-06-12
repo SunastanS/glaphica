@@ -336,10 +336,10 @@ session start. Frame work must already have been submitted through
 `DrawFrame::flush`; commit does not submit GPU work. Commit gathers `ImageEdit`s
 from document shadows and returns `None` when there is no edit to publish.
 
-Primitive document edits are applied in place to the currently bound
-`GlaImageKey` for each `ImageId`. Before applying, commit validates edit tile
-indices, rejects `TileKey::INVALID` replacements, and records the old primitive
-tile keys as an inverse `ImageEdit`.
+Primitive document edits are applied in place to the current
+`GlobalImage::Primitive(DenseImage)` for each `ImageId`. Before applying,
+commit validates edit tile indices and records the old primitive tile owners as
+an inverse `ImageEdit`.
 
 Derived document edits are cache publication. Commit validates the edited tile
 indices, writes the new tile keys into the currently bound derived cache image,

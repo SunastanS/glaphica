@@ -121,9 +121,10 @@ DrawRadialKernel1D:
 
 The user brush or tool program owns spacing, interpolation, smoothing, jitter,
 pressure mapping, and tool presets. The session receives input samples from the
-Rust app loop, applies input mappings, invokes DrawOn primitives, records frame
-dirty, uploads dirty through session/document graph edges on flush, and
-materializes root repaint demand.
+Rust app loop. A `DrawFrame` applies input mappings through the active
+`DrawSession`, invokes DrawOn primitives, records frame dirty, uploads dirty
+through session/document graph edges on flush, materializes root repaint demand,
+and submits the resulting pass list to the render backend.
 
 The first storage-backed implementation keeps that layering but uses a temporary
 fallback mapper for `RadialKernel1D`: mapped canvas position becomes center,
@@ -252,14 +253,14 @@ For a drawing session, each frame follows this image-level flow:
 
 ```text
 1. accept source input groups under the app-loop FrameBudget
-2. invoke DrawOn primitives and mark per-DrawOn frame dirty
-3. flush frame dirty by uploading each DrawOn dirty set toward root
+2. DrawFrame invokes DrawOn primitives and marks per-DrawOn frame dirty
+3. DrawFrame::flush uploads each DrawOn dirty set toward root
 4. recursively render root demand through session and document commands
-5. submit renderer passes
+5. submit dab and derived passes to RenderBackend
 ```
 
 Frame budgeting gates only input/DrawOn acceptance. Once a source group is
-accepted, downstream derive and render work is drained by `flush_frame`.
+accepted, downstream derive and render work is drained by `DrawFrame::flush`.
 
 ## Records
 

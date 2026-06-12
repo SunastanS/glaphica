@@ -60,8 +60,9 @@ reliable for guiding future analysis and modification.
   dab-count limit.
 
 ### Tool Layer
-- **Tool execution**: Rust-compiled GPU shaders. `draw_dab` records parameters,
-  `flush_frame` executes shaders in batch. Current clear-only behavior is placeholder.
+- **Tool execution**: Rust-compiled GPU shaders. `DrawFrame::draw_dab` records
+  dab work, and `DrawFrame::flush` submits the frame batch. Current clear-only
+  behavior is placeholder.
 
 ### Renderer Layer
 - **GPU rendering path**: Entire current implementation will be replaced.

@@ -104,9 +104,9 @@ fn write_pos(image, tile_index) -> TilePos;
 writable destination position. They no longer receive or return `Tile`, and they
 do not acquire resource-layer positions themselves.
 
-The first storage-side implementation is `gla_storage::LocalRenderCtx`. It
-borrows `LocalStorage` and `GlobalStorage` together and implements
-`gla_image_command::RenderCtx` for `SessionImageId`.
+The storage-side implementation is `SessionRenderCtx` in `gla_session`. It
+borrows `DrawSession`, `GlobalStorage`, and the active frame pass list together
+and implements `gla_image_command::RenderCtx` for `SessionImageId`.
 
 Current behavior:
 
@@ -156,15 +156,13 @@ same ordering guarantee. The copy must complete before the DrawOn mutation for
 that tile. This ordering is part of the normal "fill before mutate" semantics
 and verifies that the call chain materializes the edit tile correctly.
 
-TODO: renderer passes currently record `TilePos`, not owning `Tile` handles.
-Those positions are non-owning references into atlas slots. A pass must therefore
-not outlive the tile owners it references. Until the app loop has an explicit
-render-drain boundary, it must enforce this rule externally: all renderer passes
-emitted by one draw session must be executed or discarded before that session is
-committed, discarded, or allowed to release session-local tiles. Otherwise a
-delayed pass may write a freed or reused atlas slot. This is a resource lifetime
-precondition for the session loop, not a property the current pass recorder can
-prove by itself.
+Renderer passes record `TilePos`, not owning `Tile` handles. Those positions are
+non-owning references into atlas slots, so the session loop uses
+`DrawFrame::flush` as the explicit submit boundary. DrawOn may buffer
+`dab_passes` within a frame; flush combines those with derived/cache
+materialization passes, submits the ordered list to `RenderBackend`, and clears
+frame state only after submit succeeds. Commit and discard no longer own a
+renderer pass buffer.
 
 This DrawOn first-write copy path is distinct from derive materialization.
 Derived images still must not be shadowed as primitive DrawOn targets.
