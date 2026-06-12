@@ -132,55 +132,6 @@ impl ImageRole {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ImageDeclaration {
-    pub role: ImageRole,
-    pub format: GlaFormat,
-    pub layout: GlaImageLayout,
-}
-
-impl ImageDeclaration {
-    pub fn primitive(format: GlaFormat, layout: GlaImageLayout) -> Self {
-        Self {
-            role: ImageRole::Primitive,
-            format,
-            layout,
-        }
-    }
-
-    pub fn derived(format: GlaFormat, layout: GlaImageLayout, command: GraphCommand) -> Self {
-        Self {
-            role: ImageRole::Derived(command),
-            format,
-            layout,
-        }
-    }
-
-    pub fn role(&self) -> &ImageRole {
-        &self.role
-    }
-
-    pub fn format(&self) -> GlaFormat {
-        self.format
-    }
-
-    pub fn layout(&self) -> GlaImageLayout {
-        self.layout
-    }
-
-    pub fn is_primitive(&self) -> bool {
-        self.role.is_primitive()
-    }
-
-    pub fn is_derived(&self) -> bool {
-        self.role.is_derived()
-    }
-
-    pub fn graph_command(&self) -> Option<&GraphCommand> {
-        self.role.graph_command()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct DrawOnCommand {
     pub dst: ImageId,
     pub input_mapping: Mapping,

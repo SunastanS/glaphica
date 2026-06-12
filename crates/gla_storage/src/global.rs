@@ -5,7 +5,6 @@ use atlas::TilePos;
 use gla_color::GlaFormat;
 use gla_image::{CacheImage, DenseImage, GlaImageLayout, ImageError};
 use gla_ir::{DocumentVersionId, GraphCommand, ImageId, ImageRole, RegistryPatch, RegistryPatchOp};
-use gla_renderer::Renderer;
 use std::collections::HashMap;
 use tile_key::{Tile, TileReadRef, Tiles, TilesError};
 
@@ -80,17 +79,15 @@ pub struct GlobalStorage {
     root: Option<ImageId>,
     images: HashMap<ImageId, GlobalImage>,
     tiles: Tiles,
-    renderer: Renderer,
 }
 
 impl GlobalStorage {
-    pub fn new(tiles: Tiles, renderer: Renderer) -> Self {
+    pub fn new(tiles: Tiles) -> Self {
         Self {
             version: DocumentVersionId::default(),
             root: None,
             images: HashMap::new(),
             tiles,
-            renderer,
         }
     }
 
@@ -121,14 +118,6 @@ impl GlobalStorage {
 
     pub fn tiles_mut(&mut self) -> &mut Tiles {
         &mut self.tiles
-    }
-
-    pub fn renderer(&self) -> &Renderer {
-        &self.renderer
-    }
-
-    pub fn renderer_mut(&mut self) -> &mut Renderer {
-        &mut self.renderer
     }
 
     pub fn read_tile_ref(&self, tile: &Tile) -> Result<TileReadRef, TilesError> {
@@ -324,15 +313,8 @@ impl GlobalStorage {
         Option<ImageId>,
         HashMap<ImageId, GlobalImage>,
         Tiles,
-        Renderer,
     ) {
-        (
-            self.version,
-            self.root,
-            self.images,
-            self.tiles,
-            self.renderer,
-        )
+        (self.version, self.root, self.images, self.tiles)
     }
 
     pub fn apply_registry_patch(&mut self, patch: RegistryPatch) -> Result<(), GlobalStorageError> {
@@ -530,7 +512,7 @@ mod tests {
         tiles
             .new_atlas(AtlasLayout::TINY8, format, &mut textures)
             .unwrap();
-        GlobalStorage::new(tiles, Renderer::new())
+        GlobalStorage::new(tiles)
     }
 
     #[test]

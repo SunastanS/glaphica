@@ -13,12 +13,6 @@ use std::num::NonZeroU64;
 #[repr(transparent)]
 pub struct Tile(NonZeroU64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TileId {
-    index: u32,
-    generation: u32,
-}
-
 impl Tile {
     const INDEX_BITS: u32 = 32;
     const INDEX_MASK: u64 = (1 << Self::INDEX_BITS) - 1;
@@ -40,14 +34,6 @@ impl Tile {
     #[inline]
     fn generation(&self) -> u32 {
         (self.0.get() >> Self::GENERATION_SHIFT) as u32
-    }
-
-    #[inline]
-    fn id(&self) -> TileId {
-        TileId {
-            index: self.index(),
-            generation: self.generation(),
-        }
     }
 }
 
@@ -86,9 +72,9 @@ pub enum TilesError {
     KeyPoolFull,
     InvalidAtlasId { atlas_id: u8 },
     MissingAtlasForFormat { format: GlaFormat },
-    InvalidTile { tile: TileId },
-    TileGenerationMismatch { tile: TileId },
-    TileBindingMismatch { tile: TileId },
+    InvalidTile { index: u32, generation: u32 },
+    TileGenerationMismatch { index: u32, generation: u32 },
+    TileBindingMismatch { index: u32, generation: u32 },
 }
 
 impl Display for TilesError {
@@ -100,12 +86,20 @@ impl Display for TilesError {
             Self::MissingAtlasForFormat { format } => {
                 write!(f, "missing atlas for format {format:?}")
             }
-            Self::InvalidTile { tile } => write!(f, "invalid tile {tile:?}"),
-            Self::TileGenerationMismatch { tile } => {
-                write!(f, "tile generation mismatch for {tile:?}")
+            Self::InvalidTile { index, generation } => {
+                write!(f, "invalid tile index {index} generation {generation}")
             }
-            Self::TileBindingMismatch { tile } => {
-                write!(f, "tile binding mismatch for {tile:?}")
+            Self::TileGenerationMismatch { index, generation } => {
+                write!(
+                    f,
+                    "tile generation mismatch for index {index} generation {generation}"
+                )
+            }
+            Self::TileBindingMismatch { index, generation } => {
+                write!(
+                    f,
+                    "tile binding mismatch for index {index} generation {generation}"
+                )
             }
         }
     }
@@ -259,15 +253,16 @@ impl Tiles {
     }
 
     fn ensure_valid(&self, tile: &Tile) -> Result<(), TilesError> {
-        let id = tile.id();
+        let index = tile.index();
+        let generation = tile.generation();
         self.key_pool
-            .check(tile.index(), tile.generation())
+            .check(index, generation)
             .then_some(())
-            .ok_or(TilesError::TileGenerationMismatch { tile: id })?;
+            .ok_or(TilesError::TileGenerationMismatch { index, generation })?;
         let binding = self
             .bindings
-            .get(tile.index() as usize)
-            .ok_or(TilesError::InvalidTile { tile: id })?;
+            .get(index as usize)
+            .ok_or(TilesError::InvalidTile { index, generation })?;
         let atlas = self
             .atlases
             .get(binding.position().atlas_id() as usize)
@@ -276,7 +271,7 @@ impl Tiles {
             })?;
         (binding.is_empty() || atlas.check(*binding))
             .then_some(())
-            .ok_or(TilesError::TileBindingMismatch { tile: id })?;
+            .ok_or(TilesError::TileBindingMismatch { index, generation })?;
         Ok(())
     }
 

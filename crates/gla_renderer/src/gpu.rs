@@ -12,7 +12,7 @@ use crate::texture::{
     RendererTexture, RendererTextureDescriptor, TextureFormatRuntime, TextureResourceError,
     runtime_format,
 };
-use crate::{Pass, RendererCapabilities};
+use crate::{Pass, RenderBackend, RendererCapabilities};
 
 const RGBA_COMPOSITE_SHADER: &str = r#"
 struct CompositeUniforms {
@@ -422,6 +422,14 @@ impl GpuRenderer {
         }
         self.queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+}
+
+impl RenderBackend for GpuRenderer {
+    type Error = GpuRendererError;
+
+    fn submit(&mut self, passes: &[Pass]) -> Result<(), Self::Error> {
+        self.execute_passes(passes)
     }
 }
 
@@ -1289,7 +1297,7 @@ fn encode_value_to_rgba_blend_mode(blend_mode: ValueToRgbaBlendMode) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{CompositeUniforms, encode_rgba_blend_mode};
-    use crate::{GpuRenderer, Renderer};
+    use crate::{GpuRenderer, Pass, RenderBackend};
     use atlas::{AtlasLayout, TilePos};
     use bytemuck::bytes_of;
     use gla_color::{BlendMode, ChannelCount, ChannelType, GlaFormat, RgbaBlendMode};
@@ -1346,16 +1354,29 @@ mod tests {
         let rgba_dst = tiles.write_pos(&mut rgba_dst_tile).unwrap();
         let mut value_src_tile = tiles.reserve(value_atlas_id).unwrap();
         let value_src = tiles.write_pos(&mut value_src_tile).unwrap();
-        let mut renderer = Renderer::new();
+        let passes = [
+            Pass::Clear { dst: rgba_src },
+            Pass::Clear { dst: rgba_dst },
+            Pass::Clear { dst: value_src },
+            Pass::Copy {
+                src: TilePos::empty(rgba_atlas_id),
+                dst: rgba_dst,
+            },
+            Pass::RenderTo {
+                src: rgba_src,
+                dst: rgba_dst,
+                blend_mode: BlendMode::Multiply,
+                opacity: 1.0,
+            },
+            Pass::RenderTo {
+                src: value_src,
+                dst: rgba_dst,
+                blend_mode: BlendMode::MaskAlpha,
+                opacity: 1.0,
+            },
+        ];
 
-        renderer.clear(rgba_src);
-        renderer.clear(rgba_dst);
-        renderer.clear(value_src);
-        renderer.copy(TilePos::empty(rgba_atlas_id), rgba_dst);
-        renderer.render_to(rgba_src, rgba_dst, BlendMode::Multiply, 1.0);
-        renderer.render_to(value_src, rgba_dst, BlendMode::MaskAlpha, 1.0);
-        renderer.execute(&mut gpu).unwrap();
-        assert!(renderer.passes().is_empty());
+        gpu.submit(&passes).unwrap();
     }
 
     async fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {

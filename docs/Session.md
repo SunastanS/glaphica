@@ -308,18 +308,18 @@ accepted()
 ```
 
 The app loop owns when to start a frame, how to combine time and work budgets,
-and whether to stop accepting input for the current frame. `DrawSession` owns
-the frame dirty state. A typical frame is:
+and whether to stop accepting input for the current frame. `DrawFrame` owns the
+frame dirty state and the dab pass buffer. A typical frame is:
 
 ```text
 1. App loop accepts input samples under FrameBudget.
-2. For each accepted dab, DrawSession invokes DrawOn and records frame dirty.
-3. flush_frame uploads each DrawOn dirty set toward root.
-4. flush_frame renders root demand, recursively materializing dependencies.
-5. Renderer passes are available for execution/submission.
+2. For each accepted dab, DrawFrame invokes DrawOn and records frame dirty.
+3. DrawFrame::flush uploads each DrawOn dirty set toward root.
+4. DrawFrame::flush renders root demand, recursively materializing dependencies.
+5. DrawFrame::flush submits dab and derived passes to the render backend.
 ```
 
-If `flush_frame` sees no frame dirty, it returns without rendering. In normal
+If `DrawFrame::flush` sees no frame dirty, it returns without rendering. In normal
 use there is no app loop while nothing is being drawn; this path mostly covers
 stationary stylus or timing-edge cases.
 
@@ -328,13 +328,13 @@ stationary stylus or timing-edge cases.
 A draw session commit consumes the session:
 
 ```text
-DrawSession::commit(doc, history) -> CommittedDraw
+DrawSession::commit(doc, history) -> Option<DrawCommit>
 ```
 
 Commit requires that the document version still matches the version captured at
-session start. It first flushes any pending frame dirty, so callers do not need
-to remember a separate `flush_frame` call before commit. It then gathers
-`ImageEdit`s from document shadows.
+session start. Frame work must already have been submitted through
+`DrawFrame::flush`; commit does not submit GPU work. Commit gathers `ImageEdit`s
+from document shadows and returns `None` when there is no edit to publish.
 
 Primitive document edits are applied in place to the currently bound
 `GlaImageKey` for each `ImageId`. Before applying, commit validates edit tile
@@ -348,16 +348,7 @@ draw history.
 
 After successful application, commit bumps the document version, stores the
 primitive inverse patch in `DrawHistory`, discards remaining session-local
-tiles, and returns:
-
-```text
-CommittedDraw {
-  commit: DrawCommit { record_id, version },
-  images: GlaImages,
-  tiles: Tiles,
-  renderer: Renderer,
-}
-```
+tiles, and returns `Some(DrawCommit { record_id, version })`.
 
 Document bindings are not changed by draw commit. The `ImageEdit.source` field
 is retained for now, but the actual target row is resolved from the current

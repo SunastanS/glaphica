@@ -2,7 +2,6 @@ use atlas::TilePos;
 use gla_color::BlendMode;
 use gla_command_core::{FootprintModifier, Mapping};
 use gla_image::GlaImageLayout;
-use gla_renderer::Renderer;
 use tile_key::TileReadRef;
 
 pub trait RenderCtx {
@@ -16,7 +15,10 @@ pub trait RenderCtx {
     ) -> Result<TileReadRef, Self::Error>;
     fn write_pos(&mut self, image: Self::ImageKey, tile_index: u32)
     -> Result<TilePos, Self::Error>;
-    fn renderer(&mut self) -> &mut Renderer;
+    fn clear(&mut self, dst: TilePos);
+    fn copy(&mut self, src: TilePos, dst: TilePos);
+    fn render_to(&mut self, src: TilePos, dst: TilePos, blend_mode: BlendMode, opacity: f32);
+    fn fix_gutter(&mut self, dst: TilePos);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,7 +104,7 @@ impl<K> DeriveCommand<K> {
         for op in self.ops.iter().copied() {
             op.exec_tile(ctx, self.layout, dst, tile_index)?;
         }
-        ctx.renderer().fix_gutter(dst);
+        ctx.fix_gutter(dst);
         Ok(())
     }
 }
@@ -159,8 +161,8 @@ impl<K> Copy<K> {
             .for_each_source_tile(dst_layout, tile_index, |source_tile_index| {
                 let src = ctx.render(self.src.key, source_tile_index)?;
                 match src {
-                    TileReadRef::Zero => ctx.renderer().clear(dst),
-                    TileReadRef::Physical(src) => ctx.renderer().copy(src, dst),
+                    TileReadRef::Zero => ctx.clear(dst),
+                    TileReadRef::Physical(src) => ctx.copy(src, dst),
                 }
                 Ok(())
             })
@@ -175,7 +177,7 @@ impl Clear {
     where
         C: RenderCtx,
     {
-        ctx.renderer().clear(dst);
+        ctx.clear(dst);
         Ok(())
     }
 }
@@ -218,8 +220,7 @@ impl<K> RenderTo<K> {
                         todo!("zero-source RenderTo semantics are operation-specific")
                     }
                     TileReadRef::Physical(src) => {
-                        ctx.renderer()
-                            .render_to(src, dst, self.blend_mode, self.opacity);
+                        ctx.render_to(src, dst, self.blend_mode, self.opacity);
                     }
                 }
                 Ok(())
@@ -242,7 +243,7 @@ mod tests {
     struct TestImageKey(u32);
 
     struct TestCtx {
-        renderer: Renderer,
+        passes: Vec<Pass>,
         calls: Vec<(TestImageKey, u32)>,
         write_calls: Vec<(TestImageKey, u32)>,
         returns: Vec<TileReadRef>,
@@ -261,7 +262,7 @@ mod tests {
         ) -> Result<TileReadRef, Self::Error> {
             self.calls.push((image, tile_index));
             if let Some(dst) = self.nested_pass {
-                self.renderer.clear(dst);
+                self.clear(dst);
             }
             self.returns.pop().ok_or(TestError::MissingReturn)
         }
@@ -275,14 +276,31 @@ mod tests {
             self.dst_pos.ok_or(TestError::MissingReturn)
         }
 
-        fn renderer(&mut self) -> &mut Renderer {
-            &mut self.renderer
+        fn clear(&mut self, dst: TilePos) {
+            self.passes.push(Pass::Clear { dst });
+        }
+
+        fn copy(&mut self, src: TilePos, dst: TilePos) {
+            self.passes.push(Pass::Copy { src, dst });
+        }
+
+        fn render_to(&mut self, src: TilePos, dst: TilePos, blend_mode: BlendMode, opacity: f32) {
+            self.passes.push(Pass::RenderTo {
+                src,
+                dst,
+                blend_mode,
+                opacity,
+            });
+        }
+
+        fn fix_gutter(&mut self, dst: TilePos) {
+            self.passes.push(Pass::FixGutter { dst });
         }
     }
 
     fn ctx_with_tiles(returns: Vec<TileReadRef>) -> TestCtx {
         TestCtx {
-            renderer: Renderer::new(),
+            passes: Vec::new(),
             calls: Vec::new(),
             write_calls: Vec::new(),
             returns,
@@ -321,8 +339,8 @@ mod tests {
         assert_eq!(ctx.calls, vec![(source_image, 3)]);
         assert_eq!(ctx.write_calls, vec![(dst_image, 3)]);
         assert_eq!(
-            ctx.renderer.passes(),
-            &[
+            ctx.passes,
+            vec![
                 Pass::Clear { dst: nested_dst },
                 Pass::Copy {
                     src: source_pos,
@@ -358,8 +376,8 @@ mod tests {
         assert_eq!(ctx.calls, vec![(source_image, 11)]);
         assert_eq!(ctx.write_calls, vec![(dst_image, 11)]);
         assert_eq!(
-            ctx.renderer.passes(),
-            &[
+            ctx.passes,
+            vec![
                 Pass::RenderTo {
                     src: source_pos,
                     dst: dst_pos,
@@ -394,8 +412,8 @@ mod tests {
         command.exec_tile(&mut ctx, 4).unwrap();
 
         assert_eq!(
-            ctx.renderer.passes(),
-            &[
+            ctx.passes,
+            vec![
                 Pass::RenderTo {
                     src: source_pos,
                     dst: dst_pos,
@@ -420,8 +438,8 @@ mod tests {
         assert!(ctx.calls.is_empty());
         assert_eq!(ctx.write_calls, vec![(dst_image, 5)]);
         assert_eq!(
-            ctx.renderer.passes(),
-            &[
+            ctx.passes,
+            vec![
                 Pass::Clear { dst: dst_pos },
                 Pass::FixGutter { dst: dst_pos }
             ]
@@ -448,8 +466,8 @@ mod tests {
         command.exec_tile(&mut ctx, 2).unwrap();
 
         assert_eq!(
-            ctx.renderer.passes(),
-            &[
+            ctx.passes,
+            vec![
                 Pass::Clear { dst: dst_pos },
                 Pass::FixGutter { dst: dst_pos }
             ]
