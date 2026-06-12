@@ -364,9 +364,9 @@ mod tests {
     #[test]
     fn copy_renders_source_before_recording_copy_pass() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let nested_dst = TilePos::new(0, 6);
-        let source_pos = TilePos::new(0, 7);
-        let dst_pos = TilePos::new(0, 8);
+        let nested_dst = TilePos::new(0, 0, 6, 0);
+        let source_pos = TilePos::new(0, 0, 7, 0);
+        let dst_pos = TilePos::new(0, 0, 8, 0);
         ctx.returns.push(TileReadRef::Physical(source_pos));
         ctx.dst_pos = Some(dst_pos);
         ctx.nested_pass = Some(nested_dst);
@@ -402,8 +402,8 @@ mod tests {
     #[test]
     fn render_to_records_blend_mode_and_opacity() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let source_pos = TilePos::new(0, 9);
-        let dst_pos = TilePos::new(0, 10);
+        let source_pos = TilePos::new(0, 0, 9, 0);
+        let dst_pos = TilePos::new(0, 0, 10, 0);
         ctx.returns.push(TileReadRef::Physical(source_pos));
         ctx.dst_pos = Some(dst_pos);
 
@@ -440,8 +440,8 @@ mod tests {
     #[test]
     fn render_to_records_value_to_rgba_mask_mode() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let source_pos = TilePos::new(0, 13);
-        let dst_pos = TilePos::new(0, 14);
+        let source_pos = TilePos::new(0, 0, 13, 0);
+        let dst_pos = TilePos::new(0, 0, 14, 0);
         ctx.returns.push(TileReadRef::Physical(source_pos));
         ctx.dst_pos = Some(dst_pos);
 
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn clear_writes_without_rendering_source() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        let dst_pos = TilePos::new(0, 12);
+        let dst_pos = TilePos::new(0, 0, 12, 0);
         ctx.dst_pos = Some(dst_pos);
         let dst_image = TestImageKey(12);
         let command = DeriveCommand::new(dst_image, layout(), [Derive::Clear(Clear)]);
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn copy_zero_source_records_clear() {
         let mut ctx = ctx_with_tiles(vec![TileReadRef::Zero]);
-        let dst_pos = TilePos::new(0, 15);
+        let dst_pos = TilePos::new(0, 0, 15, 0);
         ctx.dst_pos = Some(dst_pos);
 
         let source_image = TestImageKey(15);
@@ -524,8 +524,8 @@ mod tests {
 
     #[test]
     fn copy_identity_uses_layout_aware_source_tiles() {
-        let dst_pos = TilePos::new(0, 23);
-        let source_pos = TilePos::new(0, 21);
+        let dst_pos = TilePos::new(0, 0, 23, 0);
+        let source_pos = TilePos::new(0, 0, 21, 0);
         let mut ctx = ctx_with_tiles(vec![TileReadRef::Physical(source_pos)]);
         ctx.dst_pos = Some(dst_pos);
 
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn matrix_footprint_returns_explicit_error() {
         let mut ctx = ctx_with_tiles(Vec::new());
-        ctx.dst_pos = Some(TilePos::new(0, 24));
+        ctx.dst_pos = Some(TilePos::new(0, 0, 24, 0));
         let mapping = Mapping::Matrix(gla_command_core::Affine2D {
             m11: 1.0,
             m12: 0.0,
@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn render_to_zero_source_returns_explicit_error() {
         let mut ctx = ctx_with_tiles(vec![TileReadRef::Zero]);
-        ctx.dst_pos = Some(TilePos::new(0, 26));
+        ctx.dst_pos = Some(TilePos::new(0, 0, 26, 0));
         let command = DeriveCommand::new(
             TestImageKey(26),
             layout(),

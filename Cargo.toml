@@ -9,7 +9,6 @@ members = [
     "crates/gla_ir",
     "crates/gla_renderer",
     "crates/gla_image_command",
-    "crates/gla_doc",
     "crates/gla_storage",
     "crates/gla_session",
 ]

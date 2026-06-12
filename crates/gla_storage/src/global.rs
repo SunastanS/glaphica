@@ -719,6 +719,27 @@ mod tests {
     }
 
     #[test]
+    fn derived_graph_rejects_self_reads() {
+        let derived = ImageId::new(1);
+        let mut storage = new_storage_with_format(format());
+
+        let err = storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
+                id: derived,
+                format: format(),
+                layout: layout(),
+                role: ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(derived)])),
+            }]))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            GlobalStorageError::RegistryCommandReadsDestination { dst } if dst == derived
+        ));
+        assert!(storage.image(derived).is_none());
+    }
+
+    #[test]
     fn derived_graph_rejects_cycles() {
         let a = ImageId::new(1);
         let b = ImageId::new(2);
@@ -763,6 +784,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage.root(), Some(id));
+    }
+
+    #[test]
+    fn set_root_rejects_missing_image() {
+        let missing = ImageId::new(404);
+        let mut storage = new_storage_with_format(format());
+
+        let err = storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::SetRoot(missing)]))
+            .unwrap_err();
+
+        assert!(matches!(err, GlobalStorageError::MissingImage { id } if id == missing));
+        assert_eq!(storage.root(), None);
     }
 
     #[test]

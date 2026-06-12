@@ -474,10 +474,6 @@ fn encode_copy_tile(
     src: TilePos,
     dst: TilePos,
 ) -> Result<(), GpuRendererError> {
-    if src.is_empty() {
-        return encode_clear_tile(ctx, atlases, tile_buffers, dst);
-    }
-
     let src = atlases.resolve_non_empty(src)?;
     let dst = atlases.resolve_non_empty(dst)?;
     if src.format != dst.format {
@@ -565,7 +561,7 @@ fn encode_render_to(
     blend_mode: BlendMode,
     opacity: f32,
 ) -> Result<(), GpuRendererError> {
-    if src.is_empty() || opacity <= 0.0 {
+    if opacity <= 0.0 {
         return Ok(());
     }
     let src = atlases.resolve_non_empty(src)?;
@@ -784,17 +780,14 @@ impl AtlasTextureSet {
     }
 
     fn resolve_non_empty(&self, position: TilePos) -> Result<ResolvedTile<'_>, GpuRendererError> {
-        if position.is_empty() {
-            return Err(GpuRendererError::InvalidTilePosition(position));
-        }
         let atlas =
             self.atlas_texture(position.atlas_id())
                 .ok_or(GpuRendererError::MissingAtlas {
                     atlas_id: position.atlas_id(),
                 })?;
-        let address = atlas
+        atlas
             .layout
-            .index_to_address(position.tile_index() as usize)
+            .address_to_index(position.address())
             .map_err(|_| GpuRendererError::InvalidTilePosition(position))?;
         Ok(ResolvedTile {
             atlas_id: position.atlas_id(),
@@ -802,9 +795,9 @@ impl AtlasTextureSet {
             runtime: atlas.runtime,
             texture: &atlas.texture,
             origin: wgpu::Origin3d {
-                x: address.offset_x() as u32,
-                y: address.offset_y() as u32,
-                z: address.layer as u32,
+                x: position.offset_x(),
+                y: position.offset_y(),
+                z: position.layer,
             },
         })
     }
@@ -1298,7 +1291,7 @@ fn encode_value_to_rgba_blend_mode(blend_mode: ValueToRgbaBlendMode) -> u32 {
 mod tests {
     use super::{CompositeUniforms, encode_rgba_blend_mode};
     use crate::{GpuRenderer, Pass, RenderBackend};
-    use atlas::{AtlasLayout, TilePos};
+    use atlas::AtlasLayout;
     use bytemuck::bytes_of;
     use gla_color::{BlendMode, ChannelCount, ChannelType, GlaFormat, RgbaBlendMode};
     use tile_key::Tiles;
@@ -1359,7 +1352,7 @@ mod tests {
             Pass::Clear { dst: rgba_dst },
             Pass::Clear { dst: value_src },
             Pass::Copy {
-                src: TilePos::empty(rgba_atlas_id),
+                src: rgba_src,
                 dst: rgba_dst,
             },
             Pass::RenderTo {

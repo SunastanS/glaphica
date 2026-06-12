@@ -18,90 +18,103 @@ impl TileAddress {
     }
 }
 
-/// Binding(u64):
-/// - [0,  32) position
-///     - [0,  24) tile index (0xFF_FFFF = empty)
-///     - [24, 32) atlas id
-/// - [32, 64) tile generation (when a tile is empty, its generation is meaningless)
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct TilePos(u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TilePos {
+    pub atlas_id: u8,
+    pub layer: u32,
+    pub tile_x: u32,
+    pub tile_y: u32,
+}
 
 impl TilePos {
-    const TILE_BITS: u32 = 24;
-    const ATLAS_SHIFT: u32 = Self::TILE_BITS;
-    // const ATLAS_BITS: u32 = 8;
-
-    const TILE_MASK: u32 = (1 << Self::TILE_BITS) - 1;
-
     #[inline]
-    pub fn new(atlas_id: u8, tile_index: u32) -> Self {
-        debug_assert!(
-            tile_index < (1 << 20),
-            "tile_index out of range for largest atlas"
-        );
-        debug_assert_ne!(
-            tile_index,
-            Self::TILE_MASK,
-            "tile_index collides with empty sentinel"
-        );
-        Self((atlas_id as u32) << Self::ATLAS_SHIFT | tile_index)
+    pub const fn new(atlas_id: u8, layer: u32, tile_x: u32, tile_y: u32) -> Self {
+        Self {
+            atlas_id,
+            layer,
+            tile_x,
+            tile_y,
+        }
     }
 
     #[inline]
-    pub fn empty(atlas_id: u8) -> Self {
-        Self((atlas_id as u32) << Self::ATLAS_SHIFT | Self::TILE_MASK)
-    }
-
-    #[inline]
-    pub fn is_empty(self) -> bool {
-        (self.0 & Self::TILE_MASK) == Self::TILE_MASK
+    pub fn from_address(atlas_id: u8, address: TileAddress) -> Self {
+        Self {
+            atlas_id,
+            layer: address.layer as u32,
+            tile_x: address.tile_x as u32,
+            tile_y: address.tile_y as u32,
+        }
     }
 
     #[inline]
     pub fn atlas_id(self) -> u8 {
-        (self.0 >> Self::ATLAS_SHIFT) as u8
+        self.atlas_id
     }
 
     #[inline]
-    pub fn tile_index(self) -> u32 {
-        self.0 & Self::TILE_MASK
+    pub fn address(self) -> TileAddress {
+        TileAddress {
+            layer: self.layer as usize,
+            tile_x: self.tile_x as usize,
+            tile_y: self.tile_y as usize,
+        }
+    }
+
+    #[inline]
+    pub const fn offset_x(self) -> u32 {
+        self.tile_x * ATLAS_TILE_SIZE
+    }
+
+    #[inline]
+    pub const fn offset_y(self) -> u32 {
+        self.tile_y * ATLAS_TILE_SIZE
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct KeyBinding(u64);
+pub struct KeyBinding {
+    atlas_id: u8,
+    position: Option<TilePos>,
+    tile_generation: u32,
+}
 
 impl KeyBinding {
-    const POSITION_BITS: u64 = 32;
-    // const TILE_GEN_BITS: u64 = 32;
-
-    const TILE_GEN_SHIFT: u64 = Self::POSITION_BITS;
-
     #[inline]
     pub(crate) fn new(position: TilePos, tile_gen: u32) -> Self {
-        Self((position.0 as u64) | ((tile_gen as u64) << Self::TILE_GEN_SHIFT))
+        Self {
+            atlas_id: position.atlas_id(),
+            position: Some(position),
+            tile_generation: tile_gen,
+        }
     }
 
     #[inline]
-    pub fn position(self) -> TilePos {
-        TilePos(self.0 as u32)
+    pub fn position(self) -> Option<TilePos> {
+        self.position
     }
 
     #[inline]
     pub fn is_empty(self) -> bool {
-        self.position().is_empty()
+        self.position.is_none()
     }
 
     pub fn empty(atlas_id: u8) -> Self {
-        Self::new(TilePos::empty(atlas_id), 0)
+        Self {
+            atlas_id,
+            position: None,
+            tile_generation: 0,
+        }
+    }
+
+    #[inline]
+    pub fn atlas_id(self) -> u8 {
+        self.atlas_id
     }
 
     #[inline]
     pub fn tile_generation(self) -> u32 {
-        (self.0 >> Self::TILE_GEN_SHIFT) as u32
+        self.tile_generation
     }
 }
 
@@ -245,7 +258,14 @@ impl Atlas {
             .tile_pool
             .alloc()
             .map_err(|_| AtlasError::OutOfTiles { atlas_id: self.id })?;
-        Ok(KeyBinding::new(TilePos::new(self.id, index), tile_gen))
+        let address = self
+            .layout
+            .index_to_address(index as usize)
+            .expect("allocated atlas slot must be inside atlas layout");
+        Ok(KeyBinding::new(
+            TilePos::from_address(self.id, address),
+            tile_gen,
+        ))
     }
 
     pub fn remaining(&self) -> u32 {
@@ -253,10 +273,17 @@ impl Atlas {
     }
 
     pub fn check(&self, binding: KeyBinding) -> bool {
-        binding.position().atlas_id() == self.id
-            && self
-                .tile_pool
-                .check(binding.position().tile_index(), binding.tile_generation())
+        if binding.atlas_id() != self.id {
+            return false;
+        }
+        let Some(position) = binding.position() else {
+            return true;
+        };
+        let Ok(index) = self.layout.address_to_index(position.address()) else {
+            return false;
+        };
+        self.tile_pool
+            .check(index as u32, binding.tile_generation())
     }
 
     pub fn free(&mut self, position: TilePos) {
@@ -265,7 +292,11 @@ impl Atlas {
             self.id,
             "tile position atlas id does not match atlas"
         );
-        self.tile_pool.free(position.tile_index() as u32);
+        let index = self
+            .layout
+            .address_to_index(position.address())
+            .expect("freed tile position must be inside atlas layout");
+        self.tile_pool.free(index as u32);
     }
 }
 
@@ -295,7 +326,7 @@ mod tests {
     fn free_panics_on_atlas_id_mismatch() {
         let mut atlas = Atlas::new(3, AtlasLayout::TINY8, format());
 
-        atlas.free(TilePos::new(4, 0));
+        atlas.free(TilePos::new(4, 0, 0, 0));
     }
 
     #[test]

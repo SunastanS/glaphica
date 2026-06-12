@@ -199,7 +199,11 @@ impl Tiles {
         if binding.is_empty() {
             Ok(TileReadRef::Zero)
         } else {
-            Ok(TileReadRef::Physical(binding.position()))
+            Ok(TileReadRef::Physical(
+                binding
+                    .position()
+                    .expect("non-empty binding must have a tile position"),
+            ))
         }
     }
 
@@ -214,12 +218,11 @@ impl Tiles {
     ) -> Result<TilePos, TilesError> {
         self.ensure_valid(tile)?;
         let binding = self.bindings[tile.index() as usize];
-        let position = binding.position();
-        if !position.is_empty() {
+        if let Some(position) = binding.position() {
             return Ok(position);
         }
 
-        let atlas_id = position.atlas_id();
+        let atlas_id = binding.atlas_id();
         let atlas = self
             .atlases
             .get_mut(atlas_id as usize)
@@ -229,7 +232,9 @@ impl Tiles {
         }
 
         let binding = atlas.alloc()?;
-        let position = binding.position();
+        let position = binding
+            .position()
+            .expect("allocated atlas binding must have a tile position");
         self.bind_tile(tile, binding);
         init_zero(position);
         Ok(position)
@@ -240,8 +245,8 @@ impl Tiles {
             .expect("released tile must be a valid owned tile");
         let idx = tile.index() as usize;
         let binding = self.bindings[idx];
-        if !binding.is_empty() {
-            let atlas_id = binding.position().atlas_id();
+        if let Some(position) = binding.position() {
+            let atlas_id = binding.atlas_id();
             let atlas = self
                 .atlases
                 .get_mut(atlas_id as usize)
@@ -250,7 +255,7 @@ impl Tiles {
                 atlas.check(binding),
                 "validated tile binding must match atlas allocation"
             );
-            atlas.free(binding.position());
+            atlas.free(position);
         }
         self.key_pool.free(tile.index());
     }
@@ -272,12 +277,12 @@ impl Tiles {
             .bindings
             .get(index as usize)
             .ok_or(TilesError::InvalidTile { index, generation })?;
-        let atlas = self
-            .atlases
-            .get(binding.position().atlas_id() as usize)
-            .ok_or(TilesError::InvalidAtlasId {
-                atlas_id: binding.position().atlas_id(),
-            })?;
+        let atlas =
+            self.atlases
+                .get(binding.atlas_id() as usize)
+                .ok_or(TilesError::InvalidAtlasId {
+                    atlas_id: binding.atlas_id(),
+                })?;
         (binding.is_empty() || atlas.check(*binding))
             .then_some(())
             .ok_or(TilesError::TileBindingMismatch { index, generation })?;
@@ -288,7 +293,7 @@ impl Tiles {
         let index = tile.index() as usize;
         if self.bindings.len() <= index {
             self.bindings
-                .resize(index + 1, KeyBinding::empty(binding.position().atlas_id()));
+                .resize(index + 1, KeyBinding::empty(binding.atlas_id()));
         }
         self.bindings[index] = binding;
     }
