@@ -249,27 +249,6 @@ impl GlobalStorage {
         Ok(())
     }
 
-    pub fn apply_primitive_edits(
-        &mut self,
-        edits: HashMap<ImageId, ImageEdit>,
-    ) -> HashMap<ImageId, ImageEdit> {
-        let mut inverse = HashMap::new();
-        for (id, edit) in edits {
-            let image = self
-                .images
-                .get_mut(&id)
-                .expect("primitive edit patch was validated against global storage");
-            let GlobalImage::Primitive(image) = image else {
-                panic!("primitive edit patch changed role after validation");
-            };
-            let old = apply_dense_edit(image, edit);
-            if !old.is_empty() {
-                inverse.insert(id, old);
-            }
-        }
-        inverse
-    }
-
     pub fn apply_session_edits(
         &mut self,
         edits: HashMap<ImageId, ImageEdit>,

@@ -71,11 +71,40 @@ impl DrawHistory {
             .patches
             .remove(&id)
             .expect("validated history patch must still exist");
+        let version = stored.version;
         let dirty = stored.dirty;
-        let inverse = global.apply_primitive_edits(stored.edits);
-        refresh_global_dirty(global, dirty, backend)?;
-        let version = global.bump_version();
-        Ok(self.store_inverse(version, inverse))
+        let mut session = match build_stored_patch_session(global, version, stored.edits) {
+            Ok(session) => session,
+            Err((source, edits)) => {
+                self.restore_patch(
+                    id,
+                    StoredImageEditPatch {
+                        version,
+                        edits,
+                        dirty,
+                    },
+                );
+                return Err(source);
+            }
+        };
+        let mut frame = DrawFrame::from_dirty(dirty.clone());
+        if let Err(error) = frame.flush(&mut session, backend) {
+            let edits = session.take_doc_edits();
+            self.restore_patch(
+                id,
+                StoredImageEditPatch {
+                    version,
+                    edits,
+                    dirty,
+                },
+            );
+            return Err(error);
+        }
+
+        let commit = session
+            .commit(self)?
+            .expect("stored patch session must produce a commit");
+        Ok(commit.record_id)
     }
 
     fn store_inverse(
@@ -95,6 +124,10 @@ impl DrawHistory {
             },
         );
         id
+    }
+
+    fn restore_patch(&mut self, id: DrawRecordId, patch: StoredImageEditPatch) {
+        debug_assert!(self.patches.insert(id, patch).is_none());
     }
 }
 
@@ -440,6 +473,7 @@ impl SessionImageContent {
 #[derive(Clone, Debug)]
 enum SessionImageWriter {
     DrawOn(DrawOnWriter),
+    Patch,
     Derive(ImageDeriveCommand<SessionImageId>),
 }
 
@@ -573,6 +607,7 @@ impl<'g> DrawSession<'g> {
                         });
                     }
                 }
+                SessionImageWriter::Patch => {}
                 SessionImageWriter::Derive(command) => {
                     let SessionImageId::Current(dst) = command.dst else {
                         continue;
@@ -660,26 +695,6 @@ impl<'g> DrawSession<'g> {
         self.release_local_tiles();
     }
 
-    fn apply_cache_refresh_edits(mut self) -> Result<(), SessionError> {
-        let edits = self.take_commit_edits();
-        match self.global.apply_session_edits(edits) {
-            Ok(inverse) => {
-                assert!(
-                    inverse.is_empty(),
-                    "cache refresh session must only write derived cache images"
-                );
-                self.release_local_tiles();
-                Ok(())
-            }
-            Err(error) => {
-                let (error, edits) = error.into_parts();
-                release_image_edits(self.global.tiles_mut(), edits);
-                self.release_local_tiles();
-                Err(error.into())
-            }
-        }
-    }
-
     fn render_ctx<'a>(
         &'a mut self,
         passes: &'a mut Vec<Pass>,
@@ -700,6 +715,22 @@ impl<'g> DrawSession<'g> {
             };
             if !edit.is_empty() {
                 edits.insert(*id, edit.take());
+            }
+        }
+        edits
+    }
+
+    fn take_doc_edits(&mut self) -> HashMap<ImageId, ImageEdit> {
+        let mut edits = HashMap::new();
+        for id in self.doc_write_ids.iter().copied() {
+            let Some(image) = self.images.get_mut(&id) else {
+                continue;
+            };
+            let SessionImageContent::Edit(edit) = &mut image.content else {
+                continue;
+            };
+            if !edit.is_empty() {
+                edits.insert(id, edit.take());
             }
         }
         edits
@@ -950,6 +981,7 @@ impl SessionRenderCtx<'_, '_> {
             .writer()
         {
             SessionImageWriter::DrawOn(_) => None,
+            SessionImageWriter::Patch => None,
             SessionImageWriter::Derive(command) => Some(command.clone()),
         };
 
@@ -1567,38 +1599,63 @@ fn activate_global_derived_chain_from(
     Ok(())
 }
 
-fn refresh_global_dirty(
-    global: &mut GlobalStorage,
-    dirty: HashMap<ImageId, TileSet>,
-    backend: &mut impl RenderBackend,
-) -> Result<(), SessionError> {
-    if dirty.values().all(TileSet::is_empty) {
-        return Ok(());
-    }
-
-    let frame_dirty = dirty.clone();
-    let mut session = build_global_cache_refresh_session(global, dirty)?;
-    let mut frame = DrawFrame::from_dirty(frame_dirty);
-    frame.flush(&mut session, backend)?;
-    session.apply_cache_refresh_edits()
-}
-
-fn build_global_cache_refresh_session<'g>(
+fn build_stored_patch_session<'g>(
     global: &'g mut GlobalStorage,
-    dirty: HashMap<ImageId, TileSet>,
-) -> Result<DrawSession<'g>, SessionError> {
+    version: DocumentVersionId,
+    mut edits: HashMap<ImageId, ImageEdit>,
+) -> Result<DrawSession<'g>, (SessionError, HashMap<ImageId, ImageEdit>)> {
     let session_specs = HashMap::new();
     let mut pending = HashMap::new();
-    let frontier = dirty.keys().copied().collect();
-    activate_global_derived_chain_from(frontier, &mut pending, &session_specs, global)?;
-    validate_writer_cycles(&pending)?;
-    let images = allocate_images(pending, global)?;
-    let expected_document_version = global.version();
+    let doc_write_ids = edits.keys().copied().collect::<HashSet<_>>();
+
+    for id in doc_write_ids.iter().copied() {
+        let image = match global.image(id) {
+            Some(GlobalImage::Primitive(image)) => image,
+            Some(GlobalImage::Derived { .. }) => {
+                return Err((SessionError::DestinationNotWritable { id }, edits));
+            }
+            None => return Err((SessionError::MissingGlobalImage { id }, edits)),
+        };
+        pending.insert(
+            id,
+            PendingSessionImage {
+                format: image.format(),
+                layout: image.layout(),
+                content: SessionContentKind::Edit,
+                writer: SessionImageWriter::Patch,
+            },
+        );
+    }
+
+    let frontier = doc_write_ids.iter().copied().collect();
+    if let Err(error) =
+        activate_global_derived_chain_from(frontier, &mut pending, &session_specs, global)
+    {
+        return Err((error, edits));
+    }
+    if let Err(error) = validate_writer_cycles(&pending) {
+        return Err((error, edits));
+    }
+
+    let mut images = HashMap::new();
+    for (id, image) in pending {
+        let content = SessionImageContent::Edit(edits.remove(&id).unwrap_or_default());
+        images.insert(
+            id,
+            SessionImage {
+                format: image.format,
+                layout: image.layout,
+                content,
+                writer: image.writer,
+            },
+        );
+    }
+    debug_assert!(edits.is_empty());
 
     Ok(DrawSession {
         global,
-        expected_document_version,
-        doc_write_ids: HashSet::new(),
+        expected_document_version: version,
+        doc_write_ids,
         draw_on_order: Vec::new(),
         doc_dirty: HashMap::new(),
         images,
@@ -2485,6 +2542,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(global.version(), commit.version.next());
+        assert!(history.patches.contains_key(&undo_record));
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert_eq!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
+    }
+
+    #[test]
+    fn stored_patch_flush_failure_keeps_history_record_and_global_truth() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        let begin_version = global.version();
+        let ir = DrawSessionIR {
+            expected_document_version: begin_version,
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![DrawOnCommand::new(base)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = DrawFrame::new();
+        let mut backend = TestBackend::default();
+        frame
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
+            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap();
+        let mut history = DrawHistory::new();
+        let commit = session.commit(&mut history).unwrap().unwrap();
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert!(matches!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Physical(_)
+        ));
+
+        let mut failing_backend = TestBackend {
+            fail: true,
+            ..Default::default()
+        };
+        let err = history.apply_stored_patch(commit.record_id, &mut global, &mut failing_backend);
+
+        assert!(matches!(err, Err(SessionError::RenderBackend { .. })));
+        assert_eq!(global.version(), commit.version);
+        assert!(history.patches.contains_key(&commit.record_id));
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert!(matches!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Physical(_)
+        ));
+
+        let undo_record = history
+            .apply_stored_patch(commit.record_id, &mut global, &mut backend)
+            .unwrap();
         assert!(history.patches.contains_key(&undo_record));
         let image = global.image(base).unwrap().as_dense().unwrap();
         assert_eq!(
