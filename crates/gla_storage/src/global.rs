@@ -5,7 +5,7 @@ use atlas::TilePos;
 use gla_color::GlaFormat;
 use gla_image::{CacheImage, DenseImage, GlaImageLayout};
 use gla_ir::{DocumentVersionId, GraphCommand, ImageId, ImageRole, RegistryPatch, RegistryPatchOp};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tile_key::{Tile, TileReadRef, Tiles, TilesError};
 
 #[derive(Debug)]
@@ -381,13 +381,22 @@ impl GlobalStorage {
 
         validate_specs(&specs)?;
         let replacements = self.stage_replacements(&specs)?;
+        let changed_images = replacements
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<HashSet<_>>();
+        let changed_root = root != self.root;
 
         for (id, image) in replacements {
             if let Some(old) = self.images.insert(id, image) {
                 old.release_tiles(&mut self.tiles);
             }
         }
+        self.invalidate_downstream_caches(&changed_images);
         self.root = root;
+        if changed_root || !changed_images.is_empty() {
+            self.bump_version();
+        }
         Ok(())
     }
 
@@ -429,6 +438,43 @@ impl GlobalStorage {
         }
 
         Ok(replacements)
+    }
+
+    fn invalidate_downstream_caches(&mut self, changed_images: &HashSet<ImageId>) {
+        let mut frontier = changed_images.iter().copied().collect::<Vec<_>>();
+        let mut invalidated = HashSet::new();
+
+        while let Some(src) = frontier.pop() {
+            let dependents = self
+                .images
+                .iter()
+                .filter_map(|(id, image)| {
+                    let GlobalImage::Derived { command, .. } = image else {
+                        return None;
+                    };
+                    command.reads.iter().any(|read| read.image == src).then_some(*id)
+                })
+                .collect::<Vec<_>>();
+
+            for id in dependents {
+                if invalidated.insert(id) {
+                    self.invalidate_cache(id);
+                    frontier.push(id);
+                }
+            }
+        }
+    }
+
+    fn invalidate_cache(&mut self, id: ImageId) {
+        let Some(GlobalImage::Derived { image, .. }) = self.images.get_mut(&id) else {
+            return;
+        };
+        for tile_index in 0..image.tile_count() {
+            let tile = image
+                .take_tile(tile_index)
+                .expect("cache tile index must be in bounds during full invalidation");
+            self.tiles.release_optional(tile);
+        }
     }
 }
 
@@ -552,6 +598,86 @@ mod tests {
             storage.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
             TileReadRef::Zero
         );
+    }
+
+    #[test]
+    fn registry_patch_bumps_version_only_for_effective_changes() {
+        let id = ImageId::new(1);
+        let mut storage = new_storage_with_format(format());
+
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
+                id,
+                format: format(),
+                layout: layout(),
+                role: ImageRole::Primitive,
+            }]))
+            .unwrap();
+        assert_eq!(storage.version(), DocumentVersionId::new(1));
+
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::SetRoot(id)]))
+            .unwrap();
+        assert_eq!(storage.version(), DocumentVersionId::new(2));
+
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::SetRoot(id)]))
+            .unwrap();
+        assert_eq!(storage.version(), DocumentVersionId::new(2));
+    }
+
+    #[test]
+    fn registry_patch_invalidates_downstream_derived_caches() {
+        let base = ImageId::new(1);
+        let group = ImageId::new(2);
+        let root = ImageId::new(3);
+        let mut storage = new_storage_with_format(format());
+
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![
+                RegistryPatchOp::NewImage {
+                    id: base,
+                    format: format(),
+                    layout: layout(),
+                    role: ImageRole::Primitive,
+                },
+                RegistryPatchOp::NewImage {
+                    id: group,
+                    format: format(),
+                    layout: layout(),
+                    role: ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(base)])),
+                },
+                RegistryPatchOp::NewImage {
+                    id: root,
+                    format: format(),
+                    layout: layout(),
+                    role: ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(group)])),
+                },
+            ]))
+            .unwrap();
+
+        let atlas_id = storage.tiles().atlas_for_format(format()).unwrap();
+        storage.write_global_cache_pos(group, 0).unwrap();
+        storage.write_global_cache_pos(root, 0).unwrap();
+        assert_eq!(storage.tiles().atlas(atlas_id).unwrap().remaining(), 254);
+
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::SetDerived {
+                id: group,
+                command: GraphCommand::new(Vec::new()),
+            }]))
+            .unwrap();
+
+        assert_eq!(storage.version(), DocumentVersionId::new(2));
+        assert_eq!(storage.tiles().atlas(atlas_id).unwrap().remaining(), 256);
+        assert!(matches!(
+            storage.read_global_ref(group, 0).unwrap_err(),
+            GlobalTileError::MissingMaterializedTile { id } if id == group
+        ));
+        assert!(matches!(
+            storage.read_global_ref(root, 0).unwrap_err(),
+            GlobalTileError::MissingMaterializedTile { id } if id == root
+        ));
     }
 
     #[test]

@@ -68,9 +68,10 @@ and optional pruning.
 ## Commit And History
 
 `GlobalStorage.version` is the Rust-side resource version. `DrawSession::begin`
-and `DrawSession::commit` reject mismatched expected versions. The current
-registry patch path does not yet bump this version; registry-version integration
-is separate follow-up work.
+and `DrawSession::commit` reject mismatched expected versions. Effective
+registry patches bump this same version and invalidate downstream derived
+caches, so a session cannot commit after graph, root, or image-role changes
+without being rebuilt against the new registry state.
 
 `DrawSession::commit(self, global, history)` consumes the session. Frame work
 must already have been submitted by `DrawFrame::flush`; commit does not submit

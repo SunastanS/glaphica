@@ -1846,7 +1846,7 @@ mod tests {
         add_global_primitive(&mut global, base, rgba_format());
 
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: vec![DocImageUse::read_write(base)],
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -1873,7 +1873,7 @@ mod tests {
         let mut draw = DrawOnCommand::new(coverage);
         draw.tool_params = ToolParams { radius: 2.0 };
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: Vec::new(),
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -1915,7 +1915,7 @@ mod tests {
         let mut draw = DrawOnCommand::new(coverage);
         draw.tool_params = ToolParams { radius: 2.0 };
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: Vec::new(),
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -1945,7 +1945,7 @@ mod tests {
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: Vec::new(),
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -1978,7 +1978,7 @@ mod tests {
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: Vec::new(),
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -2019,7 +2019,7 @@ mod tests {
         let mut global = storage_with_atlases();
         add_global_primitive(&mut global, base, rgba_format());
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: vec![DocImageUse::read_write(base)],
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -2059,7 +2059,7 @@ mod tests {
         let mut draw = DrawOnCommand::new(coverage);
         draw.tool_params = ToolParams { radius: 2.0 };
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: Vec::new(),
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -2094,7 +2094,7 @@ mod tests {
     fn empty_commit_returns_none_without_bumping_version_or_history() {
         let mut global = storage_with_atlases();
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: Vec::new(),
             session_images: Vec::new(),
             draw_on: Vec::new(),
@@ -2115,8 +2115,9 @@ mod tests {
         let base = ImageId::new(1);
         let mut global = storage_with_atlases();
         add_global_primitive(&mut global, base, rgba_format());
+        let begin_version = global.version();
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: begin_version,
             doc_images: vec![DocImageUse::read_write(base)],
             session_images: Vec::new(),
             draw_on: vec![DrawOnCommand::new(base)],
@@ -2134,11 +2135,12 @@ mod tests {
         let mut history = DrawHistory::new();
 
         let commit = session.commit(&mut global, &mut history).unwrap().unwrap();
+        assert_eq!(commit.version, begin_version.next());
         let undo_record = history
             .apply_stored_patch(commit.record_id, &mut global, &mut backend)
             .unwrap();
 
-        assert_eq!(global.version(), DocumentVersionId::new(2));
+        assert_eq!(global.version(), commit.version.next());
         assert!(history.patches.contains_key(&undo_record));
         let image = global.image(base).unwrap().as_dense().unwrap();
         assert_eq!(
@@ -2153,8 +2155,9 @@ mod tests {
         let coverage = ImageId::new(2);
         let mut global = storage_with_atlases();
         add_global_primitive(&mut global, base, rgba_format());
+        let begin_version = global.version();
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: begin_version,
             doc_images: vec![DocImageUse::read_write(base)],
             session_images: vec![SessionImageDecl::Primitive {
                 id: coverage,
@@ -2180,7 +2183,7 @@ mod tests {
 
         let commit = session.commit(&mut global, &mut history).unwrap().unwrap();
 
-        assert_eq!(commit.version, DocumentVersionId::new(1));
+        assert_eq!(commit.version, begin_version.next());
         assert!(history.patches.contains_key(&commit.record_id));
         let image = global.image(base).unwrap().as_dense().unwrap();
         assert!(matches!(
@@ -2198,7 +2201,7 @@ mod tests {
         add_global_derived(&mut global, group, vec![GraphRead::current(base)]);
 
         let reader_ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: vec![DocImageUse::read(base)],
             session_images: Vec::new(),
             draw_on: Vec::new(),
@@ -2216,7 +2219,7 @@ mod tests {
         };
 
         let draw_ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: vec![DocImageUse::read_write(base)],
             session_images: Vec::new(),
             draw_on: vec![DrawOnCommand::new(base)],
@@ -2261,7 +2264,7 @@ mod tests {
         add_global_primitive(&mut global, base, rgba_format());
         add_global_derived(&mut global, group, vec![GraphRead::current(base)]);
         let ir = DrawSessionIR {
-            expected_document_version: Default::default(),
+            expected_document_version: global.version(),
             doc_images: vec![DocImageUse::read_write(base)],
             session_images: Vec::new(),
             draw_on: vec![DrawOnCommand::new(base)],

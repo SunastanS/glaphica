@@ -142,9 +142,9 @@ Dependency indexes may be cached later, but they must be derived from
 `GlobalStorage.version` is the storage-side version gate for draw sessions and
 history patch application. Janet still owns the business document/IR layer, but
 Rust storage must reject tile/resource commits whose expected version no longer
-matches the global image store. Registry patch versioning is separate follow-up
-work; this migration introduces the version gate for draw commit and history
-first.
+matches the global image store. Effective registry patch changes now bump the
+same storage version used by draw commit and history checks, so sessions opened
+before graph/root/image changes cannot publish over the updated registry.
 
 `GlobalStorage.root` is only a temporary compatibility field for the existing
 `RegistryPatchOp::SetRoot`. It is not the long-term presentation model. Registered
@@ -167,6 +167,11 @@ Existing primitive content is preserved when an image remains primitive. Derived
 cache content is preserved only when the final graph command is unchanged;
 changing role or command stages a replacement image and releases the old tile
 owners after the patch commits.
+
+After replacements commit, storage invalidates downstream derived caches from
+the changed image ids. The current implementation uses full-cache invalidation:
+materialized cache tiles are released and the cache returns to misses until a
+later render materializes them again.
 
 ## Intended Leverage
 
