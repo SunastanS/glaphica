@@ -13,3 +13,7 @@ gla_ir = { path = "../gla_ir" }
 gla_renderer = { path = "../gla_renderer" }
 gla_storage = { path = "../gla_storage" }
 tile_key = { path = "../tile_key" }
+
+[dev-dependencies]
+pollster = "0.4.0"
+wgpu = "28.0.0"

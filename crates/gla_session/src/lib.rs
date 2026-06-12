@@ -2123,7 +2123,7 @@ mod tests {
         Affine2D, DocImageUse, DrawOnToolKind, GraphRead, ImageRole, RegistryPatch,
         RegistryPatchOp, SessionRead,
     };
-    use gla_renderer::{Pass, RenderBackend};
+    use gla_renderer::{GpuRenderer, GpuRendererError, Pass, RenderBackend};
     use std::fmt::{Display, Formatter};
     use tile_key::{TileReadRef, Tiles};
 
@@ -2245,6 +2245,52 @@ mod tests {
         GlobalStorage::new(tiles)
     }
 
+    fn storage_with_gpu_atlases(gpu: &mut GpuRenderer) -> GlobalStorage {
+        let mut tiles = Tiles::new();
+        tiles
+            .new_atlas(AtlasLayout::TINY8, rgba_format(), gpu)
+            .unwrap();
+        tiles
+            .new_atlas(AtlasLayout::TINY8, value_format(), gpu)
+            .unwrap();
+        GlobalStorage::new(tiles)
+    }
+
+    fn read_rgba_pixel(bytes: &[u8], bytes_per_pixel: u32, x: u32, y: u32) -> [f32; 4] {
+        let bytes_per_row = gla_core::ATLAS_TILE_SIZE * bytes_per_pixel;
+        let padded_bytes_per_row = bytes_per_row.div_ceil(256) * 256;
+        let offset = ((y + gla_core::GUTTER_SIZE) * padded_bytes_per_row
+            + (x + gla_core::GUTTER_SIZE) * bytes_per_pixel) as usize;
+        [
+            f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+            f32::from_ne_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()),
+            f32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().unwrap()),
+            f32::from_ne_bytes(bytes[offset + 12..offset + 16].try_into().unwrap()),
+        ]
+    }
+
+    async fn test_device(
+        required_features: wgpu::Features,
+    ) -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("glaphica-session-test-device"),
+                required_features,
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::default(),
+            })
+            .await
+            .ok()?;
+        Some((adapter, device, queue))
+    }
+
     fn add_global_primitive(storage: &mut GlobalStorage, id: ImageId, format: GlaFormat) {
         add_global_primitive_with_layout(storage, id, format, layout());
     }
@@ -2361,6 +2407,67 @@ mod tests {
                 format,
             } if id == paint && format == rgba_u8_format()
         ));
+    }
+
+    #[test]
+    fn gpu_flush_executes_session_replace_circle_4d_registered_by_ir() {
+        let canvas = ImageId::new(2);
+        let ir = DrawSessionIR {
+            expected_document_version: DocumentVersionId::default(),
+            doc_images: Vec::new(),
+            session_images: vec![SessionImageDecl::Primitive {
+                id: canvas,
+                format: MetadataRef::Concrete(rgba_format()),
+                layout: MetadataRef::Concrete(layout_with_tiles(1, 1)),
+            }],
+            draw_on: vec![replace_draw(canvas)],
+            derive: Vec::new(),
+        };
+        let (adapter, device, queue) =
+            match pollster::block_on(test_device(wgpu::Features::empty())) {
+                Some(device) => device,
+                None => {
+                    eprintln!("skipping session GPU DrawOn test: no adapter available");
+                    return;
+                }
+            };
+        let mut gpu = match GpuRenderer::with_draw_on_tools(
+            &adapter,
+            device,
+            queue,
+            ir.required_draw_on_tools(),
+        ) {
+            Ok(gpu) => gpu,
+            Err(GpuRendererError::MissingDrawOnFeature { .. }) => {
+                eprintln!("skipping session GPU DrawOn test: storage write unavailable");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let mut global = storage_with_gpu_atlases(&mut gpu);
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = session.begin_frame();
+
+        frame.draw_on(canvas, replace_input(5.5, 5.5, 2.0)).unwrap();
+        frame.flush(&mut gpu).unwrap();
+        drop(frame);
+
+        let tile_ref = {
+            let SessionImageContent::Raw(image) = session.images.get(&canvas).unwrap().content()
+            else {
+                panic!("session-local DrawOn target should be raw content");
+            };
+            session
+                .global
+                .read_tile_ref(image.tile(0).unwrap())
+                .unwrap()
+        };
+        let TileReadRef::Physical(position) = tile_ref else {
+            panic!("DrawOn flush should materialize a physical tile");
+        };
+        let bytes = gpu.read_tile_bytes(position, 16).unwrap();
+        assert_eq!(read_rgba_pixel(&bytes, 16, 5, 5), [0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(read_rgba_pixel(&bytes, 16, 20, 20), [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
