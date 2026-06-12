@@ -87,8 +87,11 @@ impl DrawHistory {
                 return Err(source);
             }
         };
-        let mut frame = DrawFrame::from_dirty(dirty.clone());
-        if let Err(error) = frame.flush(&mut session, backend) {
+        let flush = {
+            let mut frame = DrawFrame::from_dirty(&mut session, dirty.clone());
+            frame.flush(backend)
+        };
+        if let Err(error) = flush {
             let edits = session.take_doc_edits();
             self.restore_patch(
                 id,
@@ -131,20 +134,30 @@ impl DrawHistory {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct DrawFrame {
+#[derive(Debug)]
+pub struct DrawFrame<'s, 'g> {
+    session: &'s mut DrawSession<'g>,
     frame_dirty: HashMap<ImageId, TileSet>,
     dab_passes: Vec<Pass>,
     pending_flush_passes: Option<Vec<Pass>>,
 }
 
-impl DrawFrame {
-    pub fn new() -> Self {
-        Self::default()
+impl<'s, 'g> DrawFrame<'s, 'g> {
+    fn new(session: &'s mut DrawSession<'g>) -> Self {
+        Self {
+            session,
+            frame_dirty: HashMap::new(),
+            dab_passes: Vec::new(),
+            pending_flush_passes: None,
+        }
     }
 
-    fn from_dirty(frame_dirty: HashMap<ImageId, TileSet>) -> Self {
+    fn from_dirty(
+        session: &'s mut DrawSession<'g>,
+        frame_dirty: HashMap<ImageId, TileSet>,
+    ) -> Self {
         Self {
+            session,
             frame_dirty,
             dab_passes: Vec::new(),
             pending_flush_passes: None,
@@ -163,14 +176,13 @@ impl DrawFrame {
 
     pub fn draw_dab(
         &mut self,
-        session: &mut DrawSession<'_>,
         shown_image: ImageId,
         input: CanvasInput,
     ) -> Result<(), SessionError> {
         if self.pending_flush_passes.is_some() {
             return Err(SessionError::PendingFrameSubmit);
         }
-        session.draw_dab_into_frame(
+        self.session.draw_dab_into_frame(
             &mut self.frame_dirty,
             &mut self.dab_passes,
             shown_image,
@@ -178,11 +190,7 @@ impl DrawFrame {
         )
     }
 
-    pub fn flush<B: RenderBackend>(
-        &mut self,
-        session: &mut DrawSession<'_>,
-        backend: &mut B,
-    ) -> Result<(), SessionError> {
+    pub fn flush<B: RenderBackend>(&mut self, backend: &mut B) -> Result<(), SessionError> {
         if self.is_clean() {
             return Ok(());
         }
@@ -190,7 +198,7 @@ impl DrawFrame {
         if self.pending_flush_passes.is_none() {
             let frame_dirty = self.frame_dirty.clone();
             let mut passes = self.dab_passes.clone();
-            session.flush_frame_dirty(&frame_dirty, &mut passes)?;
+            self.session.flush_frame_dirty(&frame_dirty, &mut passes)?;
             self.pending_flush_passes = Some(passes);
         }
 
@@ -208,6 +216,10 @@ impl DrawFrame {
         self.pending_flush_passes = None;
         Ok(())
     }
+}
+
+impl Drop for DrawFrame<'_, '_> {
+    fn drop(&mut self) {}
 }
 
 #[derive(Debug)]
@@ -580,6 +592,10 @@ impl<'g> DrawSession<'g> {
 
     pub fn doc_dirty(&self) -> &HashMap<ImageId, TileSet> {
         &self.doc_dirty
+    }
+
+    pub fn begin_frame(&mut self) -> DrawFrame<'_, 'g> {
+        DrawFrame::new(self)
     }
 
     fn draw_dab_into_frame(
@@ -2094,14 +2110,10 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
         frame
-            .draw_dab(
-                &mut session,
-                coverage,
-                canvas_input(IMAGE_TILE_SIZE as f32, 4.0, 0.25),
-            )
+            .draw_dab(coverage, canvas_input(IMAGE_TILE_SIZE as f32, 4.0, 0.25))
             .unwrap();
 
         let brush_passes = frame
@@ -2136,10 +2148,10 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
         frame
-            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 4.0))
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 4.0))
             .unwrap();
 
         assert!(
@@ -2180,11 +2192,9 @@ mod tests {
             )],
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.5))
-            .unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.5)).unwrap();
 
         assert!(frame.dab_passes().iter().any(|pass| matches!(
             pass,
@@ -2228,10 +2238,10 @@ mod tests {
             ],
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
         let err = frame
-            .draw_dab(&mut session, shown, canvas_input(0.0, 0.0, 0.5))
+            .draw_dab(shown, canvas_input(0.0, 0.0, 0.5))
             .unwrap_err();
 
         assert!(matches!(
@@ -2260,10 +2270,10 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
         let err = frame
-            .draw_dab(&mut session, missing, canvas_input(0.0, 0.0, 0.5))
+            .draw_dab(missing, canvas_input(0.0, 0.0, 0.5))
             .unwrap_err();
 
         assert!(matches!(
@@ -2288,10 +2298,10 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
         frame
-            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
 
         let passes = frame.dab_passes();
@@ -2321,13 +2331,13 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
 
         frame
-            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
         frame
-            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
 
         let clear_count = frame
@@ -2365,17 +2375,16 @@ mod tests {
             )],
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend::default();
 
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.6))
-            .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.6)).unwrap();
+        frame.flush(&mut backend).unwrap();
 
-        assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
         assert!(frame.is_clean());
         assert!(!backend.submitted_passes().is_empty());
+        drop(frame);
+        assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
         let SessionImageContent::Edit(edit) = session.images.get(&base).unwrap().content() else {
             panic!("base should be edit content");
         };
@@ -2403,17 +2412,14 @@ mod tests {
             )],
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend::default();
 
         frame
-            .draw_dab(
-                &mut session,
-                base,
-                canvas_input(1.0, IMAGE_TILE_SIZE as f32 + 1.0, 0.6),
-            )
+            .draw_dab(base, canvas_input(1.0, IMAGE_TILE_SIZE as f32 + 1.0, 0.6))
             .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.flush(&mut backend).unwrap();
+        drop(frame);
 
         assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(1)));
     }
@@ -2436,9 +2442,9 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         frame
-            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
         let dab_pass_count = frame.dab_passes().len();
         let mut backend = TestBackend {
@@ -2446,7 +2452,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = frame.flush(&mut session, &mut backend).unwrap_err();
+        let err = frame.flush(&mut backend).unwrap_err();
 
         assert!(matches!(err, SessionError::RenderBackend { .. }));
         assert!(!frame.is_clean());
@@ -2475,16 +2481,14 @@ mod tests {
             )],
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend {
             fail: true,
             ..Default::default()
         };
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.6))
-            .unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.6)).unwrap();
 
-        let err = frame.flush(&mut session, &mut backend).unwrap_err();
+        let err = frame.flush(&mut backend).unwrap_err();
         let pending = frame
             .pending_flush_passes
             .as_ref()
@@ -2492,13 +2496,13 @@ mod tests {
             .clone();
 
         assert!(matches!(err, SessionError::RenderBackend { .. }));
-        assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
 
         backend.fail = false;
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.flush(&mut backend).unwrap();
 
         assert_eq!(backend.submitted, vec![pending]);
         assert!(frame.is_clean());
+        drop(frame);
         assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
     }
 
@@ -2518,26 +2522,26 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend {
             fail: true,
             ..Default::default()
         };
         frame
-            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(coverage, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap_err();
+        frame.flush(&mut backend).unwrap_err();
 
         let err = frame
-            .draw_dab(&mut session, coverage, canvas_input(1.0, 1.0, 0.6))
+            .draw_dab(coverage, canvas_input(1.0, 1.0, 0.6))
             .unwrap_err();
 
         assert!(matches!(err, SessionError::PendingFrameSubmit));
 
         backend.fail = false;
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.flush(&mut backend).unwrap();
         frame
-            .draw_dab(&mut session, coverage, canvas_input(1.0, 1.0, 0.6))
+            .draw_dab(coverage, canvas_input(1.0, 1.0, 0.6))
             .unwrap();
     }
 
@@ -2563,10 +2567,10 @@ mod tests {
                 derive: Vec::new(),
             };
             let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-            let mut frame = DrawFrame::new();
+            let mut frame = session.begin_frame();
 
             frame
-                .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
+                .draw_dab(coverage, canvas_input(0.0, 0.0, 0.4))
                 .unwrap();
 
             assert!(matches!(frame.dab_passes()[0], Pass::Clear { .. }));
@@ -2583,11 +2587,9 @@ mod tests {
                 derive: Vec::new(),
             };
             let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-            let mut frame = DrawFrame::new();
+            let mut frame = session.begin_frame();
 
-            frame
-                .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
-                .unwrap();
+            frame.draw_dab(base, canvas_input(0.0, 0.0, 0.4)).unwrap();
 
             assert!(matches!(frame.dab_passes()[0], Pass::Clear { .. }));
         }
@@ -2634,12 +2636,11 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend::default();
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
-            .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.4)).unwrap();
+        frame.flush(&mut backend).unwrap();
+        drop(frame);
         let mut history = DrawHistory::new();
 
         let commit = session.commit(&mut history).unwrap().unwrap();
@@ -2671,12 +2672,11 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend::default();
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
-            .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.4)).unwrap();
+        frame.flush(&mut backend).unwrap();
+        drop(frame);
         let mut history = DrawHistory::new();
         let commit = session.commit(&mut history).unwrap().unwrap();
         let image = global.image(base).unwrap().as_dense().unwrap();
@@ -2733,12 +2733,11 @@ mod tests {
             )],
         };
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend::default();
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.6))
-            .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.6)).unwrap();
+        frame.flush(&mut backend).unwrap();
+        drop(frame);
         let mut history = DrawHistory::new();
 
         let commit = session.commit(&mut history).unwrap().unwrap();
@@ -2786,12 +2785,11 @@ mod tests {
             derive: Vec::new(),
         };
         let mut session = DrawSession::begin(&draw_ir, &mut global).unwrap();
-        let mut frame = DrawFrame::new();
+        let mut frame = session.begin_frame();
         let mut backend = TestBackend::default();
-        frame
-            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
-            .unwrap();
-        frame.flush(&mut session, &mut backend).unwrap();
+        frame.draw_dab(base, canvas_input(0.0, 0.0, 0.4)).unwrap();
+        frame.flush(&mut backend).unwrap();
+        drop(frame);
         let mut history = DrawHistory::new();
         let commit = session.commit(&mut history).unwrap().unwrap();
 
