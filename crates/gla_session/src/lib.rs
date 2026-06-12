@@ -126,13 +126,11 @@ impl DrawFrame {
 
     pub fn draw_dab(
         &mut self,
-        session: &mut DrawSession,
-        global: &mut GlobalStorage,
+        session: &mut DrawSession<'_>,
         shown_image: ImageId,
         input: CanvasInput,
     ) -> Result<(), SessionError> {
         session.draw_dab_into_frame(
-            global,
             &mut self.frame_dirty,
             &mut self.dab_passes,
             shown_image,
@@ -142,8 +140,7 @@ impl DrawFrame {
 
     pub fn flush<B: RenderBackend>(
         &mut self,
-        session: &mut DrawSession,
-        global: &mut GlobalStorage,
+        session: &mut DrawSession<'_>,
         backend: &mut B,
     ) -> Result<(), SessionError> {
         if self.is_clean() {
@@ -152,7 +149,7 @@ impl DrawFrame {
 
         let frame_dirty = self.frame_dirty.clone();
         let mut passes = self.dab_passes.clone();
-        session.flush_frame_dirty(global, &frame_dirty, &mut passes)?;
+        session.flush_frame_dirty(&frame_dirty, &mut passes)?;
         backend
             .submit(&passes)
             .map_err(|source| SessionError::RenderBackend {
@@ -472,8 +469,8 @@ impl SessionImage {
     }
 }
 
-#[derive(Debug)]
-pub struct DrawSession {
+pub struct DrawSession<'g> {
+    global: &'g mut GlobalStorage,
     expected_document_version: DocumentVersionId,
     doc_write_ids: HashSet<ImageId>,
     draw_on_order: Vec<ImageId>,
@@ -481,8 +478,20 @@ pub struct DrawSession {
     images: HashMap<ImageId, SessionImage>,
 }
 
-impl DrawSession {
-    pub fn begin(ir: &DrawSessionIR, global: &mut GlobalStorage) -> Result<Self, SessionError> {
+impl std::fmt::Debug for DrawSession<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DrawSession")
+            .field("expected_document_version", &self.expected_document_version)
+            .field("doc_write_ids", &self.doc_write_ids)
+            .field("draw_on_order", &self.draw_on_order)
+            .field("doc_dirty", &self.doc_dirty)
+            .field("images", &self.images)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'g> DrawSession<'g> {
+    pub fn begin(ir: &DrawSessionIR, global: &'g mut GlobalStorage) -> Result<Self, SessionError> {
         if ir.expected_document_version != global.version() {
             return Err(SessionError::ExpectedDocumentVersion {
                 expected: ir.expected_document_version,
@@ -502,6 +511,7 @@ impl DrawSession {
         validate_writer_cycles(&pending_images)?;
         let images = allocate_images(pending_images, global)?;
         Ok(Self {
+            global,
             expected_document_version: ir.expected_document_version,
             doc_write_ids,
             draw_on_order,
@@ -520,7 +530,6 @@ impl DrawSession {
 
     fn draw_dab_into_frame(
         &mut self,
-        global: &mut GlobalStorage,
         frame_dirty: &mut HashMap<ImageId, TileSet>,
         dab_passes: &mut Vec<Pass>,
         shown_image: ImageId,
@@ -528,7 +537,7 @@ impl DrawSession {
     ) -> Result<(), SessionError> {
         let draws = self.route_draw_inputs(shown_image, input)?;
 
-        let mut ctx = self.render_ctx(global, dab_passes, Some(frame_dirty));
+        let mut ctx = self.render_ctx(dab_passes, Some(frame_dirty));
         for (id, writer, layout, input) in draws {
             draw_on(&mut ctx, id, writer, layout, input)?;
         }
@@ -600,7 +609,6 @@ impl DrawSession {
 
     fn flush_frame_dirty(
         &mut self,
-        global: &mut GlobalStorage,
         frame_dirty: &HashMap<ImageId, TileSet>,
         passes: &mut Vec<Pass>,
     ) -> Result<(), SessionError> {
@@ -611,66 +619,62 @@ impl DrawSession {
         let mut render_demand = HashMap::new();
         for (id, dirty) in frame_dirty {
             if !dirty.is_empty() {
-                self.upload_dirty_from(*id, dirty, global, &mut render_demand)?;
+                self.upload_dirty_from(*id, dirty, &mut render_demand)?;
             }
         }
 
-        self.render_terminal_demand(global, render_demand, passes)
+        self.render_terminal_demand(render_demand, passes)
     }
 
-    pub fn commit(
-        mut self,
-        global: &mut GlobalStorage,
-        history: &mut DrawHistory,
-    ) -> Result<Option<DrawCommit>, SessionError> {
-        if self.expected_document_version != global.version() {
+    pub fn commit(mut self, history: &mut DrawHistory) -> Result<Option<DrawCommit>, SessionError> {
+        if self.expected_document_version != self.global.version() {
             let expected = self.expected_document_version;
-            let actual = global.version();
-            self.release_tiles(global.tiles_mut());
+            let actual = self.global.version();
+            self.release_local_tiles();
             return Err(SessionError::ExpectedDocumentVersion { expected, actual });
         }
 
         let edits = self.take_commit_edits();
         if edits.is_empty() {
-            self.release_tiles(global.tiles_mut());
+            self.release_local_tiles();
             return Ok(None);
         }
 
-        match global.apply_session_edits(edits) {
+        match self.global.apply_session_edits(edits) {
             Ok(inverse) => {
-                let version = global.bump_version();
+                let version = self.global.bump_version();
                 let record_id = history.store_inverse(version, inverse);
-                self.release_tiles(global.tiles_mut());
+                self.release_local_tiles();
                 Ok(Some(DrawCommit { record_id, version }))
             }
             Err(error) => {
                 let (error, edits) = error.into_parts();
-                release_image_edits(global.tiles_mut(), edits);
-                self.release_tiles(global.tiles_mut());
+                release_image_edits(self.global.tiles_mut(), edits);
+                self.release_local_tiles();
                 Err(error.into())
             }
         }
     }
 
-    pub fn discard(self, global: &mut GlobalStorage) {
-        self.release_tiles(global.tiles_mut());
+    pub fn discard(mut self) {
+        self.release_local_tiles();
     }
 
-    fn apply_cache_refresh_edits(mut self, global: &mut GlobalStorage) -> Result<(), SessionError> {
+    fn apply_cache_refresh_edits(mut self) -> Result<(), SessionError> {
         let edits = self.take_commit_edits();
-        match global.apply_session_edits(edits) {
+        match self.global.apply_session_edits(edits) {
             Ok(inverse) => {
                 assert!(
                     inverse.is_empty(),
                     "cache refresh session must only write derived cache images"
                 );
-                self.release_tiles(global.tiles_mut());
+                self.release_local_tiles();
                 Ok(())
             }
             Err(error) => {
                 let (error, edits) = error.into_parts();
-                release_image_edits(global.tiles_mut(), edits);
-                self.release_tiles(global.tiles_mut());
+                release_image_edits(self.global.tiles_mut(), edits);
+                self.release_local_tiles();
                 Err(error.into())
             }
         }
@@ -678,13 +682,11 @@ impl DrawSession {
 
     fn render_ctx<'a>(
         &'a mut self,
-        global: &'a mut GlobalStorage,
         passes: &'a mut Vec<Pass>,
         frame_dirty: Option<&'a mut HashMap<ImageId, TileSet>>,
-    ) -> SessionRenderCtx<'a> {
+    ) -> SessionRenderCtx<'a, 'g> {
         SessionRenderCtx {
             session: self,
-            global,
             passes,
             frame_dirty,
         }
@@ -703,10 +705,9 @@ impl DrawSession {
         edits
     }
 
-    fn release_tiles(self, tiles: &mut Tiles) {
-        for (_, image) in self.images {
-            image.release_tiles(tiles);
-        }
+    fn release_local_tiles(&mut self) {
+        let images = std::mem::take(&mut self.images);
+        release_session_images(self.global.tiles_mut(), images);
     }
 
     fn record_doc_dirty(&mut self, id: ImageId, dirty: &TileSet) {
@@ -719,7 +720,6 @@ impl DrawSession {
         &mut self,
         id: ImageId,
         dirty: &TileSet,
-        global: &GlobalStorage,
         render_demand: &mut HashMap<ImageId, TileSet>,
     ) -> Result<(), SessionError> {
         self.record_doc_dirty(id, dirty);
@@ -728,9 +728,9 @@ impl DrawSession {
         }
 
         for (dst, read) in self.current_reads_to_src(id) {
-            let projected = self.project_dirty_read(id, dirty, dst, read, global)?;
+            let projected = self.project_dirty_read(id, dirty, dst, read)?;
             if !projected.is_empty() {
-                self.upload_dirty_from(dst, &projected, global, render_demand)?;
+                self.upload_dirty_from(dst, &projected, render_demand)?;
             }
         }
 
@@ -746,7 +746,6 @@ impl DrawSession {
 
     fn render_terminal_demand(
         &mut self,
-        global: &mut GlobalStorage,
         demand: HashMap<ImageId, TileSet>,
         passes: &mut Vec<Pass>,
     ) -> Result<(), SessionError> {
@@ -758,7 +757,7 @@ impl DrawSession {
             })
             .collect::<Vec<_>>();
 
-        let mut ctx = self.render_ctx(global, passes, None);
+        let mut ctx = self.render_ctx(passes, None);
         for (id, dirty) in terminals {
             let layout = ctx
                 .session
@@ -838,20 +837,19 @@ impl DrawSession {
         src_dirty: &TileSet,
         dst: ImageId,
         read: ImageRef<SessionImageId>,
-        global: &GlobalStorage,
     ) -> Result<TileSet, SessionError> {
         if matches!(
             (read.mapping, read.modifier),
             (Mapping::Identity, FootprintModifier::None)
-        ) && self.layout_of_id(src, global)? == self.layout_of_id(dst, global)?
+        ) && self.layout_of_id(src)? == self.layout_of_id(dst)?
         {
             return Ok(src_dirty.clone());
         }
 
         match (read.mapping, read.modifier) {
             (Mapping::Identity, FootprintModifier::None) => {
-                let src_layout = self.layout_of_id(src, global)?;
-                let dst_layout = self.layout_of_id(dst, global)?;
+                let src_layout = self.layout_of_id(src)?;
+                let dst_layout = self.layout_of_id(dst)?;
                 match src_dirty {
                     TileSet::Full => Ok(TileSet::Full),
                     TileSet::Tiles(tiles) => {
@@ -875,27 +873,28 @@ impl DrawSession {
         }
     }
 
-    fn layout_of_id(
-        &self,
-        id: ImageId,
-        global: &GlobalStorage,
-    ) -> Result<GlaImageLayout, SessionError> {
+    fn layout_of_id(&self, id: ImageId) -> Result<GlaImageLayout, SessionError> {
         self.images
             .get(&id)
             .map(SessionImage::layout)
-            .or_else(|| global.image(id).map(GlobalImage::layout))
+            .or_else(|| self.global.image(id).map(GlobalImage::layout))
             .ok_or(SessionError::MissingGlobalImage { id })
     }
 }
 
-struct SessionRenderCtx<'a> {
-    session: &'a mut DrawSession,
-    global: &'a mut GlobalStorage,
+impl Drop for DrawSession<'_> {
+    fn drop(&mut self) {
+        self.release_local_tiles();
+    }
+}
+
+struct SessionRenderCtx<'a, 'g> {
+    session: &'a mut DrawSession<'g>,
     passes: &'a mut Vec<Pass>,
     frame_dirty: Option<&'a mut HashMap<ImageId, TileSet>>,
 }
 
-impl SessionRenderCtx<'_> {
+impl SessionRenderCtx<'_, '_> {
     fn draw_on_write_pos(&mut self, id: ImageId, tile_index: u32) -> Result<TilePos, SessionError> {
         let first_edit_write = {
             let image = self
@@ -915,7 +914,7 @@ impl SessionRenderCtx<'_> {
         let dst = self.write_current(id, tile_index)?;
 
         if first_edit_write {
-            match self.global.read_global_ref(id, tile_index)? {
+            match self.session.global.read_global_ref(id, tile_index)? {
                 TileReadRef::Zero => self.clear(dst),
                 TileReadRef::Physical(src) => self.copy(src, dst),
             }
@@ -972,13 +971,15 @@ impl SessionRenderCtx<'_> {
                 let tile = raw
                     .tile(tile_index)
                     .map_err(|source| SessionError::Image { id, source })?;
-                self.global
+                self.session
+                    .global
                     .read_tile_ref(tile)
                     .map_err(|source| SessionError::Tile { id, source })
             }
             SessionImageContent::Edit(edit) => {
                 if let Some(tile) = edit.tile(tile_index) {
-                    self.global
+                    self.session
+                        .global
                         .read_tile_ref(tile)
                         .map_err(|source| SessionError::Tile { id, source })
                 } else {
@@ -991,6 +992,7 @@ impl SessionRenderCtx<'_> {
     fn render_global(&mut self, id: ImageId, tile_index: u32) -> Result<TileReadRef, SessionError> {
         let command = {
             let image = self
+                .session
                 .global
                 .image(id)
                 .ok_or(SessionError::MissingGlobalImage { id })?;
@@ -1006,7 +1008,7 @@ impl SessionRenderCtx<'_> {
                         command,
                         id,
                         image.layout(),
-                        self.global,
+                        self.session.global,
                     )?)
                 }
                 GlobalImage::Derived { .. } => None,
@@ -1017,7 +1019,7 @@ impl SessionRenderCtx<'_> {
             command.exec_tile(self, tile_index)?;
         }
 
-        Ok(self.global.read_global_ref(id, tile_index)?)
+        Ok(self.session.global.read_global_ref(id, tile_index)?)
     }
 
     fn write_image(
@@ -1029,11 +1031,11 @@ impl SessionRenderCtx<'_> {
             SessionImageId::Current(id) => self.write_current(id, tile_index),
             SessionImageId::Global(id) => {
                 let passes = &mut *self.passes;
-                Ok(self
-                    .global
-                    .write_global_cache_pos_with_zero_init(id, tile_index, |dst| {
-                        passes.push(Pass::Clear { dst })
-                    })?)
+                Ok(self.session.global.write_global_cache_pos_with_zero_init(
+                    id,
+                    tile_index,
+                    |dst| passes.push(Pass::Clear { dst }),
+                )?)
             }
         }
     }
@@ -1053,7 +1055,8 @@ impl SessionRenderCtx<'_> {
                     .tile_mut(tile_index)
                     .map_err(|source| SessionError::Image { id, source })?;
                 let passes = &mut *self.passes;
-                self.global
+                self.session
+                    .global
                     .write_tile_pos_with_zero_init(tile, |dst| {
                         passes.push(Pass::Clear { dst });
                     })
@@ -1075,13 +1078,15 @@ impl SessionRenderCtx<'_> {
                         .expect("checked edit tile must exist")
                 } else {
                     let tile = self
+                        .session
                         .global
                         .reserve_tile_for_format(image.format)
                         .map_err(|source| SessionError::Tile { id, source })?;
                     edit.insert_tile(tile_index, tile)
                 };
                 let passes = &mut *self.passes;
-                self.global
+                self.session
+                    .global
                     .write_tile_pos_with_zero_init(tile, |dst| {
                         passes.push(Pass::Clear { dst });
                     })
@@ -1091,7 +1096,7 @@ impl SessionRenderCtx<'_> {
     }
 }
 
-impl RenderCtx for SessionRenderCtx<'_> {
+impl RenderCtx for SessionRenderCtx<'_, '_> {
     type ImageKey = SessionImageId;
     type Error = SessionError;
 
@@ -1155,7 +1160,7 @@ struct DabTile {
 }
 
 fn draw_on(
-    ctx: &mut SessionRenderCtx<'_>,
+    ctx: &mut SessionRenderCtx<'_, '_>,
     id: ImageId,
     writer: DrawOnWriter,
     layout: GlaImageLayout,
@@ -1191,7 +1196,7 @@ fn draw_on_input_from_target(
 }
 
 fn draw_radial_kernel_1d(
-    ctx: &mut SessionRenderCtx<'_>,
+    ctx: &mut SessionRenderCtx<'_, '_>,
     id: ImageId,
     layout: GlaImageLayout,
     center_x: f32,
@@ -1574,23 +1579,25 @@ fn refresh_global_dirty(
     let frame_dirty = dirty.clone();
     let mut session = build_global_cache_refresh_session(global, dirty)?;
     let mut frame = DrawFrame::from_dirty(frame_dirty);
-    frame.flush(&mut session, global, backend)?;
-    session.apply_cache_refresh_edits(global)
+    frame.flush(&mut session, backend)?;
+    session.apply_cache_refresh_edits()
 }
 
-fn build_global_cache_refresh_session(
-    global: &mut GlobalStorage,
+fn build_global_cache_refresh_session<'g>(
+    global: &'g mut GlobalStorage,
     dirty: HashMap<ImageId, TileSet>,
-) -> Result<DrawSession, SessionError> {
+) -> Result<DrawSession<'g>, SessionError> {
     let session_specs = HashMap::new();
     let mut pending = HashMap::new();
     let frontier = dirty.keys().copied().collect();
     activate_global_derived_chain_from(frontier, &mut pending, &session_specs, global)?;
     validate_writer_cycles(&pending)?;
     let images = allocate_images(pending, global)?;
+    let expected_document_version = global.version();
 
     Ok(DrawSession {
-        expected_document_version: global.version(),
+        global,
+        expected_document_version,
         doc_write_ids: HashSet::new(),
         draw_on_order: Vec::new(),
         doc_dirty: HashMap::new(),
@@ -2015,7 +2022,6 @@ mod tests {
         frame
             .draw_dab(
                 &mut session,
-                &mut global,
                 coverage,
                 canvas_input(IMAGE_TILE_SIZE as f32, 4.0, 0.25),
             )
@@ -2056,12 +2062,7 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                coverage,
-                canvas_input(0.0, 0.0, 4.0),
-            )
+            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 4.0))
             .unwrap();
 
         assert!(
@@ -2105,7 +2106,7 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.5))
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.5))
             .unwrap();
 
         assert!(frame.dab_passes().iter().any(|pass| matches!(
@@ -2153,12 +2154,7 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         let err = frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                shown,
-                canvas_input(0.0, 0.0, 0.5),
-            )
+            .draw_dab(&mut session, shown, canvas_input(0.0, 0.0, 0.5))
             .unwrap_err();
 
         assert!(matches!(
@@ -2190,12 +2186,7 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         let err = frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                missing,
-                canvas_input(0.0, 0.0, 0.5),
-            )
+            .draw_dab(&mut session, missing, canvas_input(0.0, 0.0, 0.5))
             .unwrap_err();
 
         assert!(matches!(
@@ -2223,12 +2214,7 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                coverage,
-                canvas_input(0.0, 0.0, 0.4),
-            )
+            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
 
         let passes = frame.dab_passes();
@@ -2261,20 +2247,10 @@ mod tests {
         let mut frame = DrawFrame::new();
 
         frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                coverage,
-                canvas_input(0.0, 0.0, 0.4),
-            )
+            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
         frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                coverage,
-                canvas_input(0.0, 0.0, 0.4),
-            )
+            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
 
         let clear_count = frame
@@ -2316,11 +2292,9 @@ mod tests {
         let mut backend = TestBackend::default();
 
         frame
-            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
-        frame
-            .flush(&mut session, &mut global, &mut backend)
-            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap();
 
         assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(0)));
         assert!(frame.is_clean());
@@ -2358,14 +2332,11 @@ mod tests {
         frame
             .draw_dab(
                 &mut session,
-                &mut global,
                 base,
                 canvas_input(1.0, IMAGE_TILE_SIZE as f32 + 1.0, 0.6),
             )
             .unwrap();
-        frame
-            .flush(&mut session, &mut global, &mut backend)
-            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap();
 
         assert_eq!(session.doc_dirty().get(&base), Some(&TileSet::single(1)));
     }
@@ -2390,12 +2361,7 @@ mod tests {
         let mut session = DrawSession::begin(&ir, &mut global).unwrap();
         let mut frame = DrawFrame::new();
         frame
-            .draw_dab(
-                &mut session,
-                &mut global,
-                coverage,
-                canvas_input(0.0, 0.0, 0.6),
-            )
+            .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
         let dab_pass_count = frame.dab_passes().len();
         let mut backend = TestBackend {
@@ -2403,14 +2369,71 @@ mod tests {
             ..Default::default()
         };
 
-        let err = frame
-            .flush(&mut session, &mut global, &mut backend)
-            .unwrap_err();
+        let err = frame.flush(&mut session, &mut backend).unwrap_err();
 
         assert!(matches!(err, SessionError::RenderBackend { .. }));
         assert!(!frame.is_clean());
         assert_eq!(frame.dab_passes().len(), dab_pass_count);
         assert!(backend.submitted.is_empty());
+    }
+
+    #[test]
+    fn dropping_session_releases_materialized_local_tiles() {
+        let base = ImageId::new(1);
+        let coverage = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        let rgba_atlas = global.tiles().atlas_for_format(rgba_format()).unwrap();
+        let value_atlas = global.tiles().atlas_for_format(value_format()).unwrap();
+
+        {
+            let ir = DrawSessionIR {
+                expected_document_version: global.version(),
+                doc_images: Vec::new(),
+                session_images: vec![SessionImageDecl::Primitive {
+                    id: coverage,
+                    format: MetadataRef::Concrete(value_format()),
+                    layout: MetadataRef::Concrete(layout()),
+                }],
+                draw_on: vec![DrawOnCommand::new(coverage)],
+                derive: Vec::new(),
+            };
+            let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+            let mut frame = DrawFrame::new();
+
+            frame
+                .draw_dab(&mut session, coverage, canvas_input(0.0, 0.0, 0.4))
+                .unwrap();
+
+            assert!(matches!(frame.dab_passes()[0], Pass::Clear { .. }));
+        }
+
+        assert_eq!(global.tiles().atlas(value_atlas).unwrap().remaining(), 256);
+
+        {
+            let ir = DrawSessionIR {
+                expected_document_version: global.version(),
+                doc_images: vec![DocImageUse::read_write(base)],
+                session_images: Vec::new(),
+                draw_on: vec![DrawOnCommand::new(base)],
+                derive: Vec::new(),
+            };
+            let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+            let mut frame = DrawFrame::new();
+
+            frame
+                .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
+                .unwrap();
+
+            assert!(matches!(frame.dab_passes()[0], Pass::Clear { .. }));
+        }
+
+        assert_eq!(global.tiles().atlas(rgba_atlas).unwrap().remaining(), 256);
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert_eq!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Zero
+        );
     }
 
     #[test]
@@ -2426,7 +2449,7 @@ mod tests {
         let session = DrawSession::begin(&ir, &mut global).unwrap();
         let mut history = DrawHistory::new();
 
-        let commit = session.commit(&mut global, &mut history).unwrap();
+        let commit = session.commit(&mut history).unwrap();
 
         assert_eq!(commit, None);
         assert_eq!(global.version(), DocumentVersionId::default());
@@ -2450,14 +2473,12 @@ mod tests {
         let mut frame = DrawFrame::new();
         let mut backend = TestBackend::default();
         frame
-            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
-        frame
-            .flush(&mut session, &mut global, &mut backend)
-            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap();
         let mut history = DrawHistory::new();
 
-        let commit = session.commit(&mut global, &mut history).unwrap().unwrap();
+        let commit = session.commit(&mut history).unwrap().unwrap();
         assert_eq!(commit.version, begin_version.next());
         let undo_record = history
             .apply_stored_patch(commit.record_id, &mut global, &mut backend)
@@ -2497,14 +2518,12 @@ mod tests {
         let mut frame = DrawFrame::new();
         let mut backend = TestBackend::default();
         frame
-            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.6))
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.6))
             .unwrap();
-        frame
-            .flush(&mut session, &mut global, &mut backend)
-            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap();
         let mut history = DrawHistory::new();
 
-        let commit = session.commit(&mut global, &mut history).unwrap().unwrap();
+        let commit = session.commit(&mut history).unwrap().unwrap();
 
         assert_eq!(commit.version, begin_version.next());
         assert!(history.patches.contains_key(&commit.record_id));
@@ -2530,16 +2549,16 @@ mod tests {
             draw_on: Vec::new(),
             derive: Vec::new(),
         };
-        let mut reader = DrawSession::begin(&reader_ir, &mut global).unwrap();
-        let _old_group_pos = {
+        {
+            let mut reader = DrawSession::begin(&reader_ir, &mut global).unwrap();
             let mut passes = Vec::new();
-            let mut ctx = reader.render_ctx(&mut global, &mut passes, None);
+            let mut ctx = reader.render_ctx(&mut passes, None);
             let TileReadRef::Physical(pos) = ctx.render(SessionImageId::Global(group), 0).unwrap()
             else {
                 panic!("global derived cache should materialize before undo");
             };
-            pos
-        };
+            let _old_group_pos = pos;
+        }
 
         let draw_ir = DrawSessionIR {
             expected_document_version: global.version(),
@@ -2552,13 +2571,11 @@ mod tests {
         let mut frame = DrawFrame::new();
         let mut backend = TestBackend::default();
         frame
-            .draw_dab(&mut session, &mut global, base, canvas_input(0.0, 0.0, 0.4))
+            .draw_dab(&mut session, base, canvas_input(0.0, 0.0, 0.4))
             .unwrap();
-        frame
-            .flush(&mut session, &mut global, &mut backend)
-            .unwrap();
+        frame.flush(&mut session, &mut backend).unwrap();
         let mut history = DrawHistory::new();
-        let commit = session.commit(&mut global, &mut history).unwrap().unwrap();
+        let commit = session.commit(&mut history).unwrap().unwrap();
 
         backend.clear();
         let undo_record = history
