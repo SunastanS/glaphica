@@ -79,7 +79,7 @@ impl DocumentNodeId {
 impl DocumentBlendMode {
     pub fn as_renderer_blend_mode(self) -> Option<gla_color::BlendMode> {
         match self {
-            Self::Normal => None,
+            Self::Normal => Some(gla_color::BlendMode::Normal),
             Self::Overlay => Some(gla_color::BlendMode::Overlay),
             Self::Multiply => Some(gla_color::BlendMode::Multiply),
             Self::MaskAlpha => Some(gla_color::BlendMode::MaskAlpha),
@@ -703,6 +703,9 @@ mod tests {
             node.blend_mode().as_renderer_blend_mode(),
             Some(gla_color::BlendMode::Multiply)
         );
-        assert_eq!(DocumentBlendMode::Normal.as_renderer_blend_mode(), None);
+        assert_eq!(
+            DocumentBlendMode::Normal.as_renderer_blend_mode(),
+            Some(gla_color::BlendMode::Normal)
+        );
     }
 }

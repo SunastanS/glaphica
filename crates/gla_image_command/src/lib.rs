@@ -487,6 +487,40 @@ mod tests {
     }
 
     #[test]
+    fn render_to_records_normal_blend_mode() {
+        let mut ctx = ctx_with_tiles(Vec::new());
+        let source_pos = TilePos::new(0, 0, 17, 0);
+        let dst_pos = TilePos::new(0, 0, 18, 0);
+        ctx.returns.push(TileReadRef::Physical(source_pos));
+        ctx.dst_pos = Some(dst_pos);
+
+        let command = DeriveCommand::new(
+            TestImageKey(18),
+            layout(),
+            [Derive::RenderTo(RenderTo::new(
+                ImageRef::new(TestImageKey(17), layout()),
+                BlendMode::Normal,
+                1.0,
+            ))],
+        );
+
+        command.exec_tile(&mut ctx, 4).unwrap();
+
+        assert_eq!(
+            ctx.passes,
+            vec![
+                Pass::RenderTo {
+                    src: source_pos,
+                    dst: dst_pos,
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                },
+                Pass::FixGutter { dst: dst_pos },
+            ]
+        );
+    }
+
+    #[test]
     fn render_to_records_value_to_rgba_mask_mode() {
         let mut ctx = ctx_with_tiles(Vec::new());
         let source_pos = TilePos::new(0, 0, 13, 0);

@@ -9,6 +9,7 @@ pub enum ChannelCount {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RgbaBlendMode {
+    Normal,
     Overlay,
     Multiply,
 }
@@ -20,6 +21,7 @@ pub enum ValueToRgbaBlendMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlendMode {
+    Normal,
     Overlay,
     Multiply,
     MaskAlpha,
@@ -99,6 +101,17 @@ pub fn composite_kind(
         dst_format.default_interpretation(),
         blend_mode,
     ) {
+        (
+            Some(PixelInterpretation::Rgba {
+                color_space: ColorSpace::LinearSrgb,
+                alpha: AlphaMode::Premultiplied,
+            }),
+            Some(PixelInterpretation::Rgba {
+                color_space: ColorSpace::LinearSrgb,
+                alpha: AlphaMode::Premultiplied,
+            }),
+            BlendMode::Normal,
+        ) => Some(CompositeKind::Rgba(RgbaBlendMode::Normal)),
         (
             Some(PixelInterpretation::Rgba {
                 color_space: ColorSpace::LinearSrgb,
@@ -217,6 +230,7 @@ fn unpremultiply(color: PremultipliedRgbaF32) -> [f32; 3] {
 
 fn blend_rgb(backdrop: [f32; 3], source: [f32; 3], mode: RgbaBlendMode) -> [f32; 3] {
     match mode {
+        RgbaBlendMode::Normal => source,
         RgbaBlendMode::Multiply => [
             backdrop[0] * source[0],
             backdrop[1] * source[1],
@@ -284,6 +298,10 @@ mod tests {
     #[test]
     fn composite_kind_allows_supported_dimension_pairs_only() {
         assert_eq!(
+            composite_kind(d4_u8(), d4_u8(), BlendMode::Normal),
+            Some(CompositeKind::Rgba(RgbaBlendMode::Normal))
+        );
+        assert_eq!(
             composite_kind(d4_u8(), d4_u8(), BlendMode::Multiply),
             Some(CompositeKind::Rgba(RgbaBlendMode::Multiply))
         );
@@ -313,6 +331,17 @@ mod tests {
         assert_eq!(
             composite_premultiplied_rgba(backdrop, source, RgbaBlendMode::Multiply, 1.0),
             PremultipliedRgbaF32::new(0.25, 0.125, 0.1875, 1.0)
+        );
+    }
+
+    #[test]
+    fn rgba_normal_composites_source_over_backdrop() {
+        let backdrop = PremultipliedRgbaF32::new(0.2, 0.4, 0.6, 1.0);
+        let source = PremultipliedRgbaF32::new(0.5, 0.0, 0.0, 0.5);
+
+        assert_eq!(
+            composite_premultiplied_rgba(backdrop, source, RgbaBlendMode::Normal, 1.0),
+            PremultipliedRgbaF32::new(0.6, 0.2, 0.3, 1.0)
         );
     }
 }

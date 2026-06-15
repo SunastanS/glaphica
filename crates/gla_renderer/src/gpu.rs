@@ -61,7 +61,10 @@ fn overlay_channel(backdrop: f32, source: f32) -> f32 {
 }
 
 fn blend_color(backdrop: vec3f, source: vec3f, blend_mode: u32) -> vec3f {
-    if blend_mode == 1u {
+    if blend_mode == 0u {
+        return source;
+    }
+    if blend_mode == 2u {
         return backdrop * source;
     }
     return vec3f(
@@ -2439,8 +2442,9 @@ fn screen_to_ndc(point: [f32; 2], width: u32, height: u32) -> [f32; 2] {
 
 fn encode_rgba_blend_mode(blend_mode: RgbaBlendMode) -> u32 {
     match blend_mode {
-        RgbaBlendMode::Overlay => 0,
-        RgbaBlendMode::Multiply => 1,
+        RgbaBlendMode::Normal => 0,
+        RgbaBlendMode::Overlay => 1,
+        RgbaBlendMode::Multiply => 2,
     }
 }
 
@@ -2484,7 +2488,7 @@ mod tests {
 
         assert_eq!(source_x, 11);
         assert_eq!(source_layer, 17);
-        assert_eq!(blend_mode, 1);
+        assert_eq!(blend_mode, 2);
     }
 
     #[test]
@@ -2546,6 +2550,12 @@ mod tests {
             Pass::Copy {
                 src: rgba_src,
                 dst: rgba_dst,
+            },
+            Pass::RenderTo {
+                src: rgba_src,
+                dst: rgba_dst,
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
             },
             Pass::RenderTo {
                 src: rgba_src,
