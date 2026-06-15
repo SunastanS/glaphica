@@ -2,6 +2,7 @@ mod display;
 mod document;
 mod export;
 mod frame;
+mod layer_tree;
 mod runtime;
 mod script;
 mod stroke;
@@ -13,7 +14,8 @@ pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame,
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
     DocumentPresentError, DocumentRootTileRead, DocumentWorkspace, DocumentWorkspaceBuildError,
-    DocumentWorkspaceError, DocumentWorkspaceInitError, ReplaceCircleStrokeSample,
+    DocumentWorkspaceError, DocumentWorkspaceInitError, DocumentWorkspaceLayerError,
+    ReplaceCircleStrokeSample,
 };
 pub use export::{
     WorkspaceExportError, WorkspaceExportManifest, WorkspaceExportSnapshot, WorkspaceExportTile,
@@ -22,6 +24,10 @@ pub use export::{
     workspace_from_export_snapshot, write_workspace_manifest,
 };
 pub use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
+pub use layer_tree::{
+    DocumentBlendMode, DocumentLayerNode, DocumentLayerTree, DocumentLayerTreeError,
+    DocumentNodeId, DocumentNodeKind,
+};
 pub use runtime::{
     AppPerfTraceConfig, AppRunError, AppRuntimeConfig, run_app_window, run_app_window_with_config,
 };

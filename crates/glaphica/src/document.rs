@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -8,15 +9,18 @@ use gla_core::CanvasCoordF;
 use gla_draw_on::DrawOnInput;
 use gla_image::IMAGE_TILE_SIZE;
 use gla_ir::{
-    DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, ImageId,
-    ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
+    DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, GraphCommand,
+    ImageId, ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
 };
 use gla_renderer::{PresentTile, PresentTileParams, RenderBackend};
 use gla_session::{DrawCommit, DrawHistory, DrawRecordId, DrawSession, SessionError};
 use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
 
-use crate::{AppView, ScriptDrawCommand, ScriptDrawSession};
+use crate::{
+    AppView, DocumentBlendMode, DocumentLayerTree, DocumentLayerTreeError, DocumentNodeId,
+    DocumentNodeKind, ScriptDrawCommand, ScriptDrawSession,
+};
 
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
 pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 1024;
@@ -43,6 +47,7 @@ pub struct DocumentWorkspace {
     root: ImageId,
     format: GlaFormat,
     layout: ImageLayoutSpec,
+    layers: DocumentLayerTree,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +117,7 @@ impl DocumentWorkspace {
             root,
             format,
             layout,
+            layers: DocumentLayerTree::new(root),
         })
     }
 
@@ -157,6 +163,85 @@ impl DocumentWorkspace {
 
     pub fn canvas_size_px(&self) -> (u32, u32) {
         (self.layout.width_px, self.layout.height_px)
+    }
+
+    pub fn layer_tree(&self) -> &DocumentLayerTree {
+        &self.layers
+    }
+
+    pub fn append_layer(
+        &mut self,
+        parent_id: DocumentNodeId,
+    ) -> Result<DocumentNodeId, DocumentWorkspaceLayerError> {
+        self.layers.child_ids(parent_id)?;
+        let image = self.register_workspace_image(ImageRole::Primitive)?;
+        Ok(self.layers.append_layer(parent_id, image)?)
+    }
+
+    pub fn append_group(
+        &mut self,
+        parent_id: DocumentNodeId,
+    ) -> Result<DocumentNodeId, DocumentWorkspaceLayerError> {
+        self.layers.child_ids(parent_id)?;
+        let image =
+            self.register_workspace_image(ImageRole::Derived(GraphCommand::new(Vec::new())))?;
+        Ok(self.layers.append_group(parent_id, image)?)
+    }
+
+    pub fn set_active_node(
+        &mut self,
+        node_id: DocumentNodeId,
+    ) -> Result<(), DocumentWorkspaceLayerError> {
+        self.layers.set_active_node(node_id)?;
+        Ok(())
+    }
+
+    pub fn set_node_opacity(
+        &mut self,
+        node_id: DocumentNodeId,
+        opacity: f32,
+    ) -> Result<(), DocumentWorkspaceLayerError> {
+        self.layers.set_opacity(node_id, opacity)?;
+        Ok(())
+    }
+
+    pub fn set_node_blend_mode(
+        &mut self,
+        node_id: DocumentNodeId,
+        blend_mode: DocumentBlendMode,
+    ) -> Result<(), DocumentWorkspaceLayerError> {
+        self.layers.set_blend_mode(node_id, blend_mode)?;
+        Ok(())
+    }
+
+    pub fn move_node(
+        &mut self,
+        node_id: DocumentNodeId,
+        new_parent_id: DocumentNodeId,
+        new_index: usize,
+    ) -> Result<(), DocumentWorkspaceLayerError> {
+        self.layers.move_node(node_id, new_parent_id, new_index)?;
+        Ok(())
+    }
+
+    pub fn delete_node(
+        &mut self,
+        node_id: DocumentNodeId,
+    ) -> Result<(), DocumentWorkspaceLayerError> {
+        if node_id == self.layers.root_id() {
+            self.layers.delete_node(node_id)?;
+            return Ok(());
+        }
+        let mut subtree = Vec::new();
+        self.layers
+            .collect_subtree_preorder(node_id, &mut subtree)?;
+        let image_ids = subtree
+            .iter()
+            .map(|node_id| self.layers.node(*node_id).map(|node| node.image()))
+            .collect::<Result<HashSet<_>, _>>()?;
+        self.storage.delete_images(&image_ids)?;
+        self.layers.delete_node(node_id)?;
+        Ok(())
     }
 
     pub fn root_reader_ir(&self) -> DrawSessionIR {
@@ -207,6 +292,44 @@ impl DocumentWorkspace {
         self.root = root;
         self.format = image.format();
         self.layout = ImageLayoutSpec::new(layout.width_px(), layout.height_px());
+        if self
+            .layers
+            .node(self.layers.root_id())
+            .map(|node| node.image())
+            .ok()
+            != Some(root)
+        {
+            self.layers = DocumentLayerTree::new(root);
+        }
+    }
+
+    fn register_workspace_image(
+        &mut self,
+        role: ImageRole,
+    ) -> Result<ImageId, DocumentWorkspaceLayerError> {
+        let id = self.next_available_image_id()?;
+        self.storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
+                id,
+                format: self.format,
+                layout: self.layout,
+                role,
+            }]))?;
+        Ok(id)
+    }
+
+    fn next_available_image_id(&self) -> Result<ImageId, DocumentWorkspaceLayerError> {
+        let max_id = self
+            .storage
+            .images()
+            .keys()
+            .map(|id| id.value())
+            .max()
+            .unwrap_or(0);
+        let next = max_id
+            .checked_add(1)
+            .ok_or(DocumentWorkspaceLayerError::ImageIdExhausted)?;
+        Ok(ImageId::new(next))
     }
 
     fn initialize_root_to_color<B>(
@@ -500,6 +623,13 @@ pub enum DocumentPresentError {
     Tile(GlobalTileError),
 }
 
+#[derive(Debug)]
+pub enum DocumentWorkspaceLayerError {
+    Tree(DocumentLayerTreeError),
+    Registry(GlobalStorageError),
+    ImageIdExhausted,
+}
+
 impl Display for DocumentPresentError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -515,6 +645,38 @@ impl Error for DocumentPresentError {
             Self::MissingRoot { .. } => None,
             Self::Tile(error) => Some(error),
         }
+    }
+}
+
+impl Display for DocumentWorkspaceLayerError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tree(error) => Display::fmt(error, f),
+            Self::Registry(error) => Display::fmt(error, f),
+            Self::ImageIdExhausted => f.write_str("document workspace image ids are exhausted"),
+        }
+    }
+}
+
+impl Error for DocumentWorkspaceLayerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Tree(error) => Some(error),
+            Self::Registry(error) => Some(error),
+            Self::ImageIdExhausted => None,
+        }
+    }
+}
+
+impl From<DocumentLayerTreeError> for DocumentWorkspaceLayerError {
+    fn from(error: DocumentLayerTreeError) -> Self {
+        Self::Tree(error)
+    }
+}
+
+impl From<GlobalStorageError> for DocumentWorkspaceLayerError {
+    fn from(error: GlobalStorageError) -> Self {
+        Self::Registry(error)
     }
 }
 
@@ -636,6 +798,10 @@ mod tests {
         let workspace = DocumentWorkspace::blank(320, 240).unwrap();
         let root = workspace.root();
         let image = workspace.storage().image(root).unwrap();
+        let root_node = workspace
+            .layer_tree()
+            .node(workspace.layer_tree().root_id())
+            .unwrap();
 
         assert_eq!(workspace.storage().root(), Some(root));
         assert_eq!(workspace.version(), DocumentVersionId::new(1));
@@ -644,6 +810,12 @@ mod tests {
         assert!(image.role().is_primitive());
         assert_eq!(image.layout().width_px(), 320);
         assert_eq!(image.layout().height_px(), 240);
+        assert_eq!(root_node.kind(), DocumentNodeKind::Root);
+        assert_eq!(root_node.image(), root);
+        assert_eq!(
+            workspace.layer_tree().active_ancestor_chain(),
+            &[workspace.layer_tree().root_id()]
+        );
     }
 
     #[test]
@@ -690,6 +862,88 @@ mod tests {
         assert_eq!(workspace.canvas_size_px(), (64, 32));
         assert_eq!(workspace.storage().root(), Some(ImageId::new(2)));
         assert!(workspace.root_present_tiles().unwrap().is_empty());
+        assert_eq!(workspace.layer_tree().len(), 1);
+        assert_eq!(
+            workspace
+                .layer_tree()
+                .node(workspace.layer_tree().root_id())
+                .unwrap()
+                .image(),
+            ImageId::new(2)
+        );
+    }
+
+    #[test]
+    fn workspace_layer_tree_registers_storage_images() {
+        let mut workspace = DocumentWorkspace::blank(320, 240).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+
+        let group = workspace.append_group(root_node).unwrap();
+        let layer = workspace.append_layer(group).unwrap();
+
+        let group_image = workspace.layer_tree().node(group).unwrap().image();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+        assert_eq!(workspace.version(), DocumentVersionId::new(3));
+        assert_eq!(
+            workspace.layer_tree().child_ids(root_node).unwrap(),
+            &[group]
+        );
+        assert_eq!(workspace.layer_tree().child_ids(group).unwrap(), &[layer]);
+        assert_eq!(
+            workspace.layer_tree().node(group).unwrap().kind(),
+            DocumentNodeKind::Group
+        );
+        assert_eq!(
+            workspace.layer_tree().node(layer).unwrap().kind(),
+            DocumentNodeKind::Layer
+        );
+        assert!(
+            workspace
+                .storage()
+                .image(group_image)
+                .unwrap()
+                .role()
+                .is_derived()
+        );
+        assert!(
+            workspace
+                .storage()
+                .image(layer_image)
+                .unwrap()
+                .role()
+                .is_primitive()
+        );
+    }
+
+    #[test]
+    fn workspace_layer_operations_track_active_node_and_metadata() {
+        let mut workspace = DocumentWorkspace::blank(320, 240).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+        let group = workspace.append_group(root_node).unwrap();
+        let layer = workspace.append_layer(group).unwrap();
+        let group_image = workspace.layer_tree().node(group).unwrap().image();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+
+        workspace.set_active_node(layer).unwrap();
+        workspace.set_node_opacity(layer, 0.5).unwrap();
+        workspace
+            .set_node_blend_mode(layer, DocumentBlendMode::Multiply)
+            .unwrap();
+
+        let node = workspace.layer_tree().node(layer).unwrap();
+        assert_eq!(workspace.layer_tree().active_node_id(), layer);
+        assert_eq!(
+            workspace.layer_tree().active_ancestor_chain(),
+            &[layer, group, root_node]
+        );
+        assert_eq!(node.opacity(), 0.5);
+        assert_eq!(node.blend_mode(), DocumentBlendMode::Multiply);
+
+        workspace.delete_node(group).unwrap();
+        assert_eq!(workspace.layer_tree().active_node_id(), root_node);
+        assert!(!workspace.layer_tree().contains_node(layer));
+        assert!(workspace.storage().image(group_image).is_none());
+        assert!(workspace.storage().image(layer_image).is_none());
     }
 
     #[test]

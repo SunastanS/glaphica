@@ -10,6 +10,8 @@ use tile_key::TilesError;
 pub enum GlobalStorageError {
     DuplicateImage { id: ImageId },
     MissingImage { id: ImageId },
+    CannotDeleteRoot { id: ImageId },
+    ImageInUse { id: ImageId, dependent: ImageId },
     RegistryCommandReadsDestination { dst: ImageId },
     RegistryCycle { id: ImageId },
     ImageCreate { id: ImageId, source: ImageError },
@@ -118,6 +120,10 @@ impl Display for GlobalStorageError {
         match self {
             Self::DuplicateImage { id } => write!(f, "global image {id:?} already exists"),
             Self::MissingImage { id } => write!(f, "global image {id:?} is not declared"),
+            Self::CannotDeleteRoot { id } => write!(f, "cannot delete root image {id:?}"),
+            Self::ImageInUse { id, dependent } => {
+                write!(f, "global image {id:?} is still read by {dependent:?}")
+            }
             Self::RegistryCommandReadsDestination { dst } => {
                 write!(f, "registry command for {dst:?} reads its destination")
             }

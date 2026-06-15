@@ -380,6 +380,48 @@ impl GlobalStorage {
         Ok(())
     }
 
+    pub fn delete_images(&mut self, ids: &HashSet<ImageId>) -> Result<(), GlobalStorageError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        for id in ids {
+            if !self.images.contains_key(id) {
+                return Err(GlobalStorageError::MissingImage { id: *id });
+            }
+            if self.root == Some(*id) {
+                return Err(GlobalStorageError::CannotDeleteRoot { id: *id });
+            }
+        }
+
+        for (dependent, image) in &self.images {
+            if ids.contains(dependent) {
+                continue;
+            }
+            let GlobalImage::Derived { command, .. } = image else {
+                continue;
+            };
+            for read in &command.reads {
+                if ids.contains(&read.image) {
+                    return Err(GlobalStorageError::ImageInUse {
+                        id: read.image,
+                        dependent: *dependent,
+                    });
+                }
+            }
+        }
+
+        for id in ids {
+            let image = self
+                .images
+                .remove(id)
+                .expect("deleted image id was validated before removal");
+            image.release_tiles(&mut self.tiles);
+        }
+        self.bump_version();
+        Ok(())
+    }
+
     fn image_specs(&self) -> HashMap<ImageId, ImageSpec> {
         self.images
             .iter()
@@ -545,7 +587,7 @@ mod tests {
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use gla_image::{ImageError, ImageLayoutError};
     use gla_ir::{GraphRead, ImageLayoutSpec, RegistryPatch, RegistryPatchOp};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use tile_key::{TileReadRef, TilesError};
 
     fn format() -> GlaFormat {
@@ -700,6 +742,85 @@ mod tests {
             storage.read_global_ref(root, 0).unwrap_err(),
             GlobalTileError::MissingMaterializedTile { id } if id == root
         ));
+    }
+
+    #[test]
+    fn delete_images_releases_tiles_and_bumps_version() {
+        let layer = ImageId::new(1);
+        let cache = ImageId::new(2);
+        let mut storage = new_storage_with_format(format());
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![
+                RegistryPatchOp::NewImage {
+                    id: layer,
+                    format: format(),
+                    layout: layout_spec(),
+                    role: ImageRole::Primitive,
+                },
+                RegistryPatchOp::NewImage {
+                    id: cache,
+                    format: format(),
+                    layout: layout_spec(),
+                    role: ImageRole::Derived(GraphCommand::new(Vec::new())),
+                },
+            ]))
+            .unwrap();
+        let atlas_id = storage.tiles().atlas_for_format(format()).unwrap();
+        storage.write_global_cache_pos(cache, 0).unwrap();
+        assert_eq!(storage.tiles().atlas(atlas_id).unwrap().remaining(), 255);
+
+        storage
+            .delete_images(&HashSet::from([layer, cache]))
+            .unwrap();
+
+        assert_eq!(storage.version(), DocumentVersionId::new(2));
+        assert!(storage.image(layer).is_none());
+        assert!(storage.image(cache).is_none());
+        assert_eq!(storage.tiles().atlas(atlas_id).unwrap().remaining(), 256);
+    }
+
+    #[test]
+    fn delete_images_rejects_roots_and_live_dependents() {
+        let base = ImageId::new(1);
+        let dependent = ImageId::new(2);
+        let mut storage = new_storage_with_format(format());
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![
+                RegistryPatchOp::NewImage {
+                    id: base,
+                    format: format(),
+                    layout: layout_spec(),
+                    role: ImageRole::Primitive,
+                },
+                RegistryPatchOp::NewImage {
+                    id: dependent,
+                    format: format(),
+                    layout: layout_spec(),
+                    role: ImageRole::Derived(GraphCommand::new(vec![GraphRead::current(base)])),
+                },
+                RegistryPatchOp::SetRoot(base),
+            ]))
+            .unwrap();
+
+        let root_err = storage.delete_images(&HashSet::from([base])).unwrap_err();
+        assert!(matches!(
+            root_err,
+            GlobalStorageError::CannotDeleteRoot { id } if id == base
+        ));
+
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::SetRoot(
+                dependent,
+            )]))
+            .unwrap();
+        let dependent_err = storage.delete_images(&HashSet::from([base])).unwrap_err();
+        assert!(matches!(
+            dependent_err,
+            GlobalStorageError::ImageInUse { id, dependent: found }
+                if id == base && found == dependent
+        ));
+        assert!(storage.image(base).is_some());
+        assert!(storage.image(dependent).is_some());
     }
 
     #[test]
