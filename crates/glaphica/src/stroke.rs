@@ -126,6 +126,7 @@ pub(crate) struct ActiveRootStroke {
 #[derive(Debug)]
 pub(crate) struct FinishedRootStroke {
     stroke: ActiveRootStroke,
+    brush_input: BrushInput,
 }
 
 #[derive(Debug, Clone)]
@@ -605,7 +606,13 @@ impl BrushWorker {
 
     pub(crate) fn finish_active_stroke(&mut self) -> Option<FinishedRootStroke> {
         let stroke = self.active_stroke.take()?;
-        (!stroke.is_empty()).then_some(FinishedRootStroke { stroke })
+        (!stroke.is_empty()).then(|| {
+            let brush_input = stroke.brush_input();
+            FinishedRootStroke {
+                stroke,
+                brush_input,
+            }
+        })
     }
 
     pub(crate) fn restore_active_stroke(&mut self, stroke: FinishedRootStroke) {
@@ -660,12 +667,14 @@ impl ActiveRootStroke {
 }
 
 impl FinishedRootStroke {
-    pub(crate) fn brush_input(&self) -> BrushInput {
-        self.stroke.brush_input()
+    pub(crate) fn brush_input(&self) -> &BrushInput {
+        &self.brush_input
     }
 
     pub(crate) fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
-        self.stroke.replace_circle_samples()
+        self.brush_input
+            .replace_circle_samples()
+            .expect("finished root stroke should contain valid replace-circle brush input")
     }
 
     pub(crate) fn brush_id(&self) -> BrushId {

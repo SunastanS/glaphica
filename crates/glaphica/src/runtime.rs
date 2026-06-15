@@ -748,13 +748,11 @@ impl App {
             Ok(_) => {}
             Err(error) => eprintln!("stroke preview clear failed: {error}"),
         }
-        let brush_input = stroke.brush_input();
-
         let commit = match workspace
             .replace_circle_brush_input_on_active_paint_target_with_frame_budget(
                 &mut self.history,
                 gpu.renderer_mut(),
-                &brush_input,
+                stroke.brush_input(),
                 ACTIVE_STROKE_COMMIT_FRAME_DAB_BUDGET,
             ) {
             Ok(Some(commit)) => commit,
