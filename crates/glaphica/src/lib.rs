@@ -1,4 +1,5 @@
 mod document;
+mod frame;
 mod runtime;
 mod view;
 

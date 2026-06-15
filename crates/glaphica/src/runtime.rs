@@ -18,6 +18,7 @@ use winit::{
 use crate::{
     AppView, AppViewMatrixError, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
     DocumentWorkspace, DocumentWorkspaceBuildError, ReplaceCircleStrokeSample,
+    frame::AppFrameScheduler,
 };
 
 #[derive(Debug, Clone)]
@@ -88,6 +89,7 @@ struct App {
     history: DrawHistory,
     undo_stack: Vec<DrawRecordId>,
     redo_stack: Vec<DrawRecordId>,
+    frame_scheduler: AppFrameScheduler,
     active_stroke: Option<ActiveRootStroke>,
     primary_down: bool,
     middle_down: bool,
@@ -107,6 +109,7 @@ impl App {
             history: DrawHistory::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            frame_scheduler: AppFrameScheduler::new(),
             active_stroke: None,
             primary_down: false,
             middle_down: false,
@@ -120,6 +123,10 @@ impl App {
 
     fn window_attributes(&self) -> WindowAttributes {
         WindowAttributes::default().with_title(self.config.window_title.clone())
+    }
+
+    fn request_redraw(&mut self) {
+        self.frame_scheduler.request_redraw();
     }
 
     fn begin_stroke_at_last_cursor(&mut self) {
@@ -529,7 +536,9 @@ impl ApplicationHandler for App {
         if let Err(error) = self.fit_view_to_workspace() {
             eprintln!("view initialization failed: {error}");
             event_loop.exit();
+            return;
         }
+        self.request_redraw();
     }
 
     fn window_event(
@@ -560,7 +569,7 @@ impl ApplicationHandler for App {
                 }
                 if self.middle_down {
                     self.pan_view_to(pos);
-                    window.request_redraw();
+                    self.request_redraw();
                 }
             }
             WindowEvent::MouseInput {
@@ -573,7 +582,7 @@ impl ApplicationHandler for App {
                 if self.primary_down && !was_primary_down {
                     self.begin_stroke_at_last_cursor();
                 } else if was_primary_down && self.commit_active_stroke() {
-                    window.request_redraw();
+                    self.request_redraw();
                 }
             }
             WindowEvent::MouseInput {
@@ -590,7 +599,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.zoom_view_at_cursor(&delta) {
-                    window.request_redraw();
+                    self.request_redraw();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -603,15 +612,15 @@ impl ApplicationHandler for App {
                         && value.eq_ignore_ascii_case("z")
                     {
                         if self.redo() {
-                            window.request_redraw();
+                            self.request_redraw();
                         }
                     } else if self.modifiers.control_key() && value.eq_ignore_ascii_case("z") {
                         if self.undo() {
-                            window.request_redraw();
+                            self.request_redraw();
                         }
                     } else if self.modifiers.control_key() && value.eq_ignore_ascii_case("y") {
                         if self.redo() {
-                            window.request_redraw();
+                            self.request_redraw();
                         }
                     }
                 }
@@ -623,18 +632,22 @@ impl ApplicationHandler for App {
                 if let Err(error) = self.fit_view_to_workspace() {
                     eprintln!("view resize failed: {error}");
                 }
+                self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.render(self.workspace.as_ref(), &self.view);
                 }
+                self.frame_scheduler.reset_redraw_request();
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
+        if self.frame_scheduler.has_requested_redraw()
+            && let Some(window) = self.window.as_ref()
+        {
             window.request_redraw();
         }
     }
