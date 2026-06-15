@@ -17,7 +17,7 @@ use winit::{
 use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError,
-    ReplaceCircleStrokeSample, ToolSet, frame::AppFrameScheduler,
+    ReplaceCircleStrokeSample, SurfaceError, SurfaceRuntime, ToolSet, frame::AppFrameScheduler,
 };
 
 #[derive(Debug, Clone)]
@@ -335,10 +335,9 @@ impl ActiveRootStroke {
 }
 
 struct GpuCtx {
-    surface: wgpu::Surface<'static>,
+    surface: SurfaceRuntime,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
     clear_color: wgpu::Color,
     renderer: GpuRenderer,
 }
@@ -350,7 +349,7 @@ enum GpuInitError {
     Renderer(GpuRendererError),
     RequestAdapter(wgpu::RequestAdapterError),
     RequestDevice(wgpu::RequestDeviceError),
-    UnsupportedSurfaceFormat,
+    Surface(SurfaceError),
 }
 
 impl Display for GpuInitError {
@@ -363,7 +362,7 @@ impl Display for GpuInitError {
             Self::Renderer(error) => write!(f, "failed to create GPU renderer: {error}"),
             Self::RequestAdapter(error) => write!(f, "failed to request adapter: {error}"),
             Self::RequestDevice(error) => write!(f, "failed to request device: {error}"),
-            Self::UnsupportedSurfaceFormat => f.write_str("surface has no supported format"),
+            Self::Surface(error) => write!(f, "surface initialization failed: {error}"),
         }
     }
 }
@@ -376,7 +375,7 @@ impl Error for GpuInitError {
             Self::Renderer(error) => Some(error),
             Self::RequestAdapter(error) => Some(error),
             Self::RequestDevice(error) => Some(error),
-            Self::UnsupportedSurfaceFormat => None,
+            Self::Surface(error) => Some(error),
         }
     }
 }
@@ -413,32 +412,8 @@ impl GpuCtx {
             .await
             .map_err(GpuInitError::RequestDevice)?;
 
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|format| {
-                matches!(
-                    format,
-                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
-                )
-            })
-            .copied()
-            .or_else(|| caps.formats.first().copied())
-            .ok_or(GpuInitError::UnsupportedSurfaceFormat)?;
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
-        surface.configure(&device, &config);
+        let surface = SurfaceRuntime::new(surface, &adapter, &device, size.width, size.height)
+            .map_err(GpuInitError::Surface)?;
 
         let mut renderer = GpuRenderer::with_draw_on_tools(
             &adapter,
@@ -459,7 +434,6 @@ impl GpuCtx {
                 surface,
                 device,
                 queue,
-                config,
                 clear_color: app_config.clear_color,
                 renderer,
             },
@@ -472,39 +446,21 @@ impl GpuCtx {
     }
 
     fn surface_size_px(&self) -> (u32, u32) {
-        (self.config.width, self.config.height)
+        self.surface.size_px()
     }
 
     fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        if self.config.width == width && self.config.height == height {
-            return;
-        }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface.resize(&self.device, width, height);
     }
 
     fn render(&mut self, workspace: Option<&DocumentWorkspace>, view: &AppView) {
-        let frame = match self.surface.get_current_texture() {
+        let frame = match self.surface.acquire_frame(&self.device) {
             Ok(frame) => frame,
             Err(error) => {
-                if matches!(
-                    error,
-                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated
-                ) {
-                    self.surface.configure(&self.device, &self.config);
-                }
+                eprintln!("surface acquire failed: {error}");
                 return;
             }
         };
-
-        let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.config.format),
-            ..Default::default()
-        });
 
         let tiles = match workspace {
             Some(workspace) => match workspace.root_present_tiles_for_view(view) {
@@ -519,16 +475,16 @@ impl GpuCtx {
         if let Err(error) = self.renderer.present_tiles(
             &tiles,
             PresentTarget {
-                view: &surface_view,
-                format: self.config.format,
-                width: self.config.width,
-                height: self.config.height,
+                view: &frame.view,
+                format: self.surface.format(),
+                width: self.surface.width(),
+                height: self.surface.height(),
                 clear_color: self.clear_color,
             },
         ) {
             eprintln!("surface present failed: {error}");
         }
-        frame.present();
+        SurfaceRuntime::present(frame);
     }
 }
 
