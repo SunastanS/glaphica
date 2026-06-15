@@ -20,7 +20,7 @@ pub struct ScriptModuleSource {
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ScriptValue {
     Nil,
     Bool(bool),
@@ -29,7 +29,7 @@ pub enum ScriptValue {
     Bytes(Vec<u8>),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ScriptCommand {
     ApplyRegistryPatch(RegistryPatch),
     OpenWorkspaceDirectory(PathBuf),
@@ -67,6 +67,11 @@ pub enum ScriptCommand {
     Undo,
     Redo,
     RequestRedraw,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScriptCommandPlan {
+    pub commands: Vec<ScriptCommand>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,6 +166,12 @@ impl ScriptModuleSource {
     }
 }
 
+impl ScriptCommandPlan {
+    pub fn new(commands: Vec<ScriptCommand>) -> Self {
+        Self { commands }
+    }
+}
+
 impl ScriptDrawSession {
     pub fn new(ir: DrawSessionIR) -> Self {
         Self {
@@ -190,6 +201,18 @@ pub fn script_draw_session_to_json_string_pretty(
     request: &ScriptDrawSession,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(request)
+}
+
+pub fn script_command_plan_from_json_str(
+    source: &str,
+) -> Result<ScriptCommandPlan, serde_json::Error> {
+    serde_json::from_str(source)
+}
+
+pub fn script_command_plan_to_json_string_pretty(
+    plan: &ScriptCommandPlan,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(plan)
 }
 
 impl NullScriptRuntime {

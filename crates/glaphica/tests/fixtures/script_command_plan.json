@@ -1,0 +1,152 @@
+{
+  "commands": [
+    {
+      "ApplyRegistryPatch": {
+        "ops": []
+      }
+    },
+    {
+      "OpenWorkspaceDirectory": "fixtures/workspace"
+    },
+    {
+      "AppendLayer": {
+        "parent": 1
+      }
+    },
+    {
+      "AppendGroup": {
+        "parent": 1
+      }
+    },
+    "CreateLayerAboveActive",
+    "CreateGroupAboveActive",
+    {
+      "SetActiveNode": 2
+    },
+    {
+      "MoveNode": {
+        "node_id": 2,
+        "new_parent": 1,
+        "new_index": 0
+      }
+    },
+    {
+      "DeleteNode": 2
+    },
+    "DeleteActiveNode",
+    {
+      "SetActiveTool": {
+        "Brush": 1
+      }
+    },
+    {
+      "SetRoundBrushSettings": {
+        "base_radius_px": 6.0,
+        "spacing_ratio": 0.75,
+        "base_hardness": 0.6,
+        "base_flow": 1.0,
+        "base_opacity": 0.8,
+        "tint": [
+          0.2,
+          0.4,
+          0.9
+        ]
+      }
+    },
+    {
+      "BeginStroke": {
+        "time_ns": 1,
+        "position": {
+          "x": 24.0,
+          "y": 32.0
+        },
+        "pressure": 1.0,
+        "tilt": [
+          0.0,
+          0.0
+        ],
+        "twist": 0.0
+      }
+    },
+    {
+      "PushStrokeInput": {
+        "time_ns": 2,
+        "position": {
+          "x": 30.0,
+          "y": 36.0
+        },
+        "pressure": 0.9,
+        "tilt": [
+          0.0,
+          0.0
+        ],
+        "twist": 0.0
+      }
+    },
+    "FinishStroke",
+    "CancelStroke",
+    "Undo",
+    "Redo",
+    {
+      "SetNodeOpacity": {
+        "node_id": 2,
+        "opacity": 0.5
+      }
+    },
+    {
+      "SetNodeBlendMode": {
+        "node_id": 2,
+        "blend_mode": "Multiply"
+      }
+    },
+    {
+      "RunDrawSession": {
+        "ir": {
+          "expected_document_version": 4,
+          "doc_images": [
+            {
+              "id": 3,
+              "access": "ReadWrite"
+            }
+          ],
+          "session_images": [],
+          "draw_on": [
+            {
+              "dst": 3,
+              "tool": "ReplaceCircle4D"
+            }
+          ],
+          "derive": []
+        },
+        "frames": [
+          {
+            "commands": [
+              {
+                "DrawOn": {
+                  "target": 3,
+                  "input": {
+                    "center_x": 24.0,
+                    "center_y": 32.0,
+                    "footprint_radius_px": 8.0,
+                    "kind": {
+                      "ReplaceCircle4D": {
+                        "radius_px": 8.0,
+                        "color": {
+                          "r": 1.0,
+                          "g": 0.0,
+                          "b": 0.0,
+                          "a": 1.0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "RequestRedraw"
+  ]
+}
