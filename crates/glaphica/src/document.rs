@@ -12,7 +12,7 @@ use gla_ir::{
     ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
 };
 use gla_renderer::{PresentTile, PresentTileParams, RenderBackend};
-use gla_session::{DrawCommit, DrawHistory, DrawSession, SessionError};
+use gla_session::{DrawCommit, DrawHistory, DrawRecordId, DrawSession, SessionError};
 use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
 
@@ -163,6 +163,18 @@ impl DocumentWorkspace {
             frame.flush(backend)?;
         }
         session.commit(history)
+    }
+
+    pub fn apply_draw_record<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        record_id: DrawRecordId,
+    ) -> Result<DrawRecordId, SessionError>
+    where
+        B: RenderBackend,
+    {
+        history.apply_stored_patch(record_id, &mut self.storage, backend)
     }
 
     pub fn root_present_tiles(&self) -> Result<Vec<PresentTile>, DocumentPresentError> {
@@ -453,6 +465,36 @@ mod tests {
         assert_eq!(tiles.len(), 1);
         assert_eq!(tiles[0].params.target_min_px, [10.0, 20.0]);
         assert_eq!(tiles[0].params.target_max_px, [134.0, 144.0]);
+    }
+
+    #[test]
+    fn draw_record_can_be_applied_for_undo_and_redo() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let commit = workspace
+            .replace_circle_on_root(
+                &mut history,
+                &mut backend,
+                24.0,
+                32.0,
+                8.0,
+                PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert!(!workspace.root_present_tiles().unwrap().is_empty());
+        let redo_record = workspace
+            .apply_draw_record(&mut history, &mut backend, commit.record_id)
+            .unwrap();
+        assert!(workspace.root_present_tiles().unwrap().is_empty());
+        let undo_record = workspace
+            .apply_draw_record(&mut history, &mut backend, redo_record)
+            .unwrap();
+
+        assert_ne!(undo_record, redo_record);
+        assert!(!workspace.root_present_tiles().unwrap().is_empty());
     }
 
     #[test]

@@ -6,11 +6,12 @@ use gla_color::PremultipliedRgbaF32;
 use gla_core::ScreenCoordF;
 use gla_ir::DrawOnToolKind;
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
-use gla_session::DrawHistory;
+use gla_session::{DrawHistory, DrawRecordId};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key, ModifiersState},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -85,10 +86,13 @@ struct App {
     workspace: Option<DocumentWorkspace>,
     view: AppView,
     history: DrawHistory,
+    undo_stack: Vec<DrawRecordId>,
+    redo_stack: Vec<DrawRecordId>,
     primary_down: bool,
     middle_down: bool,
     middle_pan_last_pos: Option<ScreenCoordF>,
     last_cursor_pos: Option<ScreenCoordF>,
+    modifiers: ModifiersState,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
 }
@@ -100,10 +104,13 @@ impl App {
             workspace: None,
             view: AppView::identity(),
             history: DrawHistory::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             primary_down: false,
             middle_down: false,
             middle_pan_last_pos: None,
             last_cursor_pos: None,
+            modifiers: ModifiersState::default(),
             window: None,
             gpu: None,
         }
@@ -117,16 +124,16 @@ impl App {
         let Some(position) = self.last_cursor_pos else {
             return;
         };
-        self.paint_at(position);
+        let _ = self.paint_at(position);
     }
 
-    fn paint_at(&mut self, position: ScreenCoordF) {
+    fn paint_at(&mut self, position: ScreenCoordF) -> bool {
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
-            return;
+            return false;
         };
         let canvas = self.view.screen_to_document_point(position);
 
-        if let Err(error) = workspace.replace_circle_on_root(
+        match workspace.replace_circle_on_root(
             &mut self.history,
             gpu.renderer_mut(),
             canvas.x,
@@ -134,7 +141,61 @@ impl App {
             self.config.brush_radius_px,
             self.config.brush_color,
         ) {
-            eprintln!("stroke failed: {error}");
+            Ok(Some(commit)) => {
+                self.undo_stack.push(commit.record_id);
+                self.redo_stack.clear();
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                eprintln!("stroke failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn undo(&mut self) -> bool {
+        let Some(record_id) = self.undo_stack.pop() else {
+            return false;
+        };
+        match self.apply_history_record(record_id) {
+            Some(redo_record) => {
+                self.redo_stack.push(redo_record);
+                true
+            }
+            None => {
+                self.undo_stack.push(record_id);
+                false
+            }
+        }
+    }
+
+    fn redo(&mut self) -> bool {
+        let Some(record_id) = self.redo_stack.pop() else {
+            return false;
+        };
+        match self.apply_history_record(record_id) {
+            Some(undo_record) => {
+                self.undo_stack.push(undo_record);
+                true
+            }
+            None => {
+                self.redo_stack.push(record_id);
+                false
+            }
+        }
+    }
+
+    fn apply_history_record(&mut self, record_id: DrawRecordId) -> Option<DrawRecordId> {
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            return None;
+        };
+        match workspace.apply_draw_record(&mut self.history, gpu.renderer_mut(), record_id) {
+            Ok(next_record) => Some(next_record),
+            Err(error) => {
+                eprintln!("history apply failed: {error}");
+                None
+            }
         }
     }
 
@@ -440,13 +501,17 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos =
                     ScreenCoordF::new(finite_f64_to_f32(position.x), finite_f64_to_f32(position.y));
                 self.last_cursor_pos = Some(pos);
                 if self.primary_down {
-                    self.paint_at(pos);
-                    window.request_redraw();
+                    if self.paint_at(pos) {
+                        window.request_redraw();
+                    }
                 }
                 if self.middle_down {
                     self.pan_view_to(pos);
@@ -479,6 +544,29 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.zoom_view_at_cursor(&delta) {
                     window.request_redraw();
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && let Key::Character(value) = &event.logical_key
+                {
+                    if self.modifiers.control_key()
+                        && self.modifiers.shift_key()
+                        && value.eq_ignore_ascii_case("z")
+                    {
+                        if self.redo() {
+                            window.request_redraw();
+                        }
+                    } else if self.modifiers.control_key() && value.eq_ignore_ascii_case("z") {
+                        if self.undo() {
+                            window.request_redraw();
+                        }
+                    } else if self.modifiers.control_key() && value.eq_ignore_ascii_case("y") {
+                        if self.redo() {
+                            window.request_redraw();
+                        }
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
