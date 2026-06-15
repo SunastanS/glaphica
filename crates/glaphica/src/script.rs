@@ -39,7 +39,10 @@ pub enum ScriptCommand {
     AppendGroup {
         parent: DocumentNodeId,
     },
+    CreateLayerAboveActive,
+    CreateGroupAboveActive,
     DeleteNode(DocumentNodeId),
+    DeleteActiveNode,
     MoveNode {
         node_id: DocumentNodeId,
         new_parent: DocumentNodeId,
@@ -366,6 +369,8 @@ mod tests {
             ScriptCommand::AppendGroup {
                 parent: DocumentNodeId::new(1),
             },
+            ScriptCommand::CreateLayerAboveActive,
+            ScriptCommand::CreateGroupAboveActive,
             ScriptCommand::SetActiveNode(DocumentNodeId::new(2)),
             ScriptCommand::SetNodeOpacity {
                 node_id: DocumentNodeId::new(2),
@@ -381,6 +386,7 @@ mod tests {
                 new_index: 0,
             },
             ScriptCommand::DeleteNode(DocumentNodeId::new(2)),
+            ScriptCommand::DeleteActiveNode,
             ScriptCommand::SetActiveTool(ActiveTool::Brush(BrushId::DEFAULT)),
             ScriptCommand::SetRoundBrushSettings(RoundBrushSettings::default()),
             ScriptCommand::BeginStroke(input),
@@ -400,18 +406,19 @@ mod tests {
             commands[3],
             ScriptCommand::AppendGroup { parent } if parent == DocumentNodeId::new(1)
         ));
+        assert!(matches!(commands[4], ScriptCommand::CreateLayerAboveActive));
         assert!(matches!(
-            commands[6],
+            commands[8],
             ScriptCommand::SetNodeBlendMode {
                 node_id,
                 blend_mode: DocumentBlendMode::Multiply,
             } if node_id == DocumentNodeId::new(2)
         ));
         assert!(matches!(
-            commands[10],
+            commands[13],
             ScriptCommand::SetRoundBrushSettings(_)
         ));
-        assert!(matches!(commands[11], ScriptCommand::BeginStroke(found) if found == input));
+        assert!(matches!(commands[14], ScriptCommand::BeginStroke(found) if found == input));
     }
 
     #[test]

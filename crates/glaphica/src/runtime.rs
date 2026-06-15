@@ -438,6 +438,32 @@ impl App {
         Ok(outcome)
     }
 
+    fn delete_active_node_from_script(&mut self) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        if self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot update document layers while a stroke is active".to_owned(),
+            });
+        }
+        let Some(workspace) = self.workspace.as_mut() else {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot update document layers before the workspace exists".to_owned(),
+            });
+        };
+        let deleted = workspace
+            .delete_active_node()
+            .map_err(|error| ScriptHostError::Runtime {
+                reason: error.to_string(),
+            })?;
+        if !deleted {
+            return Ok(ScriptCommandOutcome::None);
+        }
+        self.history = DrawHistory::new();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.request_full_screen_update();
+        Ok(ScriptCommandOutcome::RedrawRequested)
+    }
+
     fn active_brush_id(&self) -> Option<BrushId> {
         self.brush_thread.active_brush_id()
     }
@@ -733,12 +759,29 @@ impl ScriptHost for App {
                         .map_err(|error| error.to_string())
                 })
             }
+            ScriptCommand::CreateLayerAboveActive => {
+                self.run_layer_command(true, true, |workspace| {
+                    workspace
+                        .insert_layer_above_active()
+                        .map(ScriptCommandOutcome::DocumentNode)
+                        .map_err(|error| error.to_string())
+                })
+            }
+            ScriptCommand::CreateGroupAboveActive => {
+                self.run_layer_command(true, true, |workspace| {
+                    workspace
+                        .insert_group_above_active()
+                        .map(ScriptCommandOutcome::DocumentNode)
+                        .map_err(|error| error.to_string())
+                })
+            }
             ScriptCommand::DeleteNode(node_id) => self.run_layer_command(true, true, |workspace| {
                 workspace
                     .delete_node(node_id)
                     .map(|()| ScriptCommandOutcome::RedrawRequested)
                     .map_err(|error| error.to_string())
             }),
+            ScriptCommand::DeleteActiveNode => self.delete_active_node_from_script(),
             ScriptCommand::MoveNode {
                 node_id,
                 new_parent,
@@ -1764,6 +1807,53 @@ mod tests {
         assert!(!workspace.layer_tree().contains_node(layer));
         assert!(workspace.storage().image(group_image).is_none());
         assert!(workspace.storage().image(layer_image).is_none());
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
+        assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn script_host_creates_nodes_above_active_node_and_deletes_active_node() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        let root_node = app.workspace.as_ref().unwrap().layer_tree().root_id();
+
+        let no_op = app
+            .execute_script_command(ScriptCommand::DeleteActiveNode)
+            .unwrap();
+        let ScriptCommandOutcome::DocumentNode(first) = app
+            .execute_script_command(ScriptCommand::CreateLayerAboveActive)
+            .unwrap()
+        else {
+            panic!("create layer should return the new node id");
+        };
+        let ScriptCommandOutcome::DocumentNode(second) = app
+            .execute_script_command(ScriptCommand::CreateLayerAboveActive)
+            .unwrap()
+        else {
+            panic!("create layer should return the new node id");
+        };
+        app.execute_script_command(ScriptCommand::SetActiveNode(first))
+            .unwrap();
+        let ScriptCommandOutcome::DocumentNode(group) = app
+            .execute_script_command(ScriptCommand::CreateGroupAboveActive)
+            .unwrap()
+        else {
+            panic!("create group should return the new node id");
+        };
+        let deleted = app
+            .execute_script_command(ScriptCommand::DeleteActiveNode)
+            .unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        assert_eq!(no_op, ScriptCommandOutcome::None);
+        assert_eq!(deleted, ScriptCommandOutcome::RedrawRequested);
+        assert_eq!(
+            workspace.layer_tree().child_ids(root_node).unwrap(),
+            &[first, second]
+        );
+        assert_eq!(workspace.layer_tree().active_node_id(), root_node);
+        assert!(!workspace.layer_tree().contains_node(group));
         assert!(app.undo_stack.is_empty());
         assert!(app.redo_stack.is_empty());
         assert!(app.frame_scheduler.has_requested_redraw());

@@ -213,6 +213,28 @@ impl DocumentWorkspace {
         Ok(node)
     }
 
+    pub fn insert_layer_above_active(
+        &mut self,
+    ) -> Result<DocumentNodeId, DocumentWorkspaceLayerError> {
+        let (parent_id, index) = self.active_insert_position()?;
+        let image = self.register_layer_image(ImageRole::Primitive)?;
+        let node = self.layers.insert_layer(parent_id, index, image)?;
+        self.layers.set_active_node(node)?;
+        self.invalidate_layer_composite();
+        Ok(node)
+    }
+
+    pub fn insert_group_above_active(
+        &mut self,
+    ) -> Result<DocumentNodeId, DocumentWorkspaceLayerError> {
+        let (parent_id, index) = self.active_insert_position()?;
+        let image = self.register_layer_image(ImageRole::Derived(GraphCommand::new(Vec::new())))?;
+        let node = self.layers.insert_group(parent_id, index, image)?;
+        self.layers.set_active_node(node)?;
+        self.invalidate_layer_composite();
+        Ok(node)
+    }
+
     pub fn set_active_node(
         &mut self,
         node_id: DocumentNodeId,
@@ -271,6 +293,15 @@ impl DocumentWorkspace {
         self.layers.delete_node(node_id)?;
         self.invalidate_layer_composite();
         Ok(())
+    }
+
+    pub fn delete_active_node(&mut self) -> Result<bool, DocumentWorkspaceLayerError> {
+        let active = self.layers.active_node_id();
+        if active == self.layers.root_id() {
+            return Ok(false);
+        }
+        self.delete_node(active)?;
+        Ok(true)
     }
 
     pub fn render_layer_tree_full<B>(
@@ -460,6 +491,23 @@ impl DocumentWorkspace {
             .map(|id| id.value())
             .max()
             .unwrap_or(0)
+    }
+
+    fn active_insert_position(
+        &self,
+    ) -> Result<(DocumentNodeId, usize), DocumentWorkspaceLayerError> {
+        let active = self.layers.active_node_id();
+        let active_node = self.layers.node(active)?;
+        match active_node.parent() {
+            Some(parent_id) => {
+                let index = self.layers.child_index(parent_id, active)?;
+                Ok((parent_id, index + 1))
+            }
+            None => {
+                let root = self.layers.root_id();
+                Ok((root, self.layers.child_ids(root)?.len()))
+            }
+        }
     }
 
     fn invalidate_layer_composite(&mut self) {
@@ -1229,6 +1277,39 @@ mod tests {
         assert_eq!(workspace.layer_tree().active_node_id(), root_node);
         assert!(!workspace.layer_tree().contains_node(layer));
         assert!(workspace.storage().image(group_image).is_none());
+        assert!(workspace.storage().image(layer_image).is_none());
+    }
+
+    #[test]
+    fn workspace_inserts_new_nodes_above_active_node() {
+        let mut workspace = DocumentWorkspace::blank(320, 240).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+
+        let first = workspace.insert_layer_above_active().unwrap();
+        let second = workspace.insert_layer_above_active().unwrap();
+        workspace.set_active_node(first).unwrap();
+        let group = workspace.insert_group_above_active().unwrap();
+
+        assert_eq!(
+            workspace.layer_tree().child_ids(root_node).unwrap(),
+            &[first, group, second]
+        );
+        assert_eq!(workspace.layer_tree().active_node_id(), group);
+        assert_eq!(workspace.active_paint_image(), None);
+    }
+
+    #[test]
+    fn workspace_deletes_active_node_without_deleting_root() {
+        let mut workspace = DocumentWorkspace::blank(320, 240).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+
+        assert!(!workspace.delete_active_node().unwrap());
+        let layer = workspace.append_layer(root_node).unwrap();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+
+        assert!(workspace.delete_active_node().unwrap());
+        assert_eq!(workspace.layer_tree().active_node_id(), root_node);
+        assert!(!workspace.layer_tree().contains_node(layer));
         assert!(workspace.storage().image(layer_image).is_none());
     }
 
