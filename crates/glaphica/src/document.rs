@@ -16,7 +16,7 @@ use gla_session::{DrawCommit, DrawHistory, DrawRecordId, DrawSession, SessionErr
 use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
 
-use crate::AppView;
+use crate::{AppView, ScriptDrawCommand, ScriptDrawSession};
 
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
 pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 1024;
@@ -282,6 +282,33 @@ impl DocumentWorkspace {
         session.commit(history)
     }
 
+    pub fn run_script_draw_session<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        request: &ScriptDrawSession,
+    ) -> Result<Option<DrawCommit>, SessionError>
+    where
+        B: RenderBackend,
+    {
+        let mut session = self.begin_session(&request.ir)?;
+        for frame_request in &request.frames {
+            let mut frame = session.begin_frame();
+            for command in &frame_request.commands {
+                match *command {
+                    ScriptDrawCommand::DrawOn { target, input } => {
+                        frame.draw_on(target, input)?;
+                    }
+                    ScriptDrawCommand::DrawDab { shown_image, input } => {
+                        frame.draw_dab(shown_image, input)?;
+                    }
+                }
+            }
+            frame.flush(backend)?;
+        }
+        session.commit(history)
+    }
+
     pub fn apply_draw_record<B>(
         &mut self,
         history: &mut DrawHistory,
@@ -533,6 +560,8 @@ fn default_canvas_format() -> GlaFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ScriptDrawCommand, ScriptDrawFrame, ScriptDrawSession};
+    use gla_draw_on::DrawOnInput;
     use gla_renderer::{Pass, RenderBackend};
     use std::fmt::{Display, Formatter};
 
@@ -875,6 +904,39 @@ mod tests {
         assert_ne!(undo_commit.record_id, redo_commit.record_id);
         assert_eq!(workspace.root_dirty_tile_indices(&undo_commit), vec![0]);
         assert!(!workspace.root_present_tiles().unwrap().is_empty());
+    }
+
+    #[test]
+    fn script_draw_session_runs_frames_and_commits_document_edit() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let root = workspace.root();
+        let request = ScriptDrawSession::with_frames(
+            workspace.root_replace_circle_ir(),
+            vec![ScriptDrawFrame::new(vec![ScriptDrawCommand::DrawOn {
+                target: root,
+                input: DrawOnInput::replace_circle_4d(
+                    24.0,
+                    32.0,
+                    8.0,
+                    8.0,
+                    PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+                ),
+            }])],
+        );
+
+        let commit = workspace
+            .run_script_draw_session(&mut history, &mut backend, &request)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(commit.version, DocumentVersionId::new(2));
+        assert_eq!(workspace.root_dirty_tile_indices(&commit), vec![0]);
+        assert!(backend.submitted_passes().any(|pass| matches!(
+            pass,
+            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+        )));
     }
 
     #[test]

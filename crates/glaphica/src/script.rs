@@ -2,6 +2,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use gla_core::CanvasInput;
+use gla_draw_on::DrawOnInput;
+use gla_ir::ImageId;
 use gla_ir::{DocumentVersionId, DrawSessionIR, RegistryPatch};
 
 use crate::{ActiveTool, RoundBrushSettings};
@@ -28,7 +30,7 @@ pub enum ScriptValue {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptCommand {
     ApplyRegistryPatch(RegistryPatch),
-    RunDrawSession(DrawSessionIR),
+    RunDrawSession(ScriptDrawSession),
     SetActiveTool(ActiveTool),
     SetRoundBrushSettings(RoundBrushSettings),
     BeginStroke(CanvasInput),
@@ -38,6 +40,29 @@ pub enum ScriptCommand {
     Undo,
     Redo,
     RequestRedraw,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptDrawSession {
+    pub ir: DrawSessionIR,
+    pub frames: Vec<ScriptDrawFrame>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScriptDrawFrame {
+    pub commands: Vec<ScriptDrawCommand>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScriptDrawCommand {
+    DrawOn {
+        target: ImageId,
+        input: DrawOnInput,
+    },
+    DrawDab {
+        shown_image: ImageId,
+        input: CanvasInput,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -105,6 +130,25 @@ impl ScriptModuleSource {
             name: name.into(),
             source: source.into(),
         }
+    }
+}
+
+impl ScriptDrawSession {
+    pub fn new(ir: DrawSessionIR) -> Self {
+        Self {
+            ir,
+            frames: Vec::new(),
+        }
+    }
+
+    pub fn with_frames(ir: DrawSessionIR, frames: Vec<ScriptDrawFrame>) -> Self {
+        Self { ir, frames }
+    }
+}
+
+impl ScriptDrawFrame {
+    pub fn new(commands: Vec<ScriptDrawCommand>) -> Self {
+        Self { commands }
     }
 }
 
@@ -193,8 +237,9 @@ impl From<ScriptHostError> for ScriptRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError,
-        ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError, ScriptValue,
+        NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptDrawSession, ScriptHost,
+        ScriptHostError, ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError,
+        ScriptValue,
     };
     use crate::{ActiveTool, BrushId, RoundBrushSettings};
     use gla_core::{CanvasCoordF, CanvasInput};
@@ -276,7 +321,7 @@ mod tests {
         };
 
         let commands = vec![
-            ScriptCommand::RunDrawSession(ir.clone()),
+            ScriptCommand::RunDrawSession(ScriptDrawSession::new(ir.clone())),
             ScriptCommand::SetActiveTool(ActiveTool::Brush(BrushId::DEFAULT)),
             ScriptCommand::SetRoundBrushSettings(RoundBrushSettings::default()),
             ScriptCommand::BeginStroke(input),
@@ -287,7 +332,7 @@ mod tests {
             ScriptCommand::RequestRedraw,
         ];
 
-        assert!(matches!(&commands[0], ScriptCommand::RunDrawSession(found) if found == &ir));
+        assert!(matches!(&commands[0], ScriptCommand::RunDrawSession(found) if found.ir == ir));
         assert!(matches!(
             commands[2],
             ScriptCommand::SetRoundBrushSettings(_)

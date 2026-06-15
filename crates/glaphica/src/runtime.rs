@@ -18,7 +18,8 @@ use winit::{
 use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
-    ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet,
+    ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
+    SurfaceRuntime, ToolSet,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
     stroke::BrushThreadRuntime,
@@ -284,6 +285,35 @@ impl App {
         Ok(ScriptCommandOutcome::DocumentVersion(version))
     }
 
+    fn run_draw_session_from_script(
+        &mut self,
+        request: ScriptDrawSession,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        if self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot run a draw session while a stroke is active".to_owned(),
+            });
+        }
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot run a draw session before the document workspace and GPU exist"
+                    .to_owned(),
+            });
+        };
+        let commit = workspace
+            .run_script_draw_session(&mut self.history, gpu.renderer_mut(), &request)
+            .map_err(|error| ScriptHostError::Runtime {
+                reason: error.to_string(),
+            })?;
+        let Some(commit) = commit else {
+            return Ok(ScriptCommandOutcome::None);
+        };
+        self.undo_stack.push(commit.record_id);
+        self.redo_stack.clear();
+        self.request_full_screen_update();
+        Ok(ScriptCommandOutcome::DocumentVersion(commit.version))
+    }
+
     fn active_brush_id(&self) -> Option<BrushId> {
         self.brush_thread.active_brush_id()
     }
@@ -528,9 +558,7 @@ impl ScriptHost for App {
             ScriptCommand::ApplyRegistryPatch(patch) => {
                 self.apply_registry_patch_from_script(patch)
             }
-            ScriptCommand::RunDrawSession(_) => Err(ScriptHostError::UnsupportedCommand {
-                command: "RunDrawSession",
-            }),
+            ScriptCommand::RunDrawSession(request) => self.run_draw_session_from_script(request),
             ScriptCommand::SetActiveTool(active_tool) => {
                 self.set_active_tool_from_script(active_tool)?;
                 Ok(ScriptCommandOutcome::None)
@@ -1065,8 +1093,8 @@ mod tests {
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
         BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
-        RoundBrushSettings, ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError, Tool,
-        ToolSet, load_trace_file, save_trace_file,
+        RoundBrushSettings, ScriptCommand, ScriptCommandOutcome, ScriptDrawSession, ScriptHost,
+        ScriptHostError, Tool, ToolSet, load_trace_file, save_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -1307,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn script_host_reports_unimplemented_document_commands() {
+    fn script_host_rejects_draw_session_before_gpu_workspace_exists() {
         let mut app = App::new(AppRuntimeConfig::default());
         let ir = DrawSessionIR {
             expected_document_version: DocumentVersionId::new(7),
@@ -1318,15 +1346,14 @@ mod tests {
         };
 
         let error = app
-            .execute_script_command(ScriptCommand::RunDrawSession(ir))
+            .execute_script_command(ScriptCommand::RunDrawSession(ScriptDrawSession::new(ir)))
             .unwrap_err();
 
-        assert_eq!(
+        assert!(matches!(
             error,
-            ScriptHostError::UnsupportedCommand {
-                command: "RunDrawSession"
-            }
-        );
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("before the document workspace and GPU exist")
+        ));
     }
 
     #[test]
