@@ -175,6 +175,53 @@ impl Default for RoundBrushSettings {
     }
 }
 
+impl RoundBrushSettings {
+    pub fn with_base_radius_px(mut self, base_radius_px: f32) -> Self {
+        self.base_radius_px = base_radius_px;
+        self
+    }
+
+    pub fn with_spacing_ratio(mut self, spacing_ratio: f32) -> Self {
+        self.spacing_ratio = spacing_ratio;
+        self
+    }
+
+    pub fn with_base_hardness(mut self, base_hardness: f32) -> Self {
+        self.base_hardness = base_hardness;
+        self
+    }
+
+    pub fn with_base_flow(mut self, base_flow: f32) -> Self {
+        self.base_flow = base_flow;
+        self
+    }
+
+    pub fn with_base_opacity(mut self, base_opacity: f32) -> Self {
+        self.base_opacity = base_opacity;
+        self
+    }
+
+    pub fn with_tint(mut self, tint: [f32; 3]) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    pub fn with_modulation_curve(
+        mut self,
+        variable: RoundBrushDabVariable,
+        feature: RoundBrushInputFeature,
+        curve: ModulationCurve,
+    ) -> Self {
+        self.modulations = self.modulations.with_curve(variable, feature, curve);
+        self
+    }
+
+    pub fn with_modulations(mut self, modulations: RoundBrushModulationSet) -> Self {
+        self.modulations = modulations;
+        self
+    }
+}
+
 impl CurvePoint {
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
@@ -418,6 +465,35 @@ mod tests {
             settings
                 .modulations
                 .sample_factor(RoundBrushDabVariable::Flow, 0.25, 0.0, 0.5, 0.5),
+            0.25
+        );
+    }
+
+    #[test]
+    fn round_brush_settings_builders_preserve_dev_style_configuration() {
+        let settings = RoundBrushSettings::default()
+            .with_base_radius_px(12.0)
+            .with_spacing_ratio(0.8)
+            .with_base_hardness(0.4)
+            .with_base_flow(0.6)
+            .with_base_opacity(0.7)
+            .with_tint([0.2, 0.3, 0.4])
+            .with_modulation_curve(
+                RoundBrushDabVariable::Radius,
+                RoundBrushInputFeature::Pressure,
+                ModulationCurve::identity(),
+            );
+
+        assert_eq!(settings.base_radius_px, 12.0);
+        assert_eq!(settings.spacing_ratio, 0.8);
+        assert_eq!(settings.base_hardness, 0.4);
+        assert_eq!(settings.base_flow, 0.6);
+        assert_eq!(settings.base_opacity, 0.7);
+        assert_eq!(settings.tint, [0.2, 0.3, 0.4]);
+        assert_eq!(
+            settings
+                .modulations
+                .sample_factor(RoundBrushDabVariable::Radius, 0.25, 0.0, 0.5, 0.5),
             0.25
         );
     }

@@ -45,7 +45,12 @@ pub use script::{
     script_command_plan_from_json_str, script_command_plan_to_json_string_pretty,
     script_draw_session_from_json_str, script_draw_session_to_json_string_pretty,
 };
-pub use stroke::{BrushInput, BrushInputBlock, BrushInputBlockList, BrushInputError};
+pub use stroke::{
+    BrushInput, BrushInputBlock, BrushInputBlockList, BrushInputError, BrushInputProcessor,
+    BrushStrokeInputProcessor, FrozenCanvasSample, ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT,
+    RoundBrushInputProcessor, RoundMergeSettings, encode_round_apply_payload,
+    encode_round_merge_payload,
+};
 pub use tool::{
     ActiveTool, BrushId, BrushSettings, CurvePoint, CurveValidationError, ModulationCurve,
     RoundBrushDabVariable, RoundBrushInputFeature, RoundBrushModulationSet, RoundBrushSettings,

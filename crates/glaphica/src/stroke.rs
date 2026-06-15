@@ -1,3 +1,4 @@
+use bytemuck::{Pod, Zeroable};
 use gla_color::{PremultipliedRgbaF32, apply_value_mask_to_premultiplied_rgba};
 use gla_core::{CanvasCoordF, CanvasInput};
 use std::error::Error;
@@ -7,16 +8,21 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_cha
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    ActiveTool, BrushId, BrushSettings, OverwriteRingConsumer, OverwriteRingProducer,
-    ReplaceCircleStrokeSample, RoundBrushDabVariable, ToolSet, create_overwrite_ring,
+    ActiveTool, BrushId, BrushSettings, ModulationCurve, OverwriteRingConsumer,
+    OverwriteRingProducer, ReplaceCircleStrokeSample, RoundBrushDabVariable,
+    RoundBrushInputFeature, RoundBrushSettings, ToolSet, create_overwrite_ring,
 };
 
 const MIN_SPACING_RATIO: f32 = 0.05;
 const MIN_SPACING_PX: f32 = 1.0;
 const SAME_POSITION_EPSILON: f32 = 1e-5;
 const REPLACE_CIRCLE_BLOCK_VALUE_COUNT: usize = 7;
+pub const ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT: usize = 11;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
+const ROUND_DAB_KERNEL_A: f32 = 1.5;
 
 #[derive(Debug)]
 pub(crate) struct BrushWorker {
@@ -43,21 +49,54 @@ pub(crate) enum BrushThreadRuntimeError {
     ThreadPanicked,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrushInputBlock {
     values: Vec<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrushInputBlockList {
     brush_id: BrushId,
     blocks: Vec<BrushInputBlock>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrushInput {
     pub brush_id: BrushId,
     pub blocks: BrushInputBlockList,
+}
+
+pub trait BrushInputProcessor: Send + Sync {
+    fn begin_stroke(&self) -> Box<dyn BrushStrokeInputProcessor>;
+
+    fn max_affected_radius_px(&self) -> u32;
+
+    fn block_center(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+    ) -> Result<CanvasCoordF, BrushInputError>;
+
+    fn encode_apply_dab_payload(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+        slot_canvas_origin: CanvasCoordF,
+    ) -> Result<Vec<u8>, BrushInputError>;
+
+    fn merge_payload(&self) -> Vec<u8>;
+}
+
+pub trait BrushStrokeInputProcessor: Send {
+    fn reset(&mut self);
+
+    fn push_canvas_inputs(&mut self, canvas_input: &[CanvasInput]) -> Result<(), BrushInputError>;
+
+    fn finish_stroke(&mut self) -> Result<(), BrushInputError>;
+
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample>;
+
+    fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +116,60 @@ pub enum BrushInputError {
         block_index: usize,
         value_index: usize,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrozenCanvasSample {
+    pub time_ns: u64,
+    pub position: CanvasCoordF,
+    pub pressure: f32,
+    pub tilt: (f32, f32),
+    pub twist: f32,
+    pub velocity: CanvasCoordF,
+    pub acceleration: CanvasCoordF,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundBrushInputProcessor {
+    settings: RoundBrushSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundMergeSettings {
+    pub tint: [f32; 3],
+    pub opacity: f32,
+    pub stroke_flow: f32,
+    pub spacing_ratio: f32,
+    pub hardness: f32,
+}
+
+#[derive(Debug, Clone)]
+struct RoundBrushStrokeInputProcessor {
+    settings: RoundBrushSettings,
+    inputs: Vec<CanvasInput>,
+    emitted_sample_count: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+struct RoundApplyPayload {
+    center_local_x: f32,
+    center_local_y: f32,
+    radius_px: f32,
+    flow: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+struct RoundMergePayload {
+    tint_and_opacity: [f32; 4],
+    coverage_params: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RoundDabParameters {
+    radius_px: f32,
+    flow: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -507,6 +600,196 @@ impl BrushInput {
     }
 }
 
+pub fn encode_round_apply_payload(center_local: [f32; 2], radius_px: f32, flow: f32) -> Vec<u8> {
+    bytemuck::bytes_of(&RoundApplyPayload {
+        center_local_x: center_local[0],
+        center_local_y: center_local[1],
+        radius_px,
+        flow,
+    })
+    .to_vec()
+}
+
+pub fn encode_round_merge_payload(settings: RoundMergeSettings) -> Vec<u8> {
+    bytemuck::bytes_of(&build_round_merge_payload(settings)).to_vec()
+}
+
+impl Default for RoundBrushInputProcessor {
+    fn default() -> Self {
+        Self::from_settings(RoundBrushSettings::default())
+    }
+}
+
+impl From<RoundBrushSettings> for RoundBrushInputProcessor {
+    fn from(settings: RoundBrushSettings) -> Self {
+        Self::from_settings(settings)
+    }
+}
+
+impl RoundBrushInputProcessor {
+    pub fn from_settings(settings: RoundBrushSettings) -> Self {
+        Self { settings }
+    }
+
+    pub fn settings(&self) -> RoundBrushSettings {
+        self.settings.clone()
+    }
+
+    pub fn with_base_radius_px(mut self, base_radius_px: f32) -> Self {
+        self.settings.base_radius_px = base_radius_px;
+        self
+    }
+
+    pub fn with_spacing_ratio(mut self, spacing_ratio: f32) -> Self {
+        self.settings.spacing_ratio = spacing_ratio;
+        self
+    }
+
+    pub fn with_base_hardness(mut self, base_hardness: f32) -> Self {
+        self.settings.base_hardness = base_hardness;
+        self
+    }
+
+    pub fn with_base_flow(mut self, base_flow: f32) -> Self {
+        self.settings.base_flow = base_flow;
+        self
+    }
+
+    pub fn with_base_opacity(mut self, base_opacity: f32) -> Self {
+        self.settings.base_opacity = base_opacity;
+        self
+    }
+
+    pub fn with_tint(mut self, tint: [f32; 3]) -> Self {
+        self.settings.tint = tint;
+        self
+    }
+
+    pub fn with_modulation_curve(
+        mut self,
+        variable: RoundBrushDabVariable,
+        feature: RoundBrushInputFeature,
+        curve: ModulationCurve,
+    ) -> Self {
+        self.settings.modulations = self
+            .settings
+            .modulations
+            .with_curve(variable, feature, curve);
+        self
+    }
+
+    pub fn with_modulations(mut self, modulations: crate::RoundBrushModulationSet) -> Self {
+        self.settings.modulations = modulations;
+        self
+    }
+}
+
+impl BrushInputProcessor for RoundBrushInputProcessor {
+    fn begin_stroke(&self) -> Box<dyn BrushStrokeInputProcessor> {
+        Box::new(RoundBrushStrokeInputProcessor {
+            settings: self.settings.clone(),
+            inputs: Vec::new(),
+            emitted_sample_count: 0,
+        })
+    }
+
+    fn max_affected_radius_px(&self) -> u32 {
+        self.settings.base_radius_px.ceil().max(1.0) as u32
+    }
+
+    fn block_center(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+    ) -> Result<CanvasCoordF, BrushInputError> {
+        let values = round_brush_block_values(input, block_index)?;
+        Ok(CanvasCoordF::new(values[0], values[1]))
+    }
+
+    fn encode_apply_dab_payload(
+        &self,
+        input: &BrushInput,
+        block_index: usize,
+        slot_canvas_origin: CanvasCoordF,
+    ) -> Result<Vec<u8>, BrushInputError> {
+        let values = round_brush_block_values(input, block_index)?;
+        Ok(encode_round_apply_payload(
+            [
+                values[0] - slot_canvas_origin.x,
+                values[1] - slot_canvas_origin.y,
+            ],
+            values[2].max(0.0),
+            values[3],
+        ))
+    }
+
+    fn merge_payload(&self) -> Vec<u8> {
+        encode_round_merge_payload(RoundMergeSettings {
+            tint: self.settings.tint,
+            opacity: self.settings.base_opacity,
+            stroke_flow: self.settings.base_flow,
+            spacing_ratio: self.settings.spacing_ratio,
+            hardness: self.settings.base_hardness,
+        })
+    }
+}
+
+impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
+    fn reset(&mut self) {
+        self.inputs.clear();
+        self.emitted_sample_count = 0;
+    }
+
+    fn push_canvas_inputs(&mut self, canvas_input: &[CanvasInput]) -> Result<(), BrushInputError> {
+        self.inputs.extend_from_slice(canvas_input);
+        Ok(())
+    }
+
+    fn finish_stroke(&mut self) -> Result<(), BrushInputError> {
+        Ok(())
+    }
+
+    fn current_drawing_sample(&self) -> Option<FrozenCanvasSample> {
+        let (previous, current) = match self.inputs.as_slice() {
+            [] => return None,
+            [current] => (None, *current),
+            inputs => (
+                inputs.get(inputs.len().saturating_sub(2)).copied(),
+                *inputs.last()?,
+            ),
+        };
+        Some(frozen_canvas_sample(previous, current))
+    }
+
+    fn drain_brush_input(&mut self) -> Result<Option<BrushInput>, BrushInputError> {
+        let brush_settings = BrushSettings::from_round_brush(self.settings.clone());
+        let sampled_inputs = sample_canvas_inputs(&self.inputs, &brush_settings);
+        if self.emitted_sample_count >= sampled_inputs.len() {
+            return Ok(None);
+        }
+
+        let mut blocks = BrushInputBlockList::new(BrushId::DEFAULT);
+        for absolute_index in self.emitted_sample_count..sampled_inputs.len() {
+            let input = sampled_inputs[absolute_index];
+            let block_index = blocks.blocks().len();
+            push_round_brush_block(
+                &mut blocks,
+                block_index,
+                input,
+                previous_input(&sampled_inputs, absolute_index),
+                &self.settings,
+            )?;
+        }
+        self.emitted_sample_count = sampled_inputs.len();
+
+        if blocks.blocks().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(BrushInput::new(blocks)))
+        }
+    }
+}
+
 impl Display for BrushInputError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -798,6 +1081,174 @@ fn replace_circle_sample_for_input(
     }
 }
 
+fn push_round_brush_block(
+    blocks: &mut BrushInputBlockList,
+    block_index: usize,
+    input: CanvasInput,
+    previous_input: Option<CanvasInput>,
+    settings: &RoundBrushSettings,
+) -> Result<(), BrushInputError> {
+    let dab = round_dab_parameters(input, previous_input, settings);
+    let values = vec![
+        input.position.x,
+        input.position.y,
+        dab.radius_px,
+        dab.flow,
+        settings.base_flow,
+        sanitized_spacing_ratio(settings.spacing_ratio),
+        settings.base_hardness,
+        settings.base_opacity,
+        settings.tint[0],
+        settings.tint[1],
+        settings.tint[2],
+    ];
+
+    for (value_index, value) in values.iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(BrushInputError::InvalidBlockValue {
+                brush_id: BrushId::DEFAULT,
+                block_index,
+                value_index,
+            });
+        }
+    }
+
+    blocks.push_block(values);
+    Ok(())
+}
+
+fn round_dab_parameters(
+    input: CanvasInput,
+    previous_input: Option<CanvasInput>,
+    settings: &RoundBrushSettings,
+) -> RoundDabParameters {
+    let pressure = input.pressure.clamp(0.0, 1.0);
+    let tilt = normalize_tilt(input.tilt);
+    let twist = normalize_twist(input.twist);
+    let speed = normalized_input_speed(previous_input, input);
+    let radius_factor = settings
+        .modulations
+        .sample_factor(RoundBrushDabVariable::Radius, pressure, tilt, twist, speed)
+        .clamp(0.0, 1.0);
+    let flow_factor = settings
+        .modulations
+        .sample_factor(RoundBrushDabVariable::Flow, pressure, tilt, twist, speed)
+        .clamp(0.0, 1.0);
+
+    RoundDabParameters {
+        radius_px: settings.base_radius_px.max(0.0) * radius_factor,
+        flow: settings.base_flow.max(0.0) * flow_factor,
+    }
+}
+
+fn round_brush_block_values(
+    input: &BrushInput,
+    block_index: usize,
+) -> Result<&[f32], BrushInputError> {
+    if input.brush_id != BrushId::DEFAULT {
+        return Err(BrushInputError::WrongBrush {
+            expected: BrushId::DEFAULT,
+            actual: input.brush_id,
+        });
+    }
+    if input.blocks.brush_id() != input.brush_id {
+        return Err(BrushInputError::WrongBrush {
+            expected: input.brush_id,
+            actual: input.blocks.brush_id(),
+        });
+    }
+
+    let Some(block) = input.blocks.blocks().get(block_index) else {
+        return Err(BrushInputError::InvalidBlockLength {
+            brush_id: BrushId::DEFAULT,
+            block_index,
+            expected: block_index + 1,
+            actual: input.blocks.blocks().len(),
+        });
+    };
+    if block.values().len() != ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT {
+        return Err(BrushInputError::InvalidBlockLength {
+            brush_id: BrushId::DEFAULT,
+            block_index,
+            expected: ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT,
+            actual: block.values().len(),
+        });
+    }
+    for (value_index, value) in block.values().iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(BrushInputError::InvalidBlockValue {
+                brush_id: BrushId::DEFAULT,
+                block_index,
+                value_index,
+            });
+        }
+    }
+    Ok(block.values())
+}
+
+fn build_round_merge_payload(settings: RoundMergeSettings) -> RoundMergePayload {
+    let tint_and_opacity = [
+        settings.tint[0],
+        settings.tint[1],
+        settings.tint[2],
+        settings.opacity.clamp(0.0, 1.0),
+    ];
+    let stroke_flow = settings.stroke_flow.max(0.0);
+    let spacing_ratio = sanitized_spacing_ratio(settings.spacing_ratio);
+    let hardness = settings.hardness.clamp(0.0, 1.0);
+    let hardness_threshold_source =
+        round_hardness_threshold_source(stroke_flow, spacing_ratio, hardness);
+    RoundMergePayload {
+        tint_and_opacity,
+        coverage_params: [hardness_threshold_source, hardness, 0.0, 0.0],
+    }
+}
+
+fn round_hardness_threshold_source(stroke_flow: f32, spacing_ratio: f32, hardness: f32) -> f32 {
+    let stroke_flow = stroke_flow.max(0.0);
+    let hardness = hardness.clamp(0.0, 1.0);
+    if stroke_flow <= f32::EPSILON {
+        return 0.0;
+    }
+    if hardness >= 1.0 {
+        return 0.0;
+    }
+    round_stroke_source_at_distance(stroke_flow, spacing_ratio, hardness).max(f32::EPSILON)
+}
+
+fn round_stroke_source_at_distance(
+    stroke_flow: f32,
+    spacing_ratio: f32,
+    normalized_distance: f32,
+) -> f32 {
+    let stroke_flow = stroke_flow.max(0.0);
+    if stroke_flow <= f32::EPSILON {
+        return 0.0;
+    }
+    let spacing_ratio = sanitized_spacing_ratio(spacing_ratio);
+    let normalized_distance = normalized_distance.max(0.0);
+    if normalized_distance >= 1.0 {
+        return 0.0;
+    }
+
+    let mut source = round_dab_kernel(normalized_distance) * stroke_flow;
+    let mut offset = spacing_ratio;
+    while offset < 1.0 {
+        let previous_dab_source = round_dab_kernel(normalized_distance.hypot(offset)) * stroke_flow;
+        source += previous_dab_source * 2.0;
+        offset += spacing_ratio;
+    }
+    source
+}
+
+fn round_dab_kernel(relative_distance: f32) -> f32 {
+    if relative_distance >= 1.0 {
+        return 0.0;
+    }
+    let r2 = relative_distance * relative_distance;
+    (1.0 - r2).powf(ROUND_DAB_KERNEL_A)
+}
+
 fn sample_canvas_inputs(inputs: &[CanvasInput], settings: &BrushSettings) -> Vec<CanvasInput> {
     let Some(&first) = inputs.first() else {
         return Vec::new();
@@ -859,6 +1310,37 @@ fn previous_input(inputs: &[CanvasInput], index: usize) -> Option<CanvasInput> {
         .checked_sub(1)
         .and_then(|previous| inputs.get(previous))
         .copied()
+}
+
+fn frozen_canvas_sample(previous: Option<CanvasInput>, input: CanvasInput) -> FrozenCanvasSample {
+    let velocity = input_velocity(previous, input);
+    FrozenCanvasSample {
+        time_ns: input.time_ns,
+        position: input.position,
+        pressure: input.pressure,
+        tilt: input.tilt,
+        twist: input.twist,
+        velocity,
+        acceleration: CanvasCoordF::new(0.0, 0.0),
+    }
+}
+
+fn input_velocity(previous: Option<CanvasInput>, input: CanvasInput) -> CanvasCoordF {
+    let Some(previous) = previous else {
+        return CanvasCoordF::new(0.0, 0.0);
+    };
+    let delta_time_ns = input.time_ns.saturating_sub(previous.time_ns);
+    if delta_time_ns == 0 {
+        return CanvasCoordF::new(0.0, 0.0);
+    }
+    let seconds = delta_time_ns as f32 * 1e-9;
+    if seconds <= f32::EPSILON {
+        return CanvasCoordF::new(0.0, 0.0);
+    }
+    CanvasCoordF::new(
+        (input.position.x - previous.position.x) / seconds,
+        (input.position.y - previous.position.y) / seconds,
+    )
 }
 
 fn normalize_tilt(tilt: (f32, f32)) -> f32 {
@@ -1052,9 +1534,11 @@ fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInp
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRootStroke, BrushInput, BrushInputBlockList, BrushInputError, BrushThreadCommand,
-        BrushThreadRuntime, BrushThreadRuntimeError, BrushWorker, QueuedCanvasInput,
-        ReplaceCircleSampleCache,
+        ActiveRootStroke, BrushInput, BrushInputBlockList, BrushInputError, BrushInputProcessor,
+        BrushThreadCommand, BrushThreadRuntime, BrushThreadRuntimeError, BrushWorker,
+        QueuedCanvasInput, ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT, ReplaceCircleSampleCache,
+        RoundBrushInputProcessor, RoundMergeSettings, encode_round_apply_payload,
+        encode_round_merge_payload,
     };
     use crate::create_overwrite_ring;
     use crate::{
@@ -1245,6 +1729,99 @@ mod tests {
         assert_eq!(brush_input.blocks.brush_id(), BrushId::DEFAULT);
         assert_eq!(brush_input.blocks.blocks().len(), samples.len());
         assert_eq!(brush_input.replace_circle_samples().unwrap(), samples);
+    }
+
+    #[test]
+    fn round_brush_processor_produces_dev_style_blocks_from_canvas_input() {
+        let processor = RoundBrushInputProcessor::default();
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[
+                canvas_input(0, 0.0, 0.0, 0.5),
+                canvas_input(1_000_000, 12.0, 0.0, 0.5),
+            ])
+            .unwrap();
+        stroke.finish_stroke().unwrap();
+        let brush_input = stroke.drain_brush_input().unwrap().unwrap();
+
+        assert_eq!(brush_input.brush_id, BrushId::DEFAULT);
+        assert!(!brush_input.blocks.blocks().is_empty());
+        let values = brush_input.blocks.blocks()[0].values();
+        assert_eq!(values.len(), ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT);
+        assert_eq!(
+            &values[..],
+            &[0.0, 0.0, 5.0, 0.5, 1.0, 1.0, 0.7, 1.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn round_brush_processor_maps_modulation_and_encodes_apply_payload() {
+        let processor = RoundBrushInputProcessor::default().with_modulation_curve(
+            RoundBrushDabVariable::Radius,
+            RoundBrushInputFeature::Pressure,
+            ModulationCurve::identity(),
+        );
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[canvas_input(0, 8.0, 9.0, 0.5)])
+            .unwrap();
+        let brush_input = stroke.drain_brush_input().unwrap().unwrap();
+        let values = brush_input.blocks.blocks()[0].values();
+
+        assert_eq!(values[2], 2.5);
+        assert_eq!(values[3], 0.5);
+        assert_eq!(
+            processor.block_center(&brush_input, 0).unwrap(),
+            CanvasCoordF::new(8.0, 9.0)
+        );
+        assert_eq!(
+            processor
+                .encode_apply_dab_payload(&brush_input, 0, CanvasCoordF::new(4.0, 7.0))
+                .unwrap(),
+            encode_round_apply_payload([4.0, 2.0], 2.5, 0.5)
+        );
+    }
+
+    #[test]
+    fn round_brush_processor_merge_payload_uses_settings() {
+        let processor = RoundBrushInputProcessor::default()
+            .with_base_flow(0.9)
+            .with_base_hardness(0.4)
+            .with_base_opacity(0.6)
+            .with_spacing_ratio(0.8)
+            .with_tint([0.2, 0.3, 0.4]);
+
+        assert_eq!(
+            processor.merge_payload(),
+            encode_round_merge_payload(RoundMergeSettings {
+                tint: [0.2, 0.3, 0.4],
+                opacity: 0.6,
+                stroke_flow: 0.9,
+                spacing_ratio: 0.8,
+                hardness: 0.4,
+            })
+        );
+    }
+
+    #[test]
+    fn round_brush_processor_current_sample_reports_velocity() {
+        let processor = RoundBrushInputProcessor::default();
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[
+                canvas_input(0, 1.0, 2.0, 0.5),
+                canvas_input(1_000_000_000, 11.0, 2.0, 0.5),
+            ])
+            .unwrap();
+
+        let sample = stroke.current_drawing_sample().unwrap();
+
+        assert_eq!(sample.position, CanvasCoordF::new(11.0, 2.0));
+        assert_eq!(sample.velocity, CanvasCoordF::new(10.0, 0.0));
+        assert_eq!(sample.acceleration, CanvasCoordF::new(0.0, 0.0));
     }
 
     #[test]
