@@ -24,7 +24,7 @@ use crate::{
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
-    stroke::BrushThreadRuntime,
+    stroke::{BrushThreadRuntime, replace_circle_samples_for_inputs},
     trace::{
         AppTraceBlendMode, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState,
         AppTraceUiAction,
@@ -61,6 +61,29 @@ struct AppFramePerf {
     acquire_frame: Duration,
     present_surface: Duration,
     dirty_tile_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveStrokePreview {
+    brush_settings: BrushSettings,
+    inputs: Vec<CanvasInput>,
+}
+
+impl ActiveStrokePreview {
+    fn new(brush_settings: BrushSettings, input: CanvasInput) -> Self {
+        Self {
+            brush_settings,
+            inputs: vec![input],
+        }
+    }
+
+    fn push_input(&mut self, input: CanvasInput) {
+        self.inputs.push(input);
+    }
+
+    fn replace_circle_samples(&self) -> Vec<crate::ReplaceCircleStrokeSample> {
+        replace_circle_samples_for_inputs(&self.inputs, self.brush_settings)
+    }
 }
 
 impl Default for AppRuntimeConfig {
@@ -167,6 +190,7 @@ struct App {
     redo_stack: Vec<DrawRecordId>,
     frame_scheduler: AppFrameScheduler,
     brush_thread: BrushThreadRuntime,
+    active_stroke_preview: Option<ActiveStrokePreview>,
     trace: AppTraceState,
     primary_down: bool,
     middle_down: bool,
@@ -202,6 +226,7 @@ impl App {
             redo_stack: Vec::new(),
             frame_scheduler: AppFrameScheduler::new(),
             brush_thread,
+            active_stroke_preview: None,
             trace,
             primary_down: false,
             middle_down: false,
@@ -281,6 +306,9 @@ impl App {
             });
         }
         self.brush_thread.push_canvas_input(input);
+        self.active_stroke_preview =
+            Some(ActiveStrokePreview::new(self.config.brush_settings, input));
+        self.refresh_active_stroke_preview();
         Ok(())
     }
 
@@ -291,7 +319,49 @@ impl App {
             });
         }
         self.brush_thread.push_canvas_input(input);
+        if let Some(preview) = self.active_stroke_preview.as_mut() {
+            preview.push_input(input);
+        } else {
+            self.active_stroke_preview =
+                Some(ActiveStrokePreview::new(self.config.brush_settings, input));
+        }
+        self.refresh_active_stroke_preview();
         Ok(())
+    }
+
+    fn refresh_active_stroke_preview(&mut self) {
+        let Some(preview) = self.active_stroke_preview.as_ref() else {
+            return;
+        };
+        let samples = preview.replace_circle_samples();
+        if samples.is_empty() {
+            return;
+        }
+        self.refresh_layer_composite_if_needed();
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            return;
+        };
+        match workspace.render_stroke_preview(gpu.renderer_mut(), samples) {
+            Ok(dirty_tiles) if !dirty_tiles.is_empty() => {
+                self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("stroke preview render failed: {error}"),
+        }
+    }
+
+    fn clear_active_stroke_preview_cache(&mut self) {
+        self.active_stroke_preview = None;
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            return;
+        };
+        match workspace.clear_stroke_preview(gpu.renderer_mut()) {
+            Ok(dirty_tiles) if !dirty_tiles.is_empty() => {
+                self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("stroke preview clear failed: {error}"),
+        }
     }
 
     fn set_active_tool_from_script(
@@ -310,6 +380,7 @@ impl App {
         }
         self.config.active_tool = active_tool;
         self.primary_down = false;
+        self.clear_active_stroke_preview_cache();
         Ok(())
     }
 
@@ -317,6 +388,7 @@ impl App {
         let brush_settings = BrushSettings::from_round_brush(settings);
         self.config.brush_settings = brush_settings;
         self.brush_thread.update_brush_settings(brush_settings);
+        self.clear_active_stroke_preview_cache();
     }
 
     fn apply_registry_patch_from_script(
@@ -595,6 +667,14 @@ impl App {
             self.brush_thread.restore_active_stroke(stroke);
             return None;
         };
+        self.active_stroke_preview = None;
+        match workspace.clear_stroke_preview(gpu.renderer_mut()) {
+            Ok(dirty_tiles) if !dirty_tiles.is_empty() => {
+                self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("stroke preview clear failed: {error}"),
+        }
         let samples = stroke.replace_circle_samples();
 
         let commit = match workspace.replace_circle_stroke_on_active_paint_target(
@@ -618,7 +698,11 @@ impl App {
     }
 
     fn cancel_active_stroke(&mut self) -> bool {
-        self.brush_thread.cancel_active_stroke()
+        let canceled = self.brush_thread.cancel_active_stroke();
+        if canceled {
+            self.clear_active_stroke_preview_cache();
+        }
+        canceled
     }
 
     fn cancel_stroke_from_window(&mut self) -> bool {
@@ -1708,6 +1792,11 @@ mod tests {
         app.begin_stroke_at(ScreenCoordF::new(12.0, 24.0));
         app.continue_stroke_at(ScreenCoordF::new(14.0, 28.0));
 
+        let preview_samples = app
+            .active_stroke_preview
+            .as_ref()
+            .unwrap()
+            .replace_circle_samples();
         let stroke = app.brush_thread.finish_active_stroke().unwrap();
         assert_eq!(stroke.brush_id(), BrushId::DEFAULT);
         assert_eq!(stroke.inputs().len(), 2);
@@ -1717,6 +1806,7 @@ mod tests {
         assert!(stroke.inputs()[1].time_ns > stroke.inputs()[0].time_ns);
 
         let samples = stroke.replace_circle_samples();
+        assert_eq!(preview_samples, samples);
         assert_eq!(samples[0].center, CanvasCoordF::new(1.0, 2.0));
         assert_eq!(samples[1].center, CanvasCoordF::new(2.0, 4.0));
         assert_eq!(samples[0].radius_px, BrushSettings::default().radius_px);
@@ -1756,8 +1846,10 @@ mod tests {
         app.begin_stroke_at(ScreenCoordF::new(10.0, 20.0));
 
         assert!(app.brush_thread.has_active_stroke());
+        assert!(app.active_stroke_preview.is_some());
         assert!(app.cancel_active_stroke());
         assert!(!app.brush_thread.has_active_stroke());
+        assert!(app.active_stroke_preview.is_none());
         assert!(!app.cancel_active_stroke());
     }
 
@@ -1810,12 +1902,14 @@ mod tests {
                 second_brush,
             )))
             .unwrap();
+        assert!(app.active_stroke_preview.is_none());
         app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(1, 1.0, 2.0, 1.0)))
             .unwrap();
         let finished = app.brush_thread.finish_active_stroke().unwrap();
 
         assert_eq!(outcome, ScriptCommandOutcome::None);
         assert_eq!(app.config.active_tool, ActiveTool::Brush(second_brush));
+        assert!(app.active_stroke_preview.is_some());
         assert_eq!(finished.brush_id(), second_brush);
     }
 

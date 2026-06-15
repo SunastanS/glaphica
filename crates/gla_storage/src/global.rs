@@ -380,6 +380,37 @@ impl GlobalStorage {
         Ok(())
     }
 
+    /// Inserts a derived cache image for transient renderer-owned state without
+    /// changing the document version. User-visible document image changes must
+    /// continue to use registry patches.
+    pub fn insert_unversioned_cache_image(
+        &mut self,
+        id: ImageId,
+        format: GlaFormat,
+        layout: gla_ir::ImageLayoutSpec,
+        command: GraphCommand,
+    ) -> Result<(), GlobalStorageError> {
+        if self.images.contains_key(&id) {
+            return Err(GlobalStorageError::DuplicateImage { id });
+        }
+        let layout = layout_from_spec(id, layout)?;
+        let mut specs = self.image_specs();
+        specs.insert(
+            id,
+            ImageSpec {
+                format,
+                layout,
+                role: ImageRole::Derived(command.clone()),
+            },
+        );
+        validate_specs(&specs)?;
+        let image = CacheImage::new_invalid(format, layout)
+            .map(|image| GlobalImage::Derived { image, command })
+            .map_err(|source| GlobalStorageError::ImageCreate { id, source })?;
+        self.images.insert(id, image);
+        Ok(())
+    }
+
     pub fn delete_images(&mut self, ids: &HashSet<ImageId>) -> Result<(), GlobalStorageError> {
         if ids.is_empty() {
             return Ok(());
@@ -688,6 +719,38 @@ mod tests {
             .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::SetRoot(id)]))
             .unwrap();
         assert_eq!(storage.version(), DocumentVersionId::new(2));
+    }
+
+    #[test]
+    fn unversioned_cache_image_insert_does_not_bump_document_version() {
+        let id = ImageId::new(1);
+        let cache = ImageId::new(2);
+        let mut storage = new_storage_with_format(format());
+        storage
+            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
+                id,
+                format: format(),
+                layout: layout_spec(),
+                role: ImageRole::Primitive,
+            }]))
+            .unwrap();
+        let version = storage.version();
+
+        storage
+            .insert_unversioned_cache_image(
+                cache,
+                format(),
+                layout_spec(),
+                GraphCommand::new(Vec::new()),
+            )
+            .unwrap();
+
+        assert_eq!(storage.version(), version);
+        assert!(storage.image(cache).unwrap().as_cache().is_some());
+        assert!(matches!(
+            storage.read_global_ref(cache, 0).unwrap_err(),
+            GlobalTileError::MissingMaterializedTile { id } if id == cache
+        ));
     }
 
     #[test]

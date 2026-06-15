@@ -338,19 +338,26 @@ impl FinishedRootStroke {
 
 impl ActiveRootStroke {
     fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
-        sample_canvas_inputs(&self.inputs, self.brush_settings)
-            .into_iter()
-            .map(|input| ReplaceCircleStrokeSample {
-                center: input.position,
-                radius_px: self.brush_settings.radius_px,
-                color: apply_value_mask_to_premultiplied_rgba(
-                    self.brush_settings.color,
-                    self.brush_settings.flow * input.pressure.clamp(0.0, 1.0),
-                    self.brush_settings.opacity,
-                ),
-            })
-            .collect()
+        replace_circle_samples_for_inputs(&self.inputs, self.brush_settings)
     }
+}
+
+pub(crate) fn replace_circle_samples_for_inputs(
+    inputs: &[CanvasInput],
+    brush_settings: BrushSettings,
+) -> Vec<ReplaceCircleStrokeSample> {
+    sample_canvas_inputs(inputs, brush_settings)
+        .into_iter()
+        .map(|input| ReplaceCircleStrokeSample {
+            center: input.position,
+            radius_px: brush_settings.radius_px,
+            color: apply_value_mask_to_premultiplied_rgba(
+                brush_settings.color,
+                brush_settings.flow * input.pressure.clamp(0.0, 1.0),
+                brush_settings.opacity,
+            ),
+        })
+        .collect()
 }
 
 fn sample_canvas_inputs(inputs: &[CanvasInput], settings: BrushSettings) -> Vec<CanvasInput> {
