@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures, TilePos};
 use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
 use gla_core::CanvasCoordF;
-use gla_draw_on::{DrawOnInput, DrawOnLoweringError, DrawOnPass};
+use gla_draw_on::{DrawOnInput, DrawOnLoweringError, DrawOnPass, DrawOnToolSpec};
 use gla_image::IMAGE_TILE_SIZE;
 use gla_ir::{
     DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, GraphCommand,
@@ -180,6 +180,27 @@ impl DocumentWorkspace {
 
     pub fn storage_mut(&mut self) -> &mut GlobalStorage {
         &mut self.storage
+    }
+
+    pub fn ensure_draw_on_tool_atlases<S>(
+        &mut self,
+        tools: impl IntoIterator<Item = DrawOnToolKind>,
+        textures: &mut S,
+    ) -> Result<(), NewAtlasError<S::Error>>
+    where
+        S: AtlasTextureStore,
+    {
+        let mut formats = HashSet::new();
+        for format in tools.into_iter().map(DrawOnToolKind::target_format) {
+            if formats.insert(format) && self.storage.tiles().atlas_for_format(format).is_none() {
+                self.storage.tiles_mut().new_atlas(
+                    initial_atlas_layout(self.layout, 0),
+                    format,
+                    textures,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn root(&self) -> ImageId {

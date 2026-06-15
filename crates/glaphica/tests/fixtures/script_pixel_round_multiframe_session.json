@@ -1,0 +1,100 @@
+{
+  "ir": {
+    "expected_document_version": 1,
+    "doc_images": [
+      {
+        "id": 1,
+        "access": "ReadWrite"
+      }
+    ],
+    "session_images": [
+      {
+        "Primitive": {
+          "id": 10,
+          "format": {
+            "Concrete": {
+              "channel_count": "D1",
+              "channel_type": "F32"
+            }
+          },
+          "layout": {
+            "Like": 1
+          }
+        }
+      }
+    ],
+    "draw_on": [
+      {
+        "dst": 10,
+        "tool": "RadialKernel1D"
+      }
+    ],
+    "derive": [
+      {
+        "dst": 1,
+        "command": {
+          "reads": [
+            {
+              "image": {
+                "Backup": 1
+              },
+              "mapping": "Identity",
+              "modifier": "None"
+            },
+            {
+              "image": {
+                "Current": 10
+              },
+              "mapping": "Identity",
+              "modifier": "None"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "frames": [
+    {
+      "commands": [
+        {
+          "DrawDab": {
+            "shown_image": 1,
+            "input": {
+              "time_ns": 1,
+              "position": {
+                "x": 24.0,
+                "y": 32.0
+              },
+              "pressure": 0.75,
+              "tilt": [
+                0.0,
+                0.0
+              ],
+              "twist": 0.0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "commands": [
+        {
+          "DrawOn": {
+            "target": 10,
+            "input": {
+              "center_x": 48.0,
+              "center_y": 40.0,
+              "footprint_radius_px": 6.0,
+              "kind": {
+                "RadialKernel1D": {
+                  "radius_px": 6.0,
+                  "amplitude": 0.5
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -8,6 +8,7 @@ use gla_core::{CanvasInput, ScreenCoordF};
 use gla_ir::{DrawOnToolKind, RegistryPatch};
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
 use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
+use tile_key::NewAtlasError;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -1256,6 +1257,7 @@ struct GpuCtx {
 enum GpuInitError {
     CreateSurface(wgpu::CreateSurfaceError),
     Document(DocumentWorkspaceInitError<GpuRendererError>),
+    DrawOnAtlas(NewAtlasError<GpuRendererError>),
     WorkspaceImport(WorkspaceExportError),
     Renderer(GpuRendererError),
     RequestAdapter(wgpu::RequestAdapterError),
@@ -1269,6 +1271,9 @@ impl Display for GpuInitError {
             Self::CreateSurface(error) => write!(f, "failed to create surface: {error}"),
             Self::Document(error) => {
                 write!(f, "failed to create GPU-backed document workspace: {error}")
+            }
+            Self::DrawOnAtlas(error) => {
+                write!(f, "failed to allocate draw-on workspace atlas: {error}")
             }
             Self::WorkspaceImport(error) => write!(f, "failed to import workspace: {error}"),
             Self::Renderer(error) => write!(f, "failed to create GPU renderer: {error}"),
@@ -1284,6 +1289,7 @@ impl Error for GpuInitError {
         match self {
             Self::CreateSurface(error) => Some(error),
             Self::Document(error) => Some(error),
+            Self::DrawOnAtlas(error) => Some(error),
             Self::WorkspaceImport(error) => Some(error),
             Self::Renderer(error) => Some(error),
             Self::RequestAdapter(error) => Some(error),
@@ -1339,7 +1345,7 @@ impl GpuCtx {
             app_config.draw_on_tools.iter().copied(),
         )
         .map_err(GpuInitError::Renderer)?;
-        let workspace = match &app_config.workspace_path {
+        let mut workspace = match &app_config.workspace_path {
             Some(path) => import_workspace_directory(&mut renderer, path)
                 .map_err(GpuInitError::WorkspaceImport)?,
             None => DocumentWorkspace::white_with_textures(
@@ -1349,6 +1355,9 @@ impl GpuCtx {
             )
             .map_err(GpuInitError::Document)?,
         };
+        workspace
+            .ensure_draw_on_tool_atlases(app_config.draw_on_tools.iter().copied(), &mut renderer)
+            .map_err(GpuInitError::DrawOnAtlas)?;
 
         Ok((
             Self {
