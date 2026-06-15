@@ -1,6 +1,6 @@
 use gla_color::apply_value_mask_to_premultiplied_rgba;
 use gla_core::{CanvasCoordF, CanvasInput};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use crate::{ActiveTool, BrushId, BrushSettings, ReplaceCircleStrokeSample, ToolSet};
@@ -22,18 +22,38 @@ pub(crate) struct BrushThreadRuntime {
     active_tool: ActiveTool,
     command_sender: Option<SyncSender<BrushThreadCommand>>,
     active: bool,
+    command_epoch: u64,
     thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug)]
 enum BrushThreadCommand {
-    Begin,
-    CanvasInput(CanvasInput),
-    Finish(SyncSender<Option<FinishedRootStroke>>),
-    Restore(FinishedRootStroke),
-    Cancel,
+    Begin {
+        epoch: u64,
+    },
+    CanvasInput {
+        epoch: u64,
+        input: CanvasInput,
+    },
+    Finish {
+        epoch: u64,
+        response: SyncSender<Option<FinishedRootStroke>>,
+    },
+    Restore {
+        epoch: u64,
+        stroke: FinishedRootStroke,
+    },
+    Cancel {
+        epoch: u64,
+    },
     SetActiveTool(ActiveTool),
     UpdateBrushSettings(BrushSettings),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerStrokeState {
+    Idle,
+    Active { epoch: u64 },
 }
 
 #[derive(Debug)]
@@ -60,13 +80,14 @@ impl BrushThreadRuntime {
         let worker = BrushWorker::new(tool_set.clone(), active_tool, brush_settings);
         let thread = thread::Builder::new()
             .name("glaphica-brush".to_owned())
-            .spawn(move || run_brush_thread(worker, command_receiver))
+            .spawn(move || run_brush_thread(worker, command_receiver, capacity))
             .expect("brush thread should spawn");
         Self {
             tool_set,
             active_tool,
             command_sender: Some(command_sender),
             active: false,
+            command_epoch: 0,
             thread: Some(thread),
         }
     }
@@ -81,6 +102,7 @@ impl BrushThreadRuntime {
         if !self.tool_set.contains(active_tool.as_tool()) {
             return false;
         }
+        self.next_epoch();
         let sent = self.send_control(BrushThreadCommand::SetActiveTool(active_tool));
         if sent {
             self.active_tool = active_tool;
@@ -94,7 +116,8 @@ impl BrushThreadRuntime {
             self.active = false;
             return false;
         }
-        let sent = self.send_control(BrushThreadCommand::Begin);
+        let epoch = self.next_epoch();
+        let sent = self.send_control(BrushThreadCommand::Begin { epoch });
         self.active = sent;
         sent
     }
@@ -107,8 +130,12 @@ impl BrushThreadRuntime {
             self.active = false;
             return;
         };
-        match sender.try_send(BrushThreadCommand::CanvasInput(input)) {
-            Ok(()) | Err(TrySendError::Full(BrushThreadCommand::CanvasInput(_))) => {}
+        let command = BrushThreadCommand::CanvasInput {
+            epoch: self.command_epoch,
+            input,
+        };
+        match sender.try_send(command) {
+            Ok(()) | Err(TrySendError::Full(BrushThreadCommand::CanvasInput { .. })) => {}
             Err(TrySendError::Full(command)) => {
                 if sender.send(command).is_err() {
                     self.active = false;
@@ -130,7 +157,10 @@ impl BrushThreadRuntime {
         };
         let (response_sender, response_receiver) = sync_channel(0);
         if sender
-            .send(BrushThreadCommand::Finish(response_sender))
+            .send(BrushThreadCommand::Finish {
+                epoch: self.command_epoch,
+                response: response_sender,
+            })
             .is_err()
         {
             self.active = false;
@@ -141,7 +171,8 @@ impl BrushThreadRuntime {
     }
 
     pub(crate) fn restore_active_stroke(&mut self, stroke: FinishedRootStroke) {
-        self.active = self.send_control(BrushThreadCommand::Restore(stroke));
+        let epoch = self.next_epoch();
+        self.active = self.send_control(BrushThreadCommand::Restore { epoch, stroke });
     }
 
     pub(crate) fn cancel_active_stroke(&mut self) -> bool {
@@ -149,7 +180,8 @@ impl BrushThreadRuntime {
             return false;
         }
         self.active = false;
-        self.send_control(BrushThreadCommand::Cancel)
+        let epoch = self.next_epoch();
+        self.send_control(BrushThreadCommand::Cancel { epoch })
     }
 
     pub(crate) fn has_active_stroke(&self) -> bool {
@@ -157,7 +189,14 @@ impl BrushThreadRuntime {
     }
 
     pub(crate) fn update_brush_settings(&mut self, brush_settings: BrushSettings) {
+        self.next_epoch();
+        self.active = false;
         let _ = self.send_control(BrushThreadCommand::UpdateBrushSettings(brush_settings));
+    }
+
+    fn next_epoch(&mut self) -> u64 {
+        self.command_epoch = self.command_epoch.saturating_add(1);
+        self.command_epoch
     }
 
     fn send_control(&self, command: BrushThreadCommand) -> bool {
@@ -221,6 +260,12 @@ impl BrushWorker {
         }
     }
 
+    pub(crate) fn push_canvas_inputs(&mut self, inputs: &[CanvasInput]) {
+        if let Some(stroke) = self.active_stroke.as_mut() {
+            stroke.push_inputs(inputs);
+        }
+    }
+
     pub(crate) fn finish_active_stroke(&mut self) -> Option<FinishedRootStroke> {
         let stroke = self.active_stroke.take()?;
         (!stroke.is_empty()).then_some(FinishedRootStroke { stroke })
@@ -266,6 +311,10 @@ impl ActiveRootStroke {
 
     fn push_input(&mut self, input: CanvasInput) {
         self.inputs.push(input);
+    }
+
+    fn push_inputs(&mut self, inputs: &[CanvasInput]) {
+        self.inputs.extend_from_slice(inputs);
     }
 
     fn is_empty(&self) -> bool {
@@ -385,42 +434,106 @@ fn lerp_u64(start: u64, end: u64, t: f32) -> u64 {
     (start as f64 * (1.0 - t as f64) + end as f64 * t as f64).round() as u64
 }
 
+impl WorkerStrokeState {
+    fn accepts(self, epoch: u64) -> bool {
+        matches!(self, Self::Active { epoch: active_epoch } if active_epoch == epoch)
+    }
+}
+
 fn run_brush_thread(
     mut worker: BrushWorker,
-    command_receiver: std::sync::mpsc::Receiver<BrushThreadCommand>,
+    command_receiver: Receiver<BrushThreadCommand>,
+    batch_capacity: usize,
 ) {
-    while let Ok(command) = command_receiver.recv() {
-        match command {
-            BrushThreadCommand::Begin => {
-                worker.begin_active_stroke();
-            }
-            BrushThreadCommand::CanvasInput(input) => {
-                worker.push_canvas_input(input);
-            }
-            BrushThreadCommand::Finish(response) => {
-                let _ = response.send(worker.finish_active_stroke());
-            }
-            BrushThreadCommand::Restore(stroke) => {
-                worker.restore_active_stroke(stroke);
-            }
-            BrushThreadCommand::Cancel => {
-                worker.cancel_active_stroke();
-            }
-            BrushThreadCommand::SetActiveTool(active_tool) => {
-                worker.set_active_tool(active_tool);
-            }
-            BrushThreadCommand::UpdateBrushSettings(settings) => {
-                worker.update_brush_settings(settings);
+    let batch_capacity = batch_capacity.max(1);
+    let mut command_batch = Vec::with_capacity(batch_capacity);
+    let mut canvas_batch = Vec::with_capacity(batch_capacity);
+    let mut stroke_state = WorkerStrokeState::Idle;
+
+    while receive_command_batch(&command_receiver, &mut command_batch, batch_capacity) {
+        for command in command_batch.drain(..) {
+            match command {
+                BrushThreadCommand::Begin { epoch } => {
+                    canvas_batch.clear();
+                    worker.begin_active_stroke();
+                    stroke_state = WorkerStrokeState::Active { epoch };
+                }
+                BrushThreadCommand::CanvasInput { epoch, input } => {
+                    if stroke_state.accepts(epoch) {
+                        canvas_batch.push(input);
+                    }
+                }
+                BrushThreadCommand::Finish { epoch, response } => {
+                    let finished = if stroke_state.accepts(epoch) {
+                        flush_canvas_batch(&mut worker, &mut canvas_batch);
+                        worker.finish_active_stroke()
+                    } else {
+                        None
+                    };
+                    stroke_state = WorkerStrokeState::Idle;
+                    let _ = response.send(finished);
+                }
+                BrushThreadCommand::Restore { epoch, stroke } => {
+                    canvas_batch.clear();
+                    worker.restore_active_stroke(stroke);
+                    stroke_state = WorkerStrokeState::Active { epoch };
+                }
+                BrushThreadCommand::Cancel { epoch: _ } => {
+                    canvas_batch.clear();
+                    worker.cancel_active_stroke();
+                    stroke_state = WorkerStrokeState::Idle;
+                }
+                BrushThreadCommand::SetActiveTool(active_tool) => {
+                    canvas_batch.clear();
+                    worker.set_active_tool(active_tool);
+                    stroke_state = WorkerStrokeState::Idle;
+                }
+                BrushThreadCommand::UpdateBrushSettings(settings) => {
+                    canvas_batch.clear();
+                    worker.cancel_active_stroke();
+                    worker.update_brush_settings(settings);
+                    stroke_state = WorkerStrokeState::Idle;
+                }
             }
         }
+        flush_canvas_batch(&mut worker, &mut canvas_batch);
     }
+}
+
+fn receive_command_batch(
+    command_receiver: &Receiver<BrushThreadCommand>,
+    output: &mut Vec<BrushThreadCommand>,
+    max_items: usize,
+) -> bool {
+    output.clear();
+    let Ok(first) = command_receiver.recv() else {
+        return false;
+    };
+    output.push(first);
+    for _ in 1..max_items {
+        match command_receiver.try_recv() {
+            Ok(command) => output.push(command),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    true
+}
+
+fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInput>) {
+    if canvas_batch.is_empty() {
+        return;
+    }
+    worker.push_canvas_inputs(canvas_batch);
+    canvas_batch.clear();
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveRootStroke, BrushThreadRuntime, BrushWorker};
+    use super::{ActiveRootStroke, BrushThreadCommand, BrushThreadRuntime, BrushWorker};
     use crate::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
     use gla_core::{CanvasCoordF, CanvasInput};
+    use std::sync::mpsc::sync_channel;
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
         CanvasInput {
@@ -616,6 +729,119 @@ mod tests {
         assert_eq!(finished.inputs()[0].position, CanvasCoordF::new(1.0, 2.0));
         assert_eq!(finished.inputs()[1].position, CanvasCoordF::new(3.0, 4.0));
         assert!(!runtime.has_active_stroke());
+    }
+
+    #[test]
+    fn brush_thread_batch_clears_queued_inputs_on_cancel() {
+        let (command_sender, command_receiver) = sync_channel(16);
+        let (response_sender, response_receiver) = sync_channel(1);
+        command_sender
+            .send(BrushThreadCommand::Begin { epoch: 1 })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::CanvasInput {
+                epoch: 1,
+                input: canvas_input(1, 1.0, 1.0, 1.0),
+            })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::Cancel { epoch: 2 })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::CanvasInput {
+                epoch: 1,
+                input: canvas_input(2, 2.0, 2.0, 1.0),
+            })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::Begin { epoch: 3 })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::CanvasInput {
+                epoch: 3,
+                input: canvas_input(3, 3.0, 3.0, 1.0),
+            })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::Finish {
+                epoch: 3,
+                response: response_sender,
+            })
+            .unwrap();
+        drop(command_sender);
+
+        super::run_brush_thread(
+            BrushWorker::new(
+                ToolSet::default_brush(),
+                ActiveTool::Brush(BrushId::DEFAULT),
+                BrushSettings::default(),
+            ),
+            command_receiver,
+            16,
+        );
+        let finished = response_receiver.recv().unwrap().unwrap();
+
+        assert_eq!(finished.inputs().len(), 1);
+        assert_eq!(finished.inputs()[0].position, CanvasCoordF::new(3.0, 3.0));
+    }
+
+    #[test]
+    fn brush_thread_batch_applies_settings_after_clearing_active_input() {
+        let (command_sender, command_receiver) = sync_channel(16);
+        let (response_sender, response_receiver) = sync_channel(1);
+        let mut settings = BrushSettings::default();
+        settings.radius_px = 4.0;
+
+        command_sender
+            .send(BrushThreadCommand::Begin { epoch: 1 })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::CanvasInput {
+                epoch: 1,
+                input: canvas_input(1, 1.0, 1.0, 1.0),
+            })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::UpdateBrushSettings(settings))
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::CanvasInput {
+                epoch: 1,
+                input: canvas_input(2, 2.0, 2.0, 1.0),
+            })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::Begin { epoch: 2 })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::CanvasInput {
+                epoch: 2,
+                input: canvas_input(3, 3.0, 3.0, 1.0),
+            })
+            .unwrap();
+        command_sender
+            .send(BrushThreadCommand::Finish {
+                epoch: 2,
+                response: response_sender,
+            })
+            .unwrap();
+        drop(command_sender);
+
+        super::run_brush_thread(
+            BrushWorker::new(
+                ToolSet::default_brush(),
+                ActiveTool::Brush(BrushId::DEFAULT),
+                BrushSettings::default(),
+            ),
+            command_receiver,
+            16,
+        );
+        let finished = response_receiver.recv().unwrap().unwrap();
+        let samples = finished.replace_circle_samples();
+
+        assert_eq!(finished.inputs().len(), 1);
+        assert_eq!(finished.inputs()[0].position, CanvasCoordF::new(3.0, 3.0));
+        assert_eq!(samples[0].radius_px, 4.0);
     }
 
     #[test]
