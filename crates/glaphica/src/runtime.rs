@@ -17,7 +17,9 @@ use winit::{
 use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError,
-    ReplaceCircleStrokeSample, SurfaceError, SurfaceRuntime, ToolSet, frame::AppFrameScheduler,
+    ReplaceCircleStrokeSample, ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame,
+    SurfaceRuntime, ToolSet,
+    frame::{AppFrameScheduler, ScreenUpdateRequest},
 };
 
 #[derive(Debug, Clone)]
@@ -128,6 +130,10 @@ impl App {
 
     fn request_redraw(&mut self) {
         self.frame_scheduler.request_redraw();
+    }
+
+    fn request_full_screen_update(&mut self) {
+        self.frame_scheduler.schedule_full_update();
     }
 
     fn begin_stroke_at_last_cursor(&mut self) {
@@ -340,6 +346,8 @@ struct GpuCtx {
     queue: wgpu::Queue,
     clear_color: wgpu::Color,
     renderer: GpuRenderer,
+    screen_cache: ScreenPresentCache,
+    screen_blitter: ScreenBlitter,
 }
 
 #[derive(Debug)]
@@ -414,6 +422,9 @@ impl GpuCtx {
 
         let surface = SurfaceRuntime::new(surface, &adapter, &device, size.width, size.height)
             .map_err(GpuInitError::Surface)?;
+        let screen_cache =
+            ScreenPresentCache::new(&device, surface.format(), surface.width(), surface.height());
+        let screen_blitter = ScreenBlitter::new(&device);
 
         let mut renderer = GpuRenderer::with_draw_on_tools(
             &adapter,
@@ -436,6 +447,8 @@ impl GpuCtx {
                 queue,
                 clear_color: app_config.clear_color,
                 renderer,
+                screen_cache,
+                screen_blitter,
             },
             workspace,
         ))
@@ -451,9 +464,22 @@ impl GpuCtx {
 
     fn resize(&mut self, width: u32, height: u32) {
         self.surface.resize(&self.device, width, height);
+        self.screen_cache.resize(
+            &self.device,
+            self.surface.format(),
+            self.surface.width(),
+            self.surface.height(),
+        );
+        self.screen_cache.invalidate();
     }
 
-    fn render(&mut self, workspace: Option<&DocumentWorkspace>, view: &AppView) {
+    fn render(
+        &mut self,
+        workspace: Option<&DocumentWorkspace>,
+        view: &AppView,
+        update_request: ScreenUpdateRequest,
+    ) {
+        let cache_ready = self.update_screen_cache(workspace, view, update_request);
         let frame = match self.surface.acquire_frame(&self.device) {
             Ok(frame) => frame,
             Err(error) => {
@@ -461,7 +487,78 @@ impl GpuCtx {
                 return;
             }
         };
+        if cache_ready {
+            self.screen_blitter.present_cache(
+                &self.device,
+                &self.queue,
+                &self.screen_cache,
+                &frame,
+                self.surface.format(),
+            );
+        } else {
+            self.render_direct_to_frame(workspace, view, &frame);
+        }
+        SurfaceRuntime::present(frame);
+    }
 
+    fn update_screen_cache(
+        &mut self,
+        workspace: Option<&DocumentWorkspace>,
+        view: &AppView,
+        update_request: ScreenUpdateRequest,
+    ) -> bool {
+        let full_update =
+            matches!(update_request, ScreenUpdateRequest::Full) || !self.screen_cache.is_valid();
+
+        if full_update {
+            return self.update_screen_cache_full(workspace, view);
+        }
+
+        let ScreenUpdateRequest::Tiles(tile_indices) = update_request else {
+            return self.screen_cache.is_valid();
+        };
+        if tile_indices.is_empty() {
+            return self.screen_cache.is_valid();
+        }
+        let Some(workspace) = workspace else {
+            return self.update_screen_cache_full(None, view);
+        };
+
+        let tiles = match workspace.root_present_tiles_for_view_tile_indices(view, &tile_indices) {
+            Ok(tiles) if tiles.len() == tile_indices.len() => tiles,
+            Ok(_) => {
+                return self.update_screen_cache_full(Some(workspace), view);
+            }
+            Err(error) => {
+                eprintln!("document present cache update failed: {error}");
+                self.screen_cache.invalidate();
+                return false;
+            }
+        };
+        match self.renderer.present_tiles_incremental(
+            &tiles,
+            PresentTarget {
+                view: self.screen_cache.view(),
+                format: self.screen_cache.format(),
+                width: self.screen_cache.width(),
+                height: self.screen_cache.height(),
+                clear_color: self.clear_color,
+            },
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("screen present cache update failed: {error}");
+                self.screen_cache.invalidate();
+                false
+            }
+        }
+    }
+
+    fn update_screen_cache_full(
+        &mut self,
+        workspace: Option<&DocumentWorkspace>,
+        view: &AppView,
+    ) -> bool {
         let tiles = match workspace {
             Some(workspace) => match workspace.root_present_tiles_for_view(view) {
                 Ok(tiles) => tiles,
@@ -475,16 +572,50 @@ impl GpuCtx {
         if let Err(error) = self.renderer.present_tiles(
             &tiles,
             PresentTarget {
-                view: &frame.view,
-                format: self.surface.format(),
-                width: self.surface.width(),
-                height: self.surface.height(),
+                view: self.screen_cache.view(),
+                format: self.screen_cache.format(),
+                width: self.screen_cache.width(),
+                height: self.screen_cache.height(),
                 clear_color: self.clear_color,
             },
         ) {
-            eprintln!("surface present failed: {error}");
+            eprintln!("screen present cache rebuild failed: {error}");
+            self.screen_cache.invalidate();
+            return false;
         }
-        SurfaceRuntime::present(frame);
+        self.screen_cache.mark_valid();
+        true
+    }
+
+    fn render_direct_to_frame(
+        &mut self,
+        workspace: Option<&DocumentWorkspace>,
+        view: &AppView,
+        frame: &SurfaceFrame,
+    ) {
+        let tiles = match workspace {
+            Some(workspace) => match workspace.root_present_tiles_for_view(view) {
+                Ok(tiles) => tiles,
+                Err(error) => {
+                    eprintln!("document direct present failed: {error}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let target = PresentTarget {
+            view: &frame.view,
+            format: self.surface.format(),
+            width: self.surface.width(),
+            height: self.surface.height(),
+            clear_color: self.clear_color,
+        };
+        if let Err(error) = self.renderer.present_tiles(&tiles, target) {
+            eprintln!("surface direct present failed: {error}");
+            if let Err(clear_error) = self.renderer.present_tiles(&[], target) {
+                eprintln!("surface clear failed: {clear_error}");
+            }
+        }
     }
 }
 
@@ -528,7 +659,7 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
-        self.request_redraw();
+        self.request_full_screen_update();
     }
 
     fn window_event(
@@ -559,7 +690,7 @@ impl ApplicationHandler for App {
                 }
                 if self.middle_down {
                     self.pan_view_to(pos);
-                    self.request_redraw();
+                    self.request_full_screen_update();
                 }
             }
             WindowEvent::MouseInput {
@@ -589,7 +720,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.zoom_view_at_cursor(&delta) {
-                    self.request_redraw();
+                    self.request_full_screen_update();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -622,12 +753,12 @@ impl ApplicationHandler for App {
                 if let Err(error) = self.fit_view_to_workspace() {
                     eprintln!("view resize failed: {error}");
                 }
-                self.request_redraw();
+                self.request_full_screen_update();
             }
             WindowEvent::RedrawRequested => {
-                let _scheduled_tile_indices = self.frame_scheduler.take_scheduled_tile_indices();
+                let update_request = self.frame_scheduler.take_screen_update_request();
                 if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render(self.workspace.as_ref(), &self.view);
+                    gpu.render(self.workspace.as_ref(), &self.view, update_request);
                 }
                 self.frame_scheduler.reset_redraw_request();
             }

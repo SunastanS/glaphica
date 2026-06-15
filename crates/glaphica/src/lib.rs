@@ -5,7 +5,7 @@ mod runtime;
 mod tool;
 mod view;
 
-pub use display::{SurfaceError, SurfaceFrame, SurfaceRuntime};
+pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime};
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
     DocumentPresentError, DocumentWorkspace, DocumentWorkspaceBuildError, DocumentWorkspaceError,

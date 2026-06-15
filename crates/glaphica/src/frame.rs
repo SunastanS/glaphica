@@ -1,13 +1,22 @@
 #[derive(Debug, Default)]
 pub(crate) struct AppFrameScheduler {
     scheduled_tile_indices: Vec<u32>,
+    full_update_requested: bool,
     redraw_requested: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScreenUpdateRequest {
+    None,
+    Full,
+    Tiles(Vec<u32>),
 }
 
 impl AppFrameScheduler {
     pub(crate) fn new() -> Self {
         Self {
             scheduled_tile_indices: Vec::new(),
+            full_update_requested: false,
             redraw_requested: false,
         }
     }
@@ -29,19 +38,30 @@ impl AppFrameScheduler {
         self.redraw_requested = true;
     }
 
-    pub(crate) fn take_scheduled_tile_indices(&mut self) -> Vec<u32> {
+    pub(crate) fn schedule_full_update(&mut self) {
+        self.full_update_requested = true;
+        self.scheduled_tile_indices.clear();
+        self.redraw_requested = true;
+    }
+
+    pub(crate) fn take_screen_update_request(&mut self) -> ScreenUpdateRequest {
+        if self.full_update_requested {
+            self.full_update_requested = false;
+            self.scheduled_tile_indices.clear();
+            return ScreenUpdateRequest::Full;
+        }
         if self.scheduled_tile_indices.is_empty() {
-            return Vec::new();
+            return ScreenUpdateRequest::None;
         }
         self.scheduled_tile_indices.sort_unstable();
         self.scheduled_tile_indices.dedup();
-        std::mem::take(&mut self.scheduled_tile_indices)
+        ScreenUpdateRequest::Tiles(std::mem::take(&mut self.scheduled_tile_indices))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AppFrameScheduler;
+    use super::{AppFrameScheduler, ScreenUpdateRequest};
 
     #[test]
     fn redraw_request_latches_until_reset() {
@@ -61,7 +81,30 @@ mod tests {
         scheduler.schedule_tile_indices(&[3, 1, 3, 2]);
 
         assert!(scheduler.has_requested_redraw());
-        assert_eq!(scheduler.take_scheduled_tile_indices(), vec![1, 2, 3]);
-        assert!(scheduler.take_scheduled_tile_indices().is_empty());
+        assert_eq!(
+            scheduler.take_screen_update_request(),
+            ScreenUpdateRequest::Tiles(vec![1, 2, 3])
+        );
+        assert_eq!(
+            scheduler.take_screen_update_request(),
+            ScreenUpdateRequest::None
+        );
+    }
+
+    #[test]
+    fn full_update_takes_precedence_over_tile_indices() {
+        let mut scheduler = AppFrameScheduler::new();
+
+        scheduler.schedule_tile_indices(&[1, 2]);
+        scheduler.schedule_full_update();
+
+        assert_eq!(
+            scheduler.take_screen_update_request(),
+            ScreenUpdateRequest::Full
+        );
+        assert_eq!(
+            scheduler.take_screen_update_request(),
+            ScreenUpdateRequest::None
+        );
     }
 }

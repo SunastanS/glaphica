@@ -861,8 +861,29 @@ impl GpuRenderer {
         tiles: &[PresentTile],
         target: PresentTarget<'_>,
     ) -> Result<(), GpuRendererError> {
-        self.present
-            .present_tiles(&self.device, &self.queue, &self.atlases, tiles, target)
+        self.present.present_tiles(
+            &self.device,
+            &self.queue,
+            &self.atlases,
+            tiles,
+            target,
+            true,
+        )
+    }
+
+    pub fn present_tiles_incremental(
+        &mut self,
+        tiles: &[PresentTile],
+        target: PresentTarget<'_>,
+    ) -> Result<(), GpuRendererError> {
+        self.present.present_tiles(
+            &self.device,
+            &self.queue,
+            &self.atlases,
+            tiles,
+            target,
+            false,
+        )
     }
 
     #[doc(hidden)]
@@ -983,11 +1004,12 @@ impl TilePresentStage {
         atlases: &AtlasTextureSet,
         tiles: &[PresentTile],
         target: PresentTarget<'_>,
+        clear_target: bool,
     ) -> Result<(), GpuRendererError> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("glaphica-tile-present-encoder"),
         });
-        {
+        if clear_target {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glaphica-tile-present-clear-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

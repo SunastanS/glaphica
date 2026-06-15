@@ -286,60 +286,93 @@ impl DocumentWorkspace {
         &self,
         view: &AppView,
     ) -> Result<Vec<PresentTile>, DocumentPresentError> {
-        let image = self
-            .storage
-            .image(self.root)
-            .ok_or(DocumentPresentError::MissingRoot { id: self.root })?;
-        let layout = image.layout();
+        let layout = self.root_layout()?;
         let tile_count_x = layout.tile_count_x();
         let tile_count = layout.tile_count();
         let mut tiles = Vec::new();
 
         for tile_index in 0..tile_count {
-            let tile_ref = self
-                .storage
-                .read_global_ref(self.root, tile_index)
-                .map_err(DocumentPresentError::Tile)?;
-            let TileReadRef::Physical(src) = tile_ref else {
-                continue;
-            };
-
-            let tile_x = tile_index % tile_count_x;
-            let tile_y = tile_index / tile_count_x;
-            let origin_x = tile_x * IMAGE_TILE_SIZE;
-            let origin_y = tile_y * IMAGE_TILE_SIZE;
-            let source_width = self
-                .layout
-                .width_px
-                .saturating_sub(origin_x)
-                .min(IMAGE_TILE_SIZE);
-            let source_height = self
-                .layout
-                .height_px
-                .saturating_sub(origin_y)
-                .min(IMAGE_TILE_SIZE);
-            if source_width == 0 || source_height == 0 {
-                continue;
+            if let Some(tile) = self.root_present_tile_for_index(view, tile_count_x, tile_index)? {
+                tiles.push(tile);
             }
-            let target_min =
-                view.document_to_screen_point(CanvasCoordF::new(origin_x as f32, origin_y as f32));
-            let target_max = view.document_to_screen_point(CanvasCoordF::new(
-                (origin_x + source_width) as f32,
-                (origin_y + source_height) as f32,
-            ));
-
-            tiles.push(PresentTile {
-                src,
-                params: PresentTileParams {
-                    target_min_px: [target_min.x, target_min.y],
-                    target_max_px: [target_max.x, target_max.y],
-                    source_width,
-                    source_height,
-                },
-            });
         }
 
         Ok(tiles)
+    }
+
+    pub fn root_present_tiles_for_view_tile_indices(
+        &self,
+        view: &AppView,
+        tile_indices: &[u32],
+    ) -> Result<Vec<PresentTile>, DocumentPresentError> {
+        let layout = self.root_layout()?;
+        let tile_count_x = layout.tile_count_x();
+        let mut tiles = Vec::new();
+
+        for tile_index in tile_indices.iter().copied() {
+            if let Some(tile) = self.root_present_tile_for_index(view, tile_count_x, tile_index)? {
+                tiles.push(tile);
+            }
+        }
+
+        Ok(tiles)
+    }
+
+    fn root_layout(&self) -> Result<gla_image::GlaImageLayout, DocumentPresentError> {
+        let image = self
+            .storage
+            .image(self.root)
+            .ok_or(DocumentPresentError::MissingRoot { id: self.root })?;
+        Ok(image.layout())
+    }
+
+    fn root_present_tile_for_index(
+        &self,
+        view: &AppView,
+        tile_count_x: u32,
+        tile_index: u32,
+    ) -> Result<Option<PresentTile>, DocumentPresentError> {
+        let tile_ref = self
+            .storage
+            .read_global_ref(self.root, tile_index)
+            .map_err(DocumentPresentError::Tile)?;
+        let TileReadRef::Physical(src) = tile_ref else {
+            return Ok(None);
+        };
+
+        let tile_x = tile_index % tile_count_x;
+        let tile_y = tile_index / tile_count_x;
+        let origin_x = tile_x * IMAGE_TILE_SIZE;
+        let origin_y = tile_y * IMAGE_TILE_SIZE;
+        let source_width = self
+            .layout
+            .width_px
+            .saturating_sub(origin_x)
+            .min(IMAGE_TILE_SIZE);
+        let source_height = self
+            .layout
+            .height_px
+            .saturating_sub(origin_y)
+            .min(IMAGE_TILE_SIZE);
+        if source_width == 0 || source_height == 0 {
+            return Ok(None);
+        }
+        let target_min =
+            view.document_to_screen_point(CanvasCoordF::new(origin_x as f32, origin_y as f32));
+        let target_max = view.document_to_screen_point(CanvasCoordF::new(
+            (origin_x + source_width) as f32,
+            (origin_y + source_height) as f32,
+        ));
+
+        Ok(Some(PresentTile {
+            src,
+            params: PresentTileParams {
+                target_min_px: [target_min.x, target_min.y],
+                target_max_px: [target_max.x, target_max.y],
+                source_width,
+                source_height,
+            },
+        }))
     }
 }
 
@@ -678,6 +711,21 @@ mod tests {
         assert_eq!(tiles.len(), 1);
         assert_eq!(tiles[0].params.target_min_px, [10.0, 20.0]);
         assert_eq!(tiles[0].params.target_max_px, [134.0, 144.0]);
+    }
+
+    #[test]
+    fn root_present_tiles_can_filter_by_tile_indices() {
+        let mut backend = RecordingBackend::default();
+        let workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
+        let view = AppView::new([1.5, 0.0, 0.0, 1.5, 4.0, 8.0]).unwrap();
+
+        let all_tiles = workspace.root_present_tiles_for_view(&view).unwrap();
+        assert!(all_tiles.len() > 2);
+        let filtered = workspace
+            .root_present_tiles_for_view_tile_indices(&view, &[0, 2])
+            .unwrap();
+
+        assert_eq!(filtered, vec![all_tiles[0], all_tiles[2]]);
     }
 
     #[test]
