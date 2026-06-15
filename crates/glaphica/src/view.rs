@@ -1,0 +1,228 @@
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
+use gla_core::{CanvasCoordF, ScreenCoordF};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppView {
+    document_to_screen: [f32; 6],
+    screen_to_document: [f32; 6],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppViewMatrixError {
+    NonInvertible,
+}
+
+impl Display for AppViewMatrixError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonInvertible => f.write_str("view matrix is not invertible"),
+        }
+    }
+}
+
+impl Error for AppViewMatrixError {}
+
+impl Default for AppView {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl AppView {
+    pub fn identity() -> Self {
+        Self {
+            document_to_screen: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            screen_to_document: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        }
+    }
+
+    pub fn new(document_to_screen: [f32; 6]) -> Result<Self, AppViewMatrixError> {
+        let screen_to_document =
+            invert_affine(document_to_screen).ok_or(AppViewMatrixError::NonInvertible)?;
+        Ok(Self {
+            document_to_screen,
+            screen_to_document,
+        })
+    }
+
+    pub fn from_scale_rotation_translation(
+        scale_x: f32,
+        scale_y: f32,
+        rotation_radians: f32,
+        translate_x: f32,
+        translate_y: f32,
+    ) -> Result<Self, AppViewMatrixError> {
+        let cos_theta = rotation_radians.cos();
+        let sin_theta = rotation_radians.sin();
+        Self::new([
+            cos_theta * scale_x,
+            sin_theta * scale_x,
+            -sin_theta * scale_y,
+            cos_theta * scale_y,
+            translate_x,
+            translate_y,
+        ])
+    }
+
+    pub fn fit_canvas_in_surface(
+        canvas_size_px: (u32, u32),
+        surface_size_px: (u32, u32),
+    ) -> Result<Self, AppViewMatrixError> {
+        let doc_width = canvas_size_px.0.max(1) as f32;
+        let doc_height = canvas_size_px.1.max(1) as f32;
+        let surface_width = surface_size_px.0.max(1) as f32;
+        let surface_height = surface_size_px.1.max(1) as f32;
+        let scale = (surface_width / doc_width)
+            .min(surface_height / doc_height)
+            .max(0.01);
+        let translate_x = (surface_width - doc_width * scale) * 0.5;
+        let translate_y = (surface_height - doc_height * scale) * 0.5;
+        Self::from_scale_rotation_translation(scale, scale, 0.0, translate_x, translate_y)
+    }
+
+    pub fn set_document_to_screen(
+        &mut self,
+        document_to_screen: [f32; 6],
+    ) -> Result<(), AppViewMatrixError> {
+        let screen_to_document =
+            invert_affine(document_to_screen).ok_or(AppViewMatrixError::NonInvertible)?;
+        self.document_to_screen = document_to_screen;
+        self.screen_to_document = screen_to_document;
+        Ok(())
+    }
+
+    pub fn document_to_screen_matrix(&self) -> [f32; 6] {
+        self.document_to_screen
+    }
+
+    pub fn screen_to_document_matrix(&self) -> [f32; 6] {
+        self.screen_to_document
+    }
+
+    pub fn document_to_screen_point(&self, point: CanvasCoordF) -> ScreenCoordF {
+        transform_point(self.document_to_screen, point.x, point.y)
+    }
+
+    pub fn screen_to_document_point(&self, point: ScreenCoordF) -> CanvasCoordF {
+        transform_point(self.screen_to_document, point.x, point.y)
+    }
+
+    pub fn translate_screen(&mut self, dx: f32, dy: f32) -> Result<(), AppViewMatrixError> {
+        let mut matrix = self.document_to_screen;
+        matrix[4] += dx;
+        matrix[5] += dy;
+        self.set_document_to_screen(matrix)
+    }
+
+    pub fn scale_about_screen_point(
+        &mut self,
+        scale: f32,
+        center: ScreenCoordF,
+    ) -> Result<(), AppViewMatrixError> {
+        if !scale.is_finite() || scale <= f32::EPSILON {
+            return Err(AppViewMatrixError::NonInvertible);
+        }
+        let mut matrix = self.document_to_screen;
+        matrix[0] *= scale;
+        matrix[1] *= scale;
+        matrix[2] *= scale;
+        matrix[3] *= scale;
+        matrix[4] = center.x + (matrix[4] - center.x) * scale;
+        matrix[5] = center.y + (matrix[5] - center.y) * scale;
+        self.set_document_to_screen(matrix)
+    }
+
+    pub fn uniform_scale(&self) -> f32 {
+        (self.document_to_screen[0].hypot(self.document_to_screen[1])
+            + self.document_to_screen[2].hypot(self.document_to_screen[3]))
+            * 0.5
+    }
+}
+
+fn transform_point<S>(matrix: [f32; 6], x: f32, y: f32) -> gla_core::Vec2F32<S> {
+    gla_core::Vec2F32::new(
+        matrix[0] * x + matrix[2] * y + matrix[4],
+        matrix[1] * x + matrix[3] * y + matrix[5],
+    )
+}
+
+fn invert_affine(matrix: [f32; 6]) -> Option<[f32; 6]> {
+    let determinant = matrix[0] * matrix[3] - matrix[1] * matrix[2];
+    if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
+        return None;
+    }
+    let inverse_det = 1.0 / determinant;
+    let inv_a = matrix[3] * inverse_det;
+    let inv_b = -matrix[1] * inverse_det;
+    let inv_c = -matrix[2] * inverse_det;
+    let inv_d = matrix[0] * inverse_det;
+    let inv_tx = -(inv_a * matrix[4] + inv_c * matrix[5]);
+    let inv_ty = -(inv_b * matrix[4] + inv_d * matrix[5]);
+    Some([inv_a, inv_b, inv_c, inv_d, inv_tx, inv_ty])
+}
+
+#[cfg(test)]
+mod tests {
+    use gla_core::{CanvasCoordF, ScreenCoordF};
+
+    use super::{AppView, AppViewMatrixError};
+
+    #[test]
+    fn identity_maps_points_without_change() {
+        let view = AppView::identity();
+        assert_eq!(
+            view.document_to_screen_point(CanvasCoordF::new(12.0, -3.0)),
+            ScreenCoordF::new(12.0, -3.0)
+        );
+    }
+
+    #[test]
+    fn inverse_maps_back_to_document_space() {
+        let view = AppView::new([2.0, 0.0, 0.0, 3.0, 10.0, -5.0]).unwrap();
+        let screen = view.document_to_screen_point(CanvasCoordF::new(4.0, 6.0));
+        let canvas = view.screen_to_document_point(screen);
+        assert_eq!(canvas, CanvasCoordF::new(4.0, 6.0));
+    }
+
+    #[test]
+    fn non_invertible_matrix_is_rejected() {
+        let result = AppView::new([1.0, 2.0, 2.0, 4.0, 0.0, 0.0]);
+        assert_eq!(result, Err(AppViewMatrixError::NonInvertible));
+    }
+
+    #[test]
+    fn fit_canvas_in_surface_preserves_aspect_and_centers() {
+        let view = AppView::fit_canvas_in_surface((200, 100), (1000, 1000)).unwrap();
+
+        assert_eq!(view.uniform_scale(), 5.0);
+        assert_eq!(
+            view.document_to_screen_point(CanvasCoordF::new(0.0, 0.0)),
+            ScreenCoordF::new(0.0, 250.0)
+        );
+        assert_eq!(
+            view.document_to_screen_point(CanvasCoordF::new(200.0, 100.0)),
+            ScreenCoordF::new(1000.0, 750.0)
+        );
+    }
+
+    #[test]
+    fn translate_screen_offsets_document_to_screen_mapping() {
+        let mut view = AppView::identity();
+        view.translate_screen(10.0, -5.0).unwrap();
+        assert_eq!(
+            view.document_to_screen_point(CanvasCoordF::new(3.0, 4.0)),
+            ScreenCoordF::new(13.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn scale_about_screen_point_keeps_anchor_stable() {
+        let mut view = AppView::identity();
+        let anchor_screen = ScreenCoordF::new(100.0, 80.0);
+        let anchor_doc = view.screen_to_document_point(anchor_screen);
+        view.scale_about_screen_point(2.0, anchor_screen).unwrap();
+        assert_eq!(view.document_to_screen_point(anchor_doc), anchor_screen);
+    }
+}

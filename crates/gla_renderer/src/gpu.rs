@@ -15,8 +15,7 @@ use crate::texture::{
     runtime_format,
 };
 use crate::{
-    Pass, PresentTarget, PresentTile, PresentTileParams, RenderBackend, RendererCapabilities,
-    RendererDrawOnInvocation,
+    Pass, PresentTarget, PresentTile, RenderBackend, RendererCapabilities, RendererDrawOnInvocation,
 };
 
 const RGBA_COMPOSITE_SHADER: &str = r#"

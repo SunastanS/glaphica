@@ -1,5 +1,6 @@
 mod document;
 mod runtime;
+mod view;
 
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
@@ -7,3 +8,4 @@ pub use document::{
 };
 pub use gla_session::{DrawCommit, DrawHistory};
 pub use runtime::{AppRunError, AppRuntimeConfig, run_app_window, run_app_window_with_config};
+pub use view::{AppView, AppViewMatrixError};

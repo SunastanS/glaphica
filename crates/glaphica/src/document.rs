@@ -4,6 +4,7 @@ use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures};
 use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
+use gla_core::CanvasCoordF;
 use gla_draw_on::DrawOnInput;
 use gla_image::IMAGE_TILE_SIZE;
 use gla_ir::{
@@ -14,6 +15,8 @@ use gla_renderer::{PresentTile, PresentTileParams, RenderBackend};
 use gla_session::{DrawCommit, DrawHistory, DrawSession, SessionError};
 use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
+
+use crate::AppView;
 
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
 pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 768;
@@ -163,6 +166,13 @@ impl DocumentWorkspace {
     }
 
     pub fn root_present_tiles(&self) -> Result<Vec<PresentTile>, DocumentPresentError> {
+        self.root_present_tiles_for_view(&AppView::identity())
+    }
+
+    pub fn root_present_tiles_for_view(
+        &self,
+        view: &AppView,
+    ) -> Result<Vec<PresentTile>, DocumentPresentError> {
         let image = self
             .storage
             .image(self.root)
@@ -198,15 +208,18 @@ impl DocumentWorkspace {
             if source_width == 0 || source_height == 0 {
                 continue;
             }
+            let target_min =
+                view.document_to_screen_point(CanvasCoordF::new(origin_x as f32, origin_y as f32));
+            let target_max = view.document_to_screen_point(CanvasCoordF::new(
+                (origin_x + source_width) as f32,
+                (origin_y + source_height) as f32,
+            ));
 
             tiles.push(PresentTile {
                 src,
                 params: PresentTileParams {
-                    target_min_px: [origin_x as f32, origin_y as f32],
-                    target_max_px: [
-                        (origin_x + source_width) as f32,
-                        (origin_y + source_height) as f32,
-                    ],
+                    target_min_px: [target_min.x, target_min.y],
+                    target_max_px: [target_max.x, target_max.y],
                     source_width,
                     source_height,
                 },
@@ -415,6 +428,31 @@ mod tests {
         assert_eq!(tiles[0].params.target_max_px, [62.0, 62.0]);
         assert_eq!(tiles[0].params.source_width, IMAGE_TILE_SIZE);
         assert_eq!(tiles[0].params.source_height, IMAGE_TILE_SIZE);
+    }
+
+    #[test]
+    fn root_present_tiles_apply_view_transform() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        workspace
+            .replace_circle_on_root(
+                &mut history,
+                &mut backend,
+                24.0,
+                32.0,
+                8.0,
+                PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+            )
+            .unwrap()
+            .unwrap();
+        let view = AppView::new([2.0, 0.0, 0.0, 2.0, 10.0, 20.0]).unwrap();
+
+        let tiles = workspace.root_present_tiles_for_view(&view).unwrap();
+
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].params.target_min_px, [10.0, 20.0]);
+        assert_eq!(tiles[0].params.target_max_px, [134.0, 144.0]);
     }
 
     #[test]

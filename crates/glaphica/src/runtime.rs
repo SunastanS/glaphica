@@ -3,19 +3,20 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use gla_color::PremultipliedRgbaF32;
+use gla_core::ScreenCoordF;
 use gla_ir::DrawOnToolKind;
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
 use gla_session::DrawHistory;
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowAttributes, WindowId},
 };
 
 use crate::{
-    DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
-    DocumentWorkspaceBuildError,
+    AppView, AppViewMatrixError, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
+    DocumentWorkspace, DocumentWorkspaceBuildError,
 };
 
 #[derive(Debug, Clone)]
@@ -82,9 +83,12 @@ pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRun
 struct App {
     config: AppRuntimeConfig,
     workspace: Option<DocumentWorkspace>,
+    view: AppView,
     history: DrawHistory,
     primary_down: bool,
-    last_cursor_pos: Option<(f32, f32)>,
+    middle_down: bool,
+    middle_pan_last_pos: Option<ScreenCoordF>,
+    last_cursor_pos: Option<ScreenCoordF>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
 }
@@ -94,8 +98,11 @@ impl App {
         Self {
             config,
             workspace: None,
+            view: AppView::identity(),
             history: DrawHistory::new(),
             primary_down: false,
+            middle_down: false,
+            middle_pan_last_pos: None,
             last_cursor_pos: None,
             window: None,
             gpu: None,
@@ -107,27 +114,74 @@ impl App {
     }
 
     fn paint_at_last_cursor(&mut self) {
-        let Some((x, y)) = self.last_cursor_pos else {
+        let Some(position) = self.last_cursor_pos else {
             return;
         };
-        self.paint_at(x, y);
+        self.paint_at(position);
     }
 
-    fn paint_at(&mut self, x: f32, y: f32) {
+    fn paint_at(&mut self, position: ScreenCoordF) {
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             return;
         };
+        let canvas = self.view.screen_to_document_point(position);
 
         if let Err(error) = workspace.replace_circle_on_root(
             &mut self.history,
             gpu.renderer_mut(),
-            x,
-            y,
+            canvas.x,
+            canvas.y,
             self.config.brush_radius_px,
             self.config.brush_color,
         ) {
             eprintln!("stroke failed: {error}");
         }
+    }
+
+    fn fit_view_to_workspace(&mut self) -> Result<(), AppViewMatrixError> {
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_ref(), self.gpu.as_ref()) else {
+            return Ok(());
+        };
+        self.view =
+            AppView::fit_canvas_in_surface(workspace.canvas_size_px(), gpu.surface_size_px())?;
+        Ok(())
+    }
+
+    fn pan_view_to(&mut self, position: ScreenCoordF) {
+        let Some(last_position) = self.middle_pan_last_pos else {
+            self.middle_pan_last_pos = Some(position);
+            return;
+        };
+        let dx = position.x - last_position.x;
+        let dy = position.y - last_position.y;
+        self.middle_pan_last_pos = Some(position);
+        if dx.abs() <= f32::EPSILON && dy.abs() <= f32::EPSILON {
+            return;
+        }
+        if let Err(error) = self.view.translate_screen(dx, dy) {
+            eprintln!("pan failed: {error}");
+        }
+    }
+
+    fn zoom_view_at_cursor(&mut self, delta: &MouseScrollDelta) -> bool {
+        let scroll_lines = scroll_delta_lines(delta);
+        if scroll_lines.abs() <= f32::EPSILON {
+            return false;
+        }
+        let center = self.last_cursor_pos.unwrap_or_else(|| {
+            let (width, height) = self
+                .gpu
+                .as_ref()
+                .map(GpuCtx::surface_size_px)
+                .unwrap_or((1, 1));
+            ScreenCoordF::new(width as f32 * 0.5, height as f32 * 0.5)
+        });
+        let scale = (scroll_lines * 0.12).exp().clamp(0.05, 20.0);
+        if let Err(error) = self.view.scale_about_screen_point(scale, center) {
+            eprintln!("zoom failed: {error}");
+            return false;
+        }
+        true
     }
 }
 
@@ -268,6 +322,10 @@ impl GpuCtx {
         &mut self.renderer
     }
 
+    fn surface_size_px(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -280,7 +338,7 @@ impl GpuCtx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn render(&mut self, workspace: Option<&DocumentWorkspace>) {
+    fn render(&mut self, workspace: Option<&DocumentWorkspace>, view: &AppView) {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(error) => {
@@ -294,13 +352,13 @@ impl GpuCtx {
             }
         };
 
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+        let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(self.config.format),
             ..Default::default()
         });
 
         let tiles = match workspace {
-            Some(workspace) => match workspace.root_present_tiles() {
+            Some(workspace) => match workspace.root_present_tiles_for_view(view) {
                 Ok(tiles) => tiles,
                 Err(error) => {
                     eprintln!("document present failed: {error}");
@@ -312,7 +370,7 @@ impl GpuCtx {
         if let Err(error) = self.renderer.present_tiles(
             &tiles,
             PresentTarget {
-                view: &view,
+                view: &surface_view,
                 format: self.config.format,
                 width: self.config.width,
                 height: self.config.height,
@@ -360,6 +418,10 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.workspace = Some(workspace);
         self.gpu = Some(gpu);
+        if let Err(error) = self.fit_view_to_workspace() {
+            eprintln!("view initialization failed: {error}");
+            event_loop.exit();
+        }
     }
 
     fn window_event(
@@ -379,10 +441,15 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::CursorMoved { position, .. } => {
-                let pos = (finite_f64_to_f32(position.x), finite_f64_to_f32(position.y));
+                let pos =
+                    ScreenCoordF::new(finite_f64_to_f32(position.x), finite_f64_to_f32(position.y));
                 self.last_cursor_pos = Some(pos);
                 if self.primary_down {
-                    self.paint_at(pos.0, pos.1);
+                    self.paint_at(pos);
+                    window.request_redraw();
+                }
+                if self.middle_down {
+                    self.pan_view_to(pos);
                     window.request_redraw();
                 }
             }
@@ -397,14 +464,34 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                 }
             }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                self.middle_down = state == ElementState::Pressed;
+                self.middle_pan_last_pos = if self.middle_down {
+                    self.last_cursor_pos
+                } else {
+                    None
+                };
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.zoom_view_at_cursor(&delta) {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
+                if let Err(error) = self.fit_view_to_workspace() {
+                    eprintln!("view resize failed: {error}");
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render(self.workspace.as_ref());
+                    gpu.render(self.workspace.as_ref(), &self.view);
                 }
             }
             _ => {}
@@ -420,6 +507,13 @@ impl ApplicationHandler for App {
 
 fn finite_f64_to_f32(value: f64) -> f32 {
     if value.is_finite() { value as f32 } else { 0.0 }
+}
+
+fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => *y,
+        MouseScrollDelta::PixelDelta(position) => finite_f64_to_f32(position.y) / 40.0,
+    }
 }
 
 #[cfg(test)]
@@ -452,5 +546,19 @@ mod tests {
         assert_eq!(super::finite_f64_to_f32(f64::NAN), 0.0);
         assert_eq!(super::finite_f64_to_f32(f64::INFINITY), 0.0);
         assert_eq!(super::finite_f64_to_f32(42.25), 42.25);
+    }
+
+    #[test]
+    fn scroll_delta_pixels_are_normalized_to_line_units() {
+        assert_eq!(
+            super::scroll_delta_lines(&winit::event::MouseScrollDelta::LineDelta(0.0, 2.0)),
+            2.0
+        );
+        assert_eq!(
+            super::scroll_delta_lines(&winit::event::MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(0.0, 80.0)
+            )),
+            2.0
+        );
     }
 }
