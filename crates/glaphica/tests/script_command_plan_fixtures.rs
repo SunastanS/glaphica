@@ -8,6 +8,8 @@ const SCRIPT_COMMAND_PLAN_JSON: &str = include_str!("fixtures/script_command_pla
 const STARTUP_COMMAND_PLAN_JSON: &str = include_str!("fixtures/startup_command_plan.json");
 const STARTUP_COMMIT_COMMAND_PLAN_JSON: &str =
     include_str!("fixtures/startup_commit_command_plan.json");
+const STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON: &str =
+    include_str!("fixtures/startup_export_open_command_plan.json");
 
 #[derive(Default)]
 struct RecordingHost {
@@ -30,6 +32,7 @@ fn script_command_plan_fixture_is_readable_and_writable_json() {
         SCRIPT_COMMAND_PLAN_JSON,
         STARTUP_COMMAND_PLAN_JSON,
         STARTUP_COMMIT_COMMAND_PLAN_JSON,
+        STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON,
     ] {
         let plan = script_command_plan_from_json_str(source)
             .expect("script command plan fixture should parse");
@@ -50,6 +53,49 @@ fn script_command_plan_fixture_is_readable_and_writable_json() {
     assert!(rendered.contains("\"RunDrawSession\""));
     assert!(rendered.contains("\"modulations\""));
     assert!(rendered.contains("\"pressure\""));
+}
+
+#[test]
+fn startup_export_open_command_plan_fixture_covers_workspace_round_trip() {
+    let plan = script_command_plan_from_json_str(STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON)
+        .expect("startup export/open command plan fixture should parse");
+
+    let finish_index = plan
+        .commands
+        .iter()
+        .position(|command| matches!(command, ScriptCommand::FinishStroke))
+        .expect("fixture should commit a stroke before exporting");
+    let (export_index, export_path) = plan
+        .commands
+        .iter()
+        .enumerate()
+        .find_map(|(index, command)| match command {
+            ScriptCommand::ExportWorkspaceDirectory(path) => Some((index, path)),
+            _ => None,
+        })
+        .expect("fixture should export a workspace");
+    let (open_index, open_path) = plan
+        .commands
+        .iter()
+        .enumerate()
+        .find_map(|(index, command)| match command {
+            ScriptCommand::OpenWorkspaceDirectory(path) => Some((index, path)),
+            _ => None,
+        })
+        .expect("fixture should open the exported workspace");
+
+    assert!(finish_index < export_index);
+    assert!(export_index < open_index);
+    assert_eq!(export_path, open_path);
+    assert_eq!(
+        export_path,
+        &std::path::PathBuf::from("target/startup-roundtrip-workspace")
+    );
+    assert!(
+        plan.commands[open_index + 1..]
+            .iter()
+            .any(|command| matches!(command, ScriptCommand::RequestRedraw))
+    );
 }
 
 #[test]
