@@ -25,9 +25,15 @@ fn config_from_args(
                 };
                 trace_path = PathBuf::from(path);
             }
+            "--open-workspace" => {
+                let Some(path) = args.next() else {
+                    return Err(invalid_arg("--open-workspace requires a directory path"));
+                };
+                config.workspace_path = Some(PathBuf::from(path));
+            }
             "--help" | "-h" => {
                 return Err(invalid_arg(
-                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>]",
+                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>]",
                 ));
             }
             _ => return Err(invalid_arg(format!("unknown argument {arg}"))),
@@ -57,6 +63,7 @@ fn invalid_arg(message: impl Into<String>) -> Error {
 mod tests {
     use super::config_from_args;
     use glaphica::AppTraceConfig;
+    use std::path::PathBuf;
 
     #[test]
     fn parses_record_trace_arguments() {
@@ -70,6 +77,20 @@ mod tests {
         assert_eq!(
             config.trace_config,
             AppTraceConfig::record("target/trace.json")
+        );
+    }
+
+    #[test]
+    fn parses_open_workspace_argument() {
+        let config = config_from_args([
+            "--open-workspace".to_owned(),
+            "target/workspace-export".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.workspace_path,
+            Some(PathBuf::from("target/workspace-export"))
         );
     }
 

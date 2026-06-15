@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,8 +20,9 @@ use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
-    SurfaceRuntime, ToolSet,
+    SurfaceRuntime, ToolSet, WorkspaceExportError,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
+    import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
     stroke::BrushThreadRuntime,
     trace::{AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState},
@@ -34,6 +36,7 @@ pub struct AppRuntimeConfig {
     pub clear_color: wgpu::Color,
     pub canvas_width_px: u32,
     pub canvas_height_px: u32,
+    pub workspace_path: Option<PathBuf>,
     pub tool_set: ToolSet,
     pub active_tool: ActiveTool,
     pub draw_on_tools: Vec<DrawOnToolKind>,
@@ -68,6 +71,7 @@ impl Default for AppRuntimeConfig {
             },
             canvas_width_px: DEFAULT_CANVAS_WIDTH_PX,
             canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
+            workspace_path: None,
             tool_set: ToolSet::default_brush(),
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
@@ -684,6 +688,7 @@ struct GpuCtx {
 enum GpuInitError {
     CreateSurface(wgpu::CreateSurfaceError),
     Document(DocumentWorkspaceInitError<GpuRendererError>),
+    WorkspaceImport(WorkspaceExportError),
     Renderer(GpuRendererError),
     RequestAdapter(wgpu::RequestAdapterError),
     RequestDevice(wgpu::RequestDeviceError),
@@ -697,6 +702,7 @@ impl Display for GpuInitError {
             Self::Document(error) => {
                 write!(f, "failed to create GPU-backed document workspace: {error}")
             }
+            Self::WorkspaceImport(error) => write!(f, "failed to import workspace: {error}"),
             Self::Renderer(error) => write!(f, "failed to create GPU renderer: {error}"),
             Self::RequestAdapter(error) => write!(f, "failed to request adapter: {error}"),
             Self::RequestDevice(error) => write!(f, "failed to request device: {error}"),
@@ -710,6 +716,7 @@ impl Error for GpuInitError {
         match self {
             Self::CreateSurface(error) => Some(error),
             Self::Document(error) => Some(error),
+            Self::WorkspaceImport(error) => Some(error),
             Self::Renderer(error) => Some(error),
             Self::RequestAdapter(error) => Some(error),
             Self::RequestDevice(error) => Some(error),
@@ -763,12 +770,16 @@ impl GpuCtx {
             app_config.draw_on_tools.iter().copied(),
         )
         .map_err(GpuInitError::Renderer)?;
-        let workspace = DocumentWorkspace::white_with_textures(
-            app_config.canvas_width_px,
-            app_config.canvas_height_px,
-            &mut renderer,
-        )
-        .map_err(GpuInitError::Document)?;
+        let workspace = match &app_config.workspace_path {
+            Some(path) => import_workspace_directory(&mut renderer, path)
+                .map_err(GpuInitError::WorkspaceImport)?,
+            None => DocumentWorkspace::white_with_textures(
+                app_config.canvas_width_px,
+                app_config.canvas_height_px,
+                &mut renderer,
+            )
+            .map_err(GpuInitError::Document)?,
+        };
 
         Ok((
             Self {
@@ -1254,6 +1265,7 @@ mod tests {
         assert_eq!(config.clear_color.a, 1.0);
         assert_eq!(config.canvas_width_px, DEFAULT_CANVAS_WIDTH_PX);
         assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
+        assert_eq!(config.workspace_path, None);
         assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
