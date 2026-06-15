@@ -1,5 +1,6 @@
 mod display;
 mod document;
+mod egui_overlay;
 mod export;
 mod frame;
 mod input_ring;

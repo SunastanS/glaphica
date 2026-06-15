@@ -13,6 +13,7 @@ gla_ir = { path = "../gla_ir" }
 gla_renderer = { path = "../gla_renderer" }
 gla_session = { path = "../gla_session" }
 gla_storage = { path = "../gla_storage" }
+bytemuck = { version = "1", features = ["derive"] }
 egui = "0.33.3"
 egui-winit = "0.33.3"
 pollster = "0.4.0"

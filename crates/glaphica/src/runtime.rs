@@ -21,7 +21,9 @@ use crate::{
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
     SurfaceRuntime, ToolSet, UiAction, UiLayerItem, UiTraceStatus, WorkspaceExportError,
-    collect_ui_layers, export_workspace_directory,
+    collect_ui_layers,
+    egui_overlay::EguiRenderer,
+    export_workspace_directory,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
@@ -672,16 +674,8 @@ impl App {
             .map(|ui| ui.paint(window, document_size, &layers, stroke_active, &trace_status))
     }
 
-    fn process_ui_overlay_actions(&mut self, window: &Window) {
-        let Some(output) = self.paint_ui_overlay(window) else {
-            return;
-        };
-        let UiPaintOutput {
-            textures_delta: _,
-            clipped_primitives: _,
-            pixels_per_point: _,
-            actions,
-        } = output;
+    fn process_ui_overlay_actions(&mut self, output: &mut UiPaintOutput) {
+        let actions = std::mem::take(&mut output.actions);
         for action in actions {
             self.execute_ui_action_from_window(action);
         }
@@ -1247,6 +1241,7 @@ struct GpuCtx {
     renderer: GpuRenderer,
     screen_cache: ScreenPresentCache,
     screen_blitter: ScreenBlitter,
+    ui_renderer: EguiRenderer,
 }
 
 #[derive(Debug)]
@@ -1327,6 +1322,7 @@ impl GpuCtx {
         let screen_cache =
             ScreenPresentCache::new(&device, surface.format(), surface.width(), surface.height());
         let screen_blitter = ScreenBlitter::new(&device);
+        let ui_renderer = EguiRenderer::new(&device, surface.format());
 
         let mut renderer = GpuRenderer::with_draw_on_tools(
             &adapter,
@@ -1355,6 +1351,7 @@ impl GpuCtx {
                 renderer,
                 screen_cache,
                 screen_blitter,
+                ui_renderer,
             },
             workspace,
         ))
@@ -1384,6 +1381,7 @@ impl GpuCtx {
         workspace: Option<&DocumentWorkspace>,
         view: &AppView,
         update_request: ScreenUpdateRequest,
+        ui_output: Option<&UiPaintOutput>,
     ) -> Option<AppFramePerf> {
         let dirty_tile_count = match &update_request {
             ScreenUpdateRequest::Tiles(tile_indices) => tile_indices.len(),
@@ -1410,6 +1408,18 @@ impl GpuCtx {
 
         let present_started = Instant::now();
         {
+            if let Some(ui_output) = ui_output {
+                self.ui_renderer.upload_textures(
+                    &self.device,
+                    &self.queue,
+                    &ui_output.textures_delta,
+                );
+                self.ui_renderer.upload_meshes(
+                    &self.device,
+                    &self.queue,
+                    &ui_output.clipped_primitives,
+                );
+            }
             if cache_ready {
                 self.screen_blitter.present_cache(
                     &self.device,
@@ -1421,10 +1431,29 @@ impl GpuCtx {
             } else {
                 self.render_direct_to_frame(workspace, view, &frame);
             }
+            if let Some(ui_output) = ui_output {
+                self.render_ui_overlay_to_frame(&frame, ui_output);
+            }
             SurfaceRuntime::present(frame);
         }
         perf.present_surface = present_started.elapsed();
         Some(perf)
+    }
+
+    fn render_ui_overlay_to_frame(&self, frame: &SurfaceFrame, ui_output: &UiPaintOutput) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glaphica-egui-overlay-encoder"),
+            });
+        self.ui_renderer.render(
+            &self.queue,
+            &mut encoder,
+            &frame.view,
+            [self.surface.width(), self.surface.height()],
+            ui_output.pixels_per_point,
+        );
+        self.queue.submit(Some(encoder.finish()));
     }
 
     fn update_screen_cache(
@@ -1748,13 +1777,21 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let frame_started = Instant::now();
                 let process_preview_started = Instant::now();
-                self.process_ui_overlay_actions(&window);
+                let mut ui_output = self.paint_ui_overlay(&window);
+                if let Some(output) = ui_output.as_mut() {
+                    self.process_ui_overlay_actions(output);
+                }
                 self.refresh_layer_composite_if_needed();
                 self.process_pending_active_stroke_preview();
                 let process_preview = process_preview_started.elapsed();
                 let update_request = self.frame_scheduler.take_screen_update_request();
                 let mut perf = self.gpu.as_mut().and_then(|gpu| {
-                    gpu.render(self.workspace.as_ref(), &self.view, update_request)
+                    gpu.render(
+                        self.workspace.as_ref(),
+                        &self.view,
+                        update_request,
+                        ui_output.as_ref(),
+                    )
                 });
                 if let Some(perf) = perf.as_mut() {
                     perf.process_preview = process_preview;
