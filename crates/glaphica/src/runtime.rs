@@ -398,16 +398,16 @@ impl App {
                 reason: format!("active tool {active_tool:?} is not registered"),
             });
         }
-        if !self.brush_thread.set_active_tool(active_tool) {
-            return Err(ScriptHostError::Runtime {
-                reason: "brush thread did not accept active tool update".to_owned(),
-            });
-        }
-        if !self.brush_thread.reset_active_stroke_processing() {
-            return Err(ScriptHostError::Runtime {
-                reason: "brush thread did not reset active stroke processing".to_owned(),
-            });
-        }
+        self.brush_thread
+            .set_active_tool(active_tool)
+            .map_err(|error| ScriptHostError::Runtime {
+                reason: error.to_string(),
+            })?;
+        self.brush_thread
+            .reset_active_stroke_processing()
+            .map_err(|error| ScriptHostError::Runtime {
+                reason: error.to_string(),
+            })?;
         self.config.active_tool = active_tool;
         self.primary_down = false;
         self.clear_active_stroke_preview_cache();
