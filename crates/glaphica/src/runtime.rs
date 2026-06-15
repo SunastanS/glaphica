@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gla_core::{CanvasInput, ScreenCoordF};
 use gla_ir::{DrawOnToolKind, RegistryPatch};
@@ -39,6 +39,21 @@ pub struct AppRuntimeConfig {
     pub draw_on_tools: Vec<DrawOnToolKind>,
     pub brush_settings: BrushSettings,
     pub trace_config: AppTraceConfig,
+    pub perf_trace_config: AppPerfTraceConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppPerfTraceConfig {
+    pub stderr_enabled: bool,
+    pub slow_threshold: Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AppFramePerf {
+    update_cache: Duration,
+    acquire_frame: Duration,
+    present_surface: Duration,
+    dirty_tile_count: usize,
 }
 
 impl Default for AppRuntimeConfig {
@@ -58,6 +73,7 @@ impl Default for AppRuntimeConfig {
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
             brush_settings: BrushSettings::default(),
             trace_config: AppTraceConfig::default(),
+            perf_trace_config: AppPerfTraceConfig::default(),
         }
     }
 }
@@ -66,6 +82,35 @@ impl AppRuntimeConfig {
     pub fn with_round_brush_settings(mut self, settings: RoundBrushSettings) -> Self {
         self.brush_settings = BrushSettings::from_round_brush(settings);
         self
+    }
+}
+
+impl Default for AppPerfTraceConfig {
+    fn default() -> Self {
+        Self {
+            stderr_enabled: false,
+            slow_threshold: Duration::from_millis(8),
+        }
+    }
+}
+
+impl AppPerfTraceConfig {
+    pub fn from_env() -> Self {
+        Self {
+            stderr_enabled: env_flag("GLAPHICA_APP_PERF_TRACE_STDERR")
+                || env_flag("GLAPHICA_PREVIEW_PERF_TRACE_STDERR"),
+            slow_threshold: env_millis("GLAPHICA_APP_PERF_TRACE_SLOW_MS")
+                .or_else(|| env_millis("GLAPHICA_PREVIEW_PERF_TRACE_SLOW_MS"))
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::from_millis(8)),
+        }
+    }
+
+    pub fn stderr(slow_threshold: Duration) -> Self {
+        Self {
+            stderr_enabled: true,
+            slow_threshold,
+        }
     }
 }
 
@@ -94,7 +139,9 @@ impl Error for AppRunError {
 }
 
 pub fn run_app_window() -> Result<(), AppRunError> {
-    run_app_window_with_config(AppRuntimeConfig::default())
+    let mut config = AppRuntimeConfig::default();
+    config.perf_trace_config = AppPerfTraceConfig::from_env();
+    run_app_window_with_config(config)
 }
 
 pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRunError> {
@@ -119,6 +166,7 @@ struct App {
     last_cursor_pos: Option<ScreenCoordF>,
     input_clock_start: Instant,
     last_input_time_ns: u64,
+    perf_frame_seq: u64,
     modifiers: ModifiersState,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
@@ -153,6 +201,7 @@ impl App {
             last_cursor_pos: None,
             input_clock_start: Instant::now(),
             last_input_time_ns: 0,
+            perf_frame_seq: 0,
             modifiers: ModifiersState::default(),
             window: None,
             gpu: None,
@@ -539,6 +588,15 @@ impl App {
         }
         true
     }
+
+    fn trace_frame_perf(&mut self, total: Duration, perf: &AppFramePerf) {
+        let config = self.config.perf_trace_config;
+        if !config.stderr_enabled || total < config.slow_threshold {
+            return;
+        }
+        self.perf_frame_seq = self.perf_frame_seq.saturating_add(1);
+        eprintln!("{}", format_app_perf_line(self.perf_frame_seq, total, perf));
+    }
 }
 
 impl Drop for App {
@@ -750,27 +808,47 @@ impl GpuCtx {
         workspace: Option<&DocumentWorkspace>,
         view: &AppView,
         update_request: ScreenUpdateRequest,
-    ) {
+    ) -> Option<AppFramePerf> {
+        let dirty_tile_count = match &update_request {
+            ScreenUpdateRequest::Tiles(tile_indices) => tile_indices.len(),
+            ScreenUpdateRequest::Full | ScreenUpdateRequest::None => 0,
+        };
+        let mut perf = AppFramePerf {
+            dirty_tile_count,
+            ..AppFramePerf::default()
+        };
+
+        let update_cache_started = Instant::now();
         let cache_ready = self.update_screen_cache(workspace, view, update_request);
+        perf.update_cache = update_cache_started.elapsed();
+
+        let acquire_frame_started = Instant::now();
         let frame = match self.surface.acquire_frame(&self.device) {
             Ok(frame) => frame,
             Err(error) => {
                 eprintln!("surface acquire failed: {error}");
-                return;
+                return None;
             }
         };
-        if cache_ready {
-            self.screen_blitter.present_cache(
-                &self.device,
-                &self.queue,
-                &self.screen_cache,
-                &frame,
-                self.surface.format(),
-            );
-        } else {
-            self.render_direct_to_frame(workspace, view, &frame);
+        perf.acquire_frame = acquire_frame_started.elapsed();
+
+        let present_started = Instant::now();
+        {
+            if cache_ready {
+                self.screen_blitter.present_cache(
+                    &self.device,
+                    &self.queue,
+                    &self.screen_cache,
+                    &frame,
+                    self.surface.format(),
+                );
+            } else {
+                self.render_direct_to_frame(workspace, view, &frame);
+            }
+            SurfaceRuntime::present(frame);
         }
-        SurfaceRuntime::present(frame);
+        perf.present_surface = present_started.elapsed();
+        Some(perf)
     }
 
     fn update_screen_cache(
@@ -1054,9 +1132,13 @@ impl ApplicationHandler for App {
                 self.request_full_screen_update();
             }
             WindowEvent::RedrawRequested => {
+                let frame_started = Instant::now();
                 let update_request = self.frame_scheduler.take_screen_update_request();
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render(self.workspace.as_ref(), &self.view, update_request);
+                let perf = self.gpu.as_mut().and_then(|gpu| {
+                    gpu.render(self.workspace.as_ref(), &self.view, update_request)
+                });
+                if let Some(perf) = perf.as_ref() {
+                    self.trace_frame_perf(frame_started.elapsed(), perf);
                 }
                 self.frame_scheduler.reset_redraw_request();
             }
@@ -1087,9 +1169,50 @@ fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
     }
 }
 
+fn env_flag(name: &str) -> bool {
+    std::env::var_os(name)
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+}
+
+fn env_millis(name: &str) -> Option<u64> {
+    std::env::var_os(name)
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) -> String {
+    let stages = [
+        ("update_cache", perf.update_cache),
+        ("acquire_frame", perf.acquire_frame),
+        ("present_surface", perf.present_surface),
+    ];
+    let (bottleneck, bottleneck_duration) = stages
+        .iter()
+        .max_by_key(|(_, duration)| *duration)
+        .copied()
+        .expect("app frame perf should always have stages");
+    format!(
+        "[PERF][app][frame={frame_seq}] total_ms={:.3} bottleneck={bottleneck} ({:.3}ms) dirty_tiles={} stages_ms={{update_cache:{:.3}, acquire_frame:{:.3}, present_surface:{:.3}}}",
+        duration_ms(total),
+        duration_ms(bottleneck_duration),
+        perf.dirty_tile_count,
+        duration_ms(perf.update_cache),
+        duration_ms(perf.acquire_frame),
+        duration_ms(perf.present_surface),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{App, AppRuntimeConfig};
+    use super::{App, AppFramePerf, AppPerfTraceConfig, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
         BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
@@ -1101,6 +1224,7 @@ mod tests {
         DocImageUse, DocumentVersionId, DrawOnToolKind, DrawSessionIR, ImageId, ImageLayoutSpec,
         ImageRole, RegistryPatch, RegistryPatchOp,
     };
+    use std::time::Duration;
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
         CanvasInput {
@@ -1135,6 +1259,7 @@ mod tests {
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
         assert_eq!(config.brush_settings, BrushSettings::default());
         assert_eq!(config.trace_config, AppTraceConfig::Disabled);
+        assert_eq!(config.perf_trace_config, AppPerfTraceConfig::default());
     }
 
     #[test]
@@ -1166,6 +1291,24 @@ mod tests {
             config.brush_settings.color,
             gla_color::PremultipliedRgbaF32::new(0.2, 0.3, 0.4, 1.0)
         );
+    }
+
+    #[test]
+    fn app_perf_line_reports_stage_breakdown_and_bottleneck() {
+        let perf = AppFramePerf {
+            update_cache: Duration::from_micros(500),
+            acquire_frame: Duration::from_micros(250),
+            present_surface: Duration::from_micros(1_250),
+            dirty_tile_count: 3,
+        };
+
+        let line = super::format_app_perf_line(7, Duration::from_micros(2_000), &perf);
+
+        assert!(line.contains("[PERF][app][frame=7]"));
+        assert!(line.contains("total_ms=2.000"));
+        assert!(line.contains("bottleneck=present_surface (1.250ms)"));
+        assert!(line.contains("dirty_tiles=3"));
+        assert!(line.contains("update_cache:0.500"));
     }
 
     #[test]

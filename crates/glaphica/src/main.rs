@@ -10,6 +10,7 @@ fn config_from_args(
     args: impl IntoIterator<Item = String>,
 ) -> Result<glaphica::AppRuntimeConfig, Error> {
     let mut config = glaphica::AppRuntimeConfig::default();
+    config.perf_trace_config = glaphica::AppPerfTraceConfig::from_env();
     let mut trace_path = PathBuf::from("glaphica-trace.json");
     let mut trace_mode = TraceModeArg::Disabled;
     let mut args = args.into_iter();

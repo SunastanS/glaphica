@@ -21,7 +21,9 @@ pub use export::{
     read_workspace_manifest, root_tile_asset_relative_path, write_workspace_manifest,
 };
 pub use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
-pub use runtime::{AppRunError, AppRuntimeConfig, run_app_window, run_app_window_with_config};
+pub use runtime::{
+    AppPerfTraceConfig, AppRunError, AppRuntimeConfig, run_app_window, run_app_window_with_config,
+};
 pub use script::{
     NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptDrawCommand, ScriptDrawFrame,
     ScriptDrawSession, ScriptHost, ScriptHostError, ScriptModuleId, ScriptModuleSource,
