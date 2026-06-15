@@ -12,13 +12,17 @@ use gla_storage::{GlobalEditError, GlobalStorage, GlobalStorageError, ImageEdit}
 use serde::{Deserialize, Serialize};
 use tile_key::{Tile, TilesError};
 
-use crate::{DocumentPresentError, DocumentWorkspace, DocumentWorkspaceBuildError};
+use crate::{
+    DocumentLayerTree, DocumentPresentError, DocumentWorkspace, DocumentWorkspaceBuildError,
+    DocumentWorkspaceLayerError,
+};
 
-const EXPORT_VERSION: u32 = 1;
+const EXPORT_VERSION: u32 = 2;
+const MIN_SUPPORTED_EXPORT_VERSION: u32 = 1;
 const MANIFEST_FILE_NAME: &str = "workspace.json";
 const TILE_DIRECTORY_NAME: &str = "tiles";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceExportManifest {
     pub version: u32,
     pub root_image_id: u64,
@@ -28,18 +32,22 @@ pub struct WorkspaceExportManifest {
     pub bytes_per_pixel: u32,
     pub padded_bytes_per_row: u32,
     pub atlas_tile_size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_tree: Option<DocumentLayerTree>,
     pub tiles: Vec<WorkspaceExportTile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceExportTile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<u64>,
     pub tile_index: u32,
     pub source_width: u32,
     pub source_height: u32,
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceExportSnapshot {
     pub manifest: WorkspaceExportManifest,
     pub tiles: Vec<WorkspaceExportTileAsset>,
@@ -47,6 +55,7 @@ pub struct WorkspaceExportSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceExportTileAsset {
+    pub image_id: Option<u64>,
     pub tile_index: u32,
     pub source_width: u32,
     pub source_height: u32,
@@ -60,6 +69,7 @@ pub enum WorkspaceExportError {
     Document(DocumentPresentError),
     Renderer(GpuRendererError),
     DocumentBuild(DocumentWorkspaceBuildError<GpuRendererError>),
+    Layer(DocumentWorkspaceLayerError),
     Storage(GlobalStorageError),
     StorageEdit(GlobalEditError),
     Tile(TilesError),
@@ -109,16 +119,20 @@ pub fn export_workspace_directory(
     let padded_bytes_per_row = padded_bytes_per_row(bytes_per_pixel);
     let mut tiles = Vec::new();
 
-    for tile in workspace.root_physical_tiles()? {
-        let relative_path = root_tile_asset_relative_path(tile.tile_index);
-        let bytes = renderer.read_tile_bytes(tile.src, bytes_per_pixel)?;
-        fs::write(root_path.join(&relative_path), bytes)?;
-        tiles.push(WorkspaceExportTile {
-            tile_index: tile.tile_index,
-            source_width: tile.source_width,
-            source_height: tile.source_height,
-            path: relative_path,
-        });
+    for image_id in export_primitive_image_ids(workspace)? {
+        for tile in workspace.image_physical_tiles(image_id)? {
+            let relative_path =
+                image_tile_asset_relative_path(workspace.root(), image_id, tile.tile_index);
+            let bytes = renderer.read_tile_bytes(tile.src, bytes_per_pixel)?;
+            fs::write(root_path.join(&relative_path), bytes)?;
+            tiles.push(WorkspaceExportTile {
+                image_id: Some(image_id.value()),
+                tile_index: tile.tile_index,
+                source_width: tile.source_width,
+                source_height: tile.source_height,
+                path: relative_path,
+            });
+        }
     }
 
     let (canvas_width_px, canvas_height_px) = workspace.canvas_size_px();
@@ -131,6 +145,7 @@ pub fn export_workspace_directory(
         bytes_per_pixel,
         padded_bytes_per_row,
         atlas_tile_size: ATLAS_TILE_SIZE,
+        layer_tree: Some(workspace.layer_tree().clone()),
         tiles,
     };
     write_workspace_manifest(root_path, &manifest)?;
@@ -174,6 +189,7 @@ pub fn read_workspace_directory(
             });
         }
         assets.push(WorkspaceExportTileAsset {
+            image_id: tile.image_id,
             tile_index: tile.tile_index,
             source_width: tile.source_width,
             source_height: tile.source_height,
@@ -207,15 +223,20 @@ pub fn workspace_from_export_snapshot(
     validate_manifest_layout(&manifest)?;
     validate_snapshot_tile_indices(&manifest, &tiles)?;
 
-    let mut workspace = DocumentWorkspace::primitive_root_with_textures(
+    let min_slots = u64::try_from(tiles.len()).unwrap_or(u64::MAX);
+    let mut workspace = DocumentWorkspace::primitive_root_with_textures_min_slots(
         ImageId::new(manifest.root_image_id),
         manifest.canvas_width_px,
         manifest.canvas_height_px,
         manifest.format,
+        min_slots,
         renderer,
     )
     .map_err(WorkspaceExportError::DocumentBuild)?;
-    apply_snapshot_root_tiles(&mut workspace, renderer, &manifest, &mut tiles)?;
+    if let Some(layers) = manifest.layer_tree.clone() {
+        workspace.restore_layer_tree_from_export(layers)?;
+    }
+    apply_snapshot_tiles(&mut workspace, renderer, &manifest, &mut tiles)?;
     Ok(workspace)
 }
 
@@ -223,10 +244,20 @@ pub fn root_tile_asset_relative_path(tile_index: u32) -> PathBuf {
     PathBuf::from(TILE_DIRECTORY_NAME).join(format!("root_{tile_index:06}.bin"))
 }
 
+pub fn image_tile_asset_relative_path(root: ImageId, image: ImageId, tile_index: u32) -> PathBuf {
+    if image == root {
+        return root_tile_asset_relative_path(tile_index);
+    }
+    PathBuf::from(TILE_DIRECTORY_NAME).join(format!(
+        "image_{:06}_tile_{tile_index:06}.bin",
+        image.value()
+    ))
+}
+
 fn validate_manifest_version(
     manifest: &WorkspaceExportManifest,
 ) -> Result<(), WorkspaceExportError> {
-    if manifest.version != EXPORT_VERSION {
+    if !(MIN_SUPPORTED_EXPORT_VERSION..=EXPORT_VERSION).contains(&manifest.version) {
         return Err(WorkspaceExportError::UnsupportedVersion(manifest.version));
     }
     Ok(())
@@ -272,9 +303,17 @@ fn validate_snapshot_tile_indices(
                 .div_ceil(gla_image::IMAGE_TILE_SIZE),
         )
         .unwrap_or(u32::MAX);
-    let mut indices = tiles.iter().map(|tile| tile.tile_index).collect::<Vec<_>>();
+    let mut indices = tiles
+        .iter()
+        .map(|tile| {
+            (
+                tile.image_id.unwrap_or(manifest.root_image_id),
+                tile.tile_index,
+            )
+        })
+        .collect::<Vec<_>>();
     indices.sort_unstable();
-    for tile_index in indices.iter().copied() {
+    for (_, tile_index) in indices.iter().copied() {
         if tile_index >= tile_count {
             return Err(WorkspaceExportError::InvalidTileIndex {
                 tile_index,
@@ -285,14 +324,14 @@ fn validate_snapshot_tile_indices(
     for pair in indices.windows(2) {
         if pair[0] == pair[1] {
             return Err(WorkspaceExportError::DuplicateTile {
-                tile_index: pair[0],
+                tile_index: pair[0].1,
             });
         }
     }
     Ok(())
 }
 
-fn apply_snapshot_root_tiles(
+fn apply_snapshot_tiles(
     workspace: &mut DocumentWorkspace,
     renderer: &mut GpuRenderer,
     manifest: &WorkspaceExportManifest,
@@ -302,16 +341,28 @@ fn apply_snapshot_root_tiles(
         return Ok(());
     }
 
-    tiles.sort_by_key(|tile| tile.tile_index);
-    let mut edits = Vec::with_capacity(tiles.len());
+    tiles.sort_by_key(|tile| {
+        (
+            tile.image_id.unwrap_or(manifest.root_image_id),
+            tile.tile_index,
+        )
+    });
+    let mut edits: HashMap<ImageId, Vec<(u32, Tile)>> = HashMap::new();
     for tile_asset in tiles.drain(..) {
+        let image_id = ImageId::new(tile_asset.image_id.unwrap_or(manifest.root_image_id));
+        if workspace.storage().image(image_id).is_none() {
+            release_pending_tile_edit_map(workspace.storage_mut(), edits);
+            return Err(WorkspaceExportError::StorageEdit(
+                GlobalEditError::MissingImage { id: image_id },
+            ));
+        }
         let mut tile = match workspace
             .storage_mut()
             .reserve_tile_for_format(manifest.format)
         {
             Ok(tile) => tile,
             Err(error) => {
-                release_pending_tile_edits(workspace.storage_mut(), edits);
+                release_pending_tile_edit_map(workspace.storage_mut(), edits);
                 return Err(error.into());
             }
         };
@@ -319,7 +370,7 @@ fn apply_snapshot_root_tiles(
             Ok(position) => position,
             Err(error) => {
                 workspace.storage_mut().tiles_mut().release(tile);
-                release_pending_tile_edits(workspace.storage_mut(), edits);
+                release_pending_tile_edit_map(workspace.storage_mut(), edits);
                 return Err(error.into());
             }
         };
@@ -327,17 +378,22 @@ fn apply_snapshot_root_tiles(
             renderer.write_tile_bytes(position, manifest.bytes_per_pixel, &tile_asset.bytes)
         {
             workspace.storage_mut().tiles_mut().release(tile);
-            release_pending_tile_edits(workspace.storage_mut(), edits);
+            release_pending_tile_edit_map(workspace.storage_mut(), edits);
             return Err(error.into());
         }
-        edits.push((tile_asset.tile_index, tile));
+        edits
+            .entry(image_id)
+            .or_default()
+            .push((tile_asset.tile_index, tile));
     }
 
-    let edit = ImageEdit::from_sorted_unique(edits)
-        .expect("snapshot tile edits were sorted and deduplicated before apply");
-    let mut root_edits = HashMap::new();
-    root_edits.insert(workspace.root(), edit);
-    match workspace.storage_mut().apply_session_edits(root_edits) {
+    let mut image_edits = HashMap::new();
+    for (image_id, edits) in edits {
+        let edit = ImageEdit::from_sorted_unique(edits)
+            .expect("snapshot tile edits were sorted and deduplicated before apply");
+        image_edits.insert(image_id, edit);
+    }
+    match workspace.storage_mut().apply_session_edits(image_edits) {
         Ok(inverse) => {
             release_image_edit_map(workspace.storage_mut(), inverse);
             workspace.storage_mut().bump_version();
@@ -351,9 +407,42 @@ fn apply_snapshot_root_tiles(
     }
 }
 
-fn release_pending_tile_edits(storage: &mut GlobalStorage, edits: Vec<(u32, Tile)>) {
-    for (_, tile) in edits {
-        storage.tiles_mut().release(tile);
+fn export_primitive_image_ids(
+    workspace: &DocumentWorkspace,
+) -> Result<Vec<ImageId>, WorkspaceExportError> {
+    let mut node_ids = Vec::new();
+    workspace
+        .layer_tree()
+        .collect_subtree_preorder(workspace.layer_tree().root_id(), &mut node_ids)
+        .map_err(DocumentWorkspaceLayerError::Tree)?;
+    let mut images = Vec::new();
+    for node_id in node_ids {
+        let node = workspace
+            .layer_tree()
+            .node(node_id)
+            .map_err(DocumentWorkspaceLayerError::Tree)?;
+        let image =
+            workspace
+                .storage()
+                .image(node.image())
+                .ok_or(WorkspaceExportError::Storage(
+                    GlobalStorageError::MissingImage { id: node.image() },
+                ))?;
+        if image.role().is_primitive() {
+            images.push(node.image());
+        }
+    }
+    Ok(images)
+}
+
+fn release_pending_tile_edit_map(
+    storage: &mut GlobalStorage,
+    edits: HashMap<ImageId, Vec<(u32, Tile)>>,
+) {
+    for image_edits in edits.into_values() {
+        for (_, tile) in image_edits {
+            storage.tiles_mut().release(tile);
+        }
     }
 }
 
@@ -413,6 +502,7 @@ impl Display for WorkspaceExportError {
             Self::Document(error) => Display::fmt(error, f),
             Self::Renderer(error) => Display::fmt(error, f),
             Self::DocumentBuild(error) => Display::fmt(error, f),
+            Self::Layer(error) => Display::fmt(error, f),
             Self::Storage(error) => Display::fmt(error, f),
             Self::StorageEdit(error) => Display::fmt(error, f),
             Self::Tile(error) => Display::fmt(error, f),
@@ -465,6 +555,7 @@ impl Error for WorkspaceExportError {
             Self::Document(error) => Some(error),
             Self::Renderer(error) => Some(error),
             Self::DocumentBuild(error) => Some(error),
+            Self::Layer(error) => Some(error),
             Self::Storage(error) => Some(error),
             Self::StorageEdit(error) => Some(error),
             Self::Tile(error) => Some(error),
@@ -505,6 +596,12 @@ impl From<GlobalStorageError> for WorkspaceExportError {
     }
 }
 
+impl From<DocumentWorkspaceLayerError> for WorkspaceExportError {
+    fn from(error: DocumentWorkspaceLayerError) -> Self {
+        Self::Layer(error)
+    }
+}
+
 impl From<GlobalEditError> for WorkspaceExportError {
     fn from(error: GlobalEditError) -> Self {
         Self::StorageEdit(error)
@@ -527,10 +624,11 @@ impl From<serde_json::Error> for WorkspaceExportError {
 mod tests {
     use super::{
         WorkspaceExportManifest, WorkspaceExportSnapshot, WorkspaceExportTile,
-        WorkspaceExportTileAsset, bytes_per_pixel, padded_bytes_per_row, read_workspace_directory,
-        read_workspace_manifest, root_tile_asset_relative_path, workspace_from_export_snapshot,
-        write_workspace_manifest,
+        WorkspaceExportTileAsset, bytes_per_pixel, image_tile_asset_relative_path,
+        padded_bytes_per_row, read_workspace_directory, read_workspace_manifest,
+        root_tile_asset_relative_path, workspace_from_export_snapshot, write_workspace_manifest,
     };
+    use crate::DocumentWorkspace;
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
     use gla_ir::{DocumentVersionId, ImageId};
     use gla_renderer::GpuRenderer;
@@ -547,6 +645,10 @@ mod tests {
         assert_eq!(
             root_tile_asset_relative_path(7),
             std::path::PathBuf::from("tiles/root_000007.bin")
+        );
+        assert_eq!(
+            image_tile_asset_relative_path(ImageId::new(1), ImageId::new(9), 7),
+            std::path::PathBuf::from("tiles/image_000009_tile_000007.bin")
         );
     }
 
@@ -565,7 +667,9 @@ mod tests {
             bytes_per_pixel: 16,
             padded_bytes_per_row: padded_bytes_per_row(16),
             atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            layer_tree: None,
             tiles: vec![WorkspaceExportTile {
+                image_id: None,
                 tile_index: 0,
                 source_width: 62,
                 source_height: 62,
@@ -598,7 +702,9 @@ mod tests {
             bytes_per_pixel: 16,
             padded_bytes_per_row: padded_bytes_per_row(16),
             atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            layer_tree: None,
             tiles: vec![WorkspaceExportTile {
+                image_id: None,
                 tile_index: 0,
                 source_width: 62,
                 source_height: 62,
@@ -654,7 +760,9 @@ mod tests {
             bytes_per_pixel,
             padded_bytes_per_row,
             atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            layer_tree: None,
             tiles: vec![WorkspaceExportTile {
+                image_id: None,
                 tile_index: 0,
                 source_width: gla_core::IMAGE_TILE_SIZE,
                 source_height: gla_core::IMAGE_TILE_SIZE,
@@ -664,6 +772,7 @@ mod tests {
         let snapshot = WorkspaceExportSnapshot {
             manifest,
             tiles: vec![WorkspaceExportTileAsset {
+                image_id: None,
                 tile_index: 0,
                 source_width: gla_core::IMAGE_TILE_SIZE,
                 source_height: gla_core::IMAGE_TILE_SIZE,
@@ -684,6 +793,56 @@ mod tests {
                 .unwrap(),
             bytes
         );
+
+        let mut exported_workspace = DocumentWorkspace::blank(64, 64).unwrap();
+        let root_node = exported_workspace.layer_tree().root_id();
+        let layer = exported_workspace.append_layer(root_node).unwrap();
+        let layer_image = exported_workspace.layer_tree().node(layer).unwrap().image();
+        let expected_len = padded_bytes_per_row as usize * gla_core::ATLAS_TILE_SIZE as usize;
+        let tile_path = image_tile_asset_relative_path(exported_workspace.root(), layer_image, 0);
+        let layer_bytes = vec![13_u8; expected_len];
+        let manifest = WorkspaceExportManifest {
+            version: 2,
+            root_image_id: exported_workspace.root().value(),
+            canvas_width_px: 64,
+            canvas_height_px: 64,
+            format,
+            bytes_per_pixel,
+            padded_bytes_per_row,
+            atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            layer_tree: Some(exported_workspace.layer_tree().clone()),
+            tiles: vec![WorkspaceExportTile {
+                image_id: Some(layer_image.value()),
+                tile_index: 0,
+                source_width: 64,
+                source_height: 64,
+                path: tile_path.clone(),
+            }],
+        };
+        let snapshot = WorkspaceExportSnapshot {
+            manifest,
+            tiles: vec![WorkspaceExportTileAsset {
+                image_id: Some(layer_image.value()),
+                tile_index: 0,
+                source_width: 64,
+                source_height: 64,
+                path: tile_path,
+                bytes: layer_bytes.clone(),
+            }],
+        };
+
+        let imported = workspace_from_export_snapshot(&mut gpu, snapshot).unwrap();
+
+        assert_eq!(imported.layer_tree(), exported_workspace.layer_tree());
+        assert_eq!(imported.active_paint_image(), Some(layer_image));
+        let physical = imported.image_physical_tiles(layer_image).unwrap();
+        assert_eq!(physical.len(), 1);
+        assert_eq!(
+            gpu.read_tile_bytes(physical[0].src, bytes_per_pixel)
+                .unwrap(),
+            layer_bytes
+        );
+        assert!(imported.layer_composite_needs_render());
     }
 
     #[test]
@@ -701,7 +860,9 @@ mod tests {
             bytes_per_pixel: 16,
             padded_bytes_per_row: padded_bytes_per_row(16),
             atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            layer_tree: None,
             tiles: vec![WorkspaceExportTile {
+                image_id: None,
                 tile_index: 0,
                 source_width: 62,
                 source_height: 62,

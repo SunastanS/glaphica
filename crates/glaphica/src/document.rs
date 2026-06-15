@@ -102,10 +102,24 @@ impl DocumentWorkspace {
     where
         S: AtlasTextureStore,
     {
+        Self::primitive_root_with_textures_min_slots(root, width_px, height_px, format, 0, textures)
+    }
+
+    pub(crate) fn primitive_root_with_textures_min_slots<S>(
+        root: ImageId,
+        width_px: u32,
+        height_px: u32,
+        format: GlaFormat,
+        min_slots: u64,
+        textures: &mut S,
+    ) -> Result<Self, DocumentWorkspaceBuildError<S::Error>>
+    where
+        S: AtlasTextureStore,
+    {
         let layout = ImageLayoutSpec::new(width_px, height_px);
         let mut tiles = Tiles::new();
         tiles
-            .new_atlas(AtlasLayout::LARGE17, format, textures)
+            .new_atlas(initial_atlas_layout(layout, min_slots), format, textures)
             .map_err(DocumentWorkspaceBuildError::Atlas)?;
 
         let mut storage = GlobalStorage::new(tiles);
@@ -302,6 +316,76 @@ impl DocumentWorkspace {
         }
         self.delete_node(active)?;
         Ok(true)
+    }
+
+    pub(crate) fn restore_layer_tree_from_export(
+        &mut self,
+        layers: DocumentLayerTree,
+    ) -> Result<(), DocumentWorkspaceLayerError> {
+        let root = layers
+            .node(layers.root_id())
+            .map_err(DocumentWorkspaceLayerError::Tree)?;
+        if root.kind() != DocumentNodeKind::Root || root.image() != self.root {
+            return Err(DocumentWorkspaceLayerError::InvalidLayerTreeRootImage {
+                expected: self.root,
+                actual: root.image(),
+            });
+        }
+        layers.node(layers.active_node_id())?;
+
+        let mut node_ids = Vec::new();
+        layers.collect_subtree_preorder(layers.root_id(), &mut node_ids)?;
+        let mut images = HashSet::new();
+        let mut max_image_id = self.max_image_id();
+        let mut ops = Vec::new();
+        for node_id in node_ids {
+            let node = layers.node(node_id)?;
+            if !images.insert(node.image()) {
+                return Err(DocumentWorkspaceLayerError::DuplicateLayerImage { id: node.image() });
+            }
+            max_image_id = max_image_id.max(node.image().value());
+            if node_id == layers.root_id() {
+                continue;
+            }
+            let role = match node.kind() {
+                DocumentNodeKind::Root => continue,
+                DocumentNodeKind::Group => ImageRole::Derived(GraphCommand::new(Vec::new())),
+                DocumentNodeKind::Layer => ImageRole::Primitive,
+            };
+            ops.push(RegistryPatchOp::NewImage {
+                id: node.image(),
+                format: self.format,
+                layout: self.layout,
+                role,
+            });
+        }
+
+        let has_layer_children = layers
+            .child_ids(layers.root_id())
+            .is_ok_and(|children| !children.is_empty());
+        let composite = if has_layer_children {
+            let id = max_image_id
+                .checked_add(1)
+                .ok_or(DocumentWorkspaceLayerError::ImageIdExhausted)?;
+            let id = ImageId::new(id);
+            ops.push(RegistryPatchOp::NewImage {
+                id,
+                format: self.format,
+                layout: self.layout,
+                role: ImageRole::Derived(GraphCommand::new(Vec::new())),
+            });
+            Some(id)
+        } else {
+            None
+        };
+
+        if !ops.is_empty() {
+            self.storage.apply_registry_patch(RegistryPatch::new(ops))?;
+        }
+        self.layers = layers;
+        self.layer_composite_image = composite;
+        self.layer_composite_valid = false;
+        Ok(())
     }
 
     pub fn render_layer_tree_full<B>(
@@ -773,13 +857,20 @@ impl DocumentWorkspace {
     }
 
     pub fn root_physical_tiles(&self) -> Result<Vec<DocumentRootTileRead>, DocumentPresentError> {
-        let layout = self.root_layout()?;
+        self.image_physical_tiles(self.display_root())
+    }
+
+    pub(crate) fn image_physical_tiles(
+        &self,
+        image: ImageId,
+    ) -> Result<Vec<DocumentRootTileRead>, DocumentPresentError> {
+        let layout = self.image_layout(image)?;
         let tile_count_x = layout.tile_count_x();
         let tile_count = layout.tile_count();
         let mut tiles = Vec::new();
 
         for tile_index in 0..tile_count {
-            if let Some(tile) = self.root_physical_tile_for_index(tile_count_x, tile_index)? {
+            if let Some(tile) = self.physical_tile_for_index(image, tile_count_x, tile_index)? {
                 tiles.push(tile);
             }
         }
@@ -824,12 +915,17 @@ impl DocumentWorkspace {
     }
 
     fn root_layout(&self) -> Result<gla_image::GlaImageLayout, DocumentPresentError> {
-        let image =
-            self.storage
-                .image(self.display_root())
-                .ok_or(DocumentPresentError::MissingRoot {
-                    id: self.display_root(),
-                })?;
+        self.image_layout(self.display_root())
+    }
+
+    fn image_layout(
+        &self,
+        image: ImageId,
+    ) -> Result<gla_image::GlaImageLayout, DocumentPresentError> {
+        let image = self
+            .storage
+            .image(image)
+            .ok_or(DocumentPresentError::MissingRoot { id: image })?;
         Ok(image.layout())
     }
 
@@ -839,7 +935,9 @@ impl DocumentWorkspace {
         tile_count_x: u32,
         tile_index: u32,
     ) -> Result<Option<PresentTile>, DocumentPresentError> {
-        let Some(tile) = self.root_physical_tile_for_index(tile_count_x, tile_index)? else {
+        let Some(tile) =
+            self.physical_tile_for_index(self.display_root(), tile_count_x, tile_index)?
+        else {
             return Ok(None);
         };
         let tile_x = tile_index % tile_count_x;
@@ -864,14 +962,15 @@ impl DocumentWorkspace {
         }))
     }
 
-    fn root_physical_tile_for_index(
+    fn physical_tile_for_index(
         &self,
+        image: ImageId,
         tile_count_x: u32,
         tile_index: u32,
     ) -> Result<Option<DocumentRootTileRead>, DocumentPresentError> {
         let tile_ref = self
             .storage
-            .read_global_ref(self.display_root(), tile_index)
+            .read_global_ref(image, tile_index)
             .map_err(DocumentPresentError::Tile)?;
         let TileReadRef::Physical(src) = tile_ref else {
             return Ok(None);
@@ -926,6 +1025,8 @@ pub enum DocumentPresentError {
 pub enum DocumentWorkspaceLayerError {
     Tree(DocumentLayerTreeError),
     Registry(GlobalStorageError),
+    InvalidLayerTreeRootImage { expected: ImageId, actual: ImageId },
+    DuplicateLayerImage { id: ImageId },
     ImageIdExhausted,
 }
 
@@ -960,6 +1061,13 @@ impl Display for DocumentWorkspaceLayerError {
         match self {
             Self::Tree(error) => Display::fmt(error, f),
             Self::Registry(error) => Display::fmt(error, f),
+            Self::InvalidLayerTreeRootImage { expected, actual } => write!(
+                f,
+                "exported layer tree root image {actual:?} does not match workspace root {expected:?}"
+            ),
+            Self::DuplicateLayerImage { id } => {
+                write!(f, "exported layer tree repeats image id {id:?}")
+            }
             Self::ImageIdExhausted => f.write_str("document workspace image ids are exhausted"),
         }
     }
@@ -970,6 +1078,7 @@ impl Error for DocumentWorkspaceLayerError {
         match self {
             Self::Tree(error) => Some(error),
             Self::Registry(error) => Some(error),
+            Self::InvalidLayerTreeRootImage { .. } | Self::DuplicateLayerImage { .. } => None,
             Self::ImageIdExhausted => None,
         }
     }
@@ -1063,6 +1172,29 @@ fn default_canvas_format() -> GlaFormat {
     }
 }
 
+fn initial_atlas_layout(layout: ImageLayoutSpec, min_slots: u64) -> AtlasLayout {
+    const INITIAL_FULL_IMAGE_CAPACITY: u64 = 4;
+    let tile_count_x = layout.width_px.div_ceil(IMAGE_TILE_SIZE);
+    let tile_count_y = layout.height_px.div_ceil(IMAGE_TILE_SIZE);
+    let canvas_slots = u64::from(tile_count_x)
+        .saturating_mul(u64::from(tile_count_y))
+        .saturating_mul(INITIAL_FULL_IMAGE_CAPACITY);
+    atlas_layout_for_slot_count(canvas_slots.max(min_slots))
+}
+
+fn atlas_layout_for_slot_count(slot_count: u64) -> AtlasLayout {
+    [
+        AtlasLayout::TINY8,
+        AtlasLayout::SMALL11,
+        AtlasLayout::MEDIUM14,
+        AtlasLayout::LARGE17,
+        AtlasLayout::HUGE20,
+    ]
+    .into_iter()
+    .find(|layout| layout.total_slots() as u64 >= slot_count)
+    .unwrap_or(AtlasLayout::HUGE20)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,6 +1255,21 @@ mod tests {
 
         assert_eq!(workspace.canvas_size_px(), (1024, 1024));
         assert_eq!(workspace.version(), DocumentVersionId::new(1));
+    }
+
+    #[test]
+    fn blank_workspace_uses_compact_initial_atlas_layout() {
+        let default = DocumentWorkspace::default_blank().unwrap();
+        let small = DocumentWorkspace::blank(128, 96).unwrap();
+
+        assert_eq!(
+            default.storage().tiles().atlases()[0].layout,
+            AtlasLayout::SMALL11
+        );
+        assert_eq!(
+            small.storage().tiles().atlases()[0].layout,
+            AtlasLayout::TINY8
+        );
     }
 
     #[test]
