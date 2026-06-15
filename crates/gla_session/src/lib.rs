@@ -2383,6 +2383,59 @@ mod tests {
     }
 
     #[test]
+    fn begin_rejects_session_derived_cycle() {
+        let left = ImageId::new(2);
+        let right = ImageId::new(3);
+        let mut global = storage_with_atlases();
+        let derived = |id, read| SessionImageDecl::Derived {
+            id,
+            format: MetadataRef::Concrete(rgba_format()),
+            layout: MetadataRef::Concrete(layout_spec()),
+            command: SessionCommand::new(vec![SessionRead::current(read)]),
+        };
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: vec![derived(left, right), derived(right, left)],
+            draw_on: Vec::new(),
+            derive: Vec::new(),
+        };
+
+        let err = DrawSession::begin(&ir, &mut global).unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::WriterCycle { id } if id == left || id == right
+        ));
+    }
+
+    #[test]
+    fn begin_rejects_session_cycle_through_activated_global_derive() {
+        let base = ImageId::new(1);
+        let derived = ImageId::new(2);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        add_global_derived(&mut global, derived, vec![GraphRead::current(base)]);
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: vec![DocImageUse::read_write(base), DocImageUse::read(derived)],
+            session_images: Vec::new(),
+            draw_on: Vec::new(),
+            derive: vec![gla_ir::DeriveCommand::new(
+                vec![SessionRead::current(derived)],
+                base,
+            )],
+        };
+
+        let err = DrawSession::begin(&ir, &mut global).unwrap_err();
+
+        assert!(matches!(
+            err,
+            SessionError::WriterCycle { id } if id == base || id == derived
+        ));
+    }
+
+    #[test]
     fn gpu_flush_executes_session_replace_circle_4d_registered_by_ir() {
         let canvas = ImageId::new(2);
         let ir = DrawSessionIR {
