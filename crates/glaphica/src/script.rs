@@ -33,6 +33,7 @@ pub enum ScriptValue {
 pub enum ScriptCommand {
     ApplyRegistryPatch(RegistryPatch),
     OpenWorkspaceDirectory(PathBuf),
+    ExportWorkspaceDirectory(PathBuf),
     AppendLayer {
         parent: DocumentNodeId,
     },
@@ -386,6 +387,7 @@ mod tests {
         let commands = vec![
             ScriptCommand::RunDrawSession(ScriptDrawSession::new(ir.clone())),
             ScriptCommand::OpenWorkspaceDirectory("fixtures/workspace".into()),
+            ScriptCommand::ExportWorkspaceDirectory("target/workspace-export".into()),
             ScriptCommand::AppendLayer {
                 parent: DocumentNodeId::new(1),
             },
@@ -426,22 +428,26 @@ mod tests {
             ScriptCommand::OpenWorkspaceDirectory(path) if path.ends_with("fixtures/workspace")
         ));
         assert!(matches!(
-            commands[3],
+            &commands[2],
+            ScriptCommand::ExportWorkspaceDirectory(path) if path.ends_with("target/workspace-export")
+        ));
+        assert!(matches!(
+            commands[4],
             ScriptCommand::AppendGroup { parent } if parent == DocumentNodeId::new(1)
         ));
-        assert!(matches!(commands[4], ScriptCommand::CreateLayerAboveActive));
+        assert!(matches!(commands[5], ScriptCommand::CreateLayerAboveActive));
         assert!(matches!(
-            commands[8],
+            commands[9],
             ScriptCommand::SetNodeBlendMode {
                 node_id,
                 blend_mode: DocumentBlendMode::Multiply,
             } if node_id == DocumentNodeId::new(2)
         ));
         assert!(matches!(
-            commands[13],
+            commands[14],
             ScriptCommand::SetRoundBrushSettings(_)
         ));
-        assert!(matches!(commands[14], ScriptCommand::BeginStroke(found) if found == input));
+        assert!(matches!(commands[15], ScriptCommand::BeginStroke(found) if found == input));
     }
 
     #[test]

@@ -54,6 +54,11 @@ fn script_command_plan_fixture_reserves_full_rust_command_surface() {
     assert!(
         plan.commands
             .iter()
+            .any(|command| matches!(command, ScriptCommand::ExportWorkspaceDirectory(_)))
+    );
+    assert!(
+        plan.commands
+            .iter()
             .any(|command| matches!(command, ScriptCommand::AppendLayer { .. }))
     );
     assert!(

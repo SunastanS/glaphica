@@ -9,6 +9,9 @@
       "OpenWorkspaceDirectory": "fixtures/workspace"
     },
     {
+      "ExportWorkspaceDirectory": "target/workspace-export"
+    },
+    {
       "AppendLayer": {
         "parent": 1
       }

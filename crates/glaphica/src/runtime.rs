@@ -21,6 +21,7 @@ use crate::{
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
     SurfaceRuntime, ToolSet, UiAction, UiLayerItem, WorkspaceExportError, collect_ui_layers,
+    export_workspace_directory,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
@@ -486,6 +487,30 @@ impl App {
         Ok(ScriptCommandOutcome::DocumentVersion(version))
     }
 
+    fn export_workspace_directory_from_script(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        if self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot export a workspace while a stroke is active".to_owned(),
+            });
+        }
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_ref(), self.gpu.as_ref()) else {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot export a workspace before the document workspace and GPU exist"
+                    .to_owned(),
+            });
+        };
+        let version = workspace.version();
+        export_workspace_directory(workspace, &gpu.renderer, path).map_err(|error| {
+            ScriptHostError::Runtime {
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(ScriptCommandOutcome::DocumentVersion(version))
+    }
+
     fn run_layer_command(
         &mut self,
         clear_history: bool,
@@ -928,6 +953,9 @@ impl ScriptHost for App {
             }
             ScriptCommand::OpenWorkspaceDirectory(path) => {
                 self.open_workspace_directory_from_script(path)
+            }
+            ScriptCommand::ExportWorkspaceDirectory(path) => {
+                self.export_workspace_directory_from_script(path)
             }
             ScriptCommand::AppendLayer { parent } => {
                 self.run_layer_command(true, true, |workspace| {
@@ -1998,6 +2026,27 @@ mod tests {
                 if reason.contains("before the GPU exists")
         ));
         assert!(app.workspace.is_none());
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn script_host_rejects_export_workspace_before_gpu_exists() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+
+        let error = app
+            .execute_script_command(ScriptCommand::ExportWorkspaceDirectory(
+                "target/workspace-export".into(),
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("before the document workspace and GPU exist")
+        ));
+        assert!(app.workspace.is_some());
         assert!(app.undo_stack.is_empty());
         assert!(app.redo_stack.is_empty());
     }
