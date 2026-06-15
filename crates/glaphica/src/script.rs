@@ -8,7 +8,7 @@ use gla_ir::ImageId;
 use gla_ir::{DocumentVersionId, DrawSessionIR, RegistryPatch};
 use serde::{Deserialize, Serialize};
 
-use crate::{ActiveTool, RoundBrushSettings};
+use crate::{ActiveTool, DocumentBlendMode, DocumentNodeId, RoundBrushSettings};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -33,6 +33,27 @@ pub enum ScriptValue {
 pub enum ScriptCommand {
     ApplyRegistryPatch(RegistryPatch),
     OpenWorkspaceDirectory(PathBuf),
+    AppendLayer {
+        parent: DocumentNodeId,
+    },
+    AppendGroup {
+        parent: DocumentNodeId,
+    },
+    DeleteNode(DocumentNodeId),
+    MoveNode {
+        node_id: DocumentNodeId,
+        new_parent: DocumentNodeId,
+        new_index: usize,
+    },
+    SetActiveNode(DocumentNodeId),
+    SetNodeOpacity {
+        node_id: DocumentNodeId,
+        opacity: f32,
+    },
+    SetNodeBlendMode {
+        node_id: DocumentNodeId,
+        blend_mode: DocumentBlendMode,
+    },
     RunDrawSession(ScriptDrawSession),
     SetActiveTool(ActiveTool),
     SetRoundBrushSettings(RoundBrushSettings),
@@ -72,6 +93,7 @@ pub enum ScriptDrawCommand {
 pub enum ScriptCommandOutcome {
     None,
     DocumentVersion(DocumentVersionId),
+    DocumentNode(DocumentNodeId),
     DirtyRootTiles(Vec<u32>),
     RedrawRequested,
 }
@@ -256,7 +278,7 @@ mod tests {
         ScriptHostError, ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError,
         ScriptValue,
     };
-    use crate::{ActiveTool, BrushId, RoundBrushSettings};
+    use crate::{ActiveTool, BrushId, DocumentBlendMode, DocumentNodeId, RoundBrushSettings};
     use gla_core::{CanvasCoordF, CanvasInput};
     use gla_ir::{DocImageUse, DocumentVersionId, DrawSessionIR, ImageId};
 
@@ -338,6 +360,27 @@ mod tests {
         let commands = vec![
             ScriptCommand::RunDrawSession(ScriptDrawSession::new(ir.clone())),
             ScriptCommand::OpenWorkspaceDirectory("fixtures/workspace".into()),
+            ScriptCommand::AppendLayer {
+                parent: DocumentNodeId::new(1),
+            },
+            ScriptCommand::AppendGroup {
+                parent: DocumentNodeId::new(1),
+            },
+            ScriptCommand::SetActiveNode(DocumentNodeId::new(2)),
+            ScriptCommand::SetNodeOpacity {
+                node_id: DocumentNodeId::new(2),
+                opacity: 0.5,
+            },
+            ScriptCommand::SetNodeBlendMode {
+                node_id: DocumentNodeId::new(2),
+                blend_mode: DocumentBlendMode::Multiply,
+            },
+            ScriptCommand::MoveNode {
+                node_id: DocumentNodeId::new(2),
+                new_parent: DocumentNodeId::new(1),
+                new_index: 0,
+            },
+            ScriptCommand::DeleteNode(DocumentNodeId::new(2)),
             ScriptCommand::SetActiveTool(ActiveTool::Brush(BrushId::DEFAULT)),
             ScriptCommand::SetRoundBrushSettings(RoundBrushSettings::default()),
             ScriptCommand::BeginStroke(input),
@@ -355,9 +398,20 @@ mod tests {
         ));
         assert!(matches!(
             commands[3],
+            ScriptCommand::AppendGroup { parent } if parent == DocumentNodeId::new(1)
+        ));
+        assert!(matches!(
+            commands[6],
+            ScriptCommand::SetNodeBlendMode {
+                node_id,
+                blend_mode: DocumentBlendMode::Multiply,
+            } if node_id == DocumentNodeId::new(2)
+        ));
+        assert!(matches!(
+            commands[10],
             ScriptCommand::SetRoundBrushSettings(_)
         ));
-        assert!(matches!(commands[4], ScriptCommand::BeginStroke(found) if found == input));
+        assert!(matches!(commands[11], ScriptCommand::BeginStroke(found) if found == input));
     }
 
     #[test]

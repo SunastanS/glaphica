@@ -401,6 +401,34 @@ impl App {
         Ok(ScriptCommandOutcome::DocumentVersion(version))
     }
 
+    fn run_layer_command(
+        &mut self,
+        clear_history: bool,
+        request_full_update: bool,
+        command: impl FnOnce(&mut DocumentWorkspace) -> Result<ScriptCommandOutcome, String>,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        if self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot update document layers while a stroke is active".to_owned(),
+            });
+        }
+        let Some(workspace) = self.workspace.as_mut() else {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot update document layers before the workspace exists".to_owned(),
+            });
+        };
+        let outcome = command(workspace).map_err(|reason| ScriptHostError::Runtime { reason })?;
+        if clear_history {
+            self.history = DrawHistory::new();
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+        }
+        if request_full_update {
+            self.request_full_screen_update();
+        }
+        Ok(outcome)
+    }
+
     fn active_brush_id(&self) -> Option<BrushId> {
         self.brush_thread.active_brush_id()
     }
@@ -657,6 +685,63 @@ impl ScriptHost for App {
             ScriptCommand::OpenWorkspaceDirectory(path) => {
                 self.open_workspace_directory_from_script(path)
             }
+            ScriptCommand::AppendLayer { parent } => {
+                self.run_layer_command(true, true, |workspace| {
+                    workspace
+                        .append_layer(parent)
+                        .map(ScriptCommandOutcome::DocumentNode)
+                        .map_err(|error| error.to_string())
+                })
+            }
+            ScriptCommand::AppendGroup { parent } => {
+                self.run_layer_command(true, true, |workspace| {
+                    workspace
+                        .append_group(parent)
+                        .map(ScriptCommandOutcome::DocumentNode)
+                        .map_err(|error| error.to_string())
+                })
+            }
+            ScriptCommand::DeleteNode(node_id) => self.run_layer_command(true, true, |workspace| {
+                workspace
+                    .delete_node(node_id)
+                    .map(|()| ScriptCommandOutcome::RedrawRequested)
+                    .map_err(|error| error.to_string())
+            }),
+            ScriptCommand::MoveNode {
+                node_id,
+                new_parent,
+                new_index,
+            } => self.run_layer_command(true, true, |workspace| {
+                workspace
+                    .move_node(node_id, new_parent, new_index)
+                    .map(|()| ScriptCommandOutcome::RedrawRequested)
+                    .map_err(|error| error.to_string())
+            }),
+            ScriptCommand::SetActiveNode(node_id) => {
+                self.run_layer_command(false, false, |workspace| {
+                    workspace
+                        .set_active_node(node_id)
+                        .map(|()| ScriptCommandOutcome::None)
+                        .map_err(|error| error.to_string())
+                })
+            }
+            ScriptCommand::SetNodeOpacity { node_id, opacity } => {
+                self.run_layer_command(false, true, |workspace| {
+                    workspace
+                        .set_node_opacity(node_id, opacity)
+                        .map(|()| ScriptCommandOutcome::RedrawRequested)
+                        .map_err(|error| error.to_string())
+                })
+            }
+            ScriptCommand::SetNodeBlendMode {
+                node_id,
+                blend_mode,
+            } => self.run_layer_command(false, true, |workspace| {
+                workspace
+                    .set_node_blend_mode(node_id, blend_mode)
+                    .map(|()| ScriptCommandOutcome::RedrawRequested)
+                    .map_err(|error| error.to_string())
+            }),
             ScriptCommand::RunDrawSession(request) => self.run_draw_session_from_script(request),
             ScriptCommand::SetActiveTool(active_tool) => {
                 self.set_active_tool_from_script(active_tool)?;
@@ -1263,9 +1348,10 @@ mod tests {
     use super::{App, AppFramePerf, AppPerfTraceConfig, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
-        BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
-        RoundBrushSettings, ScriptCommand, ScriptCommandOutcome, ScriptDrawSession, ScriptHost,
-        ScriptHostError, Tool, ToolSet, load_trace_file, save_trace_file,
+        BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentBlendMode,
+        DocumentNodeId, DocumentWorkspace, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
+        ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, load_trace_file,
+        save_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -1598,6 +1684,115 @@ mod tests {
         assert!(app.undo_stack.is_empty());
         assert!(app.redo_stack.is_empty());
         assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn script_host_appends_and_deletes_document_layer_nodes() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        let root_node = app.workspace.as_ref().unwrap().layer_tree().root_id();
+
+        let ScriptCommandOutcome::DocumentNode(group) = app
+            .execute_script_command(ScriptCommand::AppendGroup { parent: root_node })
+            .unwrap()
+        else {
+            panic!("append group should return the new node id");
+        };
+        let ScriptCommandOutcome::DocumentNode(layer) = app
+            .execute_script_command(ScriptCommand::AppendLayer { parent: group })
+            .unwrap()
+        else {
+            panic!("append layer should return the new node id");
+        };
+        let group_image = app
+            .workspace
+            .as_ref()
+            .unwrap()
+            .layer_tree()
+            .node(group)
+            .unwrap()
+            .image();
+        let layer_image = app
+            .workspace
+            .as_ref()
+            .unwrap()
+            .layer_tree()
+            .node(layer)
+            .unwrap()
+            .image();
+
+        let deleted = app
+            .execute_script_command(ScriptCommand::DeleteNode(group))
+            .unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        assert_eq!(deleted, ScriptCommandOutcome::RedrawRequested);
+        assert!(!workspace.layer_tree().contains_node(group));
+        assert!(!workspace.layer_tree().contains_node(layer));
+        assert!(workspace.storage().image(group_image).is_none());
+        assert!(workspace.storage().image(layer_image).is_none());
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
+        assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn script_host_updates_document_layer_metadata() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        let root_node = app.workspace.as_ref().unwrap().layer_tree().root_id();
+        let ScriptCommandOutcome::DocumentNode(layer) = app
+            .execute_script_command(ScriptCommand::AppendLayer { parent: root_node })
+            .unwrap()
+        else {
+            panic!("append layer should return the new node id");
+        };
+
+        let active = app
+            .execute_script_command(ScriptCommand::SetActiveNode(layer))
+            .unwrap();
+        let opacity = app
+            .execute_script_command(ScriptCommand::SetNodeOpacity {
+                node_id: layer,
+                opacity: 0.4,
+            })
+            .unwrap();
+        let blend = app
+            .execute_script_command(ScriptCommand::SetNodeBlendMode {
+                node_id: layer,
+                blend_mode: DocumentBlendMode::Multiply,
+            })
+            .unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        let node = workspace.layer_tree().node(layer).unwrap();
+        assert_eq!(active, ScriptCommandOutcome::None);
+        assert_eq!(opacity, ScriptCommandOutcome::RedrawRequested);
+        assert_eq!(blend, ScriptCommandOutcome::RedrawRequested);
+        assert_eq!(workspace.layer_tree().active_node_id(), layer);
+        assert_eq!(node.opacity(), 0.4);
+        assert_eq!(node.blend_mode(), DocumentBlendMode::Multiply);
+    }
+
+    #[test]
+    fn script_host_rejects_layer_updates_during_active_stroke() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(1, 1.0, 2.0, 1.0)))
+            .unwrap();
+
+        let error = app
+            .execute_script_command(ScriptCommand::AppendLayer {
+                parent: DocumentNodeId::new(1),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("while a stroke is active")
+        ));
+        assert!(app.brush_thread.has_active_stroke());
     }
 
     #[test]
