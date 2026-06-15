@@ -46,6 +46,7 @@ pub struct AppRuntimeConfig {
     pub canvas_width_px: u32,
     pub canvas_height_px: u32,
     pub workspace_path: Option<PathBuf>,
+    pub exit_after_redraw_frames: Option<u64>,
     pub tool_set: ToolSet,
     pub active_tool: ActiveTool,
     pub draw_on_tools: Vec<DrawOnToolKind>,
@@ -117,6 +118,7 @@ impl Default for AppRuntimeConfig {
             canvas_width_px: DEFAULT_CANVAS_WIDTH_PX,
             canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
             workspace_path: None,
+            exit_after_redraw_frames: None,
             tool_set: ToolSet::default_brush(),
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
@@ -217,6 +219,7 @@ struct App {
     last_cursor_pos: Option<ScreenCoordF>,
     input_clock_start: Instant,
     last_input_time_ns: u64,
+    rendered_frame_count: u64,
     perf_frame_seq: u64,
     modifiers: ModifiersState,
     window: Option<Arc<Window>>,
@@ -254,6 +257,7 @@ impl App {
             last_cursor_pos: None,
             input_clock_start: Instant::now(),
             last_input_time_ns: 0,
+            rendered_frame_count: 0,
             perf_frame_seq: 0,
             modifiers: ModifiersState::default(),
             window: None,
@@ -1024,6 +1028,10 @@ impl Drop for App {
         if let Err(error) = self.trace.stop_recording() {
             eprintln!("trace save failed: {error}");
         }
+        // Surface-backed resources must go away while the Arc<Window> used to create the surface
+        // is still alive.
+        self.ui = None;
+        self.gpu = None;
     }
 }
 
@@ -1796,8 +1804,16 @@ impl ApplicationHandler for App {
                 if let Some(perf) = perf.as_mut() {
                     perf.process_preview = process_preview;
                     self.trace_frame_perf(frame_started.elapsed(), perf);
+                    self.rendered_frame_count = self.rendered_frame_count.saturating_add(1);
                 }
                 self.frame_scheduler.reset_redraw_request();
+                if let Some(limit) = self.config.exit_after_redraw_frames {
+                    if self.rendered_frame_count >= limit {
+                        event_loop.exit();
+                    } else {
+                        self.request_redraw();
+                    }
+                }
             }
             _ => {}
         }
@@ -1937,6 +1953,7 @@ mod tests {
         assert_eq!(config.canvas_width_px, DEFAULT_CANVAS_WIDTH_PX);
         assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
         assert_eq!(config.workspace_path, None);
+        assert_eq!(config.exit_after_redraw_frames, None);
         assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);

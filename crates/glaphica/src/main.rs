@@ -31,9 +31,20 @@ fn config_from_args(
                 };
                 config.workspace_path = Some(PathBuf::from(path));
             }
+            "--exit-after-frames" => {
+                let Some(count) = args.next() else {
+                    return Err(invalid_arg(
+                        "--exit-after-frames requires a positive integer",
+                    ));
+                };
+                config.exit_after_redraw_frames = Some(parse_positive_u64(
+                    &count,
+                    "--exit-after-frames requires a positive integer",
+                )?);
+            }
             "--help" | "-h" => {
                 return Err(invalid_arg(
-                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>]",
+                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>] [--exit-after-frames <n>]",
                 ));
             }
             _ => return Err(invalid_arg(format!("unknown argument {arg}"))),
@@ -47,6 +58,16 @@ fn config_from_args(
         TraceModeArg::Replay => glaphica::AppTraceConfig::replay(trace_path),
     };
     Ok(config)
+}
+
+fn parse_positive_u64(value: &str, error_message: &'static str) -> Result<u64, Error> {
+    let count = value
+        .parse::<u64>()
+        .map_err(|_| invalid_arg(error_message))?;
+    if count == 0 {
+        return Err(invalid_arg(error_message));
+    }
+    Ok(count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +118,24 @@ mod tests {
             config.workspace_path,
             Some(PathBuf::from("target/workspace-export"))
         );
+    }
+
+    #[test]
+    fn parses_exit_after_frames_argument() {
+        let config = config_from_args(["--exit-after-frames".to_owned(), "2".to_owned()]).unwrap();
+
+        assert_eq!(config.exit_after_redraw_frames, Some(2));
+    }
+
+    #[test]
+    fn rejects_invalid_exit_after_frames_argument() {
+        let zero =
+            config_from_args(["--exit-after-frames".to_owned(), "0".to_owned()]).unwrap_err();
+        let invalid =
+            config_from_args(["--exit-after-frames".to_owned(), "nan".to_owned()]).unwrap_err();
+
+        assert_eq!(zero.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(invalid.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
