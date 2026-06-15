@@ -2559,9 +2559,22 @@ mod tests {
     #[test]
     fn startup_command_plan_file_executes_after_workspace_exists() {
         let path = trace_path("startup-command-plan");
+        let brush_settings = RoundBrushSettings {
+            base_radius_px: 7.0,
+            spacing_ratio: 0.5,
+            base_hardness: 0.6,
+            base_flow: 0.9,
+            base_opacity: 0.8,
+            tint: [0.1, 0.4, 0.9],
+            ..RoundBrushSettings::default()
+        };
         let plan = ScriptCommandPlan::new(vec![
             ScriptCommand::CreateLayerAboveActive,
             ScriptCommand::SetActiveNode(DocumentNodeId::new(2)),
+            ScriptCommand::SetRoundBrushSettings(brush_settings.clone()),
+            ScriptCommand::BeginStroke(canvas_input(1, 24.0, 32.0, 1.0)),
+            ScriptCommand::PushStrokeInput(canvas_input(2, 30.0, 36.0, 0.9)),
+            ScriptCommand::CancelStroke,
             ScriptCommand::RequestRedraw,
         ]);
         std::fs::write(
@@ -2582,6 +2595,12 @@ mod tests {
             workspace.layer_tree().active_node_id(),
             DocumentNodeId::new(2)
         );
+        assert_eq!(
+            app.config.brush_settings,
+            BrushSettings::from_round_brush(brush_settings)
+        );
+        assert!(!app.brush_thread.has_active_stroke());
+        assert!(app.active_stroke_preview.is_none());
         assert!(app.frame_scheduler.has_requested_redraw());
         let _ = std::fs::remove_file(path);
     }
