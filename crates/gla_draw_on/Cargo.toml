@@ -7,3 +7,4 @@ edition = "2024"
 gla_color = { path = "../gla_color" }
 gla_image = { path = "../gla_image" }
 gla_ir = { path = "../gla_ir" }
+serde = { version = "1", features = ["derive"] }

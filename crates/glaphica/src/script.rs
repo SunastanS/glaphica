@@ -5,6 +5,7 @@ use gla_core::CanvasInput;
 use gla_draw_on::DrawOnInput;
 use gla_ir::ImageId;
 use gla_ir::{DocumentVersionId, DrawSessionIR, RegistryPatch};
+use serde::{Deserialize, Serialize};
 
 use crate::{ActiveTool, RoundBrushSettings};
 
@@ -42,18 +43,18 @@ pub enum ScriptCommand {
     RequestRedraw,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScriptDrawSession {
     pub ir: DrawSessionIR,
     pub frames: Vec<ScriptDrawFrame>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScriptDrawFrame {
     pub commands: Vec<ScriptDrawCommand>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ScriptDrawCommand {
     DrawOn {
         target: ImageId,
@@ -150,6 +151,18 @@ impl ScriptDrawFrame {
     pub fn new(commands: Vec<ScriptDrawCommand>) -> Self {
         Self { commands }
     }
+}
+
+pub fn script_draw_session_from_json_str(
+    source: &str,
+) -> Result<ScriptDrawSession, serde_json::Error> {
+    serde_json::from_str(source)
+}
+
+pub fn script_draw_session_to_json_string_pretty(
+    request: &ScriptDrawSession,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(request)
 }
 
 impl NullScriptRuntime {

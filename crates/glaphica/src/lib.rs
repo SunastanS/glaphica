@@ -25,7 +25,8 @@ pub use runtime::{AppRunError, AppRuntimeConfig, run_app_window, run_app_window_
 pub use script::{
     NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptDrawCommand, ScriptDrawFrame,
     ScriptDrawSession, ScriptHost, ScriptHostError, ScriptModuleId, ScriptModuleSource,
-    ScriptRuntime, ScriptRuntimeError, ScriptValue,
+    ScriptRuntime, ScriptRuntimeError, ScriptValue, script_draw_session_from_json_str,
+    script_draw_session_to_json_string_pretty,
 };
 pub use tool::{ActiveTool, BrushId, BrushSettings, RoundBrushSettings, Tool, ToolSet};
 pub use trace::{

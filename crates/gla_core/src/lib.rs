@@ -2,14 +2,17 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
 
+use serde::{Deserialize, Serialize};
+
 pub const ATLAS_TILE_SIZE: u32 = 64;
 pub const GUTTER_SIZE: u32 = 1;
 pub const IMAGE_TILE_SIZE: u32 = ATLAS_TILE_SIZE - 2 * GUTTER_SIZE;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Vec2F32<S = ()> {
     pub x: f32,
     pub y: f32,
+    #[serde(skip)]
     _phantom: PhantomData<S>,
 }
 
@@ -23,9 +26,11 @@ impl<S> Vec2F32<S> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vec2U<S = ()> {
     pub x: usize,
     pub y: usize,
+    #[serde(skip)]
     _phantom: PhantomData<S>,
 }
 
@@ -39,13 +44,13 @@ impl<S> Vec2U<S> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScreenSpace {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CanvasSpace {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TileSpace {}
 
 pub type ScreenCoordF = Vec2F32<ScreenSpace>;
@@ -55,7 +60,7 @@ pub type ScreenCoordU = Vec2U<ScreenSpace>;
 pub type CanvasCoordU = Vec2U<CanvasSpace>;
 pub type TileCoordU = Vec2U<TileSpace>;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Input<T> {
     pub time_ns: u64,
     pub position: T,
@@ -67,7 +72,7 @@ pub struct Input<T> {
 pub type ScreenInput = Input<ScreenCoordF>;
 pub type CanvasInput = Input<CanvasCoordF>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PixelRect {
     pub min_x: u32,
     pub min_y: u32,
@@ -100,7 +105,7 @@ impl PixelRect {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TileGrid {
     pub width_px: u32,
     pub height_px: u32,

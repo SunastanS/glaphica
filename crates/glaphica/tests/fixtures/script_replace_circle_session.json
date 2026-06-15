@@ -1,0 +1,46 @@
+{
+  "ir": {
+    "expected_document_version": 1,
+    "doc_images": [
+      {
+        "id": 1,
+        "access": "ReadWrite"
+      }
+    ],
+    "session_images": [],
+    "draw_on": [
+      {
+        "dst": 1,
+        "tool": "ReplaceCircle4D"
+      }
+    ],
+    "derive": []
+  },
+  "frames": [
+    {
+      "commands": [
+        {
+          "DrawOn": {
+            "target": 1,
+            "input": {
+              "center_x": 24.0,
+              "center_y": 32.0,
+              "footprint_radius_px": 8.0,
+              "kind": {
+                "ReplaceCircle4D": {
+                  "radius_px": 8.0,
+                  "color": {
+                    "r": 1.0,
+                    "g": 0.0,
+                    "b": 0.0,
+                    "a": 1.0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

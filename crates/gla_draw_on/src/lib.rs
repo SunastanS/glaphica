@@ -1,6 +1,7 @@
 use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
 use gla_image::{GlaImageLayout, IMAGE_TILE_SIZE, ImageLayoutError, ImageTileIndex};
 pub use gla_ir::DrawOnToolKind;
+use serde::{Deserialize, Serialize};
 
 pub trait DrawOnToolSpec {
     fn target_format(self) -> GlaFormat;
@@ -31,7 +32,7 @@ impl DrawOnToolSpec for DrawOnToolKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DrawOnInput {
     pub center_x: f32,
     pub center_y: f32,
@@ -74,7 +75,7 @@ impl DrawOnInput {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DrawOnInputKind {
     RadialKernel1D {
         radius_px: f32,
