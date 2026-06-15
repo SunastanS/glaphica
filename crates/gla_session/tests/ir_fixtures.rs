@@ -1,7 +1,8 @@
 use atlas::{AtlasLayout, NoAtlasTextures};
 use gla_color::{ChannelCount, ChannelType, GlaFormat};
 use gla_ir::{
-    DocumentImageAccess, DocumentVersionId, DrawOnToolKind, ImageId, draw_session_ir_from_json_str,
+    DeriveCommand, DocumentImageAccess, DocumentVersionId, DrawOnToolKind, ImageId, MetadataRef,
+    SessionCommand, SessionImageDecl, SessionRead, draw_session_ir_from_json_str,
     registry_patch_from_json_str,
 };
 use gla_session::{DrawSession, SessionError};
@@ -111,6 +112,44 @@ fn edited_session_fixture_reports_stable_errors() {
                 && tool == DrawOnToolKind::ReplaceCircle4D
                 && format == value_format()
     ));
+}
+
+#[test]
+fn edited_session_fixture_begins_and_routes_through_session_derive() {
+    let mut ir =
+        draw_session_ir_from_json_str(PIXEL_ROUND_SESSION_JSON).expect("session fixture parses");
+    ir.session_images.push(SessionImageDecl::Derived {
+        id: ImageId::new(11),
+        format: MetadataRef::Like(ImageId::new(10)),
+        layout: MetadataRef::Like(ImageId::new(10)),
+        command: SessionCommand::new(vec![
+            SessionRead::backup(ImageId::new(1)),
+            SessionRead::current(ImageId::new(10)),
+        ]),
+    });
+    ir.derive[0] = DeriveCommand::new(
+        vec![
+            SessionRead::backup(ImageId::new(1)),
+            SessionRead::current(ImageId::new(11)),
+        ],
+        ImageId::new(1),
+    );
+    let mut storage = storage_from_registry_fixture();
+
+    let mut session = DrawSession::begin(&ir, &mut storage).expect("edited session fixture begins");
+    let routes = {
+        let frame = session.begin_frame();
+        frame
+            .route_draw_targets(ImageId::new(1), 18.0, 19.0)
+            .expect("edited derive chain routes draw input")
+    };
+
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].target, ImageId::new(10));
+    assert_eq!(routes[0].tool, DrawOnToolKind::RadialKernel1D);
+    assert_eq!(routes[0].target_x, 18.0);
+    assert_eq!(routes[0].target_y, 19.0);
+    session.discard();
 }
 
 fn storage_from_registry_fixture() -> GlobalStorage {

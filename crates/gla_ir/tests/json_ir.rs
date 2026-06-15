@@ -1,7 +1,8 @@
 use gla_color::{ChannelCount, ChannelType, GlaFormat};
 use gla_ir::{
-    DocumentImageAccess, DocumentVersionId, DrawOnToolKind, ImageId, ImageRole, MetadataRef,
-    SessionImageDecl, SessionReadImage, draw_session_ir_from_json_str,
+    DeriveCommand, DocImageUse, DocumentImageAccess, DocumentVersionId, DrawOnCommand,
+    DrawOnToolKind, ImageId, ImageLayoutSpec, ImageRole, MetadataRef, SessionCommand,
+    SessionImageDecl, SessionRead, SessionReadImage, draw_session_ir_from_json_str,
     draw_session_ir_to_json_string_pretty, registry_patch_from_json_str,
     registry_patch_to_json_string_pretty,
 };
@@ -57,6 +58,58 @@ fn pixel_round_session_fixture_preserves_draw_ir_contract() {
         draw_session_ir_from_json_str(&rendered).expect("rendered session IR should parse again");
 
     assert_eq!(reparsed, ir);
+}
+
+#[test]
+fn edited_draw_session_fixture_is_writable_and_readable_json() {
+    let source = include_str!("fixtures/pixel_round_session.json");
+    let mut ir = draw_session_ir_from_json_str(source).expect("session fixture should parse");
+
+    ir.expected_document_version = DocumentVersionId::new(9);
+    ir.doc_images[0] = DocImageUse::read_write(ImageId::new(1));
+    ir.doc_images.push(DocImageUse::read(ImageId::new(2)));
+    ir.session_images[0] = SessionImageDecl::Primitive {
+        id: ImageId::new(10),
+        format: MetadataRef::Concrete(GlaFormat {
+            channel_count: ChannelCount::D4,
+            channel_type: ChannelType::F32,
+        }),
+        layout: MetadataRef::Concrete(ImageLayoutSpec::new(64, 32)),
+    };
+    ir.session_images.push(SessionImageDecl::Derived {
+        id: ImageId::new(11),
+        format: MetadataRef::Like(ImageId::new(10)),
+        layout: MetadataRef::Like(ImageId::new(10)),
+        command: SessionCommand::new(vec![
+            SessionRead::backup(ImageId::new(1)),
+            SessionRead::current(ImageId::new(10)),
+        ]),
+    });
+    ir.draw_on[0] = DrawOnCommand::with_tool(ImageId::new(10), DrawOnToolKind::ReplaceCircle4D);
+    ir.derive[0] = DeriveCommand::new(
+        vec![
+            SessionRead::backup(ImageId::new(1)),
+            SessionRead::current(ImageId::new(11)),
+        ],
+        ImageId::new(1),
+    );
+
+    let rendered = draw_session_ir_to_json_string_pretty(&ir).expect("edited IR should render");
+    let reparsed =
+        draw_session_ir_from_json_str(&rendered).expect("edited rendered IR should parse again");
+
+    assert_eq!(reparsed, ir);
+    assert!(rendered.contains("\"ReplaceCircle4D\""));
+    assert!(matches!(
+        &reparsed.session_images[1],
+        SessionImageDecl::Derived { id, .. } if *id == ImageId::new(11)
+    ));
+    assert_eq!(reparsed.required_draw_on_tools().len(), 1);
+    assert!(
+        reparsed
+            .required_draw_on_tools()
+            .contains(&DrawOnToolKind::ReplaceCircle4D)
+    );
 }
 
 #[test]
