@@ -323,6 +323,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingHost {
         commands: Vec<ScriptCommand>,
+        fail_on: Option<ScriptCommand>,
     }
 
     impl ScriptHost for RecordingHost {
@@ -330,7 +331,12 @@ mod tests {
             &mut self,
             command: ScriptCommand,
         ) -> Result<ScriptCommandOutcome, ScriptHostError> {
-            self.commands.push(command);
+            self.commands.push(command.clone());
+            if self.fail_on.as_ref() == Some(&command) {
+                return Err(ScriptHostError::InvalidCommand {
+                    reason: "script command failed as requested".to_owned(),
+                });
+            }
             Ok(ScriptCommandOutcome::None)
         }
     }
@@ -497,6 +503,32 @@ mod tests {
             outcomes
                 .iter()
                 .all(|outcome| matches!(outcome, ScriptCommandOutcome::None))
+        );
+    }
+
+    #[test]
+    fn script_command_plan_stops_on_first_host_error() {
+        let failing_command = ScriptCommand::SetActiveNode(DocumentNodeId::new(2));
+        let mut host = RecordingHost {
+            fail_on: Some(failing_command.clone()),
+            ..RecordingHost::default()
+        };
+        let plan = ScriptCommandPlan::new(vec![
+            ScriptCommand::CreateLayerAboveActive,
+            failing_command.clone(),
+            ScriptCommand::RequestRedraw,
+        ]);
+
+        let error = plan.execute_on(&mut host).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason == "script command failed as requested"
+        ));
+        assert_eq!(
+            host.commands,
+            vec![ScriptCommand::CreateLayerAboveActive, failing_command]
         );
     }
 }

@@ -31,7 +31,7 @@ use crate::{
         ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan, ScriptHost, ScriptHostError,
         script_command_plan_from_json_str,
     },
-    stroke::{BrushThreadRuntime, ReplaceCircleSampleCache},
+    stroke::{BrushThreadRuntime, BrushThreadRuntimeError, ReplaceCircleSampleCache},
     trace::{
         AppTraceBlendMode, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState,
         AppTraceUiAction,
@@ -176,6 +176,7 @@ impl AppPerfTraceConfig {
 pub enum AppRunError {
     EventLoop(winit::error::EventLoopError),
     Trace(AppTraceError),
+    BrushThread(BrushThreadRuntimeError),
 }
 
 impl Display for AppRunError {
@@ -183,6 +184,7 @@ impl Display for AppRunError {
         match self {
             Self::EventLoop(error) => write!(f, "app event loop failed: {error}"),
             Self::Trace(error) => write!(f, "app trace setup failed: {error}"),
+            Self::BrushThread(error) => write!(f, "app brush thread setup failed: {error}"),
         }
     }
 }
@@ -192,6 +194,7 @@ impl Error for AppRunError {
         match self {
             Self::EventLoop(error) => Some(error),
             Self::Trace(error) => Some(error),
+            Self::BrushThread(error) => Some(error),
         }
     }
 }
@@ -204,7 +207,7 @@ pub fn run_app_window() -> Result<(), AppRunError> {
 
 pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRunError> {
     let event_loop = EventLoop::new().map_err(AppRunError::EventLoop)?;
-    let mut app = App::try_new(config).map_err(AppRunError::Trace)?;
+    let mut app = App::try_new(config)?;
     event_loop.run_app(&mut app).map_err(AppRunError::EventLoop)
 }
 
@@ -235,17 +238,18 @@ struct App {
 
 impl App {
     fn new(config: AppRuntimeConfig) -> Self {
-        Self::try_new(config).expect("default app trace configuration should initialize")
+        Self::try_new(config).expect("app runtime configuration should initialize")
     }
 
-    fn try_new(config: AppRuntimeConfig) -> Result<Self, AppTraceError> {
-        let trace = AppTraceState::from_config(&config.trace_config)?;
+    fn try_new(config: AppRuntimeConfig) -> Result<Self, AppRunError> {
+        let trace = AppTraceState::from_config(&config.trace_config).map_err(AppRunError::Trace)?;
         let brush_thread = BrushThreadRuntime::spawn(
             config.tool_set.clone(),
             config.active_tool,
             config.brush_settings.clone(),
             BRUSH_THREAD_COMMAND_CAPACITY,
-        );
+        )
+        .map_err(AppRunError::BrushThread)?;
         Ok(Self {
             config,
             workspace: None,
@@ -331,11 +335,11 @@ impl App {
                 reason: "active document node is not paintable".to_owned(),
             });
         }
-        if !self.brush_thread.begin_active_stroke() {
-            return Err(ScriptHostError::Runtime {
-                reason: "brush thread did not start a stroke".to_owned(),
-            });
-        }
+        self.brush_thread
+            .begin_active_stroke_processing()
+            .map_err(|error| ScriptHostError::Runtime {
+                reason: error.to_string(),
+            })?;
         self.brush_thread.push_canvas_input(input);
         self.active_stroke_preview = Some(ActiveStrokePreview::new(
             self.config.brush_settings.clone(),
@@ -784,8 +788,13 @@ impl App {
     }
 
     fn commit_active_stroke_dirty_tiles(&mut self) -> Option<Vec<u32>> {
-        let Some(stroke) = self.brush_thread.finish_active_stroke() else {
-            return None;
+        let stroke = match self.brush_thread.finish_active_stroke_processing() {
+            Ok(Some(stroke)) => stroke,
+            Ok(None) => return None,
+            Err(error) => {
+                eprintln!("stroke finish failed: {error}");
+                return None;
+            }
         };
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             self.brush_thread.restore_active_stroke(stroke);
@@ -1967,14 +1976,14 @@ fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{App, AppFramePerf, AppPerfTraceConfig, AppRuntimeConfig};
+    use super::{App, AppFramePerf, AppPerfTraceConfig, AppRunError, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceUiAction, AppView,
-        BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
-        DocumentBlendMode, DocumentNodeId, DocumentWorkspace, RoundBrushSettings, ScriptCommand,
-        ScriptCommandOutcome, ScriptCommandPlan, ScriptDrawSession, ScriptHost, ScriptHostError,
-        Tool, ToolSet, UiAction, load_trace_file, save_trace_file,
-        script_command_plan_to_json_string_pretty,
+        BrushId, BrushSettings, BrushThreadRuntimeError, DEFAULT_CANVAS_HEIGHT_PX,
+        DEFAULT_CANVAS_WIDTH_PX, DocumentBlendMode, DocumentNodeId, DocumentWorkspace,
+        RoundBrushSettings, ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan,
+        ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, UiAction, load_trace_file,
+        save_trace_file, script_command_plan_to_json_string_pretty,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -2029,11 +2038,20 @@ mod tests {
 
     #[test]
     fn active_brush_requires_registered_tool() {
+        let missing_brush = BrushId::new(99);
         let mut config = AppRuntimeConfig::default();
-        config.active_tool = ActiveTool::Brush(BrushId::new(99));
-        let app = App::new(config);
+        config.active_tool = ActiveTool::Brush(missing_brush);
+        let error = match App::try_new(config) {
+            Ok(_) => panic!("app should reject an unregistered active brush"),
+            Err(error) => error,
+        };
 
-        assert_eq!(app.active_brush_id(), None);
+        assert!(matches!(
+            error,
+            AppRunError::BrushThread(BrushThreadRuntimeError::ActiveToolUnavailable(
+                ActiveTool::Brush(brush_id)
+            )) if brush_id == missing_brush
+        ));
     }
 
     #[test]

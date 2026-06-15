@@ -47,9 +47,9 @@ pub use script::{
 };
 pub use stroke::{
     BrushInput, BrushInputBlock, BrushInputBlockList, BrushInputError, BrushInputProcessor,
-    BrushStrokeInputProcessor, FrozenCanvasSample, ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT,
-    RoundBrushInputProcessor, RoundMergeSettings, encode_round_apply_payload,
-    encode_round_merge_payload,
+    BrushStrokeInputProcessor, BrushThreadRuntimeError, BrushWorkerError, FrozenCanvasSample,
+    ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT, RoundBrushInputProcessor, RoundMergeSettings,
+    encode_round_apply_payload, encode_round_merge_payload,
 };
 pub use tool::{
     ActiveTool, BrushId, BrushSettings, CurvePoint, CurveValidationError, ModulationCurve,

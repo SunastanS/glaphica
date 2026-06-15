@@ -4,6 +4,7 @@ use gla_core::{CanvasCoordF, CanvasInput};
 use std::error::Error;
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::fmt::{Display, Formatter};
+use std::io;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActiveTool, BrushId, BrushSettings, ModulationCurve, OverwriteRingConsumer,
     OverwriteRingProducer, ReplaceCircleStrokeSample, RoundBrushDabVariable,
-    RoundBrushInputFeature, RoundBrushSettings, ToolSet, create_overwrite_ring,
+    RoundBrushInputFeature, RoundBrushSettings, Tool, ToolSet, create_overwrite_ring,
 };
 
 const MIN_SPACING_RATIO: f32 = 0.05;
@@ -36,15 +37,25 @@ pub(crate) struct BrushThreadRuntime {
     tool_set: ToolSet,
     active_tool: ActiveTool,
     command_sender: Option<SyncSender<BrushThreadCommand>>,
+    worker_error_receiver: Receiver<BrushWorkerError>,
     overflow_input_producer: Option<OverwriteRingProducer<QueuedCanvasInput>>,
     active: bool,
     command_epoch: u64,
     thread: Option<JoinHandle<()>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BrushThreadRuntimeError {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrushWorkerError {
+    BrushInput(BrushInputError),
+    BrushInit(BrushInputError),
+    BrushNotRegistered(BrushId),
+}
+
+#[derive(Debug)]
+pub enum BrushThreadRuntimeError {
+    Worker(BrushWorkerError),
     ActiveToolUnavailable(ActiveTool),
+    SpawnThread(io::Error),
     ThreadStopped,
     ThreadPanicked,
 }
@@ -192,7 +203,7 @@ enum BrushThreadCommand {
     },
     Finish {
         epoch: u64,
-        response: SyncSender<Option<FinishedRootStroke>>,
+        response: SyncSender<Result<Option<FinishedRootStroke>, BrushWorkerError>>,
     },
     Restore {
         epoch: u64,
@@ -239,26 +250,37 @@ impl BrushThreadRuntime {
         active_tool: ActiveTool,
         brush_settings: BrushSettings,
         command_capacity: usize,
-    ) -> Self {
+    ) -> Result<Self, BrushThreadRuntimeError> {
+        if !tool_set.contains(active_tool.as_tool()) {
+            return Err(BrushThreadRuntimeError::ActiveToolUnavailable(active_tool));
+        }
         let capacity = command_capacity.max(1);
         let (command_sender, command_receiver) = sync_channel(capacity);
+        let (worker_error_sender, worker_error_receiver) = sync_channel(1);
         let (overflow_input_producer, overflow_input_consumer) = create_overwrite_ring(capacity);
-        let worker = BrushWorker::new(tool_set.clone(), active_tool, brush_settings);
+        let worker = BrushWorker::new(tool_set.clone(), active_tool, brush_settings)?;
         let thread = thread::Builder::new()
             .name("glaphica-brush".to_owned())
             .spawn(move || {
-                run_brush_thread(worker, command_receiver, overflow_input_consumer, capacity)
+                run_brush_thread(
+                    worker,
+                    command_receiver,
+                    overflow_input_consumer,
+                    worker_error_sender,
+                    capacity,
+                )
             })
-            .expect("brush thread should spawn");
-        Self {
+            .map_err(BrushThreadRuntimeError::SpawnThread)?;
+        Ok(Self {
             tool_set,
             active_tool,
             command_sender: Some(command_sender),
+            worker_error_receiver,
             overflow_input_producer: Some(overflow_input_producer),
             active: false,
             command_epoch: 0,
             thread: Some(thread),
-        }
+        })
     }
 
     pub(crate) fn active_brush_id(&self) -> Option<BrushId> {
@@ -363,10 +385,11 @@ impl BrushThreadRuntime {
             self.active = false;
             return Err(BrushThreadRuntimeError::ThreadStopped);
         }
-        self.active = false;
-        response_receiver
+        let result = response_receiver
             .recv()
-            .map_err(|_| BrushThreadRuntimeError::ThreadStopped)
+            .map_err(|_| BrushThreadRuntimeError::ThreadStopped)?;
+        self.active = false;
+        result.map_err(BrushThreadRuntimeError::Worker)
     }
 
     pub(crate) fn finish_active_stroke(&mut self) -> Option<FinishedRootStroke> {
@@ -399,6 +422,10 @@ impl BrushThreadRuntime {
 
     pub(crate) fn has_active_stroke(&self) -> bool {
         self.active
+    }
+
+    pub fn take_worker_error(&self) -> Option<BrushWorkerError> {
+        self.worker_error_receiver.try_recv().ok()
     }
 
     pub(crate) fn update_brush_settings(&mut self, brush_settings: BrushSettings) {
@@ -445,13 +472,18 @@ impl BrushThreadRuntime {
         };
         thread
             .join()
-            .map_err(|_| BrushThreadRuntimeError::ThreadPanicked)
+            .map_err(|_| BrushThreadRuntimeError::ThreadPanicked)?;
+        if let Some(error) = self.take_worker_error() {
+            return Err(BrushThreadRuntimeError::Worker(error));
+        }
+        Ok(())
     }
 }
 
 impl Display for BrushThreadRuntimeError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Worker(error) => Display::fmt(error, formatter),
             Self::ActiveToolUnavailable(ActiveTool::Brush(brush_id)) => {
                 write!(
                     formatter,
@@ -459,13 +491,55 @@ impl Display for BrushThreadRuntimeError {
                     brush_id.value()
                 )
             }
+            Self::SpawnThread(error) => write!(formatter, "brush thread spawn failed: {error}"),
             Self::ThreadStopped => formatter.write_str("brush thread stopped"),
             Self::ThreadPanicked => formatter.write_str("brush thread panicked"),
         }
     }
 }
 
-impl Error for BrushThreadRuntimeError {}
+impl Error for BrushThreadRuntimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Worker(error) => Some(error),
+            Self::SpawnThread(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<BrushWorkerError> for BrushThreadRuntimeError {
+    fn from(error: BrushWorkerError) -> Self {
+        Self::Worker(error)
+    }
+}
+
+impl Display for BrushWorkerError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BrushInput(error) => Display::fmt(error, formatter),
+            Self::BrushInit(error) => Display::fmt(error, formatter),
+            Self::BrushNotRegistered(brush_id) => {
+                write!(formatter, "brush {} is not registered", brush_id.value())
+            }
+        }
+    }
+}
+
+impl Error for BrushWorkerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::BrushInput(error) | Self::BrushInit(error) => Some(error),
+            Self::BrushNotRegistered(_) => None,
+        }
+    }
+}
+
+impl From<BrushInputError> for BrushWorkerError {
+    fn from(error: BrushInputError) -> Self {
+        Self::BrushInput(error)
+    }
+}
 
 impl BrushInputBlock {
     pub fn new(values: Vec<f32>) -> Self {
@@ -844,13 +918,19 @@ impl BrushWorker {
         tool_set: ToolSet,
         active_tool: ActiveTool,
         brush_settings: BrushSettings,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, BrushWorkerError> {
+        let Some(brush_id) = active_tool.brush_id() else {
+            return Err(BrushWorkerError::BrushNotRegistered(BrushId::DEFAULT));
+        };
+        if !tool_set.contains(active_tool.as_tool()) {
+            return Err(BrushWorkerError::BrushNotRegistered(brush_id));
+        }
+        Ok(Self {
             tool_set,
             active_tool,
             brush_settings,
             active_stroke: None,
-        }
+        })
     }
 
     pub(crate) fn active_brush_id(&self) -> Option<BrushId> {
@@ -859,22 +939,27 @@ impl BrushWorker {
             .then_some(self.active_tool.brush_id())?
     }
 
-    pub(crate) fn set_active_tool(&mut self, active_tool: ActiveTool) -> bool {
+    pub(crate) fn set_active_tool(
+        &mut self,
+        active_tool: ActiveTool,
+    ) -> Result<(), BrushWorkerError> {
         if !self.tool_set.contains(active_tool.as_tool()) {
-            return false;
+            let brush_id = active_tool.brush_id().unwrap_or(BrushId::DEFAULT);
+            return Err(BrushWorkerError::BrushNotRegistered(brush_id));
         }
         self.active_tool = active_tool;
         self.active_stroke = None;
-        true
+        Ok(())
     }
 
-    pub(crate) fn begin_active_stroke(&mut self) -> bool {
+    pub(crate) fn begin_active_stroke(&mut self) -> Result<(), BrushWorkerError> {
         let Some(brush_id) = self.active_brush_id() else {
             self.active_stroke = None;
-            return false;
+            let brush_id = self.active_tool.brush_id().unwrap_or(BrushId::DEFAULT);
+            return Err(BrushWorkerError::BrushNotRegistered(brush_id));
         };
         self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.brush_settings.clone()));
-        true
+        Ok(())
     }
 
     pub(crate) fn push_canvas_input(&mut self, input: CanvasInput) {
@@ -889,19 +974,30 @@ impl BrushWorker {
         }
     }
 
-    pub(crate) fn finish_active_stroke(&mut self) -> Option<FinishedRootStroke> {
-        let stroke = self.active_stroke.take()?;
-        (!stroke.is_empty()).then(|| {
+    pub(crate) fn finish_active_stroke(
+        &mut self,
+    ) -> Result<Option<FinishedRootStroke>, BrushWorkerError> {
+        let Some(stroke) = self.active_stroke.take() else {
+            return Ok(None);
+        };
+        Ok((!stroke.is_empty()).then(|| {
             let brush_input = stroke.brush_input();
             FinishedRootStroke {
                 stroke,
                 brush_input,
             }
-        })
+        }))
     }
 
-    pub(crate) fn restore_active_stroke(&mut self, stroke: FinishedRootStroke) {
+    pub(crate) fn restore_active_stroke(
+        &mut self,
+        stroke: FinishedRootStroke,
+    ) -> Result<(), BrushWorkerError> {
+        if !self.tool_set.contains(Tool::Brush(stroke.brush_id())) {
+            return Err(BrushWorkerError::BrushNotRegistered(stroke.brush_id()));
+        }
         self.active_stroke = Some(stroke.stroke);
+        Ok(())
     }
 
     pub(crate) fn cancel_active_stroke(&mut self) -> bool {
@@ -1403,6 +1499,7 @@ fn run_brush_thread(
     mut worker: BrushWorker,
     command_receiver: Receiver<BrushThreadCommand>,
     overflow_input_consumer: OverwriteRingConsumer<QueuedCanvasInput>,
+    worker_error_sender: SyncSender<BrushWorkerError>,
     batch_capacity: usize,
 ) {
     let batch_capacity = batch_capacity.max(1);
@@ -1417,7 +1514,10 @@ fn run_brush_thread(
                 BrushThreadCommand::Begin { epoch } => {
                     overflow_input_consumer.clear();
                     canvas_batch.clear();
-                    worker.begin_active_stroke();
+                    if let Err(error) = worker.begin_active_stroke() {
+                        report_worker_error(&worker_error_sender, error);
+                        return;
+                    }
                     stroke_state = WorkerStrokeState::Active { epoch };
                 }
                 BrushThreadCommand::Reset { epoch } => {
@@ -1444,15 +1544,20 @@ fn run_brush_thread(
                         flush_canvas_batch(&mut worker, &mut canvas_batch);
                         worker.finish_active_stroke()
                     } else {
-                        None
+                        Ok(None)
                     };
                     stroke_state = WorkerStrokeState::Idle;
-                    let _ = response.send(finished);
+                    if respond_to_finish(response, finished, &worker_error_sender) {
+                        return;
+                    }
                 }
                 BrushThreadCommand::Restore { epoch, stroke } => {
                     overflow_input_consumer.clear();
                     canvas_batch.clear();
-                    worker.restore_active_stroke(stroke);
+                    if let Err(error) = worker.restore_active_stroke(stroke) {
+                        report_worker_error(&worker_error_sender, error);
+                        return;
+                    }
                     stroke_state = WorkerStrokeState::Active { epoch };
                 }
                 BrushThreadCommand::Cancel { epoch } => {
@@ -1465,7 +1570,10 @@ fn run_brush_thread(
                 BrushThreadCommand::SetActiveTool(active_tool) => {
                     overflow_input_consumer.clear();
                     canvas_batch.clear();
-                    worker.set_active_tool(active_tool);
+                    if let Err(error) = worker.set_active_tool(active_tool) {
+                        report_worker_error(&worker_error_sender, error);
+                        return;
+                    }
                     stroke_state = WorkerStrokeState::Idle;
                 }
                 BrushThreadCommand::UpdateBrushSettings(settings) => {
@@ -1531,14 +1639,45 @@ fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInp
     canvas_batch.clear();
 }
 
+fn respond_to_finish(
+    response: SyncSender<Result<Option<FinishedRootStroke>, BrushWorkerError>>,
+    result: Result<Option<FinishedRootStroke>, BrushWorkerError>,
+    worker_error_sender: &SyncSender<BrushWorkerError>,
+) -> bool {
+    let should_stop = result.is_err();
+    match response.send(result) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::SendError(Err(error))) => {
+            report_worker_error(worker_error_sender, error);
+        }
+        Err(std::sync::mpsc::SendError(Ok(_))) => {}
+    }
+    should_stop
+}
+
+fn report_worker_error(
+    worker_error_sender: &SyncSender<BrushWorkerError>,
+    error: BrushWorkerError,
+) {
+    match worker_error_sender.try_send(error) {
+        Ok(()) => {}
+        Err(TrySendError::Full(error)) => {
+            eprintln!("brush worker error dropped because an earlier error is pending: {error}");
+        }
+        Err(TrySendError::Disconnected(error)) => {
+            eprintln!("brush worker error dropped after runtime shutdown: {error}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ActiveRootStroke, BrushInput, BrushInputBlockList, BrushInputError, BrushInputProcessor,
         BrushThreadCommand, BrushThreadRuntime, BrushThreadRuntimeError, BrushWorker,
-        QueuedCanvasInput, ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT, ReplaceCircleSampleCache,
-        RoundBrushInputProcessor, RoundMergeSettings, encode_round_apply_payload,
-        encode_round_merge_payload,
+        BrushWorkerError, QueuedCanvasInput, ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT,
+        ReplaceCircleSampleCache, RoundBrushInputProcessor, RoundMergeSettings,
+        encode_round_apply_payload, encode_round_merge_payload,
     };
     use crate::create_overwrite_ring;
     use crate::{
@@ -1699,12 +1838,13 @@ mod tests {
             ToolSet::default_brush(),
             ActiveTool::Brush(BrushId::DEFAULT),
             settings,
-        );
+        )
+        .unwrap();
 
-        assert!(worker.begin_active_stroke());
+        worker.begin_active_stroke().unwrap();
         worker.push_canvas_input(canvas_input(0, 0.0, 0.0, 1.0));
         worker.push_canvas_input(canvas_input(30, 30.0, 0.0, 1.0));
-        let finished = worker.finish_active_stroke().unwrap();
+        let finished = worker.finish_active_stroke().unwrap().unwrap();
 
         assert_eq!(finished.brush_id(), BrushId::DEFAULT);
         assert!(!worker.has_active_stroke());
@@ -1717,11 +1857,12 @@ mod tests {
             ToolSet::default_brush(),
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
-        );
+        )
+        .unwrap();
 
-        assert!(worker.begin_active_stroke());
+        worker.begin_active_stroke().unwrap();
         worker.push_canvas_input(canvas_input(0, 10.0, 20.0, 0.5));
-        let finished = worker.finish_active_stroke().unwrap();
+        let finished = worker.finish_active_stroke().unwrap().unwrap();
         let samples = finished.replace_circle_samples();
         let brush_input = finished.brush_input();
 
@@ -1864,12 +2005,13 @@ mod tests {
             ToolSet::default_brush(),
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
-        );
+        )
+        .unwrap();
 
-        assert!(worker.begin_active_stroke());
+        worker.begin_active_stroke().unwrap();
         worker.push_canvas_input(canvas_input(0, 1.0, 2.0, 1.0));
-        let finished = worker.finish_active_stroke().unwrap();
-        worker.restore_active_stroke(finished);
+        let finished = worker.finish_active_stroke().unwrap().unwrap();
+        worker.restore_active_stroke(finished).unwrap();
 
         let active = worker.active_stroke().unwrap();
         assert_eq!(active.inputs().len(), 1);
@@ -1878,15 +2020,17 @@ mod tests {
 
     #[test]
     fn brush_worker_rejects_unregistered_active_brush() {
-        let mut worker = BrushWorker::new(
+        let error = BrushWorker::new(
             ToolSet::default_brush(),
             ActiveTool::Brush(BrushId::new(99)),
             BrushSettings::default(),
-        );
+        )
+        .unwrap_err();
 
-        assert_eq!(worker.active_brush_id(), None);
-        assert!(!worker.begin_active_stroke());
-        assert!(!worker.has_active_stroke());
+        assert!(matches!(
+            error,
+            BrushWorkerError::BrushNotRegistered(brush_id) if brush_id == BrushId::new(99)
+        ));
     }
 
     #[test]
@@ -1899,11 +2043,14 @@ mod tests {
             ]),
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
-        );
+        )
+        .unwrap();
 
-        assert!(worker.begin_active_stroke());
+        worker.begin_active_stroke().unwrap();
         worker.push_canvas_input(canvas_input(0, 0.0, 0.0, 1.0));
-        assert!(worker.set_active_tool(ActiveTool::Brush(second_brush)));
+        worker
+            .set_active_tool(ActiveTool::Brush(second_brush))
+            .unwrap();
 
         assert_eq!(worker.active_brush_id(), Some(second_brush));
         assert!(!worker.has_active_stroke());
@@ -1915,15 +2062,17 @@ mod tests {
             ToolSet::default_brush(),
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
-        );
+        )
+        .unwrap();
         let mut settings = BrushSettings::default();
         settings.radius_px = 3.0;
         worker.update_brush_settings(settings);
 
-        assert!(worker.begin_active_stroke());
+        worker.begin_active_stroke().unwrap();
         worker.push_canvas_input(canvas_input(0, 0.0, 0.0, 1.0));
         let samples = worker
             .finish_active_stroke()
+            .unwrap()
             .unwrap()
             .replace_circle_samples();
 
@@ -1937,7 +2086,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         assert!(runtime.begin_active_stroke());
         runtime.push_canvas_input(canvas_input(0, 1.0, 2.0, 1.0));
@@ -1958,7 +2108,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         runtime.begin_active_stroke_processing().unwrap();
         runtime.push_canvas_input(canvas_input(0, 7.0, 8.0, 1.0));
@@ -1977,7 +2128,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         runtime.begin_active_stroke_processing().unwrap();
         runtime.push_canvas_input(canvas_input(0, 1.0, 1.0, 1.0));
@@ -1993,22 +2145,53 @@ mod tests {
     }
 
     #[test]
-    fn brush_thread_runtime_processing_reports_unregistered_active_brush() {
+    fn brush_thread_runtime_spawn_reports_unregistered_active_brush() {
         let missing_brush = BrushId::new(99);
-        let mut runtime = BrushThreadRuntime::spawn(
+        let error = match BrushThreadRuntime::spawn(
             ToolSet::default_brush(),
             ActiveTool::Brush(missing_brush),
             BrushSettings::default(),
             8,
-        );
+        ) {
+            Ok(_) => panic!("runtime should reject an unregistered active brush"),
+            Err(error) => error,
+        };
 
-        let error = runtime.begin_active_stroke_processing().unwrap_err();
-
-        assert_eq!(
+        assert!(matches!(
             error,
-            BrushThreadRuntimeError::ActiveToolUnavailable(ActiveTool::Brush(missing_brush))
+            BrushThreadRuntimeError::ActiveToolUnavailable(ActiveTool::Brush(brush_id))
+                if brush_id == missing_brush
+        ));
+    }
+
+    #[test]
+    fn brush_thread_worker_error_channel_reports_async_worker_failure() {
+        let missing_brush = BrushId::new(99);
+        let (command_sender, command_receiver) = sync_channel(16);
+        command_sender
+            .send(BrushThreadCommand::SetActiveTool(ActiveTool::Brush(
+                missing_brush,
+            )))
+            .unwrap();
+        drop(command_sender);
+        let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (worker_error_sender, worker_error_receiver) = sync_channel(1);
+
+        super::run_brush_thread(
+            BrushWorker::new(
+                ToolSet::default_brush(),
+                ActiveTool::Brush(BrushId::DEFAULT),
+                BrushSettings::default(),
+            )
+            .unwrap(),
+            command_receiver,
+            overflow_consumer,
+            worker_error_sender,
+            16,
         );
-        assert!(!runtime.has_active_stroke());
+        let error = worker_error_receiver.recv().unwrap();
+
+        assert_eq!(error, BrushWorkerError::BrushNotRegistered(missing_brush));
     }
 
     #[test]
@@ -2050,18 +2233,22 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
             BrushWorker::new(
                 ToolSet::default_brush(),
                 ActiveTool::Brush(BrushId::DEFAULT),
                 BrushSettings::default(),
-            ),
+            )
+            .unwrap(),
             command_receiver,
             overflow_consumer,
+            worker_error_sender,
             16,
         );
-        let finished = response_receiver.recv().unwrap().unwrap();
+        assert!(worker_error_receiver.try_recv().is_err());
+        let finished = response_receiver.recv().unwrap().unwrap().unwrap();
 
         assert_eq!(finished.inputs().len(), 1);
         assert_eq!(finished.inputs()[0].position, CanvasCoordF::new(3.0, 3.0));
@@ -2106,18 +2293,22 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
             BrushWorker::new(
                 ToolSet::default_brush(),
                 ActiveTool::Brush(BrushId::DEFAULT),
                 BrushSettings::default(),
-            ),
+            )
+            .unwrap(),
             command_receiver,
             overflow_consumer,
+            worker_error_sender,
             16,
         );
-        let finished = response_receiver.recv().unwrap().unwrap();
+        assert!(worker_error_receiver.try_recv().is_err());
+        let finished = response_receiver.recv().unwrap().unwrap().unwrap();
 
         assert_eq!(finished.inputs().len(), 1);
         assert_eq!(finished.inputs()[0].position, CanvasCoordF::new(3.0, 3.0));
@@ -2165,18 +2356,22 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
             BrushWorker::new(
                 ToolSet::default_brush(),
                 ActiveTool::Brush(BrushId::DEFAULT),
                 BrushSettings::default(),
-            ),
+            )
+            .unwrap(),
             command_receiver,
             overflow_consumer,
+            worker_error_sender,
             16,
         );
-        let finished = response_receiver.recv().unwrap().unwrap();
+        assert!(worker_error_receiver.try_recv().is_err());
+        let finished = response_receiver.recv().unwrap().unwrap().unwrap();
         let samples = finished.replace_circle_samples();
 
         assert_eq!(finished.inputs().len(), 1);
@@ -2224,7 +2419,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         assert!(runtime.begin_active_stroke());
         runtime.push_canvas_input(canvas_input(0, 5.0, 6.0, 1.0));
@@ -2247,7 +2443,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         runtime
             .set_active_tool(ActiveTool::Brush(second_brush))
@@ -2268,16 +2465,18 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         let error = runtime
             .set_active_tool(ActiveTool::Brush(missing_brush))
             .unwrap_err();
 
-        assert_eq!(
+        assert!(matches!(
             error,
-            BrushThreadRuntimeError::ActiveToolUnavailable(ActiveTool::Brush(missing_brush))
-        );
+            BrushThreadRuntimeError::ActiveToolUnavailable(ActiveTool::Brush(brush_id))
+                if brush_id == missing_brush
+        ));
         assert_eq!(runtime.active_brush_id(), Some(BrushId::DEFAULT));
     }
 
@@ -2288,7 +2487,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
         let mut settings = BrushSettings::default();
         settings.radius_px = 4.0;
         runtime.update_brush_settings(settings);
@@ -2310,7 +2510,8 @@ mod tests {
             ActiveTool::Brush(BrushId::DEFAULT),
             BrushSettings::default(),
             8,
-        );
+        )
+        .unwrap();
 
         runtime.shutdown().unwrap();
     }
