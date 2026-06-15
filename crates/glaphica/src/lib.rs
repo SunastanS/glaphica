@@ -17,8 +17,9 @@ pub use document::{
 };
 pub use export::{
     WorkspaceExportError, WorkspaceExportManifest, WorkspaceExportSnapshot, WorkspaceExportTile,
-    WorkspaceExportTileAsset, export_workspace_directory, read_workspace_directory,
-    read_workspace_manifest, root_tile_asset_relative_path, write_workspace_manifest,
+    WorkspaceExportTileAsset, export_workspace_directory, import_workspace_directory,
+    read_workspace_directory, read_workspace_manifest, root_tile_asset_relative_path,
+    workspace_from_export_snapshot, write_workspace_manifest,
 };
 pub use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
 pub use runtime::{

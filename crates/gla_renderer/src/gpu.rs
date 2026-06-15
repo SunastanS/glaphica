@@ -362,6 +362,14 @@ pub enum GpuRendererError {
     UnsupportedTileTransferFormat {
         bytes_per_pixel: u32,
     },
+    TileTransferFormatMismatch {
+        format: GlaFormat,
+        bytes_per_pixel: u32,
+    },
+    InvalidTileTransferLength {
+        expected: usize,
+        actual: usize,
+    },
     MissingAtlas {
         atlas_id: u8,
     },
@@ -424,6 +432,16 @@ impl Display for GpuRendererError {
                 f,
                 "unsupported tile transfer format with {bytes_per_pixel} bytes per pixel"
             ),
+            Self::TileTransferFormatMismatch {
+                format,
+                bytes_per_pixel,
+            } => write!(
+                f,
+                "cannot transfer {format:?} tile using {bytes_per_pixel} bytes per pixel"
+            ),
+            Self::InvalidTileTransferLength { expected, actual } => {
+                write!(f, "tile transfer has {actual} bytes, expected {expected}")
+            }
             Self::MissingAtlas { atlas_id } => {
                 write!(f, "missing GPU texture for atlas {atlas_id}")
             }
@@ -893,6 +911,12 @@ impl GpuRenderer {
         bytes_per_pixel: u32,
     ) -> Result<Vec<u8>, GpuRendererError> {
         let resolved = self.atlases.resolve_non_empty(position)?;
+        if resolved.runtime.bytes_per_pixel != bytes_per_pixel {
+            return Err(GpuRendererError::TileTransferFormatMismatch {
+                format: resolved.format,
+                bytes_per_pixel,
+            });
+        }
         let (padded_bytes_per_row, buffer_size) = tile_transfer_layout(bytes_per_pixel)?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("glaphica-readback-buffer"),
@@ -948,6 +972,66 @@ impl GpuRenderer {
         drop(mapped);
         buffer.unmap();
         Ok(bytes)
+    }
+
+    #[doc(hidden)]
+    pub fn write_tile_bytes(
+        &self,
+        position: TilePos,
+        bytes_per_pixel: u32,
+        bytes: &[u8],
+    ) -> Result<(), GpuRendererError> {
+        let resolved = self.atlases.resolve_non_empty(position)?;
+        if resolved.runtime.bytes_per_pixel != bytes_per_pixel {
+            return Err(GpuRendererError::TileTransferFormatMismatch {
+                format: resolved.format,
+                bytes_per_pixel,
+            });
+        }
+        let (padded_bytes_per_row, buffer_size) = tile_transfer_layout(bytes_per_pixel)?;
+        let expected = buffer_size as usize;
+        if bytes.len() != expected {
+            return Err(GpuRendererError::InvalidTileTransferLength {
+                expected,
+                actual: bytes.len(),
+            });
+        }
+
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("glaphica-write-tile-buffer"),
+                contents: bytes,
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("glaphica-write-tile-encoder"),
+            });
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(ATLAS_TILE_SIZE),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &resolved.texture.texture,
+                mip_level: 0,
+                origin: resolved.origin,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: ATLAS_TILE_SIZE,
+                height: ATLAS_TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
     }
 }
 
@@ -2478,6 +2562,38 @@ mod tests {
         ];
 
         gpu.submit(&passes).unwrap();
+    }
+
+    #[test]
+    fn gpu_write_tile_bytes_round_trips_when_adapter_is_available() {
+        let _guard = gpu_test_lock().lock().unwrap();
+        let (device, queue) = match pollster::block_on(test_device()) {
+            Some(device) => device,
+            None => {
+                eprintln!("skipping GPU tile write test: no adapter available");
+                return;
+            }
+        };
+        let mut gpu = GpuRenderer::new(device, queue).unwrap();
+        let format = GlaFormat {
+            channel_count: ChannelCount::D4,
+            channel_type: ChannelType::F32,
+        };
+        gpu.create_atlas_texture(0, AtlasLayout::TINY8, format)
+            .unwrap();
+        let dst = TilePos::new(0, 0, 0, 0);
+        let (padded_bytes_per_row, buffer_size) = tile_transfer_layout(16).unwrap();
+        let mut bytes = vec![0_u8; buffer_size as usize];
+        let offset = ((2 + GUTTER_SIZE) * padded_bytes_per_row + (3 + GUTTER_SIZE) * 16) as usize;
+        for (channel, value) in [0.25_f32, 0.5, 0.75, 1.0].into_iter().enumerate() {
+            let start = offset + channel * 4;
+            bytes[start..start + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+
+        gpu.write_tile_bytes(dst, 16, &bytes).unwrap();
+
+        let readback = gpu.read_tile_bytes(dst, 16).unwrap();
+        assert_eq!(read_rgba_pixel(&readback, 16, 3, 2), [0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]

@@ -75,13 +75,25 @@ impl DocumentWorkspace {
         S: AtlasTextureStore,
     {
         let format = default_canvas_format();
+        Self::primitive_root_with_textures(ImageId::new(1), width_px, height_px, format, textures)
+    }
+
+    pub(crate) fn primitive_root_with_textures<S>(
+        root: ImageId,
+        width_px: u32,
+        height_px: u32,
+        format: GlaFormat,
+        textures: &mut S,
+    ) -> Result<Self, DocumentWorkspaceBuildError<S::Error>>
+    where
+        S: AtlasTextureStore,
+    {
         let layout = ImageLayoutSpec::new(width_px, height_px);
         let mut tiles = Tiles::new();
         tiles
             .new_atlas(AtlasLayout::LARGE17, format, textures)
             .map_err(DocumentWorkspaceBuildError::Atlas)?;
 
-        let root = ImageId::new(1);
         let mut storage = GlobalStorage::new(tiles);
         storage
             .apply_registry_patch(RegistryPatch::new(vec![
