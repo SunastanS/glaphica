@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gla_core::{CanvasInput, ScreenCoordF};
-use gla_ir::DrawOnToolKind;
+use gla_ir::{DrawOnToolKind, RegistryPatch};
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
 use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
 use winit::{
@@ -252,6 +252,38 @@ impl App {
         self.brush_thread.update_brush_settings(brush_settings);
     }
 
+    fn apply_registry_patch_from_script(
+        &mut self,
+        patch: RegistryPatch,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        if self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot apply a registry patch while a stroke is active".to_owned(),
+            });
+        }
+        let Some(workspace) = self.workspace.as_mut() else {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot apply a registry patch before the document workspace exists"
+                    .to_owned(),
+            });
+        };
+        let version =
+            workspace
+                .apply_registry_patch(patch)
+                .map_err(|error| ScriptHostError::Runtime {
+                    reason: error.to_string(),
+                })?;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        if let Err(error) = self.fit_view_to_workspace() {
+            return Err(ScriptHostError::Runtime {
+                reason: error.to_string(),
+            });
+        }
+        self.request_full_screen_update();
+        Ok(ScriptCommandOutcome::DocumentVersion(version))
+    }
+
     fn active_brush_id(&self) -> Option<BrushId> {
         self.brush_thread.active_brush_id()
     }
@@ -493,9 +525,9 @@ impl ScriptHost for App {
         command: ScriptCommand,
     ) -> Result<ScriptCommandOutcome, ScriptHostError> {
         match command {
-            ScriptCommand::ApplyRegistryPatch(_) => Err(ScriptHostError::UnsupportedCommand {
-                command: "ApplyRegistryPatch",
-            }),
+            ScriptCommand::ApplyRegistryPatch(patch) => {
+                self.apply_registry_patch_from_script(patch)
+            }
             ScriptCommand::RunDrawSession(_) => Err(ScriptHostError::UnsupportedCommand {
                 command: "RunDrawSession",
             }),
@@ -1032,12 +1064,15 @@ mod tests {
     use super::{App, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
-        BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, RoundBrushSettings,
-        ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError, Tool, ToolSet,
-        load_trace_file, save_trace_file,
+        BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
+        RoundBrushSettings, ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError, Tool,
+        ToolSet, load_trace_file, save_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
-    use gla_ir::{DocImageUse, DocumentVersionId, DrawOnToolKind, DrawSessionIR, ImageId};
+    use gla_ir::{
+        DocImageUse, DocumentVersionId, DrawOnToolKind, DrawSessionIR, ImageId, ImageLayoutSpec,
+        ImageRole, RegistryPatch, RegistryPatchOp,
+    };
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
         CanvasInput {
@@ -1292,6 +1327,59 @@ mod tests {
                 command: "RunDrawSession"
             }
         );
+    }
+
+    #[test]
+    fn script_host_applies_registry_patch_to_workspace() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+
+        let outcome = app
+            .execute_script_command(ScriptCommand::ApplyRegistryPatch(RegistryPatch::new(vec![
+                RegistryPatchOp::NewImage {
+                    id: ImageId::new(2),
+                    format: gla_color::GlaFormat {
+                        channel_count: gla_color::ChannelCount::D4,
+                        channel_type: gla_color::ChannelType::F32,
+                    },
+                    layout: ImageLayoutSpec::new(64, 32),
+                    role: ImageRole::Primitive,
+                },
+                RegistryPatchOp::SetRoot(ImageId::new(2)),
+            ])))
+            .unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        assert_eq!(
+            outcome,
+            ScriptCommandOutcome::DocumentVersion(DocumentVersionId::new(2))
+        );
+        assert_eq!(workspace.root(), ImageId::new(2));
+        assert_eq!(workspace.canvas_size_px(), (64, 32));
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
+        assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn script_host_rejects_registry_patch_during_active_stroke() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(1, 1.0, 2.0, 1.0)))
+            .unwrap();
+
+        let error = app
+            .execute_script_command(ScriptCommand::ApplyRegistryPatch(RegistryPatch::new(vec![
+                RegistryPatchOp::SetRoot(ImageId::new(1)),
+            ])))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("while a stroke is active")
+        ));
+        assert!(app.brush_thread.has_active_stroke());
     }
 
     #[test]

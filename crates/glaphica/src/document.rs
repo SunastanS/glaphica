@@ -174,6 +174,29 @@ impl DocumentWorkspace {
         DrawSession::begin(ir, &mut self.storage)
     }
 
+    pub fn apply_registry_patch(
+        &mut self,
+        patch: RegistryPatch,
+    ) -> Result<DocumentVersionId, GlobalStorageError> {
+        self.storage.apply_registry_patch(patch)?;
+        self.sync_root_metadata();
+        Ok(self.version())
+    }
+
+    fn sync_root_metadata(&mut self) {
+        let Some(root) = self.storage.root() else {
+            return;
+        };
+        let image = self
+            .storage
+            .image(root)
+            .expect("storage root should reference an existing image");
+        let layout = image.layout();
+        self.root = root;
+        self.format = image.format();
+        self.layout = ImageLayoutSpec::new(layout.width_px(), layout.height_px());
+    }
+
     fn initialize_root_to_color<B>(
         &mut self,
         backend: &mut B,
@@ -604,6 +627,28 @@ mod tests {
         );
         let session = workspace.begin_session(&ir).unwrap();
         session.discard();
+    }
+
+    #[test]
+    fn registry_patch_updates_workspace_root_metadata() {
+        let mut workspace = DocumentWorkspace::blank(320, 240).unwrap();
+        let version = workspace
+            .apply_registry_patch(RegistryPatch::new(vec![
+                RegistryPatchOp::NewImage {
+                    id: ImageId::new(2),
+                    format: default_canvas_format(),
+                    layout: ImageLayoutSpec::new(64, 32),
+                    role: ImageRole::Primitive,
+                },
+                RegistryPatchOp::SetRoot(ImageId::new(2)),
+            ]))
+            .unwrap();
+
+        assert_eq!(version, DocumentVersionId::new(2));
+        assert_eq!(workspace.root(), ImageId::new(2));
+        assert_eq!(workspace.canvas_size_px(), (64, 32));
+        assert_eq!(workspace.storage().root(), Some(ImageId::new(2)));
+        assert!(workspace.root_present_tiles().unwrap().is_empty());
     }
 
     #[test]
