@@ -41,6 +41,7 @@ use crate::{
 };
 
 const BRUSH_THREAD_COMMAND_CAPACITY: usize = 1024;
+const ACTIVE_STROKE_BRUSH_INPUT_BATCH_CAPACITY: usize = 64;
 const ACTIVE_STROKE_COMMIT_FRAME_DAB_BUDGET: u32 = 512;
 
 #[derive(Debug, Clone)]
@@ -340,6 +341,7 @@ impl App {
             .map_err(|error| ScriptHostError::Runtime {
                 reason: error.to_string(),
             })?;
+        self.frame_scheduler.clear_pending_brush_inputs();
         self.brush_thread.push_canvas_input(input);
         self.active_stroke_preview = Some(ActiveStrokePreview::new(
             self.config.brush_settings.clone(),
@@ -369,6 +371,7 @@ impl App {
     }
 
     fn process_pending_active_stroke_preview(&mut self) {
+        self.drain_pending_brush_inputs();
         let samples = match self.active_stroke_preview.as_ref() {
             Some(preview) if preview.needs_render() => preview.replace_circle_samples(),
             _ => return,
@@ -399,8 +402,20 @@ impl App {
         }
     }
 
+    fn drain_pending_brush_inputs(&mut self) {
+        self.frame_scheduler.drain_brush_inputs(
+            self.brush_thread.brush_input_consumer(),
+            ACTIVE_STROKE_BRUSH_INPUT_BATCH_CAPACITY,
+            Duration::ZERO,
+        );
+        if !self.frame_scheduler.pending_brush_inputs().is_empty() {
+            self.frame_scheduler.finish_brush_inputs();
+        }
+    }
+
     fn clear_active_stroke_preview_cache(&mut self) {
         self.active_stroke_preview = None;
+        self.frame_scheduler.clear_pending_brush_inputs();
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             return;
         };
@@ -833,6 +848,7 @@ impl App {
     fn cancel_active_stroke(&mut self) -> bool {
         let canceled = self.brush_thread.cancel_active_stroke();
         if canceled {
+            self.frame_scheduler.clear_pending_brush_inputs();
             self.clear_active_stroke_preview_cache();
         }
         canceled

@@ -1,5 +1,10 @@
+use std::time::Duration;
+
+use crate::{BrushInput, stroke::MainBrushInputConsumer};
+
 #[derive(Debug, Default)]
 pub(crate) struct AppFrameScheduler {
+    pending_brush_inputs: Vec<BrushInput>,
     scheduled_tile_indices: Vec<u32>,
     full_update_requested: bool,
     redraw_requested: bool,
@@ -15,6 +20,7 @@ pub(crate) enum ScreenUpdateRequest {
 impl AppFrameScheduler {
     pub(crate) fn new() -> Self {
         Self {
+            pending_brush_inputs: Vec::new(),
             scheduled_tile_indices: Vec::new(),
             full_update_requested: false,
             redraw_requested: false,
@@ -31,6 +37,29 @@ impl AppFrameScheduler {
 
     pub(crate) fn reset_redraw_request(&mut self) {
         self.redraw_requested = false;
+    }
+
+    pub(crate) fn clear_pending_brush_inputs(&mut self) {
+        self.pending_brush_inputs.clear();
+    }
+
+    pub(crate) fn drain_brush_inputs(
+        &mut self,
+        consumer: &MainBrushInputConsumer,
+        max_inputs: usize,
+        wait_timeout: Duration,
+    ) -> usize {
+        self.pending_brush_inputs.clear();
+        consumer.drain_batch_with_wait(&mut self.pending_brush_inputs, max_inputs, wait_timeout);
+        self.pending_brush_inputs.len()
+    }
+
+    pub(crate) fn pending_brush_inputs(&self) -> &[BrushInput] {
+        &self.pending_brush_inputs
+    }
+
+    pub(crate) fn finish_brush_inputs(&mut self) {
+        self.pending_brush_inputs.clear();
     }
 
     pub(crate) fn schedule_tile_indices(&mut self, tile_indices: &[u32]) {
@@ -62,6 +91,8 @@ impl AppFrameScheduler {
 #[cfg(test)]
 mod tests {
     use super::{AppFrameScheduler, ScreenUpdateRequest};
+    use crate::{BrushId, BrushInput, BrushInputBlockList, create_overwrite_ring};
+    use std::time::Duration;
 
     #[test]
     fn redraw_request_latches_until_reset() {
@@ -106,5 +137,21 @@ mod tests {
             scheduler.take_screen_update_request(),
             ScreenUpdateRequest::None
         );
+    }
+
+    #[test]
+    fn brush_input_drain_tracks_pending_batch_lifetime() {
+        let mut scheduler = AppFrameScheduler::new();
+        let (producer, consumer) = create_overwrite_ring(4);
+        let mut blocks = BrushInputBlockList::new(BrushId::DEFAULT);
+        blocks.push_block(vec![1.0, 2.0, 3.0]);
+        producer.push(BrushInput::new(blocks));
+
+        let drained = scheduler.drain_brush_inputs(&consumer, 8, Duration::ZERO);
+
+        assert_eq!(drained, 1);
+        assert_eq!(scheduler.pending_brush_inputs().len(), 1);
+        scheduler.finish_brush_inputs();
+        assert!(scheduler.pending_brush_inputs().is_empty());
     }
 }

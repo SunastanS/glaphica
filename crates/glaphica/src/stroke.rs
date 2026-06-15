@@ -25,12 +25,12 @@ pub const ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT: usize = 11;
 const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
 const ROUND_DAB_KERNEL_A: f32 = 1.5;
 
-#[derive(Debug)]
 pub(crate) struct BrushWorker {
     tool_set: ToolSet,
     active_tool: ActiveTool,
     brush_settings: BrushSettings,
     active_stroke: Option<ActiveRootStroke>,
+    active_input_stroke: Option<Box<dyn BrushStrokeInputProcessor>>,
 }
 
 pub(crate) struct BrushThreadRuntime {
@@ -38,11 +38,15 @@ pub(crate) struct BrushThreadRuntime {
     active_tool: ActiveTool,
     command_sender: Option<SyncSender<BrushThreadCommand>>,
     worker_error_receiver: Receiver<BrushWorkerError>,
+    brush_input_consumer: MainBrushInputConsumer,
     overflow_input_producer: Option<OverwriteRingProducer<QueuedCanvasInput>>,
     active: bool,
     command_epoch: u64,
     thread: Option<JoinHandle<()>>,
 }
+
+pub(crate) type BrushThreadBrushInputProducer = OverwriteRingProducer<BrushInput>;
+pub(crate) type MainBrushInputConsumer = OverwriteRingConsumer<BrushInput>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrushWorkerError {
@@ -142,6 +146,7 @@ pub struct FrozenCanvasSample {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundBrushInputProcessor {
+    brush_id: BrushId,
     settings: RoundBrushSettings,
 }
 
@@ -156,6 +161,7 @@ pub struct RoundMergeSettings {
 
 #[derive(Debug, Clone)]
 struct RoundBrushStrokeInputProcessor {
+    brush_id: BrushId,
     settings: RoundBrushSettings,
     inputs: Vec<CanvasInput>,
     emitted_sample_count: usize,
@@ -257,6 +263,7 @@ impl BrushThreadRuntime {
         let capacity = command_capacity.max(1);
         let (command_sender, command_receiver) = sync_channel(capacity);
         let (worker_error_sender, worker_error_receiver) = sync_channel(1);
+        let (brush_input_producer, brush_input_consumer) = create_overwrite_ring(capacity);
         let (overflow_input_producer, overflow_input_consumer) = create_overwrite_ring(capacity);
         let worker = BrushWorker::new(tool_set.clone(), active_tool, brush_settings)?;
         let thread = thread::Builder::new()
@@ -265,6 +272,7 @@ impl BrushThreadRuntime {
                 run_brush_thread(
                     worker,
                     command_receiver,
+                    brush_input_producer,
                     overflow_input_consumer,
                     worker_error_sender,
                     capacity,
@@ -276,6 +284,7 @@ impl BrushThreadRuntime {
             active_tool,
             command_sender: Some(command_sender),
             worker_error_receiver,
+            brush_input_consumer,
             overflow_input_producer: Some(overflow_input_producer),
             active: false,
             command_epoch: 0,
@@ -298,6 +307,7 @@ impl BrushThreadRuntime {
         }
         self.next_epoch();
         self.clear_overflow_inputs();
+        self.brush_input_consumer.clear();
         self.send_control(BrushThreadCommand::SetActiveTool(active_tool))?;
         self.active_tool = active_tool;
         self.active = false;
@@ -308,6 +318,7 @@ impl BrushThreadRuntime {
         self.active = false;
         let epoch = self.next_epoch();
         self.clear_overflow_inputs();
+        self.brush_input_consumer.clear();
         self.send_control(BrushThreadCommand::Reset { epoch })
     }
 
@@ -320,6 +331,7 @@ impl BrushThreadRuntime {
         }
         let epoch = self.next_epoch();
         self.clear_overflow_inputs();
+        self.brush_input_consumer.clear();
         match self.send_control(BrushThreadCommand::Begin { epoch }) {
             Ok(()) => {
                 self.active = true;
@@ -399,6 +411,7 @@ impl BrushThreadRuntime {
     pub(crate) fn restore_active_stroke(&mut self, stroke: FinishedRootStroke) {
         let epoch = self.next_epoch();
         self.clear_overflow_inputs();
+        self.brush_input_consumer.clear();
         self.active = self
             .send_control(BrushThreadCommand::Restore { epoch, stroke })
             .is_ok();
@@ -410,6 +423,7 @@ impl BrushThreadRuntime {
         self.active = false;
         let epoch = self.next_epoch();
         self.clear_overflow_inputs();
+        self.brush_input_consumer.clear();
         self.send_control(BrushThreadCommand::Cancel { epoch })
     }
 
@@ -428,10 +442,15 @@ impl BrushThreadRuntime {
         self.worker_error_receiver.try_recv().ok()
     }
 
+    pub(crate) fn brush_input_consumer(&self) -> &MainBrushInputConsumer {
+        &self.brush_input_consumer
+    }
+
     pub(crate) fn update_brush_settings(&mut self, brush_settings: BrushSettings) {
         self.next_epoch();
         self.active = false;
         self.clear_overflow_inputs();
+        self.brush_input_consumer.clear();
         let _ = self.send_control(BrushThreadCommand::UpdateBrushSettings(brush_settings));
     }
 
@@ -702,7 +721,15 @@ impl From<RoundBrushSettings> for RoundBrushInputProcessor {
 
 impl RoundBrushInputProcessor {
     pub fn from_settings(settings: RoundBrushSettings) -> Self {
-        Self { settings }
+        Self {
+            brush_id: BrushId::DEFAULT,
+            settings,
+        }
+    }
+
+    pub fn with_brush_id(mut self, brush_id: BrushId) -> Self {
+        self.brush_id = brush_id;
+        self
     }
 
     pub fn settings(&self) -> RoundBrushSettings {
@@ -756,11 +783,26 @@ impl RoundBrushInputProcessor {
         self.settings.modulations = modulations;
         self
     }
+
+    fn block_values<'a>(
+        &self,
+        input: &'a BrushInput,
+        block_index: usize,
+    ) -> Result<&'a [f32], BrushInputError> {
+        if input.brush_id != self.brush_id {
+            return Err(BrushInputError::WrongBrush {
+                expected: self.brush_id,
+                actual: input.brush_id,
+            });
+        }
+        round_brush_block_values(input, block_index)
+    }
 }
 
 impl BrushInputProcessor for RoundBrushInputProcessor {
     fn begin_stroke(&self) -> Box<dyn BrushStrokeInputProcessor> {
         Box::new(RoundBrushStrokeInputProcessor {
+            brush_id: self.brush_id,
             settings: self.settings.clone(),
             inputs: Vec::new(),
             emitted_sample_count: 0,
@@ -776,7 +818,7 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
         input: &BrushInput,
         block_index: usize,
     ) -> Result<CanvasCoordF, BrushInputError> {
-        let values = round_brush_block_values(input, block_index)?;
+        let values = self.block_values(input, block_index)?;
         Ok(CanvasCoordF::new(values[0], values[1]))
     }
 
@@ -786,7 +828,7 @@ impl BrushInputProcessor for RoundBrushInputProcessor {
         block_index: usize,
         slot_canvas_origin: CanvasCoordF,
     ) -> Result<Vec<u8>, BrushInputError> {
-        let values = round_brush_block_values(input, block_index)?;
+        let values = self.block_values(input, block_index)?;
         Ok(encode_round_apply_payload(
             [
                 values[0] - slot_canvas_origin.x,
@@ -842,7 +884,7 @@ impl BrushStrokeInputProcessor for RoundBrushStrokeInputProcessor {
             return Ok(None);
         }
 
-        let mut blocks = BrushInputBlockList::new(BrushId::DEFAULT);
+        let mut blocks = BrushInputBlockList::new(self.brush_id);
         for absolute_index in self.emitted_sample_count..sampled_inputs.len() {
             let input = sampled_inputs[absolute_index];
             let block_index = blocks.blocks().len();
@@ -913,6 +955,21 @@ impl Drop for BrushThreadRuntime {
     }
 }
 
+impl std::fmt::Debug for BrushWorker {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrushWorker")
+            .field("tool_set", &self.tool_set)
+            .field("active_tool", &self.active_tool)
+            .field("brush_settings", &self.brush_settings)
+            .field("active_stroke", &self.active_stroke)
+            .field(
+                "has_active_input_stroke",
+                &self.active_input_stroke.is_some(),
+            )
+            .finish()
+    }
+}
+
 impl BrushWorker {
     pub(crate) fn new(
         tool_set: ToolSet,
@@ -930,6 +987,7 @@ impl BrushWorker {
             active_tool,
             brush_settings,
             active_stroke: None,
+            active_input_stroke: None,
         })
     }
 
@@ -949,16 +1007,19 @@ impl BrushWorker {
         }
         self.active_tool = active_tool;
         self.active_stroke = None;
+        self.active_input_stroke = None;
         Ok(())
     }
 
     pub(crate) fn begin_active_stroke(&mut self) -> Result<(), BrushWorkerError> {
         let Some(brush_id) = self.active_brush_id() else {
             self.active_stroke = None;
+            self.active_input_stroke = None;
             let brush_id = self.active_tool.brush_id().unwrap_or(BrushId::DEFAULT);
             return Err(BrushWorkerError::BrushNotRegistered(brush_id));
         };
         self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.brush_settings.clone()));
+        self.active_input_stroke = Some(self.begin_input_stroke());
         Ok(())
     }
 
@@ -974,12 +1035,42 @@ impl BrushWorker {
         }
     }
 
+    pub(crate) fn process_canvas_inputs(
+        &mut self,
+        inputs: &[CanvasInput],
+        brush_input_producer: &BrushThreadBrushInputProducer,
+    ) -> Result<usize, BrushWorkerError> {
+        if inputs.is_empty() {
+            return Ok(0);
+        }
+        self.push_canvas_inputs(inputs);
+        let Some(input_stroke) = self.active_input_stroke.as_mut() else {
+            return Ok(0);
+        };
+        input_stroke.push_canvas_inputs(inputs)?;
+        push_drained_brush_input(input_stroke.as_mut(), brush_input_producer)
+    }
+
     pub(crate) fn finish_active_stroke(
         &mut self,
+    ) -> Result<Option<FinishedRootStroke>, BrushWorkerError> {
+        self.finish_active_stroke_to(None)
+    }
+
+    fn finish_active_stroke_to(
+        &mut self,
+        brush_input_producer: Option<&BrushThreadBrushInputProducer>,
     ) -> Result<Option<FinishedRootStroke>, BrushWorkerError> {
         let Some(stroke) = self.active_stroke.take() else {
             return Ok(None);
         };
+        if let Some(input_stroke) = self.active_input_stroke.as_mut() {
+            input_stroke.finish_stroke()?;
+            if let Some(brush_input_producer) = brush_input_producer {
+                let _ = push_drained_brush_input(input_stroke.as_mut(), brush_input_producer)?;
+            }
+        }
+        self.active_input_stroke = None;
         Ok((!stroke.is_empty()).then(|| {
             let brush_input = stroke.brush_input();
             FinishedRootStroke {
@@ -997,10 +1088,12 @@ impl BrushWorker {
             return Err(BrushWorkerError::BrushNotRegistered(stroke.brush_id()));
         }
         self.active_stroke = Some(stroke.stroke);
+        self.active_input_stroke = Some(self.begin_input_stroke());
         Ok(())
     }
 
     pub(crate) fn cancel_active_stroke(&mut self) -> bool {
+        self.active_input_stroke = None;
         self.active_stroke.take().is_some()
     }
 
@@ -1014,7 +1107,31 @@ impl BrushWorker {
 
     pub(crate) fn update_brush_settings(&mut self, brush_settings: BrushSettings) {
         self.brush_settings = brush_settings;
+        self.active_input_stroke = None;
     }
+
+    fn begin_input_stroke(&self) -> Box<dyn BrushStrokeInputProcessor> {
+        let brush_id = self.active_brush_id().unwrap_or(BrushId::DEFAULT);
+        RoundBrushInputProcessor::from_settings(round_brush_settings_from_brush_settings(
+            &self.brush_settings,
+        ))
+        .with_brush_id(brush_id)
+        .begin_stroke()
+    }
+}
+
+fn push_drained_brush_input(
+    input_stroke: &mut dyn BrushStrokeInputProcessor,
+    brush_input_producer: &BrushThreadBrushInputProducer,
+) -> Result<usize, BrushWorkerError> {
+    let Some(brush_input) = input_stroke.drain_brush_input()? else {
+        return Ok(0);
+    };
+    let produced_blocks = brush_input.blocks.blocks().len();
+    if produced_blocks > 0 {
+        brush_input_producer.push(brush_input);
+    }
+    Ok(produced_blocks)
 }
 
 impl ActiveRootStroke {
@@ -1124,6 +1241,18 @@ impl ActiveRootStroke {
 
     fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
         replace_circle_samples_for_inputs(&self.inputs, &self.brush_settings)
+    }
+}
+
+fn round_brush_settings_from_brush_settings(settings: &BrushSettings) -> RoundBrushSettings {
+    RoundBrushSettings {
+        base_radius_px: settings.radius_px,
+        spacing_ratio: settings.spacing_ratio,
+        base_hardness: settings.hardness,
+        base_flow: settings.flow,
+        base_opacity: settings.opacity,
+        tint: [settings.color.r, settings.color.g, settings.color.b],
+        modulations: settings.modulations.clone(),
     }
 }
 
@@ -1241,12 +1370,6 @@ fn round_brush_block_values(
     input: &BrushInput,
     block_index: usize,
 ) -> Result<&[f32], BrushInputError> {
-    if input.brush_id != BrushId::DEFAULT {
-        return Err(BrushInputError::WrongBrush {
-            expected: BrushId::DEFAULT,
-            actual: input.brush_id,
-        });
-    }
     if input.blocks.brush_id() != input.brush_id {
         return Err(BrushInputError::WrongBrush {
             expected: input.brush_id,
@@ -1256,7 +1379,7 @@ fn round_brush_block_values(
 
     let Some(block) = input.blocks.blocks().get(block_index) else {
         return Err(BrushInputError::InvalidBlockLength {
-            brush_id: BrushId::DEFAULT,
+            brush_id: input.brush_id,
             block_index,
             expected: block_index + 1,
             actual: input.blocks.blocks().len(),
@@ -1264,7 +1387,7 @@ fn round_brush_block_values(
     };
     if block.values().len() != ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT {
         return Err(BrushInputError::InvalidBlockLength {
-            brush_id: BrushId::DEFAULT,
+            brush_id: input.brush_id,
             block_index,
             expected: ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT,
             actual: block.values().len(),
@@ -1273,7 +1396,7 @@ fn round_brush_block_values(
     for (value_index, value) in block.values().iter().copied().enumerate() {
         if !value.is_finite() {
             return Err(BrushInputError::InvalidBlockValue {
-                brush_id: BrushId::DEFAULT,
+                brush_id: input.brush_id,
                 block_index,
                 value_index,
             });
@@ -1498,6 +1621,7 @@ impl WorkerStrokeState {
 fn run_brush_thread(
     mut worker: BrushWorker,
     command_receiver: Receiver<BrushThreadCommand>,
+    brush_input_producer: BrushThreadBrushInputProducer,
     overflow_input_consumer: OverwriteRingConsumer<QueuedCanvasInput>,
     worker_error_sender: SyncSender<BrushWorkerError>,
     batch_capacity: usize,
@@ -1541,8 +1665,14 @@ fn run_brush_thread(
                         &mut canvas_batch,
                     );
                     let finished = if stroke_state.accepts(epoch) {
-                        flush_canvas_batch(&mut worker, &mut canvas_batch);
-                        worker.finish_active_stroke()
+                        match flush_canvas_batch(
+                            &mut worker,
+                            &brush_input_producer,
+                            &mut canvas_batch,
+                        ) {
+                            Ok(_) => worker.finish_active_stroke_to(Some(&brush_input_producer)),
+                            Err(error) => Err(error),
+                        }
                     } else {
                         Ok(None)
                     };
@@ -1592,7 +1722,12 @@ fn run_brush_thread(
             stroke_state,
             &mut canvas_batch,
         );
-        flush_canvas_batch(&mut worker, &mut canvas_batch);
+        if let Err(error) =
+            flush_canvas_batch(&mut worker, &brush_input_producer, &mut canvas_batch)
+        {
+            report_worker_error(&worker_error_sender, error);
+            return;
+        }
     }
 }
 
@@ -1631,12 +1766,17 @@ fn receive_command_batch(
     true
 }
 
-fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInput>) {
+fn flush_canvas_batch(
+    worker: &mut BrushWorker,
+    brush_input_producer: &BrushThreadBrushInputProducer,
+    canvas_batch: &mut Vec<CanvasInput>,
+) -> Result<usize, BrushWorkerError> {
     if canvas_batch.is_empty() {
-        return;
+        return Ok(0);
     }
-    worker.push_canvas_inputs(canvas_batch);
+    let produced_blocks = worker.process_canvas_inputs(canvas_batch, brush_input_producer)?;
     canvas_batch.clear();
+    Ok(produced_blocks)
 }
 
 fn respond_to_finish(
@@ -1686,6 +1826,7 @@ mod tests {
     };
     use gla_core::{CanvasCoordF, CanvasInput};
     use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
         CanvasInput {
@@ -1926,6 +2067,34 @@ mod tests {
     }
 
     #[test]
+    fn round_brush_processor_tracks_non_default_brush_id() {
+        let brush_id = BrushId::new(2);
+        let processor = RoundBrushInputProcessor::default().with_brush_id(brush_id);
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[canvas_input(0, 8.0, 9.0, 0.5)])
+            .unwrap();
+        let brush_input = stroke.drain_brush_input().unwrap().unwrap();
+
+        assert_eq!(brush_input.brush_id, brush_id);
+        assert_eq!(brush_input.blocks.brush_id(), brush_id);
+        assert_eq!(
+            processor.block_center(&brush_input, 0).unwrap(),
+            CanvasCoordF::new(8.0, 9.0)
+        );
+        assert!(matches!(
+            RoundBrushInputProcessor::default()
+                .block_center(&brush_input, 0)
+                .unwrap_err(),
+            BrushInputError::WrongBrush {
+                expected: BrushId::DEFAULT,
+                actual
+            } if actual == brush_id
+        ));
+    }
+
+    #[test]
     fn round_brush_processor_merge_payload_uses_settings() {
         let processor = RoundBrushInputProcessor::default()
             .with_base_flow(0.9)
@@ -2122,6 +2291,34 @@ mod tests {
     }
 
     #[test]
+    fn brush_thread_runtime_emits_round_brush_input_batches() {
+        let mut runtime = BrushThreadRuntime::spawn(
+            ToolSet::default_brush(),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            BrushSettings::default(),
+            8,
+        )
+        .unwrap();
+        let mut brush_inputs = Vec::new();
+
+        runtime.begin_active_stroke_processing().unwrap();
+        runtime.push_canvas_input(canvas_input(0, 1.0, 2.0, 0.5));
+        runtime.push_canvas_input(canvas_input(1_000_000_000, 11.0, 2.0, 0.75));
+        let finished = runtime.finish_active_stroke_processing().unwrap().unwrap();
+        runtime
+            .brush_input_consumer()
+            .drain_batch_with_wait(&mut brush_inputs, 8, Duration::ZERO);
+
+        assert_eq!(finished.inputs().len(), 2);
+        assert!(!brush_inputs.is_empty());
+        assert_eq!(brush_inputs[0].brush_id, BrushId::DEFAULT);
+        assert_eq!(
+            brush_inputs[0].blocks.blocks()[0].values().len(),
+            ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT
+        );
+    }
+
+    #[test]
     fn brush_thread_runtime_reset_processing_drops_active_inputs() {
         let mut runtime = BrushThreadRuntime::spawn(
             ToolSet::default_brush(),
@@ -2175,6 +2372,7 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (brush_input_producer, _brush_input_consumer) = create_overwrite_ring(16);
         let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
@@ -2185,6 +2383,7 @@ mod tests {
             )
             .unwrap(),
             command_receiver,
+            brush_input_producer,
             overflow_consumer,
             worker_error_sender,
             16,
@@ -2233,6 +2432,7 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (brush_input_producer, _brush_input_consumer) = create_overwrite_ring(16);
         let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
@@ -2243,6 +2443,7 @@ mod tests {
             )
             .unwrap(),
             command_receiver,
+            brush_input_producer,
             overflow_consumer,
             worker_error_sender,
             16,
@@ -2293,6 +2494,7 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (brush_input_producer, _brush_input_consumer) = create_overwrite_ring(16);
         let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
@@ -2303,6 +2505,7 @@ mod tests {
             )
             .unwrap(),
             command_receiver,
+            brush_input_producer,
             overflow_consumer,
             worker_error_sender,
             16,
@@ -2356,6 +2559,7 @@ mod tests {
             .unwrap();
         drop(command_sender);
         let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
+        let (brush_input_producer, _brush_input_consumer) = create_overwrite_ring(16);
         let (worker_error_sender, worker_error_receiver) = sync_channel(1);
 
         super::run_brush_thread(
@@ -2366,6 +2570,7 @@ mod tests {
             )
             .unwrap(),
             command_receiver,
+            brush_input_producer,
             overflow_consumer,
             worker_error_sender,
             16,
@@ -2453,8 +2658,13 @@ mod tests {
         assert!(runtime.begin_active_stroke());
         runtime.push_canvas_input(canvas_input(0, 1.0, 2.0, 1.0));
         let finished = runtime.finish_active_stroke().unwrap();
+        let mut brush_inputs = Vec::new();
+        runtime
+            .brush_input_consumer()
+            .drain_batch_with_wait(&mut brush_inputs, 8, Duration::ZERO);
 
         assert_eq!(finished.brush_id(), second_brush);
+        assert_eq!(brush_inputs[0].brush_id, second_brush);
     }
 
     #[test]
