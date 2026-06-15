@@ -20,12 +20,16 @@ use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
-    SurfaceRuntime, ToolSet, UiAction, WorkspaceExportError,
+    SurfaceRuntime, ToolSet, UiAction, UiLayerItem, WorkspaceExportError, collect_ui_layers,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
     stroke::BrushThreadRuntime,
-    trace::{AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState},
+    trace::{
+        AppTraceBlendMode, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState,
+        AppTraceUiAction,
+    },
+    visible_layer_index,
 };
 
 const BRUSH_THREAD_COMMAND_CAPACITY: usize = 1024;
@@ -479,9 +483,29 @@ impl App {
     }
 
     fn execute_ui_action_from_window(&mut self, action: UiAction) {
-        if let Err(error) = self.execute_ui_action(action) {
-            eprintln!("ui action failed: {error}");
+        let trace_action = self
+            .ui_layers()
+            .ok()
+            .and_then(|layers| trace_action_for_ui_action(&layers, &action));
+        match self.execute_ui_action(action) {
+            Ok(_) => {
+                if let Some(trace_action) = trace_action {
+                    self.trace.record(AppTraceEvent::Ui(trace_action));
+                }
+            }
+            Err(error) => {
+                eprintln!("ui action failed: {error}");
+            }
         }
+    }
+
+    fn ui_layers(&self) -> Result<Vec<UiLayerItem>, ScriptHostError> {
+        let Some(workspace) = self.workspace.as_ref() else {
+            return Ok(Vec::new());
+        };
+        collect_ui_layers(workspace).map_err(|error| ScriptHostError::Runtime {
+            reason: error.to_string(),
+        })
     }
 
     fn delete_active_node_from_script(&mut self) -> Result<ScriptCommandOutcome, ScriptHostError> {
@@ -647,6 +671,9 @@ impl App {
 
     fn execute_trace_replay_event(&mut self, event: AppTraceEvent) -> Result<(), ScriptHostError> {
         match event {
+            AppTraceEvent::Ui(action) => {
+                self.execute_trace_ui_action(action)?;
+            }
             AppTraceEvent::BeginStroke(input) => {
                 self.execute_script_command(ScriptCommand::BeginStroke(input.into()))?;
             }
@@ -666,6 +693,15 @@ impl App {
                 self.execute_script_command(ScriptCommand::Redo)?;
             }
         }
+        Ok(())
+    }
+
+    fn execute_trace_ui_action(&mut self, action: AppTraceUiAction) -> Result<(), ScriptHostError> {
+        let layers = self.ui_layers()?;
+        let Some(action) = ui_action_for_trace_action(&layers, action) else {
+            return Ok(());
+        };
+        self.execute_ui_action(action)?;
         Ok(())
     }
 
@@ -913,6 +949,66 @@ impl ScriptHost for App {
                 self.request_redraw();
                 Ok(ScriptCommandOutcome::RedrawRequested)
             }
+        }
+    }
+}
+
+fn trace_action_for_ui_action(
+    layers: &[UiLayerItem],
+    action: &UiAction,
+) -> Option<AppTraceUiAction> {
+    match action {
+        UiAction::UndoRequested => Some(AppTraceUiAction::Undo),
+        UiAction::CreateLayerRequested => Some(AppTraceUiAction::CreateLayer),
+        UiAction::CreateGroupRequested => Some(AppTraceUiAction::CreateGroup),
+        UiAction::DeleteActiveNodeRequested => Some(AppTraceUiAction::DeleteActiveNode),
+        UiAction::ActiveNodeChanged(node_id) => visible_layer_index(layers, *node_id)
+            .map(|visible_index| AppTraceUiAction::SelectLayer { visible_index }),
+        UiAction::NodeOpacityChanged(node_id, opacity) => visible_layer_index(layers, *node_id)
+            .map(|visible_index| AppTraceUiAction::SetLayerOpacity {
+                visible_index,
+                opacity: *opacity,
+            }),
+        UiAction::NodeBlendModeChanged(node_id, blend_mode) => {
+            visible_layer_index(layers, *node_id).map(|visible_index| {
+                AppTraceUiAction::SetLayerBlendMode {
+                    visible_index,
+                    blend_mode: AppTraceBlendMode::from(*blend_mode),
+                }
+            })
+        }
+        UiAction::RoundBrushSettingsChanged(settings) => Some(
+            AppTraceUiAction::SetRoundBrushSettings(settings.clone().into()),
+        ),
+    }
+}
+
+fn ui_action_for_trace_action(
+    layers: &[UiLayerItem],
+    action: AppTraceUiAction,
+) -> Option<UiAction> {
+    match action {
+        AppTraceUiAction::Undo => Some(UiAction::UndoRequested),
+        AppTraceUiAction::CreateLayer => Some(UiAction::CreateLayerRequested),
+        AppTraceUiAction::CreateGroup => Some(UiAction::CreateGroupRequested),
+        AppTraceUiAction::DeleteActiveNode => Some(UiAction::DeleteActiveNodeRequested),
+        AppTraceUiAction::SelectLayer { visible_index } => layers
+            .get(visible_index)
+            .map(|layer| UiAction::ActiveNodeChanged(layer.id)),
+        AppTraceUiAction::SetLayerOpacity {
+            visible_index,
+            opacity,
+        } => layers
+            .get(visible_index)
+            .map(|layer| UiAction::NodeOpacityChanged(layer.id, opacity)),
+        AppTraceUiAction::SetLayerBlendMode {
+            visible_index,
+            blend_mode,
+        } => layers
+            .get(visible_index)
+            .map(|layer| UiAction::NodeBlendModeChanged(layer.id, blend_mode.into())),
+        AppTraceUiAction::SetRoundBrushSettings(settings) => {
+            Some(UiAction::RoundBrushSettingsChanged(settings.into()))
         }
     }
 }
@@ -1481,11 +1577,11 @@ fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) ->
 mod tests {
     use super::{App, AppFramePerf, AppPerfTraceConfig, AppRuntimeConfig};
     use crate::{
-        ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
-        BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentBlendMode,
-        DocumentNodeId, DocumentWorkspace, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
-        ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, UiAction, load_trace_file,
-        save_trace_file,
+        ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceUiAction, AppView,
+        BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
+        DocumentBlendMode, DocumentNodeId, DocumentWorkspace, RoundBrushSettings, ScriptCommand,
+        ScriptCommandOutcome, ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet,
+        UiAction, load_trace_file, save_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -1960,6 +2056,47 @@ mod tests {
         assert!(!workspace.layer_tree().contains_node(layer));
         assert!(workspace.layer_tree().contains_node(group));
         assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn window_ui_actions_record_visible_layer_trace_actions() {
+        let path = trace_path("window-ui-action");
+        let mut config = AppRuntimeConfig::default();
+        config.trace_config = AppTraceConfig::record(path.clone());
+        let mut app = App::try_new(config).unwrap();
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+
+        app.execute_ui_action_from_window(UiAction::CreateLayerRequested);
+        app.trace.stop_recording().unwrap().unwrap();
+
+        assert_eq!(
+            load_trace_file(&path).unwrap(),
+            vec![AppTraceEvent::Ui(AppTraceUiAction::CreateLayer)]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trace_ui_actions_resolve_visible_layer_indices_during_replay() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        app.execute_trace_ui_action(AppTraceUiAction::CreateLayer)
+            .unwrap();
+        let layer = app
+            .workspace
+            .as_ref()
+            .unwrap()
+            .layer_tree()
+            .active_node_id();
+
+        app.execute_trace_ui_action(AppTraceUiAction::SetLayerOpacity {
+            visible_index: 1,
+            opacity: 0.25,
+        })
+        .unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        assert_eq!(workspace.layer_tree().node(layer).unwrap().opacity(), 0.25);
     }
 
     #[test]

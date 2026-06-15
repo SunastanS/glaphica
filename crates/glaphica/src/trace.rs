@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use gla_core::{CanvasCoordF, CanvasInput};
 use serde::{Deserialize, Serialize};
 
+use crate::{DocumentBlendMode, RoundBrushSettings};
+
 const TRACE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,12 +69,51 @@ struct AppTraceFile {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AppTraceEvent {
+    Ui(AppTraceUiAction),
     BeginStroke(AppTraceCanvasInput),
     StrokeSample(AppTraceCanvasInput),
     FinishStroke,
     CancelStroke,
     Undo,
     Redo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AppTraceUiAction {
+    Undo,
+    CreateLayer,
+    CreateGroup,
+    DeleteActiveNode,
+    SelectLayer {
+        visible_index: usize,
+    },
+    SetLayerOpacity {
+        visible_index: usize,
+        opacity: f32,
+    },
+    SetLayerBlendMode {
+        visible_index: usize,
+        blend_mode: AppTraceBlendMode,
+    },
+    SetRoundBrushSettings(AppTraceRoundBrushSettings),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppTraceBlendMode {
+    Normal,
+    Overlay,
+    Multiply,
+    MaskAlpha,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppTraceRoundBrushSettings {
+    base_radius_px: f32,
+    spacing_ratio: f32,
+    base_hardness: f32,
+    base_flow: f32,
+    base_opacity: f32,
+    tint: [f32; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -212,6 +253,54 @@ impl From<CanvasInput> for AppTraceCanvasInput {
     }
 }
 
+impl From<DocumentBlendMode> for AppTraceBlendMode {
+    fn from(value: DocumentBlendMode) -> Self {
+        match value {
+            DocumentBlendMode::Normal => Self::Normal,
+            DocumentBlendMode::Overlay => Self::Overlay,
+            DocumentBlendMode::Multiply => Self::Multiply,
+            DocumentBlendMode::MaskAlpha => Self::MaskAlpha,
+        }
+    }
+}
+
+impl From<AppTraceBlendMode> for DocumentBlendMode {
+    fn from(value: AppTraceBlendMode) -> Self {
+        match value {
+            AppTraceBlendMode::Normal => Self::Normal,
+            AppTraceBlendMode::Overlay => Self::Overlay,
+            AppTraceBlendMode::Multiply => Self::Multiply,
+            AppTraceBlendMode::MaskAlpha => Self::MaskAlpha,
+        }
+    }
+}
+
+impl From<RoundBrushSettings> for AppTraceRoundBrushSettings {
+    fn from(value: RoundBrushSettings) -> Self {
+        Self {
+            base_radius_px: value.base_radius_px,
+            spacing_ratio: value.spacing_ratio,
+            base_hardness: value.base_hardness,
+            base_flow: value.base_flow,
+            base_opacity: value.base_opacity,
+            tint: value.tint,
+        }
+    }
+}
+
+impl From<AppTraceRoundBrushSettings> for RoundBrushSettings {
+    fn from(value: AppTraceRoundBrushSettings) -> Self {
+        Self {
+            base_radius_px: value.base_radius_px,
+            spacing_ratio: value.spacing_ratio,
+            base_hardness: value.base_hardness,
+            base_flow: value.base_flow,
+            base_opacity: value.base_opacity,
+            tint: value.tint,
+        }
+    }
+}
+
 impl From<AppTraceCanvasInput> for CanvasInput {
     fn from(value: AppTraceCanvasInput) -> Self {
         Self {
@@ -287,8 +376,8 @@ pub fn load_trace_file(path: &Path) -> Result<Vec<AppTraceEvent>, AppTraceError>
 #[cfg(test)]
 mod tests {
     use super::{
-        AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceMode, AppTraceState,
-        load_trace_file,
+        AppTraceBlendMode, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceMode,
+        AppTraceState, AppTraceUiAction, load_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput};
 
@@ -310,6 +399,25 @@ mod tests {
 
         let events = load_trace_file(&path).unwrap();
         assert_eq!(events, vec![AppTraceEvent::Undo]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trace_file_preserves_ui_actions_as_readable_json() {
+        let path = trace_path("ui-action");
+        let event = AppTraceEvent::Ui(AppTraceUiAction::SetLayerBlendMode {
+            visible_index: 2,
+            blend_mode: AppTraceBlendMode::Multiply,
+        });
+
+        super::save_trace_file(&path, vec![event.clone()]).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        let events = load_trace_file(&path).unwrap();
+
+        assert_eq!(events, vec![event]);
+        assert!(json.contains("\"Ui\""));
+        assert!(json.contains("\"SetLayerBlendMode\""));
+        assert!(json.contains("\"visible_index\": 2"));
         let _ = std::fs::remove_file(path);
     }
 

@@ -40,8 +40,9 @@ pub use script::{
 };
 pub use tool::{ActiveTool, BrushId, BrushSettings, RoundBrushSettings, Tool, ToolSet};
 pub use trace::{
-    AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceMode,
-    AppTraceStatus, load_trace_file, save_trace_file,
+    AppTraceBlendMode, AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent,
+    AppTraceMode, AppTraceRoundBrushSettings, AppTraceStatus, AppTraceUiAction, load_trace_file,
+    save_trace_file,
 };
 pub use ui::{UiAction, UiLayerItem, collect_ui_layers, visible_layer_index};
 pub use view::{AppView, AppViewMatrixError};
