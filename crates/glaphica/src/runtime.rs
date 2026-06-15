@@ -20,8 +20,8 @@ use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
-    SurfaceRuntime, ToolSet, UiAction, UiLayerItem, WorkspaceExportError, collect_ui_layers,
-    export_workspace_directory,
+    SurfaceRuntime, ToolSet, UiAction, UiLayerItem, UiTraceStatus, WorkspaceExportError,
+    collect_ui_layers, export_workspace_directory,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
@@ -30,6 +30,7 @@ use crate::{
         AppTraceBlendMode, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState,
         AppTraceUiAction,
     },
+    ui_overlay::{AppUi, UiPaintOutput},
     visible_layer_index,
 };
 
@@ -218,6 +219,7 @@ struct App {
     modifiers: ModifiersState,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
+    ui: Option<AppUi>,
 }
 
 impl App {
@@ -254,6 +256,7 @@ impl App {
             modifiers: ModifiersState::default(),
             window: None,
             gpu: None,
+            ui: None,
         })
     }
 
@@ -416,9 +419,12 @@ impl App {
     }
 
     fn set_round_brush_settings_from_script(&mut self, settings: RoundBrushSettings) {
-        let brush_settings = BrushSettings::from_round_brush(settings);
+        let brush_settings = BrushSettings::from_round_brush(settings.clone());
         self.config.brush_settings = brush_settings;
         self.brush_thread.update_brush_settings(brush_settings);
+        if let Some(ui) = self.ui.as_mut() {
+            ui.set_round_brush_settings(settings);
+        }
         self.clear_active_stroke_preview_cache();
     }
 
@@ -641,6 +647,43 @@ impl App {
             Err(error) => {
                 eprintln!("ui action failed: {error}");
             }
+        }
+    }
+
+    fn paint_ui_overlay(&mut self, window: &Window) -> Option<UiPaintOutput> {
+        let document_size = self
+            .workspace
+            .as_ref()
+            .map(|workspace| {
+                let (width, height) = workspace.canvas_size_px();
+                [width, height]
+            })
+            .unwrap_or([self.config.canvas_width_px, self.config.canvas_height_px]);
+        let layers = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| collect_ui_layers(workspace).ok())
+            .unwrap_or_default();
+        let stroke_active = self.brush_thread.has_active_stroke();
+        let trace_status = UiTraceStatus::from(self.trace.status());
+
+        self.ui
+            .as_mut()
+            .map(|ui| ui.paint(window, document_size, &layers, stroke_active, &trace_status))
+    }
+
+    fn process_ui_overlay_actions(&mut self, window: &Window) {
+        let Some(output) = self.paint_ui_overlay(window) else {
+            return;
+        };
+        let UiPaintOutput {
+            textures_delta: _,
+            clipped_primitives: _,
+            pixels_per_point: _,
+            actions,
+        } = output;
+        for action in actions {
+            self.execute_ui_action_from_window(action);
         }
     }
 
@@ -1534,6 +1577,11 @@ impl ApplicationHandler for App {
             }
         };
 
+        self.ui = Some(AppUi::new(
+            event_loop,
+            &window,
+            round_brush_settings_from_brush_settings(self.config.brush_settings),
+        ));
         self.window = Some(window);
         self.workspace = Some(workspace);
         self.gpu = Some(gpu);
@@ -1556,6 +1604,23 @@ impl ApplicationHandler for App {
         };
 
         if window.id() != window_id {
+            return;
+        }
+
+        let ui_response = self
+            .ui
+            .as_mut()
+            .map(|ui| ui.on_window_event(&window, &event));
+        let ui_consumed = ui_response
+            .as_ref()
+            .is_some_and(|response| response.consumed);
+        if ui_response
+            .as_ref()
+            .is_some_and(|response| response.repaint)
+        {
+            self.request_redraw();
+        }
+        if ui_consumed && ui_consumes_app_input(&event) {
             return;
         }
 
@@ -1683,6 +1748,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let frame_started = Instant::now();
                 let process_preview_started = Instant::now();
+                self.process_ui_overlay_actions(&window);
                 self.refresh_layer_composite_if_needed();
                 self.process_pending_active_stroke_preview();
                 let process_preview = process_preview_started.elapsed();
@@ -1714,6 +1780,27 @@ impl ApplicationHandler for App {
 
 fn finite_f64_to_f32(value: f64) -> f32 {
     if value.is_finite() { value as f32 } else { 0.0 }
+}
+
+fn round_brush_settings_from_brush_settings(settings: BrushSettings) -> RoundBrushSettings {
+    RoundBrushSettings {
+        base_radius_px: settings.radius_px,
+        spacing_ratio: settings.spacing_ratio,
+        base_hardness: settings.hardness,
+        base_flow: settings.flow,
+        base_opacity: settings.opacity,
+        tint: [settings.color.r, settings.color.g, settings.color.b],
+    }
+}
+
+fn ui_consumes_app_input(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::KeyboardInput { .. }
+    )
 }
 
 fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {

@@ -10,6 +10,7 @@ mod stroke;
 mod tool;
 mod trace;
 mod ui;
+mod ui_overlay;
 mod view;
 
 pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime};
