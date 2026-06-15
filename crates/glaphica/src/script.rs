@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 
 use gla_core::CanvasInput;
 use gla_draw_on::DrawOnInput;
@@ -31,6 +32,7 @@ pub enum ScriptValue {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptCommand {
     ApplyRegistryPatch(RegistryPatch),
+    OpenWorkspaceDirectory(PathBuf),
     RunDrawSession(ScriptDrawSession),
     SetActiveTool(ActiveTool),
     SetRoundBrushSettings(RoundBrushSettings),
@@ -335,6 +337,7 @@ mod tests {
 
         let commands = vec![
             ScriptCommand::RunDrawSession(ScriptDrawSession::new(ir.clone())),
+            ScriptCommand::OpenWorkspaceDirectory("fixtures/workspace".into()),
             ScriptCommand::SetActiveTool(ActiveTool::Brush(BrushId::DEFAULT)),
             ScriptCommand::SetRoundBrushSettings(RoundBrushSettings::default()),
             ScriptCommand::BeginStroke(input),
@@ -347,10 +350,14 @@ mod tests {
 
         assert!(matches!(&commands[0], ScriptCommand::RunDrawSession(found) if found.ir == ir));
         assert!(matches!(
-            commands[2],
+            &commands[1],
+            ScriptCommand::OpenWorkspaceDirectory(path) if path.ends_with("fixtures/workspace")
+        ));
+        assert!(matches!(
+            commands[3],
             ScriptCommand::SetRoundBrushSettings(_)
         ));
-        assert!(matches!(commands[3], ScriptCommand::BeginStroke(found) if found == input));
+        assert!(matches!(commands[4], ScriptCommand::BeginStroke(found) if found == input));
     }
 
     #[test]

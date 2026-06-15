@@ -367,6 +367,40 @@ impl App {
         Ok(ScriptCommandOutcome::DocumentVersion(commit.version))
     }
 
+    fn open_workspace_directory_from_script(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        if self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot open a workspace while a stroke is active".to_owned(),
+            });
+        }
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot open a workspace before the GPU exists".to_owned(),
+            });
+        };
+        let workspace = import_workspace_directory(gpu.renderer_mut(), path).map_err(|error| {
+            ScriptHostError::Runtime {
+                reason: error.to_string(),
+            }
+        })?;
+        let version = workspace.version();
+        self.workspace = Some(workspace);
+        self.history = DrawHistory::new();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.primary_down = false;
+        if let Err(error) = self.fit_view_to_workspace() {
+            return Err(ScriptHostError::Runtime {
+                reason: error.to_string(),
+            });
+        }
+        self.request_full_screen_update();
+        Ok(ScriptCommandOutcome::DocumentVersion(version))
+    }
+
     fn active_brush_id(&self) -> Option<BrushId> {
         self.brush_thread.active_brush_id()
     }
@@ -619,6 +653,9 @@ impl ScriptHost for App {
         match command {
             ScriptCommand::ApplyRegistryPatch(patch) => {
                 self.apply_registry_patch_from_script(patch)
+            }
+            ScriptCommand::OpenWorkspaceDirectory(path) => {
+                self.open_workspace_directory_from_script(path)
             }
             ScriptCommand::RunDrawSession(request) => self.run_draw_session_from_script(request),
             ScriptCommand::SetActiveTool(active_tool) => {
@@ -1509,6 +1546,26 @@ mod tests {
             ScriptHostError::InvalidCommand { reason }
                 if reason.contains("before the document workspace and GPU exist")
         ));
+    }
+
+    #[test]
+    fn script_host_rejects_open_workspace_before_gpu_exists() {
+        let mut app = App::new(AppRuntimeConfig::default());
+
+        let error = app
+            .execute_script_command(ScriptCommand::OpenWorkspaceDirectory(
+                "target/workspace-export".into(),
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("before the GPU exists")
+        ));
+        assert!(app.workspace.is_none());
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
     }
 
     #[test]
