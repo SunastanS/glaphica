@@ -371,7 +371,9 @@ draw history.
 
 After successful application, commit bumps the document version, stores the
 primitive inverse patch in `DrawHistory`, discards remaining session-local
-tiles, and returns `Some(DrawCommit { record_id, version })`.
+tiles, and returns `Some(DrawCommit { record_id, version, dirty })`. `dirty`
+is the committed document dirty map (`ImageId -> TileSet`) and is the app-loop
+handoff for repaint or screen-cache scheduling.
 
 Document bindings are not changed by draw commit. The `ImageEdit.source` field
 is retained for now, but the actual target row is resolved from the current
@@ -385,8 +387,13 @@ document binding under the checked document version.
 StoredImageEditPatch {
   version: DocumentVersionId,
   edits: ImageId -> ImageEdit,
+  dirty: ImageId -> TileSet,
 }
 ```
+
+Applying a stored patch returns a new `DrawCommit` for the reverse operation, so
+undo and redo can update history stacks and schedule the same dirty document
+tiles through the app frame scheduler.
 
 Applying a stored patch checks the expected document version, applies its
 primitive tile replacements in place, bumps the document version, and stores the

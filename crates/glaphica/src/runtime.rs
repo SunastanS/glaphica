@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gla_core::ScreenCoordF;
 use gla_ir::DrawOnToolKind;
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
-use gla_session::{DrawHistory, DrawRecordId};
+use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -190,26 +190,27 @@ impl App {
         };
         let samples = stroke.samples;
 
-        match workspace.replace_circle_stroke_on_root(
+        let commit = match workspace.replace_circle_stroke_on_root(
             &mut self.history,
             gpu.renderer_mut(),
             samples.iter().copied(),
         ) {
-            Ok(Some(commit)) => {
-                self.undo_stack.push(commit.record_id);
-                self.redo_stack.clear();
-                true
-            }
-            Ok(None) => false,
+            Ok(Some(commit)) => commit,
+            Ok(None) => return false,
             Err(error) => {
                 eprintln!("stroke failed: {error}");
                 self.active_stroke = Some(ActiveRootStroke {
                     brush_id: stroke.brush_id,
                     samples,
                 });
-                false
+                return false;
             }
-        }
+        };
+        let dirty_tiles = workspace.root_dirty_tile_indices(&commit);
+        self.undo_stack.push(commit.record_id);
+        self.redo_stack.clear();
+        self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
+        true
     }
 
     fn undo(&mut self) -> bool {
@@ -217,8 +218,9 @@ impl App {
             return false;
         };
         match self.apply_history_record(record_id) {
-            Some(redo_record) => {
-                self.redo_stack.push(redo_record);
+            Some(redo_commit) => {
+                self.redo_stack.push(redo_commit.record_id);
+                self.schedule_commit_dirty(&redo_commit);
                 true
             }
             None => {
@@ -233,8 +235,9 @@ impl App {
             return false;
         };
         match self.apply_history_record(record_id) {
-            Some(undo_record) => {
-                self.undo_stack.push(undo_record);
+            Some(undo_commit) => {
+                self.undo_stack.push(undo_commit.record_id);
+                self.schedule_commit_dirty(&undo_commit);
                 true
             }
             None => {
@@ -244,17 +247,25 @@ impl App {
         }
     }
 
-    fn apply_history_record(&mut self, record_id: DrawRecordId) -> Option<DrawRecordId> {
+    fn apply_history_record(&mut self, record_id: DrawRecordId) -> Option<DrawCommit> {
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             return None;
         };
         match workspace.apply_draw_record(&mut self.history, gpu.renderer_mut(), record_id) {
-            Ok(next_record) => Some(next_record),
+            Ok(commit) => Some(commit),
             Err(error) => {
                 eprintln!("history apply failed: {error}");
                 None
             }
         }
+    }
+
+    fn schedule_commit_dirty(&mut self, commit: &DrawCommit) {
+        let Some(workspace) = self.workspace.as_ref() else {
+            return;
+        };
+        let dirty_tiles = workspace.root_dirty_tile_indices(commit);
+        self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
     }
 
     fn fit_view_to_workspace(&mut self) -> Result<(), AppViewMatrixError> {
@@ -658,6 +669,7 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                let _scheduled_tile_indices = self.frame_scheduler.take_scheduled_tile_indices();
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.render(self.workspace.as_ref(), &self.view);
                 }

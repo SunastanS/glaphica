@@ -256,11 +256,26 @@ impl DocumentWorkspace {
         history: &mut DrawHistory,
         backend: &mut B,
         record_id: DrawRecordId,
-    ) -> Result<DrawRecordId, SessionError>
+    ) -> Result<DrawCommit, SessionError>
     where
         B: RenderBackend,
     {
         history.apply_stored_patch(record_id, &mut self.storage, backend)
+    }
+
+    pub fn root_dirty_tile_indices(&self, commit: &DrawCommit) -> Vec<u32> {
+        let Some(dirty) = commit.dirty.get(&self.root) else {
+            return Vec::new();
+        };
+        if dirty.is_full() {
+            return (0..dirty.layout().tile_count()).collect();
+        }
+        dirty
+            .tile_indices()
+            .into_iter()
+            .flatten()
+            .map(|tile| tile.value())
+            .collect()
     }
 
     pub fn root_present_tiles(&self) -> Result<Vec<PresentTile>, DocumentPresentError> {
@@ -565,6 +580,7 @@ mod tests {
 
         assert_eq!(commit.version, DocumentVersionId::new(2));
         assert_eq!(workspace.version(), DocumentVersionId::new(2));
+        assert_eq!(workspace.root_dirty_tile_indices(&commit), vec![0]);
         assert!(backend.submitted_passes().any(|pass| matches!(
             pass,
             Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
@@ -604,11 +620,12 @@ mod tests {
             2
         );
 
-        let redo_record = workspace
+        let redo_commit = workspace
             .apply_draw_record(&mut history, &mut backend, commit.record_id)
             .unwrap();
         assert!(workspace.root_present_tiles().unwrap().is_empty());
-        assert_ne!(redo_record, commit.record_id);
+        assert_eq!(workspace.root_dirty_tile_indices(&redo_commit), vec![0]);
+        assert_ne!(redo_commit.record_id, commit.record_id);
     }
 
     #[test]
@@ -681,15 +698,17 @@ mod tests {
             .unwrap();
 
         assert!(!workspace.root_present_tiles().unwrap().is_empty());
-        let redo_record = workspace
+        let redo_commit = workspace
             .apply_draw_record(&mut history, &mut backend, commit.record_id)
             .unwrap();
         assert!(workspace.root_present_tiles().unwrap().is_empty());
-        let undo_record = workspace
-            .apply_draw_record(&mut history, &mut backend, redo_record)
+        assert_eq!(workspace.root_dirty_tile_indices(&redo_commit), vec![0]);
+        let undo_commit = workspace
+            .apply_draw_record(&mut history, &mut backend, redo_commit.record_id)
             .unwrap();
 
-        assert_ne!(undo_record, redo_record);
+        assert_ne!(undo_commit.record_id, redo_commit.record_id);
+        assert_eq!(workspace.root_dirty_tile_indices(&undo_commit), vec![0]);
         assert!(!workspace.root_present_tiles().unwrap().is_empty());
     }
 

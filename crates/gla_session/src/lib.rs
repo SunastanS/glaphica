@@ -25,10 +25,11 @@ pub use frame::FrameBudget;
 
 const CANVAS_DAB_COMPAT_RADIUS_PX: f32 = 1.0;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DrawCommit {
     pub record_id: DrawRecordId,
     pub version: DocumentVersionId,
+    pub dirty: HashMap<ImageId, TileSet>,
 }
 
 pub type DrawRecordId = u64;
@@ -76,7 +77,7 @@ impl DrawHistory {
         id: DrawRecordId,
         global: &mut GlobalStorage,
         backend: &mut impl RenderBackend,
-    ) -> Result<DrawRecordId, SessionError> {
+    ) -> Result<DrawCommit, SessionError> {
         let stored = self
             .patches
             .get(&id)
@@ -129,7 +130,7 @@ impl DrawHistory {
         let commit = session
             .commit(self)?
             .expect("stored patch session must produce a commit");
-        Ok(commit.record_id)
+        Ok(commit)
     }
 
     fn store_inverse(
@@ -798,9 +799,13 @@ impl<'g> DrawSession<'g> {
             Ok(inverse) => {
                 let version = self.global.bump_version();
                 let dirty = dirty_from_edits(self.global, &inverse);
-                let record_id = history.store_inverse(version, inverse, dirty);
+                let record_id = history.store_inverse(version, inverse, dirty.clone());
                 self.release_local_tiles();
-                Ok(Some(DrawCommit { record_id, version }))
+                Ok(Some(DrawCommit {
+                    record_id,
+                    version,
+                    dirty,
+                }))
             }
             Err(error) => {
                 let (error, edits) = error.into_parts();
@@ -3364,12 +3369,28 @@ mod tests {
 
         let commit = session.commit(&mut history).unwrap().unwrap();
         assert_eq!(commit.version, begin_version.next());
-        let undo_record = history
+        assert_eq!(
+            commit
+                .dirty
+                .get(&base)
+                .and_then(TileSet::tile_indices)
+                .map(|tiles| tiles.iter().map(|tile| tile.value()).collect::<Vec<_>>()),
+            Some(vec![0])
+        );
+        let undo_commit = history
             .apply_stored_patch(commit.record_id, &mut global, &mut backend)
             .unwrap();
 
         assert_eq!(global.version(), commit.version.next());
-        assert!(history.patches.contains_key(&undo_record));
+        assert!(history.patches.contains_key(&undo_commit.record_id));
+        assert_eq!(
+            undo_commit
+                .dirty
+                .get(&base)
+                .and_then(TileSet::tile_indices)
+                .map(|tiles| tiles.iter().map(|tile| tile.value()).collect::<Vec<_>>()),
+            Some(vec![0])
+        );
         let image = global.image(base).unwrap().as_dense().unwrap();
         assert_eq!(
             global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
@@ -3450,10 +3471,10 @@ mod tests {
             TileReadRef::Physical(_)
         ));
 
-        let undo_record = history
+        let undo_commit = history
             .apply_stored_patch(commit.record_id, &mut global, &mut backend)
             .unwrap();
-        assert!(history.patches.contains_key(&undo_record));
+        assert!(history.patches.contains_key(&undo_commit.record_id));
         let image = global.image(base).unwrap().as_dense().unwrap();
         assert_eq!(
             global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
@@ -3544,7 +3565,7 @@ mod tests {
         let commit = session.commit(&mut history).unwrap().unwrap();
 
         backend.clear();
-        let undo_record = history
+        let undo_commit = history
             .apply_stored_patch(commit.record_id, &mut global, &mut backend)
             .unwrap();
         let TileReadRef::Physical(new_group_pos) = global.read_global_ref(group, 0).unwrap() else {
@@ -3559,7 +3580,7 @@ mod tests {
                 Pass::FixGutter { dst: new_group_pos },
             ]
         );
-        assert!(history.patches.contains_key(&undo_record));
+        assert!(history.patches.contains_key(&undo_commit.record_id));
     }
 
     #[test]
