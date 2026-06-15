@@ -663,6 +663,29 @@ impl App {
         self.perf_frame_seq = self.perf_frame_seq.saturating_add(1);
         eprintln!("{}", format_app_perf_line(self.perf_frame_seq, total, perf));
     }
+
+    fn refresh_layer_composite_if_needed(&mut self) -> bool {
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            return false;
+        };
+        if !workspace.layer_composite_needs_render() {
+            return false;
+        }
+        match workspace.render_layer_tree_full(gpu.renderer_mut()) {
+            Ok(dirty) => {
+                if dirty.is_empty() {
+                    false
+                } else {
+                    self.frame_scheduler.schedule_full_update();
+                    true
+                }
+            }
+            Err(error) => {
+                eprintln!("document layer composite render failed: {error}");
+                false
+            }
+        }
+    }
 }
 
 impl Drop for App {
@@ -1266,6 +1289,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let frame_started = Instant::now();
+                self.refresh_layer_composite_if_needed();
                 let update_request = self.frame_scheduler.take_screen_update_request();
                 let perf = self.gpu.as_mut().and_then(|gpu| {
                     gpu.render(self.workspace.as_ref(), &self.view, update_request)

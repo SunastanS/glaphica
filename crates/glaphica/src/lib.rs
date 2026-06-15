@@ -13,9 +13,9 @@ mod view;
 pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime};
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
-    DocumentPresentError, DocumentRootTileRead, DocumentWorkspace, DocumentWorkspaceBuildError,
-    DocumentWorkspaceError, DocumentWorkspaceInitError, DocumentWorkspaceLayerError,
-    ReplaceCircleStrokeSample,
+    DocumentLayerRenderError, DocumentPresentError, DocumentRootTileRead, DocumentWorkspace,
+    DocumentWorkspaceBuildError, DocumentWorkspaceError, DocumentWorkspaceInitError,
+    DocumentWorkspaceLayerError, ReplaceCircleStrokeSample,
 };
 pub use export::{
     WorkspaceExportError, WorkspaceExportManifest, WorkspaceExportSnapshot, WorkspaceExportTile,

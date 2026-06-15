@@ -12,7 +12,7 @@ use gla_ir::{
     DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, GraphCommand,
     ImageId, ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
 };
-use gla_renderer::{PresentTile, PresentTileParams, RenderBackend};
+use gla_renderer::{Pass, PresentTile, PresentTileParams, RenderBackend};
 use gla_session::{DrawCommit, DrawHistory, DrawRecordId, DrawSession, SessionError};
 use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
@@ -48,6 +48,8 @@ pub struct DocumentWorkspace {
     format: GlaFormat,
     layout: ImageLayoutSpec,
     layers: DocumentLayerTree,
+    layer_composite_image: Option<ImageId>,
+    layer_composite_valid: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +58,13 @@ pub struct DocumentRootTileRead {
     pub src: TilePos,
     pub source_width: u32,
     pub source_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LayerRenderInput {
+    image: ImageId,
+    opacity: f32,
+    blend_mode: gla_color::BlendMode,
 }
 
 impl DocumentWorkspace {
@@ -118,6 +127,8 @@ impl DocumentWorkspace {
             format,
             layout,
             layers: DocumentLayerTree::new(root),
+            layer_composite_image: None,
+            layer_composite_valid: false,
         })
     }
 
@@ -169,13 +180,24 @@ impl DocumentWorkspace {
         &self.layers
     }
 
+    pub fn layer_composite_needs_render(&self) -> bool {
+        self.layer_composite_image.is_some()
+            && !self.layer_composite_valid
+            && self
+                .layers
+                .child_ids(self.layers.root_id())
+                .is_ok_and(|children| !children.is_empty())
+    }
+
     pub fn append_layer(
         &mut self,
         parent_id: DocumentNodeId,
     ) -> Result<DocumentNodeId, DocumentWorkspaceLayerError> {
         self.layers.child_ids(parent_id)?;
-        let image = self.register_workspace_image(ImageRole::Primitive)?;
-        Ok(self.layers.append_layer(parent_id, image)?)
+        let image = self.register_layer_image(ImageRole::Primitive)?;
+        let node = self.layers.append_layer(parent_id, image)?;
+        self.invalidate_layer_composite();
+        Ok(node)
     }
 
     pub fn append_group(
@@ -183,9 +205,10 @@ impl DocumentWorkspace {
         parent_id: DocumentNodeId,
     ) -> Result<DocumentNodeId, DocumentWorkspaceLayerError> {
         self.layers.child_ids(parent_id)?;
-        let image =
-            self.register_workspace_image(ImageRole::Derived(GraphCommand::new(Vec::new())))?;
-        Ok(self.layers.append_group(parent_id, image)?)
+        let image = self.register_layer_image(ImageRole::Derived(GraphCommand::new(Vec::new())))?;
+        let node = self.layers.append_group(parent_id, image)?;
+        self.invalidate_layer_composite();
+        Ok(node)
     }
 
     pub fn set_active_node(
@@ -202,6 +225,7 @@ impl DocumentWorkspace {
         opacity: f32,
     ) -> Result<(), DocumentWorkspaceLayerError> {
         self.layers.set_opacity(node_id, opacity)?;
+        self.invalidate_layer_composite();
         Ok(())
     }
 
@@ -211,6 +235,7 @@ impl DocumentWorkspace {
         blend_mode: DocumentBlendMode,
     ) -> Result<(), DocumentWorkspaceLayerError> {
         self.layers.set_blend_mode(node_id, blend_mode)?;
+        self.invalidate_layer_composite();
         Ok(())
     }
 
@@ -221,6 +246,7 @@ impl DocumentWorkspace {
         new_index: usize,
     ) -> Result<(), DocumentWorkspaceLayerError> {
         self.layers.move_node(node_id, new_parent_id, new_index)?;
+        self.invalidate_layer_composite();
         Ok(())
     }
 
@@ -241,7 +267,71 @@ impl DocumentWorkspace {
             .collect::<Result<HashSet<_>, _>>()?;
         self.storage.delete_images(&image_ids)?;
         self.layers.delete_node(node_id)?;
+        self.invalidate_layer_composite();
         Ok(())
+    }
+
+    pub fn render_layer_tree_full<B>(
+        &mut self,
+        backend: &mut B,
+    ) -> Result<Vec<u32>, DocumentLayerRenderError<B::Error>>
+    where
+        B: RenderBackend,
+    {
+        if !self.layer_composite_needs_render() {
+            return Ok(Vec::new());
+        }
+        let composite = self
+            .layer_composite_image
+            .expect("layer composite image exists when render is needed");
+        let layout = self
+            .root_layout()
+            .map_err(DocumentLayerRenderError::Present)?;
+        let tile_count = layout.tile_count();
+        let inputs = self
+            .layer_render_inputs()
+            .map_err(DocumentLayerRenderError::Layer)?;
+        let mut passes = Vec::new();
+        let mut dirty = Vec::with_capacity(tile_count as usize);
+
+        for tile_index in 0..tile_count {
+            let dst = self
+                .storage
+                .write_global_cache_pos(composite, tile_index)
+                .map_err(DocumentLayerRenderError::Tile)?;
+            passes.push(Pass::Clear { dst });
+            if let TileReadRef::Physical(src) = self
+                .storage
+                .read_global_ref(self.root, tile_index)
+                .map_err(DocumentLayerRenderError::Tile)?
+            {
+                passes.push(Pass::Copy { src, dst });
+            }
+
+            for input in &inputs {
+                let TileReadRef::Physical(src) = self
+                    .storage
+                    .read_global_ref(input.image, tile_index)
+                    .map_err(DocumentLayerRenderError::Tile)?
+                else {
+                    continue;
+                };
+                passes.push(Pass::RenderTo {
+                    src,
+                    dst,
+                    blend_mode: input.blend_mode,
+                    opacity: input.opacity,
+                });
+            }
+            passes.push(Pass::FixGutter { dst });
+            dirty.push(tile_index);
+        }
+
+        backend
+            .submit(&passes)
+            .map_err(DocumentLayerRenderError::Render)?;
+        self.layer_composite_valid = true;
+        Ok(dirty)
     }
 
     pub fn root_reader_ir(&self) -> DrawSessionIR {
@@ -292,6 +382,8 @@ impl DocumentWorkspace {
         self.root = root;
         self.format = image.format();
         self.layout = ImageLayoutSpec::new(layout.width_px(), layout.height_px());
+        self.layer_composite_image = None;
+        self.layer_composite_valid = false;
         if self
             .layers
             .node(self.layers.root_id())
@@ -303,33 +395,95 @@ impl DocumentWorkspace {
         }
     }
 
-    fn register_workspace_image(
+    fn register_layer_image(
         &mut self,
         role: ImageRole,
     ) -> Result<ImageId, DocumentWorkspaceLayerError> {
-        let id = self.next_available_image_id()?;
-        self.storage
-            .apply_registry_patch(RegistryPatch::new(vec![RegistryPatchOp::NewImage {
+        let max_id = self.max_image_id();
+        let mut next = max_id
+            .checked_add(1)
+            .ok_or(DocumentWorkspaceLayerError::ImageIdExhausted)?;
+        let mut ops = Vec::new();
+        let new_composite = if self.layer_composite_image.is_none() {
+            let id = ImageId::new(next);
+            next = next
+                .checked_add(1)
+                .ok_or(DocumentWorkspaceLayerError::ImageIdExhausted)?;
+            ops.push(RegistryPatchOp::NewImage {
                 id,
                 format: self.format,
                 layout: self.layout,
-                role,
-            }]))?;
+                role: ImageRole::Derived(GraphCommand::new(Vec::new())),
+            });
+            Some(id)
+        } else {
+            None
+        };
+        let id = ImageId::new(next);
+        ops.push(RegistryPatchOp::NewImage {
+            id,
+            format: self.format,
+            layout: self.layout,
+            role,
+        });
+        self.storage.apply_registry_patch(RegistryPatch::new(ops))?;
+        if let Some(composite) = new_composite {
+            self.layer_composite_image = Some(composite);
+        }
         Ok(id)
     }
 
-    fn next_available_image_id(&self) -> Result<ImageId, DocumentWorkspaceLayerError> {
-        let max_id = self
-            .storage
+    fn max_image_id(&self) -> u64 {
+        self.storage
             .images()
             .keys()
             .map(|id| id.value())
             .max()
-            .unwrap_or(0);
-        let next = max_id
-            .checked_add(1)
-            .ok_or(DocumentWorkspaceLayerError::ImageIdExhausted)?;
-        Ok(ImageId::new(next))
+            .unwrap_or(0)
+    }
+
+    fn invalidate_layer_composite(&mut self) {
+        self.layer_composite_valid = false;
+    }
+
+    fn display_root(&self) -> ImageId {
+        if self.layer_composite_valid {
+            self.layer_composite_image.unwrap_or(self.root)
+        } else {
+            self.root
+        }
+    }
+
+    fn layer_render_inputs(&self) -> Result<Vec<LayerRenderInput>, DocumentLayerTreeError> {
+        let mut inputs = Vec::new();
+        self.collect_layer_render_inputs(self.layers.root_id(), 1.0, &mut inputs)?;
+        Ok(inputs)
+    }
+
+    fn collect_layer_render_inputs(
+        &self,
+        node_id: DocumentNodeId,
+        parent_opacity: f32,
+        inputs: &mut Vec<LayerRenderInput>,
+    ) -> Result<(), DocumentLayerTreeError> {
+        let node = self.layers.node(node_id)?;
+        let opacity = parent_opacity * node.opacity();
+        match node.kind() {
+            DocumentNodeKind::Root | DocumentNodeKind::Group => {
+                for child in node.children().unwrap_or_default() {
+                    self.collect_layer_render_inputs(*child, opacity, inputs)?;
+                }
+            }
+            DocumentNodeKind::Layer => inputs.push(LayerRenderInput {
+                image: node.image(),
+                opacity,
+                blend_mode: node
+                    .blend_mode()
+                    .as_renderer_blend_mode()
+                    .expect("all document blend modes must map to renderer blend modes"),
+            }),
+        }
+        Ok(())
     }
 
     fn initialize_root_to_color<B>(
@@ -360,7 +514,9 @@ impl DocumentWorkspace {
             )?;
             frame.flush(backend)?;
         }
-        session.commit_discarding_undo()?;
+        if session.commit_discarding_undo()?.is_some() {
+            self.invalidate_layer_composite();
+        }
         Ok(())
     }
 
@@ -414,7 +570,11 @@ impl DocumentWorkspace {
             }
             frame.flush(backend)?;
         }
-        session.commit(history)
+        let commit = session.commit(history)?;
+        if commit.is_some() {
+            self.invalidate_layer_composite();
+        }
+        Ok(commit)
     }
 
     pub fn run_script_draw_session<B>(
@@ -441,7 +601,11 @@ impl DocumentWorkspace {
             }
             frame.flush(backend)?;
         }
-        session.commit(history)
+        let commit = session.commit(history)?;
+        if commit.is_some() {
+            self.invalidate_layer_composite();
+        }
+        Ok(commit)
     }
 
     pub fn apply_draw_record<B>(
@@ -453,7 +617,9 @@ impl DocumentWorkspace {
     where
         B: RenderBackend,
     {
-        history.apply_stored_patch(record_id, &mut self.storage, backend)
+        let commit = history.apply_stored_patch(record_id, &mut self.storage, backend)?;
+        self.invalidate_layer_composite();
+        Ok(commit)
     }
 
     pub fn root_dirty_tile_indices(&self, commit: &DrawCommit) -> Vec<u32> {
@@ -527,10 +693,12 @@ impl DocumentWorkspace {
     }
 
     fn root_layout(&self) -> Result<gla_image::GlaImageLayout, DocumentPresentError> {
-        let image = self
-            .storage
-            .image(self.root)
-            .ok_or(DocumentPresentError::MissingRoot { id: self.root })?;
+        let image =
+            self.storage
+                .image(self.display_root())
+                .ok_or(DocumentPresentError::MissingRoot {
+                    id: self.display_root(),
+                })?;
         Ok(image.layout())
     }
 
@@ -572,7 +740,7 @@ impl DocumentWorkspace {
     ) -> Result<Option<DocumentRootTileRead>, DocumentPresentError> {
         let tile_ref = self
             .storage
-            .read_global_ref(self.root, tile_index)
+            .read_global_ref(self.display_root(), tile_index)
             .map_err(DocumentPresentError::Tile)?;
         let TileReadRef::Physical(src) = tile_ref else {
             return Ok(None);
@@ -630,6 +798,14 @@ pub enum DocumentWorkspaceLayerError {
     ImageIdExhausted,
 }
 
+#[derive(Debug)]
+pub enum DocumentLayerRenderError<E> {
+    Present(DocumentPresentError),
+    Layer(DocumentLayerTreeError),
+    Tile(GlobalTileError),
+    Render(E),
+}
+
 impl Display for DocumentPresentError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -664,6 +840,31 @@ impl Error for DocumentWorkspaceLayerError {
             Self::Tree(error) => Some(error),
             Self::Registry(error) => Some(error),
             Self::ImageIdExhausted => None,
+        }
+    }
+}
+
+impl<E: Display> Display for DocumentLayerRenderError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Present(error) => Display::fmt(error, f),
+            Self::Layer(error) => Display::fmt(error, f),
+            Self::Tile(error) => Display::fmt(error, f),
+            Self::Render(error) => write!(f, "document layer render failed: {error}"),
+        }
+    }
+}
+
+impl<E> Error for DocumentLayerRenderError<E>
+where
+    E: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Present(error) => Some(error),
+            Self::Layer(error) => Some(error),
+            Self::Tile(error) => Some(error),
+            Self::Render(error) => Some(error),
         }
     }
 }
@@ -944,6 +1145,70 @@ mod tests {
         assert!(!workspace.layer_tree().contains_node(layer));
         assert!(workspace.storage().image(group_image).is_none());
         assert!(workspace.storage().image(layer_image).is_none());
+    }
+
+    #[test]
+    fn layer_composite_render_noops_without_layer_children() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut backend = RecordingBackend::default();
+
+        let dirty = workspace.render_layer_tree_full(&mut backend).unwrap();
+
+        assert!(dirty.is_empty());
+        assert!(!workspace.layer_composite_needs_render());
+        assert!(backend.submitted.is_empty());
+    }
+
+    #[test]
+    fn layer_composite_render_blends_layer_over_root() {
+        let mut backend = RecordingBackend::default();
+        let mut workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
+        backend.submitted.clear();
+        let root_node = workspace.layer_tree().root_id();
+        let layer = workspace.append_layer(root_node).unwrap();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+        let request = ScriptDrawSession::with_frames(
+            DrawSessionIR {
+                expected_document_version: workspace.version(),
+                doc_images: vec![DocImageUse::read_write(layer_image)],
+                session_images: Vec::new(),
+                draw_on: vec![DrawOnCommand::with_tool(
+                    layer_image,
+                    DrawOnToolKind::ReplaceCircle4D,
+                )],
+                derive: Vec::new(),
+            },
+            vec![ScriptDrawFrame::new(vec![ScriptDrawCommand::DrawOn {
+                target: layer_image,
+                input: DrawOnInput::replace_circle_4d(
+                    24.0,
+                    32.0,
+                    8.0,
+                    8.0,
+                    PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+                ),
+            }])],
+        );
+        let mut history = DrawHistory::new();
+        workspace
+            .run_script_draw_session(&mut history, &mut backend, &request)
+            .unwrap()
+            .unwrap();
+        backend.submitted.clear();
+
+        let dirty = workspace.render_layer_tree_full(&mut backend).unwrap();
+
+        assert!(!dirty.is_empty());
+        assert!(!workspace.layer_composite_needs_render());
+        assert!(backend.submitted_passes().any(|pass| matches!(
+            pass,
+            Pass::RenderTo {
+                blend_mode: gla_color::BlendMode::Normal,
+                opacity,
+                ..
+            } if opacity == 1.0
+        )));
+        assert!(workspace.root_present_tiles().unwrap().len() >= 1);
     }
 
     #[test]
