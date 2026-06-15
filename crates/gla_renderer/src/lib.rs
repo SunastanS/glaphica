@@ -11,6 +11,29 @@ pub use crate::gpu::{GpuRenderer, GpuRendererError};
 pub type RendererDrawOnInvocation = DrawOnInvocation<TilePos>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresentTileParams {
+    pub target_min_px: [f32; 2],
+    pub target_max_px: [f32; 2],
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresentTile {
+    pub src: TilePos,
+    pub params: PresentTileParams,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PresentTarget<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+    pub width: u32,
+    pub height: u32,
+    pub clear_color: wgpu::Color,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pass {
     Clear {
         dst: TilePos,

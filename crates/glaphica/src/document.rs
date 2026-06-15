@@ -5,14 +5,15 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures};
 use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
 use gla_draw_on::DrawOnInput;
+use gla_image::IMAGE_TILE_SIZE;
 use gla_ir::{
     DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, ImageId,
     ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
 };
-use gla_renderer::RenderBackend;
+use gla_renderer::{PresentTile, PresentTileParams, RenderBackend};
 use gla_session::{DrawCommit, DrawHistory, DrawSession, SessionError};
-use gla_storage::{GlobalStorage, GlobalStorageError};
-use tile_key::{NewAtlasError, Tiles};
+use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
+use tile_key::{NewAtlasError, TileReadRef, Tiles};
 
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
 pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 768;
@@ -160,12 +161,90 @@ impl DocumentWorkspace {
         }
         session.commit(history)
     }
+
+    pub fn root_present_tiles(&self) -> Result<Vec<PresentTile>, DocumentPresentError> {
+        let image = self
+            .storage
+            .image(self.root)
+            .ok_or(DocumentPresentError::MissingRoot { id: self.root })?;
+        let layout = image.layout();
+        let tile_count_x = layout.tile_count_x();
+        let tile_count = layout.tile_count();
+        let mut tiles = Vec::new();
+
+        for tile_index in 0..tile_count {
+            let tile_ref = self
+                .storage
+                .read_global_ref(self.root, tile_index)
+                .map_err(DocumentPresentError::Tile)?;
+            let TileReadRef::Physical(src) = tile_ref else {
+                continue;
+            };
+
+            let tile_x = tile_index % tile_count_x;
+            let tile_y = tile_index / tile_count_x;
+            let origin_x = tile_x * IMAGE_TILE_SIZE;
+            let origin_y = tile_y * IMAGE_TILE_SIZE;
+            let source_width = self
+                .layout
+                .width_px
+                .saturating_sub(origin_x)
+                .min(IMAGE_TILE_SIZE);
+            let source_height = self
+                .layout
+                .height_px
+                .saturating_sub(origin_y)
+                .min(IMAGE_TILE_SIZE);
+            if source_width == 0 || source_height == 0 {
+                continue;
+            }
+
+            tiles.push(PresentTile {
+                src,
+                params: PresentTileParams {
+                    target_min_px: [origin_x as f32, origin_y as f32],
+                    target_max_px: [
+                        (origin_x + source_width) as f32,
+                        (origin_y + source_height) as f32,
+                    ],
+                    source_width,
+                    source_height,
+                },
+            });
+        }
+
+        Ok(tiles)
+    }
 }
 
 #[derive(Debug)]
 pub enum DocumentWorkspaceBuildError<E> {
     Atlas(NewAtlasError<E>),
     Registry(GlobalStorageError),
+}
+
+#[derive(Debug)]
+pub enum DocumentPresentError {
+    MissingRoot { id: ImageId },
+    Tile(GlobalTileError),
+}
+
+impl Display for DocumentPresentError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRoot { id } => write!(f, "document root image {id:?} is missing"),
+            Self::Tile(error) => write!(f, "document root tile access failed: {error}"),
+        }
+    }
+}
+
+impl Error for DocumentPresentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::MissingRoot { .. } => None,
+            Self::Tile(error) => Some(error),
+        }
+    }
 }
 
 pub type DocumentWorkspaceError = DocumentWorkspaceBuildError<Infallible>;
@@ -309,6 +388,33 @@ mod tests {
             pass,
             Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
         )));
+    }
+
+    #[test]
+    fn root_present_tiles_skip_zero_tiles_and_include_committed_physical_tiles() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        assert!(workspace.root_present_tiles().unwrap().is_empty());
+
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        workspace
+            .replace_circle_on_root(
+                &mut history,
+                &mut backend,
+                24.0,
+                32.0,
+                8.0,
+                PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+            )
+            .unwrap()
+            .unwrap();
+
+        let tiles = workspace.root_present_tiles().unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].params.target_min_px, [0.0, 0.0]);
+        assert_eq!(tiles[0].params.target_max_px, [62.0, 62.0]);
+        assert_eq!(tiles[0].params.source_width, IMAGE_TILE_SIZE);
+        assert_eq!(tiles[0].params.source_height, IMAGE_TILE_SIZE);
     }
 
     #[test]

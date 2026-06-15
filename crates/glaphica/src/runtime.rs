@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gla_color::PremultipliedRgbaF32;
 use gla_ir::DrawOnToolKind;
-use gla_renderer::{GpuRenderer, GpuRendererError};
+use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
 use gla_session::DrawHistory;
 use winit::{
     application::ApplicationHandler,
@@ -280,8 +280,7 @@ impl GpuCtx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn render(&mut self) {
-        let _ = self.renderer_mut().capabilities();
+    fn render(&mut self, workspace: Option<&DocumentWorkspace>) {
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(error) => {
@@ -299,32 +298,29 @@ impl GpuCtx {
             format: Some(self.config.format),
             ..Default::default()
         });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("glaphica-clear-frame-encoder"),
-            });
 
-        {
-            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("glaphica-clear-frame-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+        let tiles = match workspace {
+            Some(workspace) => match workspace.root_present_tiles() {
+                Ok(tiles) => tiles,
+                Err(error) => {
+                    eprintln!("document present failed: {error}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        if let Err(error) = self.renderer.present_tiles(
+            &tiles,
+            PresentTarget {
+                view: &view,
+                format: self.config.format,
+                width: self.config.width,
+                height: self.config.height,
+                clear_color: self.clear_color,
+            },
+        ) {
+            eprintln!("surface present failed: {error}");
         }
-
-        self.queue.submit(Some(encoder.finish()));
         frame.present();
     }
 }
@@ -408,7 +404,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render();
+                    gpu.render(self.workspace.as_ref());
                 }
             }
             _ => {}

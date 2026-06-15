@@ -14,7 +14,10 @@ use crate::texture::{
     RendererTexture, RendererTextureDescriptor, TextureFormatRuntime, TextureResourceError,
     runtime_format,
 };
-use crate::{Pass, RenderBackend, RendererCapabilities, RendererDrawOnInvocation};
+use crate::{
+    Pass, PresentTarget, PresentTile, PresentTileParams, RenderBackend, RendererCapabilities,
+    RendererDrawOnInvocation,
+};
 
 const RGBA_COMPOSITE_SHADER: &str = r#"
 struct CompositeUniforms {
@@ -242,6 +245,58 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
 }
 "#;
 
+const TILE_PRESENT_SHADER: &str = r#"
+struct PresentUniforms {
+    dst_min_ndc: vec2f,
+    dst_max_ndc: vec2f,
+    source_origin: vec2u,
+    source_layer: u32,
+    _pad0: u32,
+    source_size: vec2u,
+    _padding: vec2u,
+};
+
+@group(0) @binding(0) var source_texture: texture_2d_array<f32>;
+@group(0) @binding(1) var<uniform> uniforms: PresentUniforms;
+
+struct VsOut {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    let positions = array<vec2f, 6>(
+        vec2f(0.0, 0.0),
+        vec2f(1.0, 0.0),
+        vec2f(0.0, 1.0),
+        vec2f(0.0, 1.0),
+        vec2f(1.0, 0.0),
+        vec2f(1.0, 1.0),
+    );
+    let uv = positions[vertex_index];
+    let ndc = mix(uniforms.dst_min_ndc, uniforms.dst_max_ndc, uv);
+    var out: VsOut;
+    out.position = vec4f(ndc, 0.0, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VsOut) -> @location(0) vec4f {
+    let scaled = min(
+        vec2u(input.uv * vec2f(uniforms.source_size)),
+        uniforms.source_size - vec2u(1u, 1u)
+    );
+    return textureLoad(
+        source_texture,
+        vec2i(uniforms.source_origin + scaled),
+        i32(uniforms.source_layer),
+        0
+    );
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeUniforms {
@@ -276,6 +331,18 @@ struct ReplaceInstance {
     radius_px: f32,
     _pad0: f32,
     color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PresentUniforms {
+    dst_min_ndc: [f32; 2],
+    dst_max_ndc: [f32; 2],
+    source_origin: [u32; 2],
+    source_layer: u32,
+    _pad0: u32,
+    source_size: [u32; 2],
+    _padding: [u32; 2],
 }
 
 #[derive(Debug)]
@@ -674,6 +741,7 @@ pub struct GpuRenderer {
     tile_buffers: TileTransferBuffers,
     composite: CompositeStages,
     draw_on: DrawOnStages,
+    present: TilePresentStage,
 }
 
 impl GpuRenderer {
@@ -681,6 +749,7 @@ impl GpuRenderer {
         let tile_buffers = TileTransferBuffers::new(&device)?;
         let composite = CompositeStages::new(&device)?;
         let draw_on = DrawOnStages::disabled();
+        let present = TilePresentStage::new(&device);
         Ok(Self {
             device,
             queue,
@@ -688,6 +757,7 @@ impl GpuRenderer {
             tile_buffers,
             composite,
             draw_on,
+            present,
         })
     }
 
@@ -700,6 +770,7 @@ impl GpuRenderer {
         let tile_buffers = TileTransferBuffers::new(&device)?;
         let composite = CompositeStages::new(&device)?;
         let draw_on = DrawOnStages::new(adapter, &device, draw_on_tools)?;
+        let present = TilePresentStage::new(&device);
         Ok(Self {
             device,
             queue,
@@ -707,6 +778,7 @@ impl GpuRenderer {
             tile_buffers,
             composite,
             draw_on,
+            present,
         })
     }
 
@@ -785,6 +857,15 @@ impl GpuRenderer {
         Ok(())
     }
 
+    pub fn present_tiles(
+        &mut self,
+        tiles: &[PresentTile],
+        target: PresentTarget<'_>,
+    ) -> Result<(), GpuRendererError> {
+        self.present
+            .present_tiles(&self.device, &self.queue, &self.atlases, tiles, target)
+    }
+
     #[doc(hidden)]
     pub fn read_tile_bytes(
         &self,
@@ -855,6 +936,204 @@ impl RenderBackend for GpuRenderer {
 
     fn submit(&mut self, passes: &[Pass]) -> Result<(), Self::Error> {
         self.execute_passes(passes)
+    }
+}
+
+struct TilePresentStage {
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipelines: Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
+}
+
+impl TilePresentStage {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("glaphica-tile-present-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        Self {
+            bind_group_layout,
+            pipelines: Vec::new(),
+        }
+    }
+
+    fn present_tiles(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlases: &AtlasTextureSet,
+        tiles: &[PresentTile],
+        target: PresentTarget<'_>,
+    ) -> Result<(), GpuRendererError> {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("glaphica-tile-present-encoder"),
+        });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-tile-present-clear-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(target.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+
+        for tile in tiles.iter().copied() {
+            if tile.params.source_width == 0 || tile.params.source_height == 0 {
+                continue;
+            }
+            self.encode_present_tile(device, queue, &mut encoder, atlases, tile, target)?;
+        }
+
+        queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
+    fn encode_present_tile(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        atlases: &AtlasTextureSet,
+        tile: PresentTile,
+        target: PresentTarget<'_>,
+    ) -> Result<(), GpuRendererError> {
+        let source = atlases.resolve_non_empty(tile.src)?;
+        let uniform = PresentUniforms {
+            dst_min_ndc: screen_to_ndc(tile.params.target_min_px, target.width, target.height),
+            dst_max_ndc: screen_to_ndc(tile.params.target_max_px, target.width, target.height),
+            source_origin: [source.origin.x + GUTTER_SIZE, source.origin.y + GUTTER_SIZE],
+            source_layer: source.origin.z,
+            _pad0: 0,
+            source_size: [tile.params.source_width, tile.params.source_height],
+            _padding: [0; 2],
+        };
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glaphica-tile-present-uniform"),
+            size: std::mem::size_of::<PresentUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glaphica-tile-present-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source.texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let pipeline = self.present_pipeline(device, target.format);
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glaphica-tile-present-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+        Ok(())
+    }
+
+    fn present_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> &wgpu::RenderPipeline {
+        if let Some(index) = self
+            .pipelines
+            .iter()
+            .position(|(candidate, _)| *candidate == format)
+        {
+            return &self.pipelines[index].1;
+        }
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glaphica-tile-present-shader"),
+            source: wgpu::ShaderSource::Wgsl(TILE_PRESENT_SHADER.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("glaphica-tile-present-pipeline-layout"),
+            bind_group_layouts: &[&self.bind_group_layout],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glaphica-tile-present-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.pipelines.push((format, pipeline));
+        let last = self.pipelines.len() - 1;
+        &self.pipelines[last].1
     }
 }
 
@@ -2046,6 +2325,13 @@ fn tile_transfer_layout(bytes_per_pixel: u32) -> Result<(u32, u64), GpuRendererE
     Ok((padded_bytes_per_row, buffer_size))
 }
 
+fn screen_to_ndc(point: [f32; 2], width: u32, height: u32) -> [f32; 2] {
+    [
+        point[0] / width.max(1) as f32 * 2.0 - 1.0,
+        1.0 - point[1] / height.max(1) as f32 * 2.0,
+    ]
+}
+
 fn encode_rgba_blend_mode(blend_mode: RgbaBlendMode) -> u32 {
     match blend_mode {
         RgbaBlendMode::Overlay => 0,
@@ -2062,9 +2348,10 @@ fn encode_value_to_rgba_blend_mode(blend_mode: ValueToRgbaBlendMode) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositeUniforms, GpuRendererError, encode_rgba_blend_mode, tile_transfer_layout,
+        CompositeUniforms, GpuRendererError, PresentUniforms, encode_rgba_blend_mode,
+        screen_to_ndc, tile_transfer_layout,
     };
-    use crate::{GpuRenderer, Pass, RenderBackend};
+    use crate::{GpuRenderer, Pass, PresentTarget, PresentTile, PresentTileParams, RenderBackend};
     use atlas::{AtlasLayout, AtlasTextureStore, TilePos};
     use bytemuck::bytes_of;
     use gla_color::{
@@ -2093,6 +2380,26 @@ mod tests {
         assert_eq!(source_x, 11);
         assert_eq!(source_layer, 17);
         assert_eq!(blend_mode, 1);
+    }
+
+    #[test]
+    fn present_uniform_layout_keeps_source_offsets_stable() {
+        assert_eq!(std::mem::size_of::<PresentUniforms>(), 48);
+        let params = PresentTileParams {
+            target_min_px: [0.0, 0.0],
+            target_max_px: [62.0, 62.0],
+            source_width: 62,
+            source_height: 62,
+        };
+
+        assert_eq!(params.source_width, gla_core::IMAGE_TILE_SIZE);
+        assert_eq!(params.source_height, gla_core::IMAGE_TILE_SIZE);
+    }
+
+    #[test]
+    fn screen_to_ndc_maps_surface_pixels_to_clip_space() {
+        assert_eq!(screen_to_ndc([0.0, 0.0], 100, 50), [-1.0, 1.0]);
+        assert_eq!(screen_to_ndc([100.0, 50.0], 100, 50), [1.0, -1.0]);
     }
 
     #[test]
@@ -2150,6 +2457,62 @@ mod tests {
         ];
 
         gpu.submit(&passes).unwrap();
+    }
+
+    #[test]
+    fn gpu_presents_atlas_tile_to_render_target_when_adapter_is_available() {
+        let _guard = gpu_test_lock().lock().unwrap();
+        let (device, queue) = match pollster::block_on(test_device()) {
+            Some(device) => device,
+            None => {
+                eprintln!("skipping GPU present test: no adapter available");
+                return;
+            }
+        };
+        let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glaphica-present-test-target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut gpu = GpuRenderer::new(device, queue).unwrap();
+        let format = GlaFormat {
+            channel_count: ChannelCount::D4,
+            channel_type: ChannelType::F32,
+        };
+        gpu.create_atlas_texture(0, AtlasLayout::TINY8, format)
+            .unwrap();
+        let src = TilePos::new(0, 0, 0, 0);
+
+        gpu.submit(&[Pass::Clear { dst: src }]).unwrap();
+        gpu.present_tiles(
+            &[PresentTile {
+                src,
+                params: PresentTileParams {
+                    target_min_px: [0.0, 0.0],
+                    target_max_px: [62.0, 62.0],
+                    source_width: 62,
+                    source_height: 62,
+                },
+            }],
+            PresentTarget {
+                view: &target_view,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                width: 64,
+                height: 64,
+                clear_color: wgpu::Color::BLACK,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
