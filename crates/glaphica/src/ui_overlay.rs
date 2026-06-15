@@ -5,6 +5,7 @@ use winit::{event::WindowEvent, event_loop::ActiveEventLoop, window::Window};
 use crate::{
     DocumentBlendMode, DocumentNodeId, DocumentNodeKind, RoundBrushSettings, UiAction, UiLayerItem,
     UiTraceMode, UiTraceStatus,
+    ui_components::{labeled_f32_slider, panel_frame, rgb_color_picker},
 };
 
 const BRUSH_PANEL_MIN_WIDTH: f32 = 220.0;
@@ -147,14 +148,6 @@ fn apply_theme(ctx: &Context, theme: UiTheme) {
     ctx.set_style(style);
 }
 
-fn panel_frame(theme: UiTheme) -> egui::Frame {
-    egui::Frame {
-        fill: theme.panel_fill,
-        stroke: egui::Stroke::new(1.0, theme.panel_border),
-        ..Default::default()
-    }
-}
-
 fn render_top_bar(
     ctx: &Context,
     theme: UiTheme,
@@ -162,10 +155,15 @@ fn render_top_bar(
     actions: &mut Vec<UiAction>,
 ) {
     TopBottomPanel::top("glaphica-ui-top-bar")
-        .frame(panel_frame(theme))
+        .frame(panel_frame(theme.panel_fill, theme.panel_border))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("glaphica").strong());
+                ui.label(
+                    RichText::new("Round Brush")
+                        .color(theme.subdued_text)
+                        .small(),
+                );
                 ui.separator();
                 if ui.button("Undo").clicked() {
                     actions.push(UiAction::UndoRequested);
@@ -207,7 +205,7 @@ fn render_status_bar(
     trace_status: &UiTraceStatus,
 ) {
     TopBottomPanel::bottom("glaphica-ui-status-bar")
-        .frame(panel_frame(theme))
+        .frame(panel_frame(theme.panel_fill, theme.panel_border))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -219,6 +217,8 @@ fn render_status_bar(
                     RichText::new(if stroke_active { "Drawing" } else { "Idle" })
                         .color(theme.subdued_text),
                 );
+                ui.separator();
+                ui.label(RichText::new("Ctrl+Z Undo").color(theme.subdued_text));
                 ui.separator();
                 ui.label(RichText::new(trace_status_text(trace_status)).color(theme.subdued_text));
             });
@@ -255,7 +255,7 @@ fn render_layer_panel(
         .default_width(*left_panel_width)
         .min_width(LAYER_PANEL_MIN_WIDTH)
         .max_width(LAYER_PANEL_MAX_WIDTH)
-        .frame(panel_frame(theme))
+        .frame(panel_frame(theme.panel_fill, theme.panel_border))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Layers");
@@ -285,8 +285,8 @@ fn render_layer_row(ui: &mut egui::Ui, item: &UiLayerItem, actions: &mut Vec<UiA
     ui.horizontal(|ui| {
         ui.add_space(indent);
         let selected = ui
-            .add_enabled(
-                item.paintable,
+            .add_sized(
+                [96.0, 24.0],
                 Button::new(layer_label(item)).selected(item.active),
             )
             .on_hover_text(format!("{:?}", item.id));
@@ -358,36 +358,40 @@ fn render_brush_panel(
         .default_width(*right_panel_width)
         .min_width(BRUSH_PANEL_MIN_WIDTH)
         .max_width(BRUSH_PANEL_MAX_WIDTH)
-        .frame(panel_frame(theme))
+        .frame(panel_frame(theme.panel_fill, theme.panel_border))
         .show(ctx, |ui| {
             ui.heading("Brush");
+            ui.label(
+                RichText::new("Round brush settings are applied immediately.")
+                    .color(theme.subdued_text)
+                    .small(),
+            );
             ui.separator();
 
             let mut changed = false;
-            changed |= ui
-                .color_edit_button_rgb(&mut round_brush_settings.tint)
-                .changed();
+            changed |= rgb_color_picker(ui, "Tint", &mut round_brush_settings.tint);
             ui.separator();
-            changed |= slider(
+            changed |= labeled_f32_slider(
                 ui,
                 "Radius",
                 &mut round_brush_settings.base_radius_px,
                 1.0..=256.0,
             );
-            changed |= slider(
+            changed |= labeled_f32_slider(
                 ui,
                 "Hardness",
                 &mut round_brush_settings.base_hardness,
                 0.0..=1.0,
             );
-            changed |= slider(ui, "Flow", &mut round_brush_settings.base_flow, 0.0..=1.0);
-            changed |= slider(
+            changed |=
+                labeled_f32_slider(ui, "Flow", &mut round_brush_settings.base_flow, 0.0..=1.0);
+            changed |= labeled_f32_slider(
                 ui,
                 "Opacity",
                 &mut round_brush_settings.base_opacity,
                 0.0..=1.0,
             );
-            changed |= slider(
+            changed |= labeled_f32_slider(
                 ui,
                 "Spacing",
                 &mut round_brush_settings.spacing_ratio,
@@ -402,14 +406,4 @@ fn render_brush_panel(
         });
 
     *right_panel_width = panel.response.rect.width();
-}
-
-fn slider(
-    ui: &mut egui::Ui,
-    label: &'static str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-) -> bool {
-    ui.add(egui::Slider::new(value, range).text(label))
-        .changed()
 }

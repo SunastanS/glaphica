@@ -2542,6 +2542,49 @@ mod tests {
     }
 
     #[test]
+    fn ui_action_can_select_group_but_stroke_still_requires_paintable_node() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        let root_node = app.workspace.as_ref().unwrap().layer_tree().root_id();
+        let ScriptCommandOutcome::DocumentNode(layer) = app
+            .execute_script_command(ScriptCommand::AppendLayer { parent: root_node })
+            .unwrap()
+        else {
+            panic!("append layer should return the new node id");
+        };
+        let ScriptCommandOutcome::DocumentNode(group) = app
+            .execute_script_command(ScriptCommand::AppendGroup { parent: root_node })
+            .unwrap()
+        else {
+            panic!("append group should return the new node id");
+        };
+        app.execute_script_command(ScriptCommand::SetActiveNode(layer))
+            .unwrap();
+
+        let active = app
+            .execute_ui_action(UiAction::ActiveNodeChanged(group))
+            .unwrap();
+        let stroke =
+            app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(0, 1.0, 2.0, 1.0)));
+
+        assert_eq!(active, ScriptCommandOutcome::None);
+        assert_eq!(
+            app.workspace
+                .as_ref()
+                .unwrap()
+                .layer_tree()
+                .active_node_id(),
+            group
+        );
+        assert!(matches!(
+            stroke,
+            Err(ScriptHostError::InvalidCommand { reason })
+                if reason.contains("not paintable")
+        ));
+        assert!(!app.brush_thread.has_active_stroke());
+    }
+
+    #[test]
     fn window_ui_actions_record_visible_layer_trace_actions() {
         let path = trace_path("window-ui-action");
         let mut config = AppRuntimeConfig::default();

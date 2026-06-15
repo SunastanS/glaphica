@@ -11,6 +11,7 @@ mod stroke;
 mod tool;
 mod trace;
 mod ui;
+mod ui_components;
 mod ui_overlay;
 mod view;
 
