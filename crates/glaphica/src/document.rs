@@ -56,6 +56,7 @@ pub struct DocumentWorkspace {
     layers: DocumentLayerTree,
     layer_composite_image: Option<ImageId>,
     layer_composite_valid: bool,
+    layer_composite_tile_indices: Vec<u32>,
     stroke_preview_image: Option<ImageId>,
     stroke_preview_composite_image: Option<ImageId>,
     stroke_preview_tile_indices: Vec<u32>,
@@ -72,6 +73,13 @@ pub struct DocumentRootTileRead {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LayerRenderInput {
     image: ImageId,
+    opacity: f32,
+    blend_mode: gla_color::BlendMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LayerRenderTileInput {
+    src: TilePos,
     opacity: f32,
     blend_mode: gla_color::BlendMode,
 }
@@ -152,6 +160,7 @@ impl DocumentWorkspace {
             layers: DocumentLayerTree::new(root),
             layer_composite_image: None,
             layer_composite_valid: false,
+            layer_composite_tile_indices: Vec::new(),
             stroke_preview_image: None,
             stroke_preview_composite_image: None,
             stroke_preview_tile_indices: Vec::new(),
@@ -418,6 +427,7 @@ impl DocumentWorkspace {
         self.layers = layers;
         self.layer_composite_image = composite;
         self.layer_composite_valid = false;
+        self.layer_composite_tile_indices.clear();
         self.clear_stroke_preview_state();
         Ok(())
     }
@@ -446,6 +456,25 @@ impl DocumentWorkspace {
         let mut dirty = Vec::with_capacity(tile_count as usize);
 
         for tile_index in 0..tile_count {
+            let mut layer_tile_inputs = Vec::new();
+            for input in &inputs {
+                let TileReadRef::Physical(src) = self
+                    .storage
+                    .read_global_ref(input.image, tile_index)
+                    .map_err(DocumentLayerRenderError::Tile)?
+                else {
+                    continue;
+                };
+                layer_tile_inputs.push(LayerRenderTileInput {
+                    src,
+                    opacity: input.opacity,
+                    blend_mode: input.blend_mode,
+                });
+            }
+            if layer_tile_inputs.is_empty() {
+                continue;
+            }
+
             let dst = self
                 .storage
                 .write_global_cache_pos(composite, tile_index)
@@ -459,16 +488,9 @@ impl DocumentWorkspace {
                 passes.push(Pass::Copy { src, dst });
             }
 
-            for input in &inputs {
-                let TileReadRef::Physical(src) = self
-                    .storage
-                    .read_global_ref(input.image, tile_index)
-                    .map_err(DocumentLayerRenderError::Tile)?
-                else {
-                    continue;
-                };
+            for input in &layer_tile_inputs {
                 passes.push(Pass::RenderTo {
-                    src,
+                    src: input.src,
                     dst,
                     blend_mode: input.blend_mode,
                     opacity: input.opacity,
@@ -478,9 +500,12 @@ impl DocumentWorkspace {
             dirty.push(tile_index);
         }
 
-        backend
-            .submit(&passes)
-            .map_err(DocumentLayerRenderError::Render)?;
+        if !passes.is_empty() {
+            backend
+                .submit(&passes)
+                .map_err(DocumentLayerRenderError::Render)?;
+        }
+        self.layer_composite_tile_indices = dirty.clone();
         self.layer_composite_valid = true;
         Ok(dirty)
     }
@@ -503,7 +528,6 @@ impl DocumentWorkspace {
         let layout = self
             .image_layout(preview)
             .map_err(DocumentStrokePreviewError::Present)?;
-        let base = self.base_display_root();
         let previous_tiles = self.stroke_preview_tile_indices.clone();
         let mut next_tiles = Vec::new();
         let mut draw_invocations = Vec::new();
@@ -571,7 +595,11 @@ impl DocumentWorkspace {
                 .map_err(DocumentStrokePreviewError::Tile)?;
             passes.push(Pass::Clear { dst });
             if let Some(base_tile) = self
-                .physical_tile_for_index(base, tile_count_x, *tile_index)
+                .physical_tile_for_index(
+                    self.base_display_image_for_tile_index(*tile_index),
+                    tile_count_x,
+                    *tile_index,
+                )
                 .map_err(DocumentStrokePreviewError::Present)?
             {
                 passes.push(Pass::Copy {
@@ -620,7 +648,6 @@ impl DocumentWorkspace {
             return Ok(Vec::new());
         }
 
-        let base = self.base_display_root();
         let layout = self
             .image_layout(preview)
             .map_err(DocumentStrokePreviewError::Present)?;
@@ -640,7 +667,11 @@ impl DocumentWorkspace {
                 .map_err(DocumentStrokePreviewError::Tile)?;
             passes.push(Pass::Clear { dst: composite_dst });
             if let Some(base_tile) = self
-                .physical_tile_for_index(base, tile_count_x, *tile_index)
+                .physical_tile_for_index(
+                    self.base_display_image_for_tile_index(*tile_index),
+                    tile_count_x,
+                    *tile_index,
+                )
                 .map_err(DocumentStrokePreviewError::Present)?
             {
                 passes.push(Pass::Copy {
@@ -725,6 +756,7 @@ impl DocumentWorkspace {
         self.layout = ImageLayoutSpec::new(layout.width_px(), layout.height_px());
         self.layer_composite_image = None;
         self.layer_composite_valid = false;
+        self.layer_composite_tile_indices.clear();
         self.clear_stroke_preview_state();
         if self
             .layers
@@ -850,14 +882,20 @@ impl DocumentWorkspace {
     }
 
     fn base_display_root(&self) -> ImageId {
-        if self.layer_composite_valid {
-            self.layer_composite_image.unwrap_or(self.root)
-        } else {
-            self.root
-        }
+        self.root
     }
 
-    fn display_root(&self) -> ImageId {
+    fn base_display_image_for_tile_index(&self, tile_index: u32) -> ImageId {
+        if self.layer_composite_valid
+            && self
+                .layer_composite_tile_indices
+                .binary_search(&tile_index)
+                .is_ok()
+        {
+            if let Some(image) = self.layer_composite_image {
+                return image;
+            }
+        }
         self.base_display_root()
     }
 
@@ -871,7 +909,7 @@ impl DocumentWorkspace {
                 return image;
             }
         }
-        self.base_display_root()
+        self.base_display_image_for_tile_index(tile_index)
     }
 
     fn layer_render_inputs(&self) -> Result<Vec<LayerRenderInput>, DocumentLayerTreeError> {
@@ -1246,7 +1284,22 @@ impl DocumentWorkspace {
     }
 
     pub fn root_physical_tiles(&self) -> Result<Vec<DocumentRootTileRead>, DocumentPresentError> {
-        self.image_physical_tiles(self.display_root())
+        let layout = self.image_layout(self.root)?;
+        let tile_count_x = layout.tile_count_x();
+        let tile_count = layout.tile_count();
+        let mut tiles = Vec::new();
+
+        for tile_index in 0..tile_count {
+            if let Some(tile) = self.physical_tile_for_index(
+                self.display_image_for_tile_index(tile_index),
+                tile_count_x,
+                tile_index,
+            )? {
+                tiles.push(tile);
+            }
+        }
+
+        Ok(tiles)
     }
 
     pub(crate) fn image_physical_tiles(
@@ -1314,7 +1367,7 @@ impl DocumentWorkspace {
     }
 
     fn root_layout(&self) -> Result<gla_image::GlaImageLayout, DocumentPresentError> {
-        self.image_layout(self.display_root())
+        self.image_layout(self.root)
     }
 
     fn image_layout(
@@ -1994,6 +2047,30 @@ mod tests {
     }
 
     #[test]
+    fn layer_composite_render_skips_empty_layer_children() {
+        let mut backend = RecordingBackend::default();
+        let mut workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
+        backend.submitted.clear();
+        let root_node = workspace.layer_tree().root_id();
+
+        workspace.append_layer(root_node).unwrap();
+        let dirty = workspace.render_layer_tree_full(&mut backend).unwrap();
+
+        assert!(dirty.is_empty());
+        assert!(!workspace.layer_composite_needs_render());
+        assert!(backend.submitted.is_empty());
+        assert_eq!(
+            workspace.root_present_tiles().unwrap().len() as u32,
+            workspace
+                .storage()
+                .image(workspace.root())
+                .unwrap()
+                .layout()
+                .tile_count()
+        );
+    }
+
+    #[test]
     fn layer_composite_render_blends_layer_over_root() {
         let mut backend = RecordingBackend::default();
         let mut workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
@@ -2032,7 +2109,7 @@ mod tests {
 
         let dirty = workspace.render_layer_tree_full(&mut backend).unwrap();
 
-        assert!(!dirty.is_empty());
+        assert_eq!(dirty, vec![0]);
         assert!(!workspace.layer_composite_needs_render());
         assert!(backend.submitted_passes().any(|pass| matches!(
             pass,
@@ -2042,7 +2119,24 @@ mod tests {
                 ..
             } if opacity == 1.0
         )));
-        assert!(workspace.root_present_tiles().unwrap().len() >= 1);
+        assert_eq!(
+            workspace.root_present_tiles().unwrap().len() as u32,
+            workspace
+                .storage()
+                .image(workspace.root())
+                .unwrap()
+                .layout()
+                .tile_count()
+        );
+        assert_eq!(
+            workspace.root_physical_tiles().unwrap().len() as u32,
+            workspace
+                .storage()
+                .image(workspace.root())
+                .unwrap()
+                .layout()
+                .tile_count()
+        );
     }
 
     #[test]

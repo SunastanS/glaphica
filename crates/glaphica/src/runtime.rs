@@ -27,7 +27,10 @@ use crate::{
     export_workspace_directory,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
-    script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
+    script::{
+        ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan, ScriptHost, ScriptHostError,
+        script_command_plan_from_json_str,
+    },
     stroke::{BrushThreadRuntime, ReplaceCircleSampleCache},
     trace::{
         AppTraceBlendMode, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState,
@@ -47,6 +50,7 @@ pub struct AppRuntimeConfig {
     pub canvas_width_px: u32,
     pub canvas_height_px: u32,
     pub workspace_path: Option<PathBuf>,
+    pub startup_command_plan_path: Option<PathBuf>,
     pub exit_after_redraw_frames: Option<u64>,
     pub tool_set: ToolSet,
     pub active_tool: ActiveTool,
@@ -119,6 +123,7 @@ impl Default for AppRuntimeConfig {
             canvas_width_px: DEFAULT_CANVAS_WIDTH_PX,
             canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
             workspace_path: None,
+            startup_command_plan_path: None,
             exit_after_redraw_frames: None,
             tool_set: ToolSet::default_brush(),
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
@@ -1022,6 +1027,36 @@ impl App {
             }
         }
     }
+
+    fn execute_startup_command_plan(&mut self) -> Result<(), ScriptHostError> {
+        let Some(path) = self.config.startup_command_plan_path.clone() else {
+            return Ok(());
+        };
+        let source = std::fs::read_to_string(&path).map_err(|error| ScriptHostError::Runtime {
+            reason: format!(
+                "failed to read startup command plan {}: {error}",
+                path.display()
+            ),
+        })?;
+        let plan = script_command_plan_from_json_str(&source).map_err(|error| {
+            ScriptHostError::InvalidCommand {
+                reason: format!(
+                    "failed to parse startup command plan {}: {error}",
+                    path.display()
+                ),
+            }
+        })?;
+        self.execute_script_command_plan(&plan)?;
+        self.request_full_screen_update();
+        Ok(())
+    }
+
+    fn execute_script_command_plan(
+        &mut self,
+        plan: &ScriptCommandPlan,
+    ) -> Result<Vec<ScriptCommandOutcome>, ScriptHostError> {
+        plan.execute_on(self)
+    }
 }
 
 impl Drop for App {
@@ -1636,6 +1671,16 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        if let Err(error) = self.execute_startup_command_plan() {
+            eprintln!("startup command plan failed: {error}");
+            event_loop.exit();
+            return;
+        }
+        if let Err(error) = self.fit_view_to_workspace() {
+            eprintln!("view initialization after startup command plan failed: {error}");
+            event_loop.exit();
+            return;
+        }
         self.request_full_screen_update();
     }
 
@@ -1922,8 +1967,9 @@ mod tests {
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceUiAction, AppView,
         BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
         DocumentBlendMode, DocumentNodeId, DocumentWorkspace, RoundBrushSettings, ScriptCommand,
-        ScriptCommandOutcome, ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet,
-        UiAction, load_trace_file, save_trace_file,
+        ScriptCommandOutcome, ScriptCommandPlan, ScriptDrawSession, ScriptHost, ScriptHostError,
+        Tool, ToolSet, UiAction, load_trace_file, save_trace_file,
+        script_command_plan_to_json_string_pretty,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -1962,6 +2008,7 @@ mod tests {
         assert_eq!(config.canvas_width_px, DEFAULT_CANVAS_WIDTH_PX);
         assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
         assert_eq!(config.workspace_path, None);
+        assert_eq!(config.startup_command_plan_path, None);
         assert_eq!(config.exit_after_redraw_frames, None);
         assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
@@ -2218,6 +2265,36 @@ mod tests {
 
         assert_eq!(outcome, ScriptCommandOutcome::RedrawRequested);
         assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn startup_command_plan_file_executes_after_workspace_exists() {
+        let path = trace_path("startup-command-plan");
+        let plan = ScriptCommandPlan::new(vec![
+            ScriptCommand::CreateLayerAboveActive,
+            ScriptCommand::SetActiveNode(DocumentNodeId::new(2)),
+            ScriptCommand::RequestRedraw,
+        ]);
+        std::fs::write(
+            &path,
+            script_command_plan_to_json_string_pretty(&plan).unwrap(),
+        )
+        .unwrap();
+        let mut config = AppRuntimeConfig::default();
+        config.startup_command_plan_path = Some(path.clone());
+        let mut app = App::new(config);
+        app.workspace = Some(DocumentWorkspace::blank(128, 96).unwrap());
+
+        app.execute_startup_command_plan().unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        assert_eq!(workspace.layer_tree().len(), 2);
+        assert_eq!(
+            workspace.layer_tree().active_node_id(),
+            DocumentNodeId::new(2)
+        );
+        assert!(app.frame_scheduler.has_requested_redraw());
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

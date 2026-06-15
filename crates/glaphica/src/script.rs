@@ -171,6 +171,17 @@ impl ScriptCommandPlan {
     pub fn new(commands: Vec<ScriptCommand>) -> Self {
         Self { commands }
     }
+
+    pub fn execute_on(
+        &self,
+        host: &mut dyn ScriptHost,
+    ) -> Result<Vec<ScriptCommandOutcome>, ScriptHostError> {
+        let mut outcomes = Vec::with_capacity(self.commands.len());
+        for command in self.commands.iter().cloned() {
+            outcomes.push(host.execute_script_command(command)?);
+        }
+        Ok(outcomes)
+    }
 }
 
 impl ScriptDrawSession {
@@ -301,9 +312,9 @@ impl From<ScriptHostError> for ScriptRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptDrawSession, ScriptHost,
-        ScriptHostError, ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError,
-        ScriptValue,
+        NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan,
+        ScriptDrawSession, ScriptHost, ScriptHostError, ScriptModuleId, ScriptModuleSource,
+        ScriptRuntime, ScriptRuntimeError, ScriptValue,
     };
     use crate::{ActiveTool, BrushId, DocumentBlendMode, DocumentNodeId, RoundBrushSettings};
     use gla_core::{CanvasCoordF, CanvasInput};
@@ -460,5 +471,32 @@ mod tests {
 
         assert_eq!(outcome, ScriptCommandOutcome::None);
         assert_eq!(host.commands, vec![ScriptCommand::CancelStroke]);
+    }
+
+    #[test]
+    fn script_command_plan_executes_commands_against_host_in_order() {
+        let mut host = RecordingHost::default();
+        let plan = ScriptCommandPlan::new(vec![
+            ScriptCommand::CreateLayerAboveActive,
+            ScriptCommand::SetActiveNode(DocumentNodeId::new(2)),
+            ScriptCommand::RequestRedraw,
+        ]);
+
+        let outcomes = plan.execute_on(&mut host).unwrap();
+
+        assert_eq!(
+            host.commands,
+            vec![
+                ScriptCommand::CreateLayerAboveActive,
+                ScriptCommand::SetActiveNode(DocumentNodeId::new(2)),
+                ScriptCommand::RequestRedraw,
+            ]
+        );
+        assert_eq!(outcomes.len(), 3);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, ScriptCommandOutcome::None))
+        );
     }
 }

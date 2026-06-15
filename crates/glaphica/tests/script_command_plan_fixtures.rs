@@ -5,6 +5,7 @@ use glaphica::{
 };
 
 const SCRIPT_COMMAND_PLAN_JSON: &str = include_str!("fixtures/script_command_plan.json");
+const STARTUP_COMMAND_PLAN_JSON: &str = include_str!("fixtures/startup_command_plan.json");
 
 #[derive(Default)]
 struct RecordingHost {
@@ -23,15 +24,22 @@ impl ScriptHost for RecordingHost {
 
 #[test]
 fn script_command_plan_fixture_is_readable_and_writable_json() {
-    let plan = script_command_plan_from_json_str(SCRIPT_COMMAND_PLAN_JSON)
-        .expect("script command plan fixture should parse");
+    for source in [SCRIPT_COMMAND_PLAN_JSON, STARTUP_COMMAND_PLAN_JSON] {
+        let plan = script_command_plan_from_json_str(source)
+            .expect("script command plan fixture should parse");
 
-    let rendered =
-        script_command_plan_to_json_string_pretty(&plan).expect("script command plan renders");
-    let reparsed =
-        script_command_plan_from_json_str(&rendered).expect("rendered command plan parses again");
+        let rendered =
+            script_command_plan_to_json_string_pretty(&plan).expect("script command plan renders");
+        let reparsed = script_command_plan_from_json_str(&rendered)
+            .expect("rendered command plan parses again");
 
-    assert_eq!(reparsed, plan);
+        assert_eq!(reparsed, plan);
+    }
+
+    let rendered = script_command_plan_to_json_string_pretty(
+        &script_command_plan_from_json_str(SCRIPT_COMMAND_PLAN_JSON).unwrap(),
+    )
+    .unwrap();
     assert!(rendered.contains("\"CreateLayerAboveActive\""));
     assert!(rendered.contains("\"RunDrawSession\""));
 }

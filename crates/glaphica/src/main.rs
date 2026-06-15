@@ -31,6 +31,12 @@ fn config_from_args(
                 };
                 config.workspace_path = Some(PathBuf::from(path));
             }
+            "--run-command-plan" => {
+                let Some(path) = args.next() else {
+                    return Err(invalid_arg("--run-command-plan requires a JSON file path"));
+                };
+                config.startup_command_plan_path = Some(PathBuf::from(path));
+            }
             "--exit-after-frames" => {
                 let Some(count) = args.next() else {
                     return Err(invalid_arg(
@@ -44,7 +50,7 @@ fn config_from_args(
             }
             "--help" | "-h" => {
                 return Err(invalid_arg(
-                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>] [--exit-after-frames <n>]",
+                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>] [--run-command-plan <file>] [--exit-after-frames <n>]",
                 ));
             }
             _ => return Err(invalid_arg(format!("unknown argument {arg}"))),
@@ -117,6 +123,20 @@ mod tests {
         assert_eq!(
             config.workspace_path,
             Some(PathBuf::from("target/workspace-export"))
+        );
+    }
+
+    #[test]
+    fn parses_run_command_plan_argument() {
+        let config = config_from_args([
+            "--run-command-plan".to_owned(),
+            "target/startup-plan.json".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.startup_command_plan_path,
+            Some(PathBuf::from("target/startup-plan.json"))
         );
     }
 
