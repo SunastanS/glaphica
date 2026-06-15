@@ -1,3 +1,4 @@
+use gla_color::apply_value_mask_to_premultiplied_rgba;
 use gla_core::{CanvasCoordF, CanvasInput};
 
 use crate::{BrushId, BrushSettings, ReplaceCircleStrokeSample};
@@ -43,8 +44,12 @@ impl ActiveRootStroke {
             .into_iter()
             .map(|input| ReplaceCircleStrokeSample {
                 center: input.position,
-                radius_px: self.brush_settings.radius_px * input.pressure.clamp(0.0, 1.0),
-                color: self.brush_settings.color,
+                radius_px: self.brush_settings.radius_px,
+                color: apply_value_mask_to_premultiplied_rgba(
+                    self.brush_settings.color,
+                    self.brush_settings.flow * input.pressure.clamp(0.0, 1.0),
+                    self.brush_settings.opacity,
+                ),
             })
             .collect()
     }
@@ -190,10 +195,13 @@ mod tests {
     }
 
     #[test]
-    fn replace_circle_samples_interpolate_pressure_for_radius() {
+    fn replace_circle_samples_interpolate_pressure_for_flow() {
         let mut settings = BrushSettings::default();
         settings.radius_px = 10.0;
         settings.spacing_ratio = 0.5;
+        settings.flow = 0.5;
+        settings.opacity = 0.8;
+        settings.color = gla_color::PremultipliedRgbaF32::new(1.0, 0.5, 0.25, 1.0);
         let mut stroke = ActiveRootStroke::new(BrushId::DEFAULT, settings);
 
         stroke.push_input(canvas_input(0, 0.0, 0.0, 1.0));
@@ -201,8 +209,18 @@ mod tests {
 
         let samples = stroke.replace_circle_samples();
         assert_eq!(samples.len(), 3);
-        assert_eq!(samples[0].radius_px, 10.0);
-        assert_eq!(samples[1].radius_px, 7.5);
-        assert_eq!(samples[2].radius_px, 5.0);
+        assert!(samples.iter().all(|sample| sample.radius_px == 10.0));
+        assert_eq!(
+            samples[0].color,
+            gla_color::PremultipliedRgbaF32::new(0.4, 0.2, 0.1, 0.4)
+        );
+        assert_eq!(
+            samples[1].color,
+            gla_color::PremultipliedRgbaF32::new(0.3, 0.15, 0.075, 0.3)
+        );
+        assert_eq!(
+            samples[2].color,
+            gla_color::PremultipliedRgbaF32::new(0.2, 0.1, 0.05, 0.2)
+        );
     }
 }
