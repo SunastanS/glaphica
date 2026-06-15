@@ -22,6 +22,7 @@ use crate::{
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
     stroke::BrushThreadRuntime,
+    trace::{AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState},
 };
 
 const BRUSH_THREAD_COMMAND_CAPACITY: usize = 1024;
@@ -36,6 +37,7 @@ pub struct AppRuntimeConfig {
     pub active_tool: ActiveTool,
     pub draw_on_tools: Vec<DrawOnToolKind>,
     pub brush_settings: BrushSettings,
+    pub trace_config: AppTraceConfig,
 }
 
 impl Default for AppRuntimeConfig {
@@ -54,6 +56,7 @@ impl Default for AppRuntimeConfig {
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
             brush_settings: BrushSettings::default(),
+            trace_config: AppTraceConfig::default(),
         }
     }
 }
@@ -68,12 +71,14 @@ impl AppRuntimeConfig {
 #[derive(Debug)]
 pub enum AppRunError {
     EventLoop(winit::error::EventLoopError),
+    Trace(AppTraceError),
 }
 
 impl Display for AppRunError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EventLoop(error) => write!(f, "app event loop failed: {error}"),
+            Self::Trace(error) => write!(f, "app trace setup failed: {error}"),
         }
     }
 }
@@ -82,6 +87,7 @@ impl Error for AppRunError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::EventLoop(error) => Some(error),
+            Self::Trace(error) => Some(error),
         }
     }
 }
@@ -92,7 +98,7 @@ pub fn run_app_window() -> Result<(), AppRunError> {
 
 pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRunError> {
     let event_loop = EventLoop::new().map_err(AppRunError::EventLoop)?;
-    let mut app = App::new(config);
+    let mut app = App::try_new(config).map_err(AppRunError::Trace)?;
     event_loop.run_app(&mut app).map_err(AppRunError::EventLoop)
 }
 
@@ -105,6 +111,7 @@ struct App {
     redo_stack: Vec<DrawRecordId>,
     frame_scheduler: AppFrameScheduler,
     brush_thread: BrushThreadRuntime,
+    trace: AppTraceState,
     primary_down: bool,
     middle_down: bool,
     middle_pan_last_pos: Option<ScreenCoordF>,
@@ -118,13 +125,18 @@ struct App {
 
 impl App {
     fn new(config: AppRuntimeConfig) -> Self {
+        Self::try_new(config).expect("default app trace configuration should initialize")
+    }
+
+    fn try_new(config: AppRuntimeConfig) -> Result<Self, AppTraceError> {
+        let trace = AppTraceState::from_config(&config.trace_config)?;
         let brush_thread = BrushThreadRuntime::spawn(
             config.tool_set.clone(),
             config.active_tool,
             config.brush_settings,
             BRUSH_THREAD_COMMAND_CAPACITY,
         );
-        Self {
+        Ok(Self {
             config,
             workspace: None,
             view: AppView::identity(),
@@ -133,6 +145,7 @@ impl App {
             redo_stack: Vec::new(),
             frame_scheduler: AppFrameScheduler::new(),
             brush_thread,
+            trace,
             primary_down: false,
             middle_down: false,
             middle_pan_last_pos: None,
@@ -142,7 +155,7 @@ impl App {
             modifiers: ModifiersState::default(),
             window: None,
             gpu: None,
-        }
+        })
     }
 
     fn window_attributes(&self) -> WindowAttributes {
@@ -165,10 +178,10 @@ impl App {
     }
 
     fn begin_stroke_at(&mut self, position: ScreenCoordF) {
-        if !self.brush_thread.begin_active_stroke() {
-            return;
+        let input = self.stroke_input_from_screen(position);
+        if self.begin_stroke_with_canvas_input(input).is_ok() {
+            self.trace.record(AppTraceEvent::BeginStroke(input.into()));
         }
-        self.push_stroke_input(position);
     }
 
     fn continue_stroke_at(&mut self, position: ScreenCoordF) {
@@ -181,7 +194,9 @@ impl App {
 
     fn push_stroke_input(&mut self, position: ScreenCoordF) {
         let input = self.stroke_input_from_screen(position);
-        self.brush_thread.push_canvas_input(input);
+        if self.push_canvas_input_from_script(input).is_ok() {
+            self.trace.record(AppTraceEvent::StrokeSample(input.into()));
+        }
     }
 
     fn begin_stroke_with_canvas_input(
@@ -264,6 +279,12 @@ impl App {
         self.commit_active_stroke_dirty_tiles().is_some()
     }
 
+    fn finish_stroke_from_window(&mut self) -> bool {
+        let committed = self.commit_active_stroke();
+        self.trace.record(AppTraceEvent::FinishStroke);
+        committed
+    }
+
     fn commit_active_stroke_dirty_tiles(&mut self) -> Option<Vec<u32>> {
         let Some(stroke) = self.brush_thread.finish_active_stroke() else {
             return None;
@@ -298,6 +319,14 @@ impl App {
         self.brush_thread.cancel_active_stroke()
     }
 
+    fn cancel_stroke_from_window(&mut self) -> bool {
+        let canceled = self.cancel_active_stroke();
+        if canceled {
+            self.trace.record(AppTraceEvent::CancelStroke);
+        }
+        canceled
+    }
+
     fn undo(&mut self) -> bool {
         let Some(record_id) = self.undo_stack.pop() else {
             return false;
@@ -315,6 +344,14 @@ impl App {
         }
     }
 
+    fn undo_from_window(&mut self) -> bool {
+        let undone = self.undo();
+        if undone {
+            self.trace.record(AppTraceEvent::Undo);
+        }
+        undone
+    }
+
     fn redo(&mut self) -> bool {
         let Some(record_id) = self.redo_stack.pop() else {
             return false;
@@ -330,6 +367,48 @@ impl App {
                 false
             }
         }
+    }
+
+    fn redo_from_window(&mut self) -> bool {
+        let redone = self.redo();
+        if redone {
+            self.trace.record(AppTraceEvent::Redo);
+        }
+        redone
+    }
+
+    fn process_next_trace_replay_event(&mut self) -> bool {
+        let Some(event) = self.trace.next_replay_event() else {
+            return false;
+        };
+        if let Err(error) = self.execute_trace_replay_event(event) {
+            eprintln!("trace replay event failed: {error}");
+        }
+        true
+    }
+
+    fn execute_trace_replay_event(&mut self, event: AppTraceEvent) -> Result<(), ScriptHostError> {
+        match event {
+            AppTraceEvent::BeginStroke(input) => {
+                self.execute_script_command(ScriptCommand::BeginStroke(input.into()))?;
+            }
+            AppTraceEvent::StrokeSample(input) => {
+                self.execute_script_command(ScriptCommand::PushStrokeInput(input.into()))?;
+            }
+            AppTraceEvent::FinishStroke => {
+                self.execute_script_command(ScriptCommand::FinishStroke)?;
+            }
+            AppTraceEvent::CancelStroke => {
+                self.execute_script_command(ScriptCommand::CancelStroke)?;
+            }
+            AppTraceEvent::Undo => {
+                self.execute_script_command(ScriptCommand::Undo)?;
+            }
+            AppTraceEvent::Redo => {
+                self.execute_script_command(ScriptCommand::Redo)?;
+            }
+        }
+        Ok(())
     }
 
     fn apply_history_record(&mut self, record_id: DrawRecordId) -> Option<DrawCommit> {
@@ -397,6 +476,14 @@ impl App {
             return false;
         }
         true
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Err(error) = self.trace.stop_recording() {
+            eprintln!("trace save failed: {error}");
+        }
     }
 }
 
@@ -807,6 +894,9 @@ impl ApplicationHandler for App {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if self.trace.is_replaying() {
+                    return;
+                }
                 let pos =
                     ScreenCoordF::new(finite_f64_to_f32(position.x), finite_f64_to_f32(position.y));
                 self.last_cursor_pos = Some(pos);
@@ -823,11 +913,14 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                if self.trace.is_replaying() {
+                    return;
+                }
                 let was_primary_down = self.primary_down;
                 self.primary_down = state == ElementState::Pressed;
                 if self.primary_down && !was_primary_down {
                     self.begin_stroke_at_last_cursor();
-                } else if was_primary_down && self.commit_active_stroke() {
+                } else if was_primary_down && self.finish_stroke_from_window() {
                     self.request_redraw();
                 }
             }
@@ -836,6 +929,9 @@ impl ApplicationHandler for App {
                 button: MouseButton::Middle,
                 ..
             } => {
+                if self.trace.is_replaying() {
+                    return;
+                }
                 self.middle_down = state == ElementState::Pressed;
                 self.middle_pan_last_pos = if self.middle_down {
                     self.last_cursor_pos
@@ -844,15 +940,21 @@ impl ApplicationHandler for App {
                 };
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.trace.is_replaying() {
+                    return;
+                }
                 if self.zoom_view_at_cursor(&delta) {
                     self.request_full_screen_update();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if self.trace.is_replaying() {
+                    return;
+                }
                 if event.state == ElementState::Pressed && !event.repeat {
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => {
-                            if self.cancel_active_stroke() {
+                            if self.cancel_stroke_from_window() {
                                 self.primary_down = false;
                             }
                         }
@@ -861,19 +963,19 @@ impl ApplicationHandler for App {
                                 && self.modifiers.shift_key()
                                 && value.eq_ignore_ascii_case("z")
                             {
-                                if self.redo() {
+                                if self.redo_from_window() {
                                     self.request_redraw();
                                 }
                             } else if self.modifiers.control_key()
                                 && value.eq_ignore_ascii_case("z")
                             {
-                                if self.undo() {
+                                if self.undo_from_window() {
                                     self.request_redraw();
                                 }
                             } else if self.modifiers.control_key()
                                 && value.eq_ignore_ascii_case("y")
                             {
-                                if self.redo() {
+                                if self.redo_from_window() {
                                     self.request_redraw();
                                 }
                             }
@@ -903,6 +1005,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.trace.is_replaying() && self.process_next_trace_replay_event() {
+            self.request_redraw();
+        }
         if self.frame_scheduler.has_requested_redraw()
             && let Some(window) = self.window.as_ref()
         {
@@ -926,9 +1031,10 @@ fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
 mod tests {
     use super::{App, AppRuntimeConfig};
     use crate::{
-        ActiveTool, AppView, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
-        DEFAULT_CANVAS_WIDTH_PX, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
-        ScriptHost, ScriptHostError, Tool, ToolSet,
+        ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
+        BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, RoundBrushSettings,
+        ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError, Tool, ToolSet,
+        load_trace_file, save_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{DocImageUse, DocumentVersionId, DrawOnToolKind, DrawSessionIR, ImageId};
@@ -941,6 +1047,13 @@ mod tests {
             tilt: (0.0, 0.0),
             twist: 0.0,
         }
+    }
+
+    fn trace_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "glaphica-runtime-trace-{name}-{}.json",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -958,6 +1071,7 @@ mod tests {
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
         assert_eq!(config.brush_settings, BrushSettings::default());
+        assert_eq!(config.trace_config, AppTraceConfig::Disabled);
     }
 
     #[test]
@@ -1178,6 +1292,60 @@ mod tests {
                 command: "RunDrawSession"
             }
         );
+    }
+
+    #[test]
+    fn window_stroke_methods_record_replayable_trace() {
+        let path = trace_path("record");
+        {
+            let mut config = AppRuntimeConfig::default();
+            config.trace_config = AppTraceConfig::record(path.clone());
+            let mut app = App::try_new(config).unwrap();
+
+            app.begin_stroke_at(ScreenCoordF::new(10.0, 20.0));
+            app.continue_stroke_at(ScreenCoordF::new(12.0, 24.0));
+            app.finish_stroke_from_window();
+        }
+
+        let events = load_trace_file(&path).unwrap();
+
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], AppTraceEvent::BeginStroke(_)));
+        assert!(matches!(&events[1], AppTraceEvent::StrokeSample(_)));
+        assert!(matches!(&events[2], AppTraceEvent::FinishStroke));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trace_replay_events_drive_script_host_stroke_commands() {
+        let path = trace_path("replay");
+        save_trace_file(
+            &path,
+            vec![
+                AppTraceEvent::BeginStroke(AppTraceCanvasInput::from(canvas_input(
+                    1, 2.0, 3.0, 0.5,
+                ))),
+                AppTraceEvent::StrokeSample(AppTraceCanvasInput::from(canvas_input(
+                    2, 5.0, 7.0, 0.75,
+                ))),
+            ],
+        )
+        .unwrap();
+        let mut config = AppRuntimeConfig::default();
+        config.trace_config = AppTraceConfig::replay(path.clone());
+        let mut app = App::try_new(config).unwrap();
+
+        assert!(app.process_next_trace_replay_event());
+        assert!(app.process_next_trace_replay_event());
+        assert!(!app.process_next_trace_replay_event());
+        let stroke = app.brush_thread.finish_active_stroke().unwrap();
+
+        assert_eq!(stroke.inputs().len(), 2);
+        assert_eq!(stroke.inputs()[0].position, CanvasCoordF::new(2.0, 3.0));
+        assert_eq!(stroke.inputs()[1].position, CanvasCoordF::new(5.0, 7.0));
+        assert_eq!(stroke.inputs()[0].pressure, 0.5);
+        assert_eq!(stroke.inputs()[1].pressure, 0.75);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

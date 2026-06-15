@@ -5,6 +5,7 @@ mod runtime;
 mod script;
 mod stroke;
 mod tool;
+mod trace;
 mod view;
 
 pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime};
@@ -20,4 +21,8 @@ pub use script::{
     ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError, ScriptValue,
 };
 pub use tool::{ActiveTool, BrushId, BrushSettings, RoundBrushSettings, Tool, ToolSet};
+pub use trace::{
+    AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceMode,
+    AppTraceStatus, load_trace_file, save_trace_file,
+};
 pub use view::{AppView, AppViewMatrixError};
