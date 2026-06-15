@@ -82,6 +82,15 @@ pub(crate) struct FinishedRootStroke {
     stroke: ActiveRootStroke,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReplaceCircleSampleCache {
+    brush_settings: BrushSettings,
+    sampled_inputs: Vec<CanvasInput>,
+    path_distance: f32,
+    next_sample_distance: f32,
+    trailing_endpoint: bool,
+}
+
 impl BrushThreadRuntime {
     pub(crate) fn spawn(
         tool_set: ToolSet,
@@ -404,6 +413,55 @@ impl FinishedRootStroke {
     }
 }
 
+impl ReplaceCircleSampleCache {
+    pub(crate) fn new(brush_settings: BrushSettings) -> Self {
+        Self {
+            brush_settings,
+            sampled_inputs: Vec::new(),
+            path_distance: 0.0,
+            next_sample_distance: dab_spacing_px(brush_settings),
+            trailing_endpoint: false,
+        }
+    }
+
+    pub(crate) fn push_input(&mut self, input: CanvasInput) {
+        let Some(&previous) = self.sampled_inputs.last() else {
+            self.sampled_inputs.push(input);
+            return;
+        };
+
+        if self.trailing_endpoint {
+            self.sampled_inputs.pop();
+            self.trailing_endpoint = false;
+        }
+
+        let segment_length = distance_between(previous.position, input.position);
+        if segment_length > f32::EPSILON {
+            let segment_end_distance = self.path_distance + segment_length;
+            while self.next_sample_distance <= segment_end_distance {
+                let t = (self.next_sample_distance - self.path_distance) / segment_length;
+                self.sampled_inputs
+                    .push(interpolate_input(previous, input, t));
+                self.next_sample_distance += dab_spacing_px(self.brush_settings);
+            }
+            self.path_distance = segment_end_distance;
+        }
+
+        if self
+            .sampled_inputs
+            .last()
+            .is_none_or(|sample| !same_position(sample.position, input.position))
+        {
+            self.sampled_inputs.push(input);
+            self.trailing_endpoint = true;
+        }
+    }
+
+    pub(crate) fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
+        replace_circle_samples_for_sampled_inputs(&self.sampled_inputs, self.brush_settings)
+    }
+}
+
 impl ActiveRootStroke {
     fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
         replace_circle_samples_for_inputs(&self.inputs, self.brush_settings)
@@ -416,16 +474,34 @@ pub(crate) fn replace_circle_samples_for_inputs(
 ) -> Vec<ReplaceCircleStrokeSample> {
     sample_canvas_inputs(inputs, brush_settings)
         .into_iter()
-        .map(|input| ReplaceCircleStrokeSample {
-            center: input.position,
-            radius_px: brush_settings.radius_px,
-            color: apply_value_mask_to_premultiplied_rgba(
-                brush_settings.color,
-                brush_settings.flow * input.pressure.clamp(0.0, 1.0),
-                brush_settings.opacity,
-            ),
-        })
+        .map(|input| replace_circle_sample_for_input(input, brush_settings))
         .collect()
+}
+
+fn replace_circle_samples_for_sampled_inputs(
+    inputs: &[CanvasInput],
+    brush_settings: BrushSettings,
+) -> Vec<ReplaceCircleStrokeSample> {
+    inputs
+        .iter()
+        .copied()
+        .map(|input| replace_circle_sample_for_input(input, brush_settings))
+        .collect()
+}
+
+fn replace_circle_sample_for_input(
+    input: CanvasInput,
+    brush_settings: BrushSettings,
+) -> ReplaceCircleStrokeSample {
+    ReplaceCircleStrokeSample {
+        center: input.position,
+        radius_px: brush_settings.radius_px,
+        color: apply_value_mask_to_premultiplied_rgba(
+            brush_settings.color,
+            brush_settings.flow * input.pressure.clamp(0.0, 1.0),
+            brush_settings.opacity,
+        ),
+    }
 }
 
 fn sample_canvas_inputs(inputs: &[CanvasInput], settings: BrushSettings) -> Vec<CanvasInput> {
@@ -651,6 +727,7 @@ fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInp
 mod tests {
     use super::{
         ActiveRootStroke, BrushThreadCommand, BrushThreadRuntime, BrushWorker, QueuedCanvasInput,
+        ReplaceCircleSampleCache,
     };
     use crate::create_overwrite_ring;
     use crate::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
@@ -737,6 +814,37 @@ mod tests {
             samples[2].color,
             gla_color::PremultipliedRgbaF32::new(0.2, 0.1, 0.05, 0.2)
         );
+    }
+
+    #[test]
+    fn replace_circle_sample_cache_matches_batch_sampling_incrementally() {
+        let mut settings = BrushSettings::default();
+        settings.radius_px = 10.0;
+        settings.spacing_ratio = 1.0;
+        settings.flow = 0.5;
+        settings.opacity = 0.8;
+        settings.color = gla_color::PremultipliedRgbaF32::new(1.0, 0.5, 0.25, 1.0);
+        let inputs = [
+            canvas_input(0, 0.0, 0.0, 1.0),
+            canvas_input(1, 3.0, 0.0, 0.8),
+            canvas_input(2, 3.0, 0.0, 0.6),
+            canvas_input(3, 12.0, 0.0, 0.4),
+            canvas_input(4, 30.0, 0.0, 0.2),
+            canvas_input(5, 30.0, 0.0, 0.1),
+            canvas_input(6, 35.0, 5.0, 1.0),
+        ];
+        let mut cache = ReplaceCircleSampleCache::new(settings);
+        let mut seen_inputs = Vec::new();
+
+        for input in inputs {
+            seen_inputs.push(input);
+            cache.push_input(input);
+
+            assert_eq!(
+                cache.replace_circle_samples(),
+                super::replace_circle_samples_for_inputs(&seen_inputs, settings)
+            );
+        }
     }
 
     #[test]

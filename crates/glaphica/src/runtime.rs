@@ -25,7 +25,7 @@ use crate::{
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
-    stroke::{BrushThreadRuntime, replace_circle_samples_for_inputs},
+    stroke::{BrushThreadRuntime, ReplaceCircleSampleCache},
     trace::{
         AppTraceBlendMode, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceState,
         AppTraceUiAction,
@@ -68,22 +68,22 @@ struct AppFramePerf {
 
 #[derive(Debug, Clone)]
 struct ActiveStrokePreview {
-    brush_settings: BrushSettings,
-    inputs: Vec<CanvasInput>,
+    samples: ReplaceCircleSampleCache,
     dirty: bool,
 }
 
 impl ActiveStrokePreview {
     fn new(brush_settings: BrushSettings, input: CanvasInput) -> Self {
+        let mut samples = ReplaceCircleSampleCache::new(brush_settings);
+        samples.push_input(input);
         Self {
-            brush_settings,
-            inputs: vec![input],
+            samples,
             dirty: true,
         }
     }
 
     fn push_input(&mut self, input: CanvasInput) {
-        self.inputs.push(input);
+        self.samples.push_input(input);
         self.dirty = true;
     }
 
@@ -96,7 +96,7 @@ impl ActiveStrokePreview {
     }
 
     fn replace_circle_samples(&self) -> Vec<crate::ReplaceCircleStrokeSample> {
-        replace_circle_samples_for_inputs(&self.inputs, self.brush_settings)
+        self.samples.replace_circle_samples()
     }
 }
 
