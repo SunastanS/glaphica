@@ -3,12 +3,14 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures};
-use gla_color::{ChannelCount, ChannelType, GlaFormat};
+use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
+use gla_draw_on::DrawOnInput;
 use gla_ir::{
     DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, ImageId,
     ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
 };
-use gla_session::{DrawSession, SessionError};
+use gla_renderer::RenderBackend;
+use gla_session::{DrawCommit, DrawHistory, DrawSession, SessionError};
 use gla_storage::{GlobalStorage, GlobalStorageError};
 use tile_key::{NewAtlasError, Tiles};
 
@@ -126,6 +128,38 @@ impl DocumentWorkspace {
     pub fn begin_session(&mut self, ir: &DrawSessionIR) -> Result<DrawSession<'_>, SessionError> {
         DrawSession::begin(ir, &mut self.storage)
     }
+
+    pub fn replace_circle_on_root<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        center_x: f32,
+        center_y: f32,
+        radius_px: f32,
+        color: PremultipliedRgbaF32,
+    ) -> Result<Option<DrawCommit>, SessionError>
+    where
+        B: RenderBackend,
+    {
+        let root = self.root;
+        let ir = self.root_replace_circle_ir();
+        let mut session = self.begin_session(&ir)?;
+        {
+            let mut frame = session.begin_frame();
+            frame.draw_on(
+                root,
+                DrawOnInput::replace_circle_4d(
+                    center_x,
+                    center_y,
+                    radius_px.max(0.0),
+                    radius_px.max(0.0),
+                    color,
+                ),
+            )?;
+            frame.flush(backend)?;
+        }
+        session.commit(history)
+    }
 }
 
 #[derive(Debug)]
@@ -167,6 +201,41 @@ fn default_canvas_format() -> GlaFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gla_renderer::{Pass, RenderBackend};
+    use std::fmt::{Display, Formatter};
+
+    #[derive(Debug)]
+    struct RecordingBackendError;
+
+    impl Display for RecordingBackendError {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.write_str("recording backend failed")
+        }
+    }
+
+    impl Error for RecordingBackendError {}
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        submitted: Vec<Vec<Pass>>,
+    }
+
+    impl RecordingBackend {
+        fn submitted_passes(&self) -> impl Iterator<Item = Pass> + '_ {
+            self.submitted
+                .iter()
+                .flat_map(|passes| passes.iter().copied())
+        }
+    }
+
+    impl RenderBackend for RecordingBackend {
+        type Error = RecordingBackendError;
+
+        fn submit(&mut self, passes: &[Pass]) -> Result<(), Self::Error> {
+            self.submitted.push(passes.to_vec());
+            Ok(())
+        }
+    }
 
     #[test]
     fn blank_workspace_creates_root_primitive_document() {
@@ -214,6 +283,32 @@ mod tests {
 
         assert_eq!(workspace.canvas_size_px(), (128, 96));
         assert_eq!(workspace.storage().root(), Some(workspace.root()));
+    }
+
+    #[test]
+    fn replace_circle_on_root_flushes_and_commits_document_edit() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+
+        let commit = workspace
+            .replace_circle_on_root(
+                &mut history,
+                &mut backend,
+                24.0,
+                32.0,
+                8.0,
+                PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(commit.version, DocumentVersionId::new(2));
+        assert_eq!(workspace.version(), DocumentVersionId::new(2));
+        assert!(backend.submitted_passes().any(|pass| matches!(
+            pass,
+            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+        )));
     }
 
     #[test]
