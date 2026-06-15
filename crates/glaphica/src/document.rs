@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasLayout, NoAtlasTextures};
+use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures};
 use gla_color::{ChannelCount, ChannelType, GlaFormat};
 use gla_ir::{
     DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, ImageId,
@@ -23,18 +23,32 @@ pub struct DocumentWorkspace {
 }
 
 impl DocumentWorkspace {
-    pub fn default_blank() -> Result<Self, DocumentWorkspaceError> {
+    pub fn default_blank() -> Result<Self, DocumentWorkspaceBuildError<Infallible>> {
         Self::blank(DEFAULT_CANVAS_WIDTH_PX, DEFAULT_CANVAS_HEIGHT_PX)
     }
 
-    pub fn blank(width_px: u32, height_px: u32) -> Result<Self, DocumentWorkspaceError> {
+    pub fn blank(
+        width_px: u32,
+        height_px: u32,
+    ) -> Result<Self, DocumentWorkspaceBuildError<Infallible>> {
+        let mut textures = NoAtlasTextures;
+        Self::blank_with_textures(width_px, height_px, &mut textures)
+    }
+
+    pub fn blank_with_textures<S>(
+        width_px: u32,
+        height_px: u32,
+        textures: &mut S,
+    ) -> Result<Self, DocumentWorkspaceBuildError<S::Error>>
+    where
+        S: AtlasTextureStore,
+    {
         let format = default_canvas_format();
         let layout = ImageLayoutSpec::new(width_px, height_px);
         let mut tiles = Tiles::new();
-        let mut textures = NoAtlasTextures;
         tiles
-            .new_atlas(AtlasLayout::LARGE17, format, &mut textures)
-            .map_err(DocumentWorkspaceError::Atlas)?;
+            .new_atlas(AtlasLayout::LARGE17, format, textures)
+            .map_err(DocumentWorkspaceBuildError::Atlas)?;
 
         let root = ImageId::new(1);
         let mut storage = GlobalStorage::new(tiles);
@@ -48,7 +62,7 @@ impl DocumentWorkspace {
                 },
                 RegistryPatchOp::SetRoot(root),
             ]))
-            .map_err(DocumentWorkspaceError::Registry)?;
+            .map_err(DocumentWorkspaceBuildError::Registry)?;
 
         Ok(Self {
             storage,
@@ -115,12 +129,14 @@ impl DocumentWorkspace {
 }
 
 #[derive(Debug)]
-pub enum DocumentWorkspaceError {
-    Atlas(NewAtlasError<Infallible>),
+pub enum DocumentWorkspaceBuildError<E> {
+    Atlas(NewAtlasError<E>),
     Registry(GlobalStorageError),
 }
 
-impl Display for DocumentWorkspaceError {
+pub type DocumentWorkspaceError = DocumentWorkspaceBuildError<Infallible>;
+
+impl<E: Display> Display for DocumentWorkspaceBuildError<E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Atlas(error) => write!(f, "failed to allocate document atlas: {error}"),
@@ -129,7 +145,10 @@ impl Display for DocumentWorkspaceError {
     }
 }
 
-impl Error for DocumentWorkspaceError {
+impl<E> Error for DocumentWorkspaceBuildError<E>
+where
+    E: Error + 'static,
+{
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Atlas(error) => Some(error),
@@ -186,6 +205,15 @@ mod tests {
         );
         let session = workspace.begin_session(&ir).unwrap();
         session.discard();
+    }
+
+    #[test]
+    fn blank_workspace_can_use_injected_texture_store() {
+        let mut textures = NoAtlasTextures;
+        let workspace = DocumentWorkspace::blank_with_textures(128, 96, &mut textures).unwrap();
+
+        assert_eq!(workspace.canvas_size_px(), (128, 96));
+        assert_eq!(workspace.storage().root(), Some(workspace.root()));
     }
 
     #[test]
