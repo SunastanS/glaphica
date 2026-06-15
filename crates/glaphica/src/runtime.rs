@@ -17,7 +17,7 @@ use winit::{
 
 use crate::{
     AppView, AppViewMatrixError, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
-    DocumentWorkspace, DocumentWorkspaceBuildError,
+    DocumentWorkspace, DocumentWorkspaceBuildError, ReplaceCircleStrokeSample,
 };
 
 #[derive(Debug, Clone)]
@@ -88,6 +88,7 @@ struct App {
     history: DrawHistory,
     undo_stack: Vec<DrawRecordId>,
     redo_stack: Vec<DrawRecordId>,
+    active_stroke: Option<ActiveRootStroke>,
     primary_down: bool,
     middle_down: bool,
     middle_pan_last_pos: Option<ScreenCoordF>,
@@ -106,6 +107,7 @@ impl App {
             history: DrawHistory::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            active_stroke: None,
             primary_down: false,
             middle_down: false,
             middle_pan_last_pos: None,
@@ -120,26 +122,59 @@ impl App {
         WindowAttributes::default().with_title(self.config.window_title.clone())
     }
 
-    fn paint_at_last_cursor(&mut self) {
+    fn begin_stroke_at_last_cursor(&mut self) {
         let Some(position) = self.last_cursor_pos else {
             return;
         };
-        let _ = self.paint_at(position);
+        self.begin_stroke_at(position);
     }
 
-    fn paint_at(&mut self, position: ScreenCoordF) -> bool {
-        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+    fn begin_stroke_at(&mut self, position: ScreenCoordF) {
+        self.active_stroke = Some(ActiveRootStroke::default());
+        self.push_stroke_sample(position);
+    }
+
+    fn continue_stroke_at(&mut self, position: ScreenCoordF) {
+        if self.active_stroke.is_some() {
+            self.push_stroke_sample(position);
+        } else {
+            self.begin_stroke_at(position);
+        }
+    }
+
+    fn push_stroke_sample(&mut self, position: ScreenCoordF) {
+        let sample = self.stroke_sample_from_screen(position);
+        if let Some(stroke) = self.active_stroke.as_mut() {
+            stroke.push(sample);
+        }
+    }
+
+    fn stroke_sample_from_screen(&self, position: ScreenCoordF) -> ReplaceCircleStrokeSample {
+        let canvas = self.view.screen_to_document_point(position);
+        ReplaceCircleStrokeSample {
+            center: canvas,
+            radius_px: self.config.brush_radius_px,
+            color: self.config.brush_color,
+        }
+    }
+
+    fn commit_active_stroke(&mut self) -> bool {
+        let Some(stroke) = self.active_stroke.take() else {
             return false;
         };
-        let canvas = self.view.screen_to_document_point(position);
+        if stroke.samples.is_empty() {
+            return false;
+        }
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            self.active_stroke = Some(stroke);
+            return false;
+        };
+        let samples = stroke.samples;
 
-        match workspace.replace_circle_on_root(
+        match workspace.replace_circle_stroke_on_root(
             &mut self.history,
             gpu.renderer_mut(),
-            canvas.x,
-            canvas.y,
-            self.config.brush_radius_px,
-            self.config.brush_color,
+            samples.iter().copied(),
         ) {
             Ok(Some(commit)) => {
                 self.undo_stack.push(commit.record_id);
@@ -149,6 +184,7 @@ impl App {
             Ok(None) => false,
             Err(error) => {
                 eprintln!("stroke failed: {error}");
+                self.active_stroke = Some(ActiveRootStroke { samples });
                 false
             }
         }
@@ -243,6 +279,17 @@ impl App {
             return false;
         }
         true
+    }
+}
+
+#[derive(Debug, Default)]
+struct ActiveRootStroke {
+    samples: Vec<ReplaceCircleStrokeSample>,
+}
+
+impl ActiveRootStroke {
+    fn push(&mut self, sample: ReplaceCircleStrokeSample) {
+        self.samples.push(sample);
     }
 }
 
@@ -509,9 +556,7 @@ impl ApplicationHandler for App {
                     ScreenCoordF::new(finite_f64_to_f32(position.x), finite_f64_to_f32(position.y));
                 self.last_cursor_pos = Some(pos);
                 if self.primary_down {
-                    if self.paint_at(pos) {
-                        window.request_redraw();
-                    }
+                    self.continue_stroke_at(pos);
                 }
                 if self.middle_down {
                     self.pan_view_to(pos);
@@ -523,9 +568,11 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                let was_primary_down = self.primary_down;
                 self.primary_down = state == ElementState::Pressed;
-                if self.primary_down {
-                    self.paint_at_last_cursor();
+                if self.primary_down && !was_primary_down {
+                    self.begin_stroke_at_last_cursor();
+                } else if was_primary_down && self.commit_active_stroke() {
                     window.request_redraw();
                 }
             }

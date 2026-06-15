@@ -21,6 +21,23 @@ use crate::AppView;
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
 pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 768;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReplaceCircleStrokeSample {
+    pub center: CanvasCoordF,
+    pub radius_px: f32,
+    pub color: PremultipliedRgbaF32,
+}
+
+impl ReplaceCircleStrokeSample {
+    pub fn new(center_x: f32, center_y: f32, radius_px: f32, color: PremultipliedRgbaF32) -> Self {
+        Self {
+            center: CanvasCoordF::new(center_x, center_y),
+            radius_px,
+            color,
+        }
+    }
+}
+
 pub struct DocumentWorkspace {
     storage: GlobalStorage,
     root: ImageId,
@@ -145,21 +162,42 @@ impl DocumentWorkspace {
     where
         B: RenderBackend,
     {
+        self.replace_circle_stroke_on_root(
+            history,
+            backend,
+            [ReplaceCircleStrokeSample::new(
+                center_x, center_y, radius_px, color,
+            )],
+        )
+    }
+
+    pub fn replace_circle_stroke_on_root<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
+    ) -> Result<Option<DrawCommit>, SessionError>
+    where
+        B: RenderBackend,
+    {
         let root = self.root;
         let ir = self.root_replace_circle_ir();
         let mut session = self.begin_session(&ir)?;
         {
             let mut frame = session.begin_frame();
-            frame.draw_on(
-                root,
-                DrawOnInput::replace_circle_4d(
-                    center_x,
-                    center_y,
-                    radius_px.max(0.0),
-                    radius_px.max(0.0),
-                    color,
-                ),
-            )?;
+            for sample in samples {
+                let radius_px = sample.radius_px.max(0.0);
+                frame.draw_on(
+                    root,
+                    DrawOnInput::replace_circle_4d(
+                        sample.center.x,
+                        sample.center.y,
+                        radius_px,
+                        radius_px,
+                        sample.color,
+                    ),
+                )?;
+            }
             frame.flush(backend)?;
         }
         session.commit(history)
@@ -413,6 +451,46 @@ mod tests {
             pass,
             Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
         )));
+    }
+
+    #[test]
+    fn replace_circle_stroke_on_root_batches_samples_into_one_commit() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let color = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+
+        let commit = workspace
+            .replace_circle_stroke_on_root(
+                &mut history,
+                &mut backend,
+                [
+                    ReplaceCircleStrokeSample::new(24.0, 32.0, 8.0, color),
+                    ReplaceCircleStrokeSample::new(34.0, 42.0, 8.0, color),
+                ],
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(commit.version, DocumentVersionId::new(2));
+        assert_eq!(workspace.version(), DocumentVersionId::new(2));
+        assert_eq!(backend.submitted.len(), 1);
+        assert_eq!(
+            backend
+                .submitted_passes()
+                .filter(|pass| matches!(
+                    pass,
+                    Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+                ))
+                .count(),
+            2
+        );
+
+        let redo_record = workspace
+            .apply_draw_record(&mut history, &mut backend, commit.record_id)
+            .unwrap();
+        assert!(workspace.root_present_tiles().unwrap().is_empty());
+        assert_ne!(redo_record, commit.record_id);
     }
 
     #[test]
