@@ -122,7 +122,7 @@ impl ActiveStrokePreview {
     }
 
     fn push_brush_input(&mut self, input: &BrushInput) -> Result<usize, BrushInputError> {
-        let samples = input.replace_circle_samples()?;
+        let samples = input.preview_replace_circle_samples()?;
         let sample_count = samples.len();
         if sample_count > 0 {
             self.pending_brush_input_samples

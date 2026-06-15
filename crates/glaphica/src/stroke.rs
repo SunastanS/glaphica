@@ -615,6 +615,41 @@ impl BrushInputBlock {
             ),
         ))
     }
+
+    fn preview_replace_circle_sample(
+        &self,
+        brush_id: BrushId,
+        block_index: usize,
+    ) -> Result<ReplaceCircleStrokeSample, BrushInputError> {
+        if self.values.len() == REPLACE_CIRCLE_BLOCK_VALUE_COUNT {
+            return self.replace_circle_sample(brush_id, block_index);
+        }
+        if self.values.len() != ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT {
+            return Err(BrushInputError::InvalidBlockLength {
+                brush_id,
+                block_index,
+                expected: ROUND_BRUSH_INPUT_BLOCK_VALUE_COUNT,
+                actual: self.values.len(),
+            });
+        }
+        for (value_index, value) in self.values.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(BrushInputError::InvalidBlockValue {
+                    brush_id,
+                    block_index,
+                    value_index,
+                });
+            }
+        }
+
+        let tint = PremultipliedRgbaF32::new(self.values[8], self.values[9], self.values[10], 1.0);
+        Ok(ReplaceCircleStrokeSample::new(
+            self.values[0],
+            self.values[1],
+            self.values[2].max(0.0),
+            apply_value_mask_to_premultiplied_rgba(tint, self.values[3], self.values[7]),
+        ))
+    }
 }
 
 impl BrushInputBlockList {
@@ -660,6 +695,18 @@ impl BrushInputBlockList {
             .map(|(block_index, block)| block.replace_circle_sample(self.brush_id, block_index))
             .collect()
     }
+
+    fn preview_replace_circle_samples(
+        &self,
+    ) -> Result<Vec<ReplaceCircleStrokeSample>, BrushInputError> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .map(|(block_index, block)| {
+                block.preview_replace_circle_sample(self.brush_id, block_index)
+            })
+            .collect()
+    }
 }
 
 impl BrushInput {
@@ -690,6 +737,19 @@ impl BrushInput {
             });
         }
         self.blocks.replace_circle_samples()
+    }
+
+    pub(crate) fn preview_replace_circle_samples(
+        &self,
+    ) -> Result<Vec<ReplaceCircleStrokeSample>, BrushInputError> {
+        let actual = self.blocks.brush_id();
+        if actual != self.brush_id {
+            return Err(BrushInputError::WrongBrush {
+                expected: self.brush_id,
+                actual,
+            });
+        }
+        self.blocks.preview_replace_circle_samples()
     }
 }
 
@@ -2014,6 +2074,22 @@ mod tests {
     }
 
     #[test]
+    fn brush_input_preview_samples_accept_legacy_replace_circle_blocks() {
+        let sample = crate::ReplaceCircleStrokeSample::new(
+            10.0,
+            20.0,
+            3.0,
+            gla_color::PremultipliedRgbaF32::new(0.1, 0.2, 0.3, 0.4),
+        );
+        let brush_input = BrushInput::from_replace_circle_samples(BrushId::DEFAULT, [sample]);
+
+        assert_eq!(
+            brush_input.preview_replace_circle_samples().unwrap(),
+            vec![sample]
+        );
+    }
+
+    #[test]
     fn round_brush_processor_produces_dev_style_blocks_from_canvas_input() {
         let processor = RoundBrushInputProcessor::default();
         let mut stroke = processor.begin_stroke();
@@ -2034,6 +2110,29 @@ mod tests {
         assert_eq!(
             &values[..],
             &[0.0, 0.0, 5.0, 0.5, 1.0, 1.0, 0.7, 1.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn round_brush_input_exports_preview_replace_circle_samples() {
+        let processor = RoundBrushInputProcessor::default()
+            .with_base_flow(0.25)
+            .with_base_opacity(0.5)
+            .with_tint([0.2, 0.4, 0.8]);
+        let mut stroke = processor.begin_stroke();
+
+        stroke
+            .push_canvas_inputs(&[canvas_input(0, 8.0, 9.0, 1.0)])
+            .unwrap();
+        let brush_input = stroke.drain_brush_input().unwrap().unwrap();
+        let samples = brush_input.preview_replace_circle_samples().unwrap();
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].center, CanvasCoordF::new(8.0, 9.0));
+        assert_eq!(samples[0].radius_px, 5.0);
+        assert_eq!(
+            samples[0].color,
+            gla_color::PremultipliedRgbaF32::new(0.025, 0.05, 0.1, 0.125)
         );
     }
 

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "events": [
+    {
+      "Ui": "CreateLayer"
+    },
+    {
+      "BeginStroke": {
+        "time_ns": 1,
+        "position": [
+          24.0,
+          32.0
+        ],
+        "pressure": 1.0,
+        "tilt": [
+          0.0,
+          0.0
+        ],
+        "twist": 0.0
+      }
+    },
+    {
+      "StrokeSample": {
+        "time_ns": 2,
+        "position": [
+          64.0,
+          72.0
+        ],
+        "pressure": 0.9,
+        "tilt": [
+          0.0,
+          0.0
+        ],
+        "twist": 0.0
+      }
+    },
+    "FinishStroke",
+    "Undo",
+    "Redo"
+  ]
+}
