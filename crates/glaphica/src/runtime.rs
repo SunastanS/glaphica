@@ -71,7 +71,7 @@ pub struct AppPerfTraceConfig {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct AppFramePerf {
-    process_preview: Duration,
+    process_inputs: Duration,
     update_cache: Duration,
     acquire_frame: Duration,
     present_surface: Duration,
@@ -439,7 +439,7 @@ impl App {
         Ok(())
     }
 
-    fn process_pending_active_stroke_preview(&mut self) {
+    fn process_pending_brush_inputs(&mut self) {
         self.drain_pending_brush_input_preview();
         let request = match self.active_stroke_preview.as_ref() {
             Some(preview) => match preview.render_request() {
@@ -1995,14 +1995,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let frame_started = Instant::now();
-                let process_preview_started = Instant::now();
                 let mut ui_output = self.paint_ui_overlay(&window);
                 if let Some(output) = ui_output.as_mut() {
                     self.process_ui_overlay_actions(output);
                 }
                 self.refresh_layer_composite_if_needed();
-                self.process_pending_active_stroke_preview();
-                let process_preview = process_preview_started.elapsed();
+                let process_inputs_started = Instant::now();
+                self.process_pending_brush_inputs();
+                let process_inputs = process_inputs_started.elapsed();
                 let update_request = self.frame_scheduler.take_screen_update_request();
                 let mut perf = self.gpu.as_mut().and_then(|gpu| {
                     gpu.render(
@@ -2013,7 +2013,7 @@ impl ApplicationHandler for App {
                     )
                 });
                 if let Some(perf) = perf.as_mut() {
-                    perf.process_preview = process_preview;
+                    perf.process_inputs = process_inputs;
                     self.trace_frame_perf(frame_started.elapsed(), perf);
                     self.rendered_frame_count = self.rendered_frame_count.saturating_add(1);
                 }
@@ -2096,7 +2096,7 @@ fn duration_ms(duration: Duration) -> f64 {
 
 fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) -> String {
     let stages = [
-        ("process_preview", perf.process_preview),
+        ("process_inputs", perf.process_inputs),
         ("update_cache", perf.update_cache),
         ("acquire_frame", perf.acquire_frame),
         ("present_surface", perf.present_surface),
@@ -2107,11 +2107,11 @@ fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) ->
         .copied()
         .expect("app frame perf should always have stages");
     format!(
-        "[PERF][app][frame={frame_seq}] total_ms={:.3} bottleneck={bottleneck} ({:.3}ms) dirty_tiles={} stages_ms={{process_preview:{:.3}, update_cache:{:.3}, acquire_frame:{:.3}, present_surface:{:.3}}}",
+        "[PERF][app][frame={frame_seq}] total_ms={:.3} bottleneck={bottleneck} ({:.3}ms) dirty_tiles={} stages_ms={{process_inputs:{:.3}, update_cache:{:.3}, acquire_frame:{:.3}, present_surface:{:.3}}}",
         duration_ms(total),
         duration_ms(bottleneck_duration),
         perf.dirty_tile_count,
-        duration_ms(perf.process_preview),
+        duration_ms(perf.process_inputs),
         duration_ms(perf.update_cache),
         duration_ms(perf.acquire_frame),
         duration_ms(perf.present_surface),
@@ -2270,7 +2270,7 @@ mod tests {
     #[test]
     fn app_perf_line_reports_stage_breakdown_and_bottleneck() {
         let perf = AppFramePerf {
-            process_preview: Duration::from_micros(400),
+            process_inputs: Duration::from_micros(400),
             update_cache: Duration::from_micros(500),
             acquire_frame: Duration::from_micros(250),
             present_surface: Duration::from_micros(1_250),
@@ -2283,7 +2283,7 @@ mod tests {
         assert!(line.contains("total_ms=2.000"));
         assert!(line.contains("bottleneck=present_surface (1.250ms)"));
         assert!(line.contains("dirty_tiles=3"));
-        assert!(line.contains("process_preview:0.400"));
+        assert!(line.contains("process_inputs:0.400"));
         assert!(line.contains("update_cache:0.500"));
     }
 
