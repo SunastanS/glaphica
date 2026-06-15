@@ -499,6 +499,26 @@ impl App {
         }
     }
 
+    fn select_visible_layer_from_window(&mut self, delta: isize) {
+        let layers = match self.ui_layers() {
+            Ok(layers) if !layers.is_empty() => layers,
+            Ok(_) => return,
+            Err(error) => {
+                eprintln!("ui layer collection failed: {error}");
+                return;
+            }
+        };
+        let active_index = layers
+            .iter()
+            .position(|layer| layer.active)
+            .unwrap_or_default();
+        let next_index = active_index
+            .saturating_add_signed(delta)
+            .min(layers.len().saturating_sub(1));
+        let next_id = layers[next_index].id;
+        self.execute_ui_action_from_window(UiAction::ActiveNodeChanged(next_id));
+    }
+
     fn ui_layers(&self) -> Result<Vec<UiLayerItem>, ScriptHostError> {
         let Some(workspace) = self.workspace.as_ref() else {
             return Ok(Vec::new());
@@ -1462,6 +1482,10 @@ impl ApplicationHandler for App {
                                 && value.eq_ignore_ascii_case("l")
                             {
                                 self.execute_ui_action_from_window(UiAction::CreateGroupRequested);
+                            } else if self.modifiers.control_key() && value == "[" {
+                                self.select_visible_layer_from_window(-1);
+                            } else if self.modifiers.control_key() && value == "]" {
+                                self.select_visible_layer_from_window(1);
                             } else if self.modifiers.control_key()
                                 && value.eq_ignore_ascii_case("z")
                             {
@@ -2097,6 +2121,46 @@ mod tests {
 
         let workspace = app.workspace.as_ref().unwrap();
         assert_eq!(workspace.layer_tree().node(layer).unwrap().opacity(), 0.25);
+    }
+
+    #[test]
+    fn window_layer_selection_steps_through_visible_layers() {
+        let path = trace_path("window-layer-selection");
+        let mut config = AppRuntimeConfig::default();
+        config.trace_config = AppTraceConfig::record(path.clone());
+        let mut app = App::try_new(config).unwrap();
+        let mut workspace = DocumentWorkspace::blank(320, 240).unwrap();
+        let root = workspace.layer_tree().root_id();
+        let first = workspace.append_layer(root).unwrap();
+        let second = workspace.append_layer(root).unwrap();
+        app.workspace = Some(workspace);
+
+        app.select_visible_layer_from_window(1);
+        let active_after_next = app
+            .workspace
+            .as_ref()
+            .unwrap()
+            .layer_tree()
+            .active_node_id();
+        app.select_visible_layer_from_window(-1);
+        let active_after_prev = app
+            .workspace
+            .as_ref()
+            .unwrap()
+            .layer_tree()
+            .active_node_id();
+        app.trace.stop_recording().unwrap().unwrap();
+
+        assert_eq!(active_after_next, first);
+        assert_eq!(active_after_prev, second);
+        assert_eq!(
+            load_trace_file(&path).unwrap(),
+            vec![
+                AppTraceEvent::Ui(AppTraceUiAction::SelectLayer { visible_index: 2 }),
+                AppTraceEvent::Ui(AppTraceUiAction::SelectLayer { visible_index: 1 }),
+            ]
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
