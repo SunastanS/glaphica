@@ -2,6 +2,7 @@ mod display;
 mod document;
 mod frame;
 mod runtime;
+mod stroke;
 mod tool;
 mod view;
 

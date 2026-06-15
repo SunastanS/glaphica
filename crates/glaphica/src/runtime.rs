@@ -17,10 +17,10 @@ use winit::{
 
 use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
-    DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError,
-    ReplaceCircleStrokeSample, ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame,
-    SurfaceRuntime, ToolSet,
+    DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, ScreenBlitter,
+    ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
+    stroke::ActiveRootStroke,
 };
 
 #[derive(Debug, Clone)]
@@ -334,42 +334,6 @@ impl App {
             return false;
         }
         true
-    }
-}
-
-#[derive(Debug)]
-struct ActiveRootStroke {
-    brush_id: BrushId,
-    brush_settings: BrushSettings,
-    inputs: Vec<CanvasInput>,
-}
-
-impl ActiveRootStroke {
-    fn new(brush_id: BrushId, brush_settings: BrushSettings) -> Self {
-        Self {
-            brush_id,
-            brush_settings,
-            inputs: Vec::new(),
-        }
-    }
-
-    fn push_input(&mut self, input: CanvasInput) {
-        self.inputs.push(input);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inputs.is_empty()
-    }
-
-    fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
-        self.inputs
-            .iter()
-            .map(|input| ReplaceCircleStrokeSample {
-                center: input.position,
-                radius_px: self.brush_settings.radius_px * input.pressure.clamp(0.0, 1.0),
-                color: self.brush_settings.color,
-            })
-            .collect()
     }
 }
 
@@ -875,12 +839,12 @@ mod tests {
         app.continue_stroke_at(ScreenCoordF::new(14.0, 28.0));
 
         let stroke = app.active_stroke.as_ref().unwrap();
-        assert_eq!(stroke.brush_id, BrushId::DEFAULT);
-        assert_eq!(stroke.inputs.len(), 2);
-        assert_eq!(stroke.inputs[0].position, CanvasCoordF::new(1.0, 2.0));
-        assert_eq!(stroke.inputs[1].position, CanvasCoordF::new(2.0, 4.0));
-        assert_eq!(stroke.inputs[0].pressure, 1.0);
-        assert!(stroke.inputs[1].time_ns > stroke.inputs[0].time_ns);
+        assert_eq!(stroke.brush_id(), BrushId::DEFAULT);
+        assert_eq!(stroke.inputs().len(), 2);
+        assert_eq!(stroke.inputs()[0].position, CanvasCoordF::new(1.0, 2.0));
+        assert_eq!(stroke.inputs()[1].position, CanvasCoordF::new(2.0, 4.0));
+        assert_eq!(stroke.inputs()[0].pressure, 1.0);
+        assert!(stroke.inputs()[1].time_ns > stroke.inputs()[0].time_ns);
 
         let samples = stroke.replace_circle_samples();
         assert_eq!(samples[0].center, CanvasCoordF::new(1.0, 2.0));
