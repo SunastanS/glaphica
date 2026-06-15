@@ -82,7 +82,22 @@ struct AppFramePerf {
 struct ActiveStrokePreview {
     samples: ReplaceCircleSampleCache,
     brush_input_samples: Vec<crate::ReplaceCircleStrokeSample>,
+    pending_brush_input_samples: Vec<crate::ReplaceCircleStrokeSample>,
+    rendered_brush_input_sample_count: usize,
     dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveStrokePreviewRenderMode {
+    Full,
+    Append,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ActiveStrokePreviewRenderRequest {
+    mode: ActiveStrokePreviewRenderMode,
+    samples: Vec<crate::ReplaceCircleStrokeSample>,
+    rendered_brush_input_sample_count: Option<usize>,
 }
 
 impl ActiveStrokePreview {
@@ -92,25 +107,32 @@ impl ActiveStrokePreview {
         Self {
             samples,
             brush_input_samples: Vec::new(),
+            pending_brush_input_samples: Vec::new(),
+            rendered_brush_input_sample_count: 0,
             dirty: true,
         }
     }
 
     fn push_input(&mut self, input: CanvasInput) {
         self.samples.push_input(input);
-        self.dirty = true;
+        if self.brush_input_samples.is_empty() {
+            self.dirty = true;
+        }
     }
 
     fn push_brush_input(&mut self, input: &BrushInput) -> Result<usize, BrushInputError> {
         let samples = input.replace_circle_samples()?;
         let sample_count = samples.len();
         if sample_count > 0 {
+            self.pending_brush_input_samples
+                .extend(samples.iter().copied());
             self.brush_input_samples.extend(samples);
             self.dirty = true;
         }
         Ok(sample_count)
     }
 
+    #[cfg(test)]
     fn needs_render(&self) -> bool {
         self.dirty
     }
@@ -119,6 +141,37 @@ impl ActiveStrokePreview {
         self.dirty = false;
     }
 
+    fn render_request(&self) -> Option<ActiveStrokePreviewRenderRequest> {
+        if !self.pending_brush_input_samples.is_empty() {
+            if self.rendered_brush_input_sample_count == 0 {
+                return Some(ActiveStrokePreviewRenderRequest {
+                    mode: ActiveStrokePreviewRenderMode::Full,
+                    samples: self.brush_input_samples.clone(),
+                    rendered_brush_input_sample_count: Some(self.brush_input_samples.len()),
+                });
+            }
+            return Some(ActiveStrokePreviewRenderRequest {
+                mode: ActiveStrokePreviewRenderMode::Append,
+                samples: self.pending_brush_input_samples.clone(),
+                rendered_brush_input_sample_count: Some(self.brush_input_samples.len()),
+            });
+        }
+        self.dirty.then(|| ActiveStrokePreviewRenderRequest {
+            mode: ActiveStrokePreviewRenderMode::Full,
+            samples: self.samples.replace_circle_samples(),
+            rendered_brush_input_sample_count: None,
+        })
+    }
+
+    fn finish_render_request(&mut self, rendered_brush_input_sample_count: Option<usize>) {
+        self.mark_rendered();
+        if let Some(count) = rendered_brush_input_sample_count {
+            self.rendered_brush_input_sample_count = count;
+            self.pending_brush_input_samples.clear();
+        }
+    }
+
+    #[cfg(test)]
     fn replace_circle_samples(&self) -> Vec<crate::ReplaceCircleStrokeSample> {
         if !self.brush_input_samples.is_empty() {
             return self.brush_input_samples.clone();
@@ -388,13 +441,16 @@ impl App {
 
     fn process_pending_active_stroke_preview(&mut self) {
         self.drain_pending_brush_input_preview();
-        let samples = match self.active_stroke_preview.as_ref() {
-            Some(preview) if preview.needs_render() => preview.replace_circle_samples(),
+        let request = match self.active_stroke_preview.as_ref() {
+            Some(preview) => match preview.render_request() {
+                Some(request) => request,
+                None => return,
+            },
             _ => return,
         };
-        if samples.is_empty() {
+        if request.samples.is_empty() {
             if let Some(preview) = self.active_stroke_preview.as_mut() {
-                preview.mark_rendered();
+                preview.finish_render_request(request.rendered_brush_input_sample_count);
             }
             return;
         }
@@ -402,16 +458,24 @@ impl App {
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             return;
         };
-        match workspace.render_stroke_preview(gpu.renderer_mut(), samples) {
+        let result = match request.mode {
+            ActiveStrokePreviewRenderMode::Full => {
+                workspace.render_stroke_preview(gpu.renderer_mut(), request.samples)
+            }
+            ActiveStrokePreviewRenderMode::Append => {
+                workspace.append_stroke_preview(gpu.renderer_mut(), request.samples)
+            }
+        };
+        match result {
             Ok(dirty_tiles) if !dirty_tiles.is_empty() => {
                 if let Some(preview) = self.active_stroke_preview.as_mut() {
-                    preview.mark_rendered();
+                    preview.finish_render_request(request.rendered_brush_input_sample_count);
                 }
                 self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
             }
             Ok(_) => {
                 if let Some(preview) = self.active_stroke_preview.as_mut() {
-                    preview.mark_rendered();
+                    preview.finish_render_request(request.rendered_brush_input_sample_count);
                 }
             }
             Err(error) => eprintln!("stroke preview render failed: {error}"),
@@ -2260,6 +2324,58 @@ mod tests {
 
         assert!(preview.needs_render());
         assert_eq!(preview.replace_circle_samples(), vec![worker_sample]);
+    }
+
+    #[test]
+    fn active_stroke_preview_appends_worker_batches_after_first_worker_render() {
+        let mut preview = super::ActiveStrokePreview::new(
+            BrushSettings::default(),
+            canvas_input(0, 1.0, 2.0, 1.0),
+        );
+        preview.mark_rendered();
+        let first = ReplaceCircleStrokeSample::new(
+            9.0,
+            10.0,
+            11.0,
+            gla_color::PremultipliedRgbaF32::new(0.25, 0.5, 0.75, 1.0),
+        );
+        let second = ReplaceCircleStrokeSample::new(
+            19.0,
+            20.0,
+            21.0,
+            gla_color::PremultipliedRgbaF32::new(0.75, 0.5, 0.25, 1.0),
+        );
+
+        preview
+            .push_brush_input(&BrushInput::from_replace_circle_samples(
+                BrushId::DEFAULT,
+                [first],
+            ))
+            .unwrap();
+        let first_request = preview.render_request().unwrap();
+        assert_eq!(
+            first_request.mode,
+            super::ActiveStrokePreviewRenderMode::Full
+        );
+        assert_eq!(first_request.samples, vec![first]);
+        preview.finish_render_request(first_request.rendered_brush_input_sample_count);
+        preview.push_input(canvas_input(1, 30.0, 31.0, 1.0));
+        assert!(!preview.needs_render());
+
+        preview
+            .push_brush_input(&BrushInput::from_replace_circle_samples(
+                BrushId::DEFAULT,
+                [second],
+            ))
+            .unwrap();
+        let second_request = preview.render_request().unwrap();
+
+        assert_eq!(
+            second_request.mode,
+            super::ActiveStrokePreviewRenderMode::Append
+        );
+        assert_eq!(second_request.samples, vec![second]);
+        assert_eq!(preview.replace_circle_samples(), vec![first, second]);
     }
 
     #[test]
