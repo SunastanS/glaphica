@@ -1,8 +1,9 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
+use std::time::Instant;
 
-use gla_core::ScreenCoordF;
+use gla_core::{CanvasInput, ScreenCoordF};
 use gla_ir::DrawOnToolKind;
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
 use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
@@ -10,7 +11,7 @@ use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{Key, ModifiersState},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -98,6 +99,8 @@ struct App {
     middle_down: bool,
     middle_pan_last_pos: Option<ScreenCoordF>,
     last_cursor_pos: Option<ScreenCoordF>,
+    input_clock_start: Instant,
+    last_input_time_ns: u64,
     modifiers: ModifiersState,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
@@ -118,6 +121,8 @@ impl App {
             middle_down: false,
             middle_pan_last_pos: None,
             last_cursor_pos: None,
+            input_clock_start: Instant::now(),
+            last_input_time_ns: 0,
             modifiers: ModifiersState::default(),
             window: None,
             gpu: None,
@@ -148,22 +153,22 @@ impl App {
             self.active_stroke = None;
             return;
         };
-        self.active_stroke = Some(ActiveRootStroke::new(brush_id));
-        self.push_stroke_sample(position);
+        self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.config.brush_settings));
+        self.push_stroke_input(position);
     }
 
     fn continue_stroke_at(&mut self, position: ScreenCoordF) {
         if self.active_stroke.is_some() {
-            self.push_stroke_sample(position);
+            self.push_stroke_input(position);
         } else {
             self.begin_stroke_at(position);
         }
     }
 
-    fn push_stroke_sample(&mut self, position: ScreenCoordF) {
-        let sample = self.stroke_sample_from_screen(position);
+    fn push_stroke_input(&mut self, position: ScreenCoordF) {
+        let input = self.stroke_input_from_screen(position);
         if let Some(stroke) = self.active_stroke.as_mut() {
-            stroke.push(sample);
+            stroke.push_input(input);
         }
     }
 
@@ -174,27 +179,37 @@ impl App {
             .then_some(self.config.active_tool.brush_id())?
     }
 
-    fn stroke_sample_from_screen(&self, position: ScreenCoordF) -> ReplaceCircleStrokeSample {
+    fn stroke_input_from_screen(&mut self, position: ScreenCoordF) -> CanvasInput {
         let canvas = self.view.screen_to_document_point(position);
-        ReplaceCircleStrokeSample {
-            center: canvas,
-            radius_px: self.config.brush_settings.radius_px,
-            color: self.config.brush_settings.color,
+        CanvasInput {
+            time_ns: self.next_input_time_ns(),
+            position: canvas,
+            pressure: 1.0,
+            tilt: (0.0, 0.0),
+            twist: 0.0,
         }
+    }
+
+    fn next_input_time_ns(&mut self) -> u64 {
+        let elapsed_ns = self.input_clock_start.elapsed().as_nanos();
+        let elapsed_ns = u64::try_from(elapsed_ns).unwrap_or(u64::MAX);
+        let time_ns = elapsed_ns.max(self.last_input_time_ns.saturating_add(1));
+        self.last_input_time_ns = time_ns;
+        time_ns
     }
 
     fn commit_active_stroke(&mut self) -> bool {
         let Some(stroke) = self.active_stroke.take() else {
             return false;
         };
-        if stroke.samples.is_empty() {
+        if stroke.is_empty() {
             return false;
         }
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             self.active_stroke = Some(stroke);
             return false;
         };
-        let samples = stroke.samples;
+        let samples = stroke.replace_circle_samples();
 
         let commit = match workspace.replace_circle_stroke_on_root(
             &mut self.history,
@@ -205,10 +220,7 @@ impl App {
             Ok(None) => return false,
             Err(error) => {
                 eprintln!("stroke failed: {error}");
-                self.active_stroke = Some(ActiveRootStroke {
-                    brush_id: stroke.brush_id,
-                    samples,
-                });
+                self.active_stroke = Some(stroke);
                 return false;
             }
         };
@@ -217,6 +229,10 @@ impl App {
         self.redo_stack.clear();
         self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
         true
+    }
+
+    fn cancel_active_stroke(&mut self) -> bool {
+        self.active_stroke.take().is_some()
     }
 
     fn undo(&mut self) -> bool {
@@ -324,19 +340,36 @@ impl App {
 #[derive(Debug)]
 struct ActiveRootStroke {
     brush_id: BrushId,
-    samples: Vec<ReplaceCircleStrokeSample>,
+    brush_settings: BrushSettings,
+    inputs: Vec<CanvasInput>,
 }
 
 impl ActiveRootStroke {
-    fn new(brush_id: BrushId) -> Self {
+    fn new(brush_id: BrushId, brush_settings: BrushSettings) -> Self {
         Self {
             brush_id,
-            samples: Vec::new(),
+            brush_settings,
+            inputs: Vec::new(),
         }
     }
 
-    fn push(&mut self, sample: ReplaceCircleStrokeSample) {
-        self.samples.push(sample);
+    fn push_input(&mut self, input: CanvasInput) {
+        self.inputs.push(input);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inputs.is_empty()
+    }
+
+    fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
+        self.inputs
+            .iter()
+            .map(|input| ReplaceCircleStrokeSample {
+                center: input.position,
+                radius_px: self.brush_settings.radius_px * input.pressure.clamp(0.0, 1.0),
+                color: self.brush_settings.color,
+            })
+            .collect()
     }
 }
 
@@ -724,25 +757,36 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && !event.repeat
-                    && let Key::Character(value) = &event.logical_key
-                {
-                    if self.modifiers.control_key()
-                        && self.modifiers.shift_key()
-                        && value.eq_ignore_ascii_case("z")
-                    {
-                        if self.redo() {
-                            self.request_redraw();
+                if event.state == ElementState::Pressed && !event.repeat {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            if self.cancel_active_stroke() {
+                                self.primary_down = false;
+                            }
                         }
-                    } else if self.modifiers.control_key() && value.eq_ignore_ascii_case("z") {
-                        if self.undo() {
-                            self.request_redraw();
+                        Key::Character(value) => {
+                            if self.modifiers.control_key()
+                                && self.modifiers.shift_key()
+                                && value.eq_ignore_ascii_case("z")
+                            {
+                                if self.redo() {
+                                    self.request_redraw();
+                                }
+                            } else if self.modifiers.control_key()
+                                && value.eq_ignore_ascii_case("z")
+                            {
+                                if self.undo() {
+                                    self.request_redraw();
+                                }
+                            } else if self.modifiers.control_key()
+                                && value.eq_ignore_ascii_case("y")
+                            {
+                                if self.redo() {
+                                    self.request_redraw();
+                                }
+                            }
                         }
-                    } else if self.modifiers.control_key() && value.eq_ignore_ascii_case("y") {
-                        if self.redo() {
-                            self.request_redraw();
-                        }
+                        _ => {}
                     }
                 }
             }
@@ -790,8 +834,10 @@ fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
 mod tests {
     use super::{App, AppRuntimeConfig};
     use crate::{
-        ActiveTool, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, Tool,
+        ActiveTool, AppView, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
+        DEFAULT_CANVAS_WIDTH_PX, Tool,
     };
+    use gla_core::{CanvasCoordF, ScreenCoordF};
     use gla_ir::DrawOnToolKind;
 
     #[test]
@@ -818,6 +864,63 @@ mod tests {
         let app = App::new(config);
 
         assert_eq!(app.active_brush_id(), None);
+    }
+
+    #[test]
+    fn active_stroke_records_canvas_inputs_for_current_view() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.view = AppView::new([2.0, 0.0, 0.0, 2.0, 10.0, 20.0]).unwrap();
+
+        app.begin_stroke_at(ScreenCoordF::new(12.0, 24.0));
+        app.continue_stroke_at(ScreenCoordF::new(14.0, 28.0));
+
+        let stroke = app.active_stroke.as_ref().unwrap();
+        assert_eq!(stroke.brush_id, BrushId::DEFAULT);
+        assert_eq!(stroke.inputs.len(), 2);
+        assert_eq!(stroke.inputs[0].position, CanvasCoordF::new(1.0, 2.0));
+        assert_eq!(stroke.inputs[1].position, CanvasCoordF::new(2.0, 4.0));
+        assert_eq!(stroke.inputs[0].pressure, 1.0);
+        assert!(stroke.inputs[1].time_ns > stroke.inputs[0].time_ns);
+
+        let samples = stroke.replace_circle_samples();
+        assert_eq!(samples[0].center, CanvasCoordF::new(1.0, 2.0));
+        assert_eq!(samples[1].center, CanvasCoordF::new(2.0, 4.0));
+        assert_eq!(samples[0].radius_px, BrushSettings::default().radius_px);
+    }
+
+    #[test]
+    fn active_stroke_snapshots_brush_settings_at_begin() {
+        let mut config = AppRuntimeConfig::default();
+        config.brush_settings.radius_px = 7.0;
+        config.brush_settings.color = gla_color::PremultipliedRgbaF32::new(0.1, 0.2, 0.3, 1.0);
+        let mut app = App::new(config);
+
+        app.begin_stroke_at(ScreenCoordF::new(10.0, 20.0));
+        app.config.brush_settings.radius_px = 99.0;
+        app.config.brush_settings.color = gla_color::PremultipliedRgbaF32::new(0.8, 0.7, 0.6, 1.0);
+        app.continue_stroke_at(ScreenCoordF::new(11.0, 21.0));
+
+        let samples = app.active_stroke.as_ref().unwrap().replace_circle_samples();
+        assert_eq!(samples.len(), 2);
+        assert!(samples.iter().all(|sample| sample.radius_px == 7.0));
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.color
+                    == gla_color::PremultipliedRgbaF32::new(0.1, 0.2, 0.3, 1.0))
+        );
+    }
+
+    #[test]
+    fn cancel_active_stroke_drops_transaction() {
+        let mut app = App::new(AppRuntimeConfig::default());
+
+        app.begin_stroke_at(ScreenCoordF::new(10.0, 20.0));
+
+        assert!(app.active_stroke.is_some());
+        assert!(app.cancel_active_stroke());
+        assert!(app.active_stroke.is_none());
+        assert!(!app.cancel_active_stroke());
     }
 
     #[test]
