@@ -53,6 +53,7 @@ pub struct AppRuntimeConfig {
     pub canvas_height_px: u32,
     pub workspace_path: Option<PathBuf>,
     pub startup_command_plan_path: Option<PathBuf>,
+    pub startup_export_workspace_path: Option<PathBuf>,
     pub exit_after_redraw_frames: Option<u64>,
     pub tool_set: ToolSet,
     pub active_tool: ActiveTool,
@@ -194,6 +195,7 @@ impl Default for AppRuntimeConfig {
             canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
             workspace_path: None,
             startup_command_plan_path: None,
+            startup_export_workspace_path: None,
             exit_after_redraw_frames: None,
             tool_set: ToolSet::default_brush(),
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
@@ -1169,6 +1171,14 @@ impl App {
         Ok(())
     }
 
+    fn execute_startup_export_workspace(&mut self) -> Result<(), ScriptHostError> {
+        let Some(path) = self.config.startup_export_workspace_path.clone() else {
+            return Ok(());
+        };
+        self.export_workspace_directory_from_script(path)?;
+        Ok(())
+    }
+
     fn execute_startup_command_plan_source(
         &mut self,
         path: &Path,
@@ -1838,6 +1848,11 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        if let Err(error) = self.execute_startup_export_workspace() {
+            eprintln!("startup workspace export failed: {error}");
+            event_loop.exit();
+            return;
+        }
         self.request_full_screen_update();
     }
 
@@ -2213,6 +2228,7 @@ mod tests {
         assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
         assert_eq!(config.workspace_path, None);
         assert_eq!(config.startup_command_plan_path, None);
+        assert_eq!(config.startup_export_workspace_path, None);
         assert_eq!(config.exit_after_redraw_frames, None);
         assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
