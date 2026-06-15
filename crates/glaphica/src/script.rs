@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActiveTool, DocumentBlendMode, DocumentNodeId, RoundBrushSettings};
 
+pub const DEFAULT_SCRIPT_ENTRY: &str = "main";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ScriptModuleId(u64);
@@ -227,6 +229,20 @@ pub fn script_command_plan_to_json_string_pretty(
     serde_json::to_string_pretty(plan)
 }
 
+pub fn call_script_entry<R>(
+    runtime: &mut R,
+    host: &mut dyn ScriptHost,
+    source: ScriptModuleSource,
+    entry: &str,
+    args: &[ScriptValue],
+) -> Result<ScriptValue, R::Error>
+where
+    R: ScriptRuntime,
+{
+    let module = runtime.load_module(source)?;
+    runtime.call_entry(host, module, entry, args)
+}
+
 impl NullScriptRuntime {
     pub fn new() -> Self {
         Self::default()
@@ -312,9 +328,9 @@ impl From<ScriptHostError> for ScriptRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::{
-        NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan,
-        ScriptDrawSession, ScriptHost, ScriptHostError, ScriptModuleId, ScriptModuleSource,
-        ScriptRuntime, ScriptRuntimeError, ScriptValue,
+        DEFAULT_SCRIPT_ENTRY, NullScriptRuntime, ScriptCommand, ScriptCommandOutcome,
+        ScriptCommandPlan, ScriptDrawSession, ScriptHost, ScriptHostError, ScriptModuleId,
+        ScriptModuleSource, ScriptRuntime, ScriptRuntimeError, ScriptValue, call_script_entry,
     };
     use crate::{ActiveTool, BrushId, DocumentBlendMode, DocumentNodeId, RoundBrushSettings};
     use gla_core::{CanvasCoordF, CanvasInput};
@@ -324,6 +340,50 @@ mod tests {
     struct RecordingHost {
         commands: Vec<ScriptCommand>,
         fail_on: Option<ScriptCommand>,
+    }
+
+    struct CommandRuntime {
+        command: ScriptCommand,
+        modules: Vec<ScriptModuleSource>,
+        called_entries: Vec<String>,
+    }
+
+    impl CommandRuntime {
+        fn new(command: ScriptCommand) -> Self {
+            Self {
+                command,
+                modules: Vec::new(),
+                called_entries: Vec::new(),
+            }
+        }
+    }
+
+    impl ScriptRuntime for CommandRuntime {
+        type Error = ScriptRuntimeError;
+
+        fn load_module(
+            &mut self,
+            source: ScriptModuleSource,
+        ) -> Result<ScriptModuleId, Self::Error> {
+            let id = ScriptModuleId::new(self.modules.len() as u64);
+            self.modules.push(source);
+            Ok(id)
+        }
+
+        fn call_entry(
+            &mut self,
+            host: &mut dyn ScriptHost,
+            module: ScriptModuleId,
+            entry: &str,
+            _args: &[ScriptValue],
+        ) -> Result<ScriptValue, Self::Error> {
+            if self.modules.get(module.value() as usize).is_none() {
+                return Err(ScriptRuntimeError::UnknownModule { id: module });
+            }
+            self.called_entries.push(entry.to_owned());
+            host.execute_script_command(self.command.clone())?;
+            Ok(ScriptValue::Nil)
+        }
     }
 
     impl ScriptHost for RecordingHost {
@@ -382,6 +442,27 @@ mod tests {
                 id: ScriptModuleId::new(99)
             }
         );
+    }
+
+    #[test]
+    fn call_script_entry_loads_module_and_drives_host() {
+        let mut runtime = CommandRuntime::new(ScriptCommand::RequestRedraw);
+        let mut host = RecordingHost::default();
+        let source = ScriptModuleSource::new("startup.janet", "(main)");
+
+        let value = call_script_entry(
+            &mut runtime,
+            &mut host,
+            source.clone(),
+            DEFAULT_SCRIPT_ENTRY,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(value, ScriptValue::Nil);
+        assert_eq!(runtime.modules, vec![source]);
+        assert_eq!(runtime.called_entries, vec![DEFAULT_SCRIPT_ENTRY]);
+        assert_eq!(host.commands, vec![ScriptCommand::RequestRedraw]);
     }
 
     #[test]

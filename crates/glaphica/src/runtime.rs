@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,8 +28,9 @@ use crate::{
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{
-        ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan, ScriptHost, ScriptHostError,
-        script_command_plan_from_json_str,
+        DEFAULT_SCRIPT_ENTRY, NullScriptRuntime, ScriptCommand, ScriptCommandOutcome,
+        ScriptCommandPlan, ScriptHost, ScriptHostError, ScriptModuleSource, ScriptRuntime,
+        ScriptValue, call_script_entry, script_command_plan_from_json_str,
     },
     stroke::{BrushThreadRuntime, BrushThreadRuntimeError, ReplaceCircleSampleCache},
     trace::{
@@ -1087,11 +1088,29 @@ impl App {
         };
         let source = std::fs::read_to_string(&path).map_err(|error| ScriptHostError::Runtime {
             reason: format!(
-                "failed to read startup command plan {}: {error}",
+                "failed to read startup script file {}: {error}",
                 path.display()
             ),
         })?;
-        let plan = script_command_plan_from_json_str(&source).map_err(|error| {
+        if startup_path_is_command_plan(&path) {
+            self.execute_startup_command_plan_source(&path, &source)?;
+        } else {
+            let mut runtime = NullScriptRuntime::new();
+            self.execute_startup_script_module(
+                &mut runtime,
+                ScriptModuleSource::new(path.display().to_string(), source),
+            )?;
+        }
+        self.request_full_screen_update();
+        Ok(())
+    }
+
+    fn execute_startup_command_plan_source(
+        &mut self,
+        path: &Path,
+        source: &str,
+    ) -> Result<(), ScriptHostError> {
+        let plan = script_command_plan_from_json_str(source).map_err(|error| {
             ScriptHostError::InvalidCommand {
                 reason: format!(
                     "failed to parse startup command plan {}: {error}",
@@ -1100,8 +1119,23 @@ impl App {
             }
         })?;
         self.execute_script_command_plan(&plan)?;
-        self.request_full_screen_update();
         Ok(())
+    }
+
+    fn execute_startup_script_module<R>(
+        &mut self,
+        runtime: &mut R,
+        source: ScriptModuleSource,
+    ) -> Result<ScriptValue, ScriptHostError>
+    where
+        R: ScriptRuntime,
+        R::Error: Display,
+    {
+        call_script_entry(runtime, self, source, DEFAULT_SCRIPT_ENTRY, &[]).map_err(|error| {
+            ScriptHostError::Runtime {
+                reason: format!("startup script entry {DEFAULT_SCRIPT_ENTRY} failed: {error}"),
+            }
+        })
     }
 
     fn execute_script_command_plan(
@@ -1110,6 +1144,12 @@ impl App {
     ) -> Result<Vec<ScriptCommandOutcome>, ScriptHostError> {
         plan.execute_on(self)
     }
+}
+
+fn startup_path_is_command_plan(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
 }
 
 impl Drop for App {
@@ -2020,10 +2060,12 @@ mod tests {
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceUiAction, AppView,
         BrushId, BrushInput, BrushSettings, BrushThreadRuntimeError, DEFAULT_CANVAS_HEIGHT_PX,
-        DEFAULT_CANVAS_WIDTH_PX, DocumentBlendMode, DocumentNodeId, DocumentWorkspace,
-        ReplaceCircleStrokeSample, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
-        ScriptCommandPlan, ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, UiAction,
-        load_trace_file, save_trace_file, script_command_plan_to_json_string_pretty,
+        DEFAULT_CANVAS_WIDTH_PX, DEFAULT_SCRIPT_ENTRY, DocumentBlendMode, DocumentNodeId,
+        DocumentWorkspace, ReplaceCircleStrokeSample, RoundBrushSettings, ScriptCommand,
+        ScriptCommandOutcome, ScriptCommandPlan, ScriptDrawSession, ScriptHost, ScriptHostError,
+        ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError, ScriptValue, Tool,
+        ToolSet, UiAction, load_trace_file, save_trace_file,
+        script_command_plan_to_json_string_pretty,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -2040,6 +2082,50 @@ mod tests {
             pressure,
             tilt: (0.0, 0.0),
             twist: 0.0,
+        }
+    }
+
+    struct StartupCommandRuntime {
+        command: ScriptCommand,
+        modules: Vec<ScriptModuleSource>,
+        called_entries: Vec<String>,
+    }
+
+    impl StartupCommandRuntime {
+        fn new(command: ScriptCommand) -> Self {
+            Self {
+                command,
+                modules: Vec::new(),
+                called_entries: Vec::new(),
+            }
+        }
+    }
+
+    impl ScriptRuntime for StartupCommandRuntime {
+        type Error = ScriptRuntimeError;
+
+        fn load_module(
+            &mut self,
+            source: ScriptModuleSource,
+        ) -> Result<ScriptModuleId, Self::Error> {
+            let id = ScriptModuleId::new(self.modules.len() as u64);
+            self.modules.push(source);
+            Ok(id)
+        }
+
+        fn call_entry(
+            &mut self,
+            host: &mut dyn ScriptHost,
+            module: ScriptModuleId,
+            entry: &str,
+            _args: &[ScriptValue],
+        ) -> Result<ScriptValue, Self::Error> {
+            if self.modules.get(module.value() as usize).is_none() {
+                return Err(ScriptRuntimeError::UnknownModule { id: module });
+            }
+            self.called_entries.push(entry.to_owned());
+            host.execute_script_command(self.command.clone())?;
+            Ok(ScriptValue::Nil)
         }
     }
 
@@ -2381,6 +2467,44 @@ mod tests {
             DocumentNodeId::new(2)
         );
         assert!(app.frame_scheduler.has_requested_redraw());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_script_module_executes_through_script_runtime() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        let mut runtime = StartupCommandRuntime::new(ScriptCommand::RequestRedraw);
+        let source = ScriptModuleSource::new("startup.janet", "(main)");
+
+        let value = app
+            .execute_startup_script_module(&mut runtime, source.clone())
+            .unwrap();
+
+        assert_eq!(value, ScriptValue::Nil);
+        assert_eq!(runtime.modules, vec![source]);
+        assert_eq!(runtime.called_entries, vec![DEFAULT_SCRIPT_ENTRY]);
+        assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn startup_non_json_file_reports_null_runtime_entry_error() {
+        let path = std::env::temp_dir().join(format!(
+            "glaphica-runtime-startup-script-{}.janet",
+            std::process::id()
+        ));
+        std::fs::write(&path, "(main)").unwrap();
+        let mut config = AppRuntimeConfig::default();
+        config.startup_command_plan_path = Some(path.clone());
+        let mut app = App::new(config);
+
+        let error = app.execute_startup_command_plan().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::Runtime { reason }
+                if reason.contains("startup script entry main failed")
+                    && reason.contains("has no callable entry main")
+        ));
         let _ = std::fs::remove_file(path);
     }
 

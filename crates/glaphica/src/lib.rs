@@ -39,11 +39,12 @@ pub use runtime::{
     AppPerfTraceConfig, AppRunError, AppRuntimeConfig, run_app_window, run_app_window_with_config,
 };
 pub use script::{
-    NullScriptRuntime, ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan, ScriptDrawCommand,
-    ScriptDrawFrame, ScriptDrawSession, ScriptHost, ScriptHostError, ScriptModuleId,
-    ScriptModuleSource, ScriptRuntime, ScriptRuntimeError, ScriptValue,
-    script_command_plan_from_json_str, script_command_plan_to_json_string_pretty,
-    script_draw_session_from_json_str, script_draw_session_to_json_string_pretty,
+    DEFAULT_SCRIPT_ENTRY, NullScriptRuntime, ScriptCommand, ScriptCommandOutcome,
+    ScriptCommandPlan, ScriptDrawCommand, ScriptDrawFrame, ScriptDrawSession, ScriptHost,
+    ScriptHostError, ScriptModuleId, ScriptModuleSource, ScriptRuntime, ScriptRuntimeError,
+    ScriptValue, call_script_entry, script_command_plan_from_json_str,
+    script_command_plan_to_json_string_pretty, script_draw_session_from_json_str,
+    script_draw_session_to_json_string_pretty,
 };
 pub use stroke::{
     BrushInput, BrushInputBlock, BrushInputBlockList, BrushInputError, BrushInputProcessor,

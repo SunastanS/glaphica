@@ -33,7 +33,7 @@ fn config_from_args(
             }
             "--run-command-plan" => {
                 let Some(path) = args.next() else {
-                    return Err(invalid_arg("--run-command-plan requires a JSON file path"));
+                    return Err(invalid_arg("--run-command-plan requires a file path"));
                 };
                 config.startup_command_plan_path = Some(PathBuf::from(path));
             }
@@ -50,7 +50,7 @@ fn config_from_args(
             }
             "--help" | "-h" => {
                 return Err(invalid_arg(
-                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>] [--run-command-plan <file>] [--exit-after-frames <n>]",
+                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>] [--run-command-plan <command-plan-or-script>] [--exit-after-frames <n>]",
                 ));
             }
             _ => return Err(invalid_arg(format!("unknown argument {arg}"))),
