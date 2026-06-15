@@ -16,7 +16,8 @@ pub use document::{
     DocumentWorkspaceError, DocumentWorkspaceInitError, ReplaceCircleStrokeSample,
 };
 pub use export::{
-    WorkspaceExportError, WorkspaceExportManifest, WorkspaceExportTile, export_workspace_directory,
+    WorkspaceExportError, WorkspaceExportManifest, WorkspaceExportSnapshot, WorkspaceExportTile,
+    WorkspaceExportTileAsset, export_workspace_directory, read_workspace_directory,
     read_workspace_manifest, root_tile_asset_relative_path, write_workspace_manifest,
 };
 pub use gla_session::{DrawCommit, DrawHistory, DrawRecordId};

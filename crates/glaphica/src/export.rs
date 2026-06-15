@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use gla_color::{ChannelCount, ChannelType, GlaFormat};
 use gla_core::ATLAS_TILE_SIZE;
@@ -35,11 +35,35 @@ pub struct WorkspaceExportTile {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceExportSnapshot {
+    pub manifest: WorkspaceExportManifest,
+    pub tiles: Vec<WorkspaceExportTileAsset>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceExportTileAsset {
+    pub tile_index: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub enum WorkspaceExportError {
     Io(std::io::Error),
     Document(DocumentPresentError),
     Renderer(GpuRendererError),
+    UnsupportedVersion(u32),
+    InvalidTilePath {
+        path: PathBuf,
+    },
+    InvalidTileLength {
+        path: PathBuf,
+        expected: usize,
+        actual: usize,
+    },
     UnsupportedFormat(GlaFormat),
 }
 
@@ -106,8 +130,76 @@ pub fn read_workspace_manifest(
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+pub fn read_workspace_directory(
+    root_path: impl AsRef<Path>,
+) -> Result<WorkspaceExportSnapshot, WorkspaceExportError> {
+    let root_path = root_path.as_ref();
+    let manifest = read_workspace_manifest(root_path)?;
+    validate_manifest_version(&manifest)?;
+    let expected_tile_len = expected_tile_byte_len(&manifest);
+    let mut assets = Vec::with_capacity(manifest.tiles.len());
+
+    for tile in &manifest.tiles {
+        validate_relative_asset_path(&tile.path)?;
+        let bytes = fs::read(root_path.join(&tile.path))?;
+        if bytes.len() != expected_tile_len {
+            return Err(WorkspaceExportError::InvalidTileLength {
+                path: tile.path.clone(),
+                expected: expected_tile_len,
+                actual: bytes.len(),
+            });
+        }
+        assets.push(WorkspaceExportTileAsset {
+            tile_index: tile.tile_index,
+            source_width: tile.source_width,
+            source_height: tile.source_height,
+            path: tile.path.clone(),
+            bytes,
+        });
+    }
+
+    Ok(WorkspaceExportSnapshot {
+        manifest,
+        tiles: assets,
+    })
+}
+
 pub fn root_tile_asset_relative_path(tile_index: u32) -> PathBuf {
     PathBuf::from(TILE_DIRECTORY_NAME).join(format!("root_{tile_index:06}.bin"))
+}
+
+fn validate_manifest_version(
+    manifest: &WorkspaceExportManifest,
+) -> Result<(), WorkspaceExportError> {
+    if manifest.version != EXPORT_VERSION {
+        return Err(WorkspaceExportError::UnsupportedVersion(manifest.version));
+    }
+    Ok(())
+}
+
+fn validate_relative_asset_path(path: &Path) -> Result<(), WorkspaceExportError> {
+    let mut has_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_component = true,
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(WorkspaceExportError::InvalidTilePath {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+    }
+    if !has_component {
+        return Err(WorkspaceExportError::InvalidTilePath {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn expected_tile_byte_len(manifest: &WorkspaceExportManifest) -> usize {
+    manifest.padded_bytes_per_row as usize * manifest.atlas_tile_size as usize
 }
 
 fn bytes_per_pixel(format: GlaFormat) -> Option<u32> {
@@ -134,6 +226,20 @@ impl Display for WorkspaceExportError {
             Self::Io(error) => write!(f, "workspace export io failed: {error}"),
             Self::Document(error) => Display::fmt(error, f),
             Self::Renderer(error) => Display::fmt(error, f),
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported workspace export version {version}")
+            }
+            Self::InvalidTilePath { path } => {
+                write!(f, "workspace export tile path is not relative: {path:?}")
+            }
+            Self::InvalidTileLength {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "workspace export tile {path:?} has {actual} bytes, expected {expected}"
+            ),
             Self::UnsupportedFormat(format) => {
                 write!(f, "workspace export does not support format {format:?}")
             }
@@ -147,7 +253,10 @@ impl Error for WorkspaceExportError {
             Self::Io(error) => Some(error),
             Self::Document(error) => Some(error),
             Self::Renderer(error) => Some(error),
-            Self::UnsupportedFormat(_) => None,
+            Self::UnsupportedVersion(_)
+            | Self::InvalidTilePath { .. }
+            | Self::InvalidTileLength { .. }
+            | Self::UnsupportedFormat(_) => None,
         }
     }
 }
@@ -180,7 +289,8 @@ impl From<serde_json::Error> for WorkspaceExportError {
 mod tests {
     use super::{
         WorkspaceExportManifest, WorkspaceExportTile, bytes_per_pixel, padded_bytes_per_row,
-        read_workspace_manifest, root_tile_asset_relative_path, write_workspace_manifest,
+        read_workspace_directory, read_workspace_manifest, root_tile_asset_relative_path,
+        write_workspace_manifest,
     };
     use gla_color::{ChannelCount, ChannelType, GlaFormat};
 
@@ -228,6 +338,78 @@ mod tests {
 
         assert_eq!(loaded, manifest);
         assert!(json.contains("\"canvas_width_px\": 320"));
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn workspace_directory_reads_manifest_and_tile_assets() {
+        let path = export_path("directory-read");
+        let tile_path = root_tile_asset_relative_path(0);
+        let manifest = WorkspaceExportManifest {
+            version: 1,
+            root_image_id: 1,
+            canvas_width_px: 320,
+            canvas_height_px: 240,
+            format: GlaFormat {
+                channel_count: ChannelCount::D4,
+                channel_type: ChannelType::F32,
+            },
+            bytes_per_pixel: 16,
+            padded_bytes_per_row: padded_bytes_per_row(16),
+            atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            tiles: vec![WorkspaceExportTile {
+                tile_index: 0,
+                source_width: 62,
+                source_height: 62,
+                path: tile_path.clone(),
+            }],
+        };
+        let expected_len =
+            manifest.padded_bytes_per_row as usize * manifest.atlas_tile_size as usize;
+        write_workspace_manifest(&path, &manifest).unwrap();
+        std::fs::create_dir_all(path.join("tiles")).unwrap();
+        std::fs::write(path.join(&tile_path), vec![7_u8; expected_len]).unwrap();
+
+        let snapshot = read_workspace_directory(&path).unwrap();
+
+        assert_eq!(snapshot.manifest, manifest);
+        assert_eq!(snapshot.tiles.len(), 1);
+        assert_eq!(snapshot.tiles[0].tile_index, 0);
+        assert_eq!(snapshot.tiles[0].path, tile_path);
+        assert_eq!(snapshot.tiles[0].bytes, vec![7_u8; expected_len]);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn workspace_directory_rejects_escaping_tile_paths() {
+        let path = export_path("escaping-path");
+        let manifest = WorkspaceExportManifest {
+            version: 1,
+            root_image_id: 1,
+            canvas_width_px: 320,
+            canvas_height_px: 240,
+            format: GlaFormat {
+                channel_count: ChannelCount::D4,
+                channel_type: ChannelType::F32,
+            },
+            bytes_per_pixel: 16,
+            padded_bytes_per_row: padded_bytes_per_row(16),
+            atlas_tile_size: gla_core::ATLAS_TILE_SIZE,
+            tiles: vec![WorkspaceExportTile {
+                tile_index: 0,
+                source_width: 62,
+                source_height: 62,
+                path: std::path::PathBuf::from("../outside.bin"),
+            }],
+        };
+        write_workspace_manifest(&path, &manifest).unwrap();
+
+        let error = read_workspace_directory(&path).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::WorkspaceExportError::InvalidTilePath { .. }
+        ));
         let _ = std::fs::remove_dir_all(path);
     }
 
