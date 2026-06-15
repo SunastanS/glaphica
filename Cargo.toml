@@ -1,4 +1,18 @@
 [workspace]
 
 resolver = "3"
-members = ["crates/glaphica"]
+members = [
+    "crates/glaphica",
+    "crates/gla_core",
+    "crates/atlas",
+    "crates/tile_key",
+    "crates/gla_color",
+    "crates/gla_command_core",
+    "crates/gla_ir",
+    "crates/gla_image",
+    "crates/gla_draw_on",
+    "crates/gla_image_command",
+    "crates/gla_storage",
+    "crates/gla_renderer",
+    "crates/gla_session",
+]

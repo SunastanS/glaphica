@@ -1,0 +1,9 @@
+[package]
+name = "gla_draw_on"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_color = { path = "../gla_color" }
+gla_image = { path = "../gla_image" }
+gla_ir = { path = "../gla_ir" }

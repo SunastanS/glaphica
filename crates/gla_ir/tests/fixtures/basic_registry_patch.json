@@ -1,0 +1,45 @@
+{
+  "ops": [
+    {
+      "NewImage": {
+        "id": 1,
+        "format": {
+          "channel_count": "D4",
+          "channel_type": "F32"
+        },
+        "layout": {
+          "width_px": 124,
+          "height_px": 124
+        },
+        "role": "Primitive"
+      }
+    },
+    {
+      "NewImage": {
+        "id": 2,
+        "format": {
+          "channel_count": "D4",
+          "channel_type": "F32"
+        },
+        "layout": {
+          "width_px": 124,
+          "height_px": 124
+        },
+        "role": {
+          "Derived": {
+            "reads": [
+              {
+                "image": 1,
+                "mapping": "Identity",
+                "modifier": "None"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "SetRoot": 2
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[package]
+name = "gla_image"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gla_color = { path = "../gla_color" }
+tile_key = { path = "../tile_key" }
+gla_core = { path = "../gla_core" }
+
+[dev-dependencies]
+atlas = { path = "../atlas" }
