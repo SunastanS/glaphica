@@ -2,11 +2,13 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
+use gla_color::PremultipliedRgbaF32;
 use gla_ir::DrawOnToolKind;
 use gla_renderer::{GpuRenderer, GpuRendererError};
+use gla_session::DrawHistory;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowAttributes, WindowId},
 };
@@ -23,6 +25,8 @@ pub struct AppRuntimeConfig {
     pub canvas_width_px: u32,
     pub canvas_height_px: u32,
     pub draw_on_tools: Vec<DrawOnToolKind>,
+    pub brush_radius_px: f32,
+    pub brush_color: PremultipliedRgbaF32,
 }
 
 impl Default for AppRuntimeConfig {
@@ -38,6 +42,8 @@ impl Default for AppRuntimeConfig {
             canvas_width_px: DEFAULT_CANVAS_WIDTH_PX,
             canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
+            brush_radius_px: 10.0,
+            brush_color: PremultipliedRgbaF32::new(0.95, 0.17, 0.10, 1.0),
         }
     }
 }
@@ -76,6 +82,9 @@ pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRun
 struct App {
     config: AppRuntimeConfig,
     workspace: Option<DocumentWorkspace>,
+    history: DrawHistory,
+    primary_down: bool,
+    last_cursor_pos: Option<(f32, f32)>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
 }
@@ -85,6 +94,9 @@ impl App {
         Self {
             config,
             workspace: None,
+            history: DrawHistory::new(),
+            primary_down: false,
+            last_cursor_pos: None,
             window: None,
             gpu: None,
         }
@@ -92,6 +104,30 @@ impl App {
 
     fn window_attributes(&self) -> WindowAttributes {
         WindowAttributes::default().with_title(self.config.window_title.clone())
+    }
+
+    fn paint_at_last_cursor(&mut self) {
+        let Some((x, y)) = self.last_cursor_pos else {
+            return;
+        };
+        self.paint_at(x, y);
+    }
+
+    fn paint_at(&mut self, x: f32, y: f32) {
+        let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
+            return;
+        };
+
+        if let Err(error) = workspace.replace_circle_on_root(
+            &mut self.history,
+            gpu.renderer_mut(),
+            x,
+            y,
+            self.config.brush_radius_px,
+            self.config.brush_color,
+        ) {
+            eprintln!("stroke failed: {error}");
+        }
     }
 }
 
@@ -336,7 +372,7 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window.as_ref() else {
+        let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
 
@@ -346,6 +382,25 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CursorMoved { position, .. } => {
+                let pos = (finite_f64_to_f32(position.x), finite_f64_to_f32(position.y));
+                self.last_cursor_pos = Some(pos);
+                if self.primary_down {
+                    self.paint_at(pos.0, pos.1);
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.primary_down = state == ElementState::Pressed;
+                if self.primary_down {
+                    self.paint_at_last_cursor();
+                    window.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
@@ -367,6 +422,10 @@ impl ApplicationHandler for App {
     }
 }
 
+fn finite_f64_to_f32(value: f64) -> f32 {
+    if value.is_finite() { value as f32 } else { 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AppRuntimeConfig;
@@ -385,5 +444,17 @@ mod tests {
         assert_eq!(config.canvas_width_px, DEFAULT_CANVAS_WIDTH_PX);
         assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
+        assert_eq!(config.brush_radius_px, 10.0);
+        assert_eq!(
+            config.brush_color,
+            gla_color::PremultipliedRgbaF32::new(0.95, 0.17, 0.10, 1.0)
+        );
+    }
+
+    #[test]
+    fn non_finite_cursor_coordinate_maps_to_zero() {
+        assert_eq!(super::finite_f64_to_f32(f64::NAN), 0.0);
+        assert_eq!(super::finite_f64_to_f32(f64::INFINITY), 0.0);
+        assert_eq!(super::finite_f64_to_f32(42.25), 42.25);
     }
 }
