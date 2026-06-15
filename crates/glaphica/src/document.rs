@@ -196,6 +196,7 @@ impl DocumentWorkspace {
         self.layers.child_ids(parent_id)?;
         let image = self.register_layer_image(ImageRole::Primitive)?;
         let node = self.layers.append_layer(parent_id, image)?;
+        self.layers.set_active_node(node)?;
         self.invalidate_layer_composite();
         Ok(node)
     }
@@ -207,6 +208,7 @@ impl DocumentWorkspace {
         self.layers.child_ids(parent_id)?;
         let image = self.register_layer_image(ImageRole::Derived(GraphCommand::new(Vec::new())))?;
         let node = self.layers.append_group(parent_id, image)?;
+        self.layers.set_active_node(node)?;
         self.invalidate_layer_composite();
         Ok(node)
     }
@@ -345,12 +347,30 @@ impl DocumentWorkspace {
     }
 
     pub fn root_replace_circle_ir(&self) -> DrawSessionIR {
+        self.replace_circle_ir(self.root)
+    }
+
+    pub fn active_paint_image(&self) -> Option<ImageId> {
+        let node = self.layers.node(self.layers.active_node_id()).ok()?;
+        match node.kind() {
+            DocumentNodeKind::Root => Some(self.root),
+            DocumentNodeKind::Group => None,
+            DocumentNodeKind::Layer => Some(node.image()),
+        }
+    }
+
+    pub fn active_replace_circle_ir(&self) -> Option<DrawSessionIR> {
+        self.active_paint_image()
+            .map(|target| self.replace_circle_ir(target))
+    }
+
+    fn replace_circle_ir(&self, target: ImageId) -> DrawSessionIR {
         DrawSessionIR {
             expected_document_version: self.version(),
-            doc_images: vec![DocImageUse::read_write(self.root)],
+            doc_images: vec![DocImageUse::read_write(target)],
             session_images: Vec::new(),
             draw_on: vec![DrawOnCommand::with_tool(
-                self.root,
+                target,
                 DrawOnToolKind::ReplaceCircle4D,
             )],
             derive: Vec::new(),
@@ -577,6 +597,44 @@ impl DocumentWorkspace {
         Ok(commit)
     }
 
+    pub fn replace_circle_stroke_on_active_paint_target<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
+    ) -> Result<Option<DrawCommit>, SessionError>
+    where
+        B: RenderBackend,
+    {
+        let Some(target) = self.active_paint_image() else {
+            return Ok(None);
+        };
+        let ir = self.replace_circle_ir(target);
+        let mut session = self.begin_session(&ir)?;
+        {
+            let mut frame = session.begin_frame();
+            for sample in samples {
+                let radius_px = sample.radius_px.max(0.0);
+                frame.draw_on(
+                    target,
+                    DrawOnInput::replace_circle_4d(
+                        sample.center.x,
+                        sample.center.y,
+                        radius_px,
+                        radius_px,
+                        sample.color,
+                    ),
+                )?;
+            }
+            frame.flush(backend)?;
+        }
+        let commit = session.commit(history)?;
+        if commit.is_some() {
+            self.invalidate_layer_composite();
+        }
+        Ok(commit)
+    }
+
     pub fn run_script_draw_session<B>(
         &mut self,
         history: &mut DrawHistory,
@@ -620,6 +678,31 @@ impl DocumentWorkspace {
         let commit = history.apply_stored_patch(record_id, &mut self.storage, backend)?;
         self.invalidate_layer_composite();
         Ok(commit)
+    }
+
+    pub fn dirty_tile_indices(&self, commit: &DrawCommit) -> Vec<u32> {
+        let mut full_tile_count = None::<u32>;
+        let mut tiles = Vec::new();
+        for dirty in commit.dirty.values() {
+            if dirty.is_full() {
+                let tile_count = dirty.layout().tile_count();
+                full_tile_count = Some(
+                    full_tile_count
+                        .map(|current| current.max(tile_count))
+                        .unwrap_or(tile_count),
+                );
+                continue;
+            }
+            if let Some(dirty_tiles) = dirty.tile_indices() {
+                tiles.extend(dirty_tiles.iter().map(|tile| tile.value()));
+            }
+        }
+        if let Some(tile_count) = full_tile_count {
+            return (0..tile_count).collect();
+        }
+        tiles.sort_unstable();
+        tiles.dedup();
+        tiles
     }
 
     pub fn root_dirty_tile_indices(&self, commit: &DrawCommit) -> Vec<u32> {
@@ -1098,6 +1181,8 @@ mod tests {
             workspace.layer_tree().node(layer).unwrap().kind(),
             DocumentNodeKind::Layer
         );
+        assert_eq!(workspace.layer_tree().active_node_id(), layer);
+        assert_eq!(workspace.active_paint_image(), Some(layer_image));
         assert!(
             workspace
                 .storage()
@@ -1145,6 +1230,37 @@ mod tests {
         assert!(!workspace.layer_tree().contains_node(layer));
         assert!(workspace.storage().image(group_image).is_none());
         assert!(workspace.storage().image(layer_image).is_none());
+    }
+
+    #[test]
+    fn active_replace_circle_ir_targets_paintable_active_node() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+        assert_eq!(workspace.active_paint_image(), Some(workspace.root()));
+        assert!(
+            workspace
+                .active_replace_circle_ir()
+                .unwrap()
+                .doc_images
+                .contains(&DocImageUse::read_write(workspace.root()))
+        );
+
+        let group = workspace.append_group(root_node).unwrap();
+        assert_eq!(workspace.layer_tree().active_node_id(), group);
+        assert_eq!(workspace.active_paint_image(), None);
+        assert!(workspace.active_replace_circle_ir().is_none());
+
+        let layer = workspace.append_layer(group).unwrap();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+        let ir = workspace.active_replace_circle_ir().unwrap();
+
+        assert_eq!(workspace.layer_tree().active_node_id(), layer);
+        assert_eq!(workspace.active_paint_image(), Some(layer_image));
+        assert!(
+            ir.doc_images
+                .contains(&DocImageUse::read_write(layer_image))
+        );
+        assert!(ir.draw_on.iter().any(|command| command.dst == layer_image));
     }
 
     #[test]
@@ -1308,6 +1424,35 @@ mod tests {
         assert!(workspace.root_present_tiles().unwrap().is_empty());
         assert_eq!(workspace.root_dirty_tile_indices(&redo_commit), vec![0]);
         assert_ne!(redo_commit.record_id, commit.record_id);
+    }
+
+    #[test]
+    fn replace_circle_stroke_on_active_layer_writes_layer_image() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+        let layer = workspace.append_layer(root_node).unwrap();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let color = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+
+        let commit = workspace
+            .replace_circle_stroke_on_active_paint_target(
+                &mut history,
+                &mut backend,
+                [ReplaceCircleStrokeSample::new(24.0, 32.0, 8.0, color)],
+            )
+            .unwrap()
+            .unwrap();
+
+        assert!(commit.dirty.contains_key(&layer_image));
+        assert!(!commit.dirty.contains_key(&workspace.root()));
+        assert_eq!(workspace.dirty_tile_indices(&commit), vec![0]);
+        assert_eq!(
+            workspace.root_dirty_tile_indices(&commit),
+            Vec::<u32>::new()
+        );
+        assert!(workspace.layer_composite_needs_render());
     }
 
     #[test]

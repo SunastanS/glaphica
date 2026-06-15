@@ -262,6 +262,15 @@ impl App {
                 reason: "active tool is not a registered brush".to_owned(),
             });
         }
+        if self
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.active_paint_image().is_none())
+        {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "active document node is not paintable".to_owned(),
+            });
+        }
         if !self.brush_thread.begin_active_stroke() {
             return Err(ScriptHostError::Runtime {
                 reason: "brush thread did not start a stroke".to_owned(),
@@ -472,7 +481,7 @@ impl App {
         };
         let samples = stroke.replace_circle_samples();
 
-        let commit = match workspace.replace_circle_stroke_on_root(
+        let commit = match workspace.replace_circle_stroke_on_active_paint_target(
             &mut self.history,
             gpu.renderer_mut(),
             samples.iter().copied(),
@@ -485,7 +494,7 @@ impl App {
                 return None;
             }
         };
-        let dirty_tiles = workspace.root_dirty_tile_indices(&commit);
+        let dirty_tiles = workspace.dirty_tile_indices(&commit);
         self.undo_stack.push(commit.record_id);
         self.redo_stack.clear();
         self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
@@ -1796,6 +1805,38 @@ mod tests {
         assert_eq!(workspace.layer_tree().active_node_id(), layer);
         assert_eq!(node.opacity(), 0.4);
         assert_eq!(node.blend_mode(), DocumentBlendMode::Multiply);
+    }
+
+    #[test]
+    fn script_host_rejects_stroke_when_active_node_is_group() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        let root_node = app.workspace.as_ref().unwrap().layer_tree().root_id();
+        let ScriptCommandOutcome::DocumentNode(group) = app
+            .execute_script_command(ScriptCommand::AppendGroup { parent: root_node })
+            .unwrap()
+        else {
+            panic!("append group should return the new node id");
+        };
+
+        let error = app
+            .execute_script_command(ScriptCommand::BeginStroke(canvas_input(0, 1.0, 2.0, 1.0)))
+            .unwrap_err();
+
+        assert_eq!(
+            app.workspace
+                .as_ref()
+                .unwrap()
+                .layer_tree()
+                .active_node_id(),
+            group
+        );
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("not paintable")
+        ));
+        assert!(!app.brush_thread.has_active_stroke());
     }
 
     #[test]
