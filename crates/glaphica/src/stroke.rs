@@ -1,11 +1,19 @@
 use gla_color::apply_value_mask_to_premultiplied_rgba;
 use gla_core::{CanvasCoordF, CanvasInput};
 
-use crate::{BrushId, BrushSettings, ReplaceCircleStrokeSample};
+use crate::{ActiveTool, BrushId, BrushSettings, ReplaceCircleStrokeSample, ToolSet};
 
 const MIN_SPACING_RATIO: f32 = 0.05;
 const MIN_SPACING_PX: f32 = 1.0;
 const SAME_POSITION_EPSILON: f32 = 1e-5;
+
+#[derive(Debug)]
+pub(crate) struct BrushWorker {
+    tool_set: ToolSet,
+    active_tool: ActiveTool,
+    brush_settings: BrushSettings,
+    active_stroke: Option<ActiveRootStroke>,
+}
 
 #[derive(Debug)]
 pub(crate) struct ActiveRootStroke {
@@ -14,8 +22,74 @@ pub(crate) struct ActiveRootStroke {
     inputs: Vec<CanvasInput>,
 }
 
+#[derive(Debug)]
+pub(crate) struct FinishedRootStroke {
+    stroke: ActiveRootStroke,
+}
+
+impl BrushWorker {
+    pub(crate) fn new(
+        tool_set: ToolSet,
+        active_tool: ActiveTool,
+        brush_settings: BrushSettings,
+    ) -> Self {
+        Self {
+            tool_set,
+            active_tool,
+            brush_settings,
+            active_stroke: None,
+        }
+    }
+
+    pub(crate) fn active_brush_id(&self) -> Option<BrushId> {
+        self.tool_set
+            .contains(self.active_tool.as_tool())
+            .then_some(self.active_tool.brush_id())?
+    }
+
+    pub(crate) fn begin_active_stroke(&mut self) -> bool {
+        let Some(brush_id) = self.active_brush_id() else {
+            self.active_stroke = None;
+            return false;
+        };
+        self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.brush_settings));
+        true
+    }
+
+    pub(crate) fn push_canvas_input(&mut self, input: CanvasInput) {
+        if let Some(stroke) = self.active_stroke.as_mut() {
+            stroke.push_input(input);
+        }
+    }
+
+    pub(crate) fn finish_active_stroke(&mut self) -> Option<FinishedRootStroke> {
+        let stroke = self.active_stroke.take()?;
+        (!stroke.is_empty()).then_some(FinishedRootStroke { stroke })
+    }
+
+    pub(crate) fn restore_active_stroke(&mut self, stroke: FinishedRootStroke) {
+        self.active_stroke = Some(stroke.stroke);
+    }
+
+    pub(crate) fn cancel_active_stroke(&mut self) -> bool {
+        self.active_stroke.take().is_some()
+    }
+
+    pub(crate) fn has_active_stroke(&self) -> bool {
+        self.active_stroke.is_some()
+    }
+
+    pub(crate) fn active_stroke(&self) -> Option<&ActiveRootStroke> {
+        self.active_stroke.as_ref()
+    }
+
+    pub(crate) fn update_brush_settings(&mut self, brush_settings: BrushSettings) {
+        self.brush_settings = brush_settings;
+    }
+}
+
 impl ActiveRootStroke {
-    pub(crate) fn new(brush_id: BrushId, brush_settings: BrushSettings) -> Self {
+    fn new(brush_id: BrushId, brush_settings: BrushSettings) -> Self {
         Self {
             brush_id,
             brush_settings,
@@ -31,15 +105,27 @@ impl ActiveRootStroke {
         &self.inputs
     }
 
-    pub(crate) fn push_input(&mut self, input: CanvasInput) {
+    fn push_input(&mut self, input: CanvasInput) {
         self.inputs.push(input);
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.inputs.is_empty()
     }
+}
 
+impl FinishedRootStroke {
     pub(crate) fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
+        self.stroke.replace_circle_samples()
+    }
+
+    pub(crate) fn brush_id(&self) -> BrushId {
+        self.stroke.brush_id()
+    }
+}
+
+impl ActiveRootStroke {
+    fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
         sample_canvas_inputs(&self.inputs, self.brush_settings)
             .into_iter()
             .map(|input| ReplaceCircleStrokeSample {
@@ -138,8 +224,8 @@ fn lerp_u64(start: u64, end: u64, t: f32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::ActiveRootStroke;
-    use crate::{BrushId, BrushSettings};
+    use super::{ActiveRootStroke, BrushWorker};
+    use crate::{ActiveTool, BrushId, BrushSettings, ToolSet};
     use gla_core::{CanvasCoordF, CanvasInput};
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
@@ -222,5 +308,78 @@ mod tests {
             samples[2].color,
             gla_color::PremultipliedRgbaF32::new(0.2, 0.1, 0.05, 0.2)
         );
+    }
+
+    #[test]
+    fn brush_worker_finishes_active_stroke_into_samples() {
+        let mut settings = BrushSettings::default();
+        settings.radius_px = 10.0;
+        settings.spacing_ratio = 1.0;
+        let mut worker = BrushWorker::new(
+            ToolSet::default_brush(),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            settings,
+        );
+
+        assert!(worker.begin_active_stroke());
+        worker.push_canvas_input(canvas_input(0, 0.0, 0.0, 1.0));
+        worker.push_canvas_input(canvas_input(30, 30.0, 0.0, 1.0));
+        let finished = worker.finish_active_stroke().unwrap();
+
+        assert_eq!(finished.brush_id(), BrushId::DEFAULT);
+        assert!(!worker.has_active_stroke());
+        assert_eq!(finished.replace_circle_samples().len(), 4);
+    }
+
+    #[test]
+    fn brush_worker_can_restore_uncommitted_finished_stroke() {
+        let mut worker = BrushWorker::new(
+            ToolSet::default_brush(),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            BrushSettings::default(),
+        );
+
+        assert!(worker.begin_active_stroke());
+        worker.push_canvas_input(canvas_input(0, 1.0, 2.0, 1.0));
+        let finished = worker.finish_active_stroke().unwrap();
+        worker.restore_active_stroke(finished);
+
+        let active = worker.active_stroke().unwrap();
+        assert_eq!(active.inputs().len(), 1);
+        assert_eq!(active.inputs()[0].position, CanvasCoordF::new(1.0, 2.0));
+    }
+
+    #[test]
+    fn brush_worker_rejects_unregistered_active_brush() {
+        let mut worker = BrushWorker::new(
+            ToolSet::default_brush(),
+            ActiveTool::Brush(BrushId::new(99)),
+            BrushSettings::default(),
+        );
+
+        assert_eq!(worker.active_brush_id(), None);
+        assert!(!worker.begin_active_stroke());
+        assert!(!worker.has_active_stroke());
+    }
+
+    #[test]
+    fn brush_worker_setting_updates_apply_to_next_stroke() {
+        let mut worker = BrushWorker::new(
+            ToolSet::default_brush(),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            BrushSettings::default(),
+        );
+        let mut settings = BrushSettings::default();
+        settings.radius_px = 3.0;
+        worker.update_brush_settings(settings);
+
+        assert!(worker.begin_active_stroke());
+        worker.push_canvas_input(canvas_input(0, 0.0, 0.0, 1.0));
+        let samples = worker
+            .finish_active_stroke()
+            .unwrap()
+            .replace_circle_samples();
+
+        assert_eq!(samples[0].radius_px, 3.0);
     }
 }

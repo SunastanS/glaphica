@@ -20,7 +20,7 @@ use crate::{
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
-    stroke::ActiveRootStroke,
+    stroke::BrushWorker,
 };
 
 #[derive(Debug, Clone)]
@@ -101,7 +101,7 @@ struct App {
     undo_stack: Vec<DrawRecordId>,
     redo_stack: Vec<DrawRecordId>,
     frame_scheduler: AppFrameScheduler,
-    active_stroke: Option<ActiveRootStroke>,
+    brush_worker: BrushWorker,
     primary_down: bool,
     middle_down: bool,
     middle_pan_last_pos: Option<ScreenCoordF>,
@@ -115,6 +115,11 @@ struct App {
 
 impl App {
     fn new(config: AppRuntimeConfig) -> Self {
+        let brush_worker = BrushWorker::new(
+            config.tool_set.clone(),
+            config.active_tool,
+            config.brush_settings,
+        );
         Self {
             config,
             workspace: None,
@@ -123,7 +128,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             frame_scheduler: AppFrameScheduler::new(),
-            active_stroke: None,
+            brush_worker,
             primary_down: false,
             middle_down: false,
             middle_pan_last_pos: None,
@@ -156,16 +161,14 @@ impl App {
     }
 
     fn begin_stroke_at(&mut self, position: ScreenCoordF) {
-        let Some(brush_id) = self.active_brush_id() else {
-            self.active_stroke = None;
+        if !self.brush_worker.begin_active_stroke() {
             return;
-        };
-        self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.config.brush_settings));
+        }
         self.push_stroke_input(position);
     }
 
     fn continue_stroke_at(&mut self, position: ScreenCoordF) {
-        if self.active_stroke.is_some() {
+        if self.brush_worker.has_active_stroke() {
             self.push_stroke_input(position);
         } else {
             self.begin_stroke_at(position);
@@ -174,16 +177,11 @@ impl App {
 
     fn push_stroke_input(&mut self, position: ScreenCoordF) {
         let input = self.stroke_input_from_screen(position);
-        if let Some(stroke) = self.active_stroke.as_mut() {
-            stroke.push_input(input);
-        }
+        self.brush_worker.push_canvas_input(input);
     }
 
     fn active_brush_id(&self) -> Option<BrushId> {
-        self.config
-            .tool_set
-            .contains(self.config.active_tool.as_tool())
-            .then_some(self.config.active_tool.brush_id())?
+        self.brush_worker.active_brush_id()
     }
 
     fn stroke_input_from_screen(&mut self, position: ScreenCoordF) -> CanvasInput {
@@ -206,14 +204,11 @@ impl App {
     }
 
     fn commit_active_stroke(&mut self) -> bool {
-        let Some(stroke) = self.active_stroke.take() else {
+        let Some(stroke) = self.brush_worker.finish_active_stroke() else {
             return false;
         };
-        if stroke.is_empty() {
-            return false;
-        }
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
-            self.active_stroke = Some(stroke);
+            self.brush_worker.restore_active_stroke(stroke);
             return false;
         };
         let samples = stroke.replace_circle_samples();
@@ -227,7 +222,7 @@ impl App {
             Ok(None) => return false,
             Err(error) => {
                 eprintln!("stroke failed: {error}");
-                self.active_stroke = Some(stroke);
+                self.brush_worker.restore_active_stroke(stroke);
                 return false;
             }
         };
@@ -239,7 +234,7 @@ impl App {
     }
 
     fn cancel_active_stroke(&mut self) -> bool {
-        self.active_stroke.take().is_some()
+        self.brush_worker.cancel_active_stroke()
     }
 
     fn undo(&mut self) -> bool {
@@ -867,7 +862,7 @@ mod tests {
         app.begin_stroke_at(ScreenCoordF::new(12.0, 24.0));
         app.continue_stroke_at(ScreenCoordF::new(14.0, 28.0));
 
-        let stroke = app.active_stroke.as_ref().unwrap();
+        let stroke = app.brush_worker.active_stroke().unwrap();
         assert_eq!(stroke.brush_id(), BrushId::DEFAULT);
         assert_eq!(stroke.inputs().len(), 2);
         assert_eq!(stroke.inputs()[0].position, CanvasCoordF::new(1.0, 2.0));
@@ -875,7 +870,11 @@ mod tests {
         assert_eq!(stroke.inputs()[0].pressure, 1.0);
         assert!(stroke.inputs()[1].time_ns > stroke.inputs()[0].time_ns);
 
-        let samples = stroke.replace_circle_samples();
+        let samples = app
+            .brush_worker
+            .finish_active_stroke()
+            .unwrap()
+            .replace_circle_samples();
         assert_eq!(samples[0].center, CanvasCoordF::new(1.0, 2.0));
         assert_eq!(samples[1].center, CanvasCoordF::new(2.0, 4.0));
         assert_eq!(samples[0].radius_px, BrushSettings::default().radius_px);
@@ -893,7 +892,11 @@ mod tests {
         app.config.brush_settings.color = gla_color::PremultipliedRgbaF32::new(0.8, 0.7, 0.6, 1.0);
         app.continue_stroke_at(ScreenCoordF::new(11.0, 21.0));
 
-        let samples = app.active_stroke.as_ref().unwrap().replace_circle_samples();
+        let samples = app
+            .brush_worker
+            .finish_active_stroke()
+            .unwrap()
+            .replace_circle_samples();
         assert_eq!(samples.len(), 2);
         assert!(samples.iter().all(|sample| sample.radius_px == 7.0));
         assert!(
@@ -910,9 +913,9 @@ mod tests {
 
         app.begin_stroke_at(ScreenCoordF::new(10.0, 20.0));
 
-        assert!(app.active_stroke.is_some());
+        assert!(app.brush_worker.has_active_stroke());
         assert!(app.cancel_active_stroke());
-        assert!(app.active_stroke.is_none());
+        assert!(!app.brush_worker.has_active_stroke());
         assert!(!app.cancel_active_stroke());
     }
 
