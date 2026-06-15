@@ -2,8 +2,12 @@ use gla_color::apply_value_mask_to_premultiplied_rgba;
 use gla_core::{CanvasCoordF, CanvasInput};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use crate::{ActiveTool, BrushId, BrushSettings, ReplaceCircleStrokeSample, ToolSet};
+use crate::{
+    ActiveTool, BrushId, BrushSettings, OverwriteRingConsumer, OverwriteRingProducer,
+    ReplaceCircleStrokeSample, ToolSet, create_overwrite_ring,
+};
 
 const MIN_SPACING_RATIO: f32 = 0.05;
 const MIN_SPACING_PX: f32 = 1.0;
@@ -21,9 +25,16 @@ pub(crate) struct BrushThreadRuntime {
     tool_set: ToolSet,
     active_tool: ActiveTool,
     command_sender: Option<SyncSender<BrushThreadCommand>>,
+    overflow_input_producer: Option<OverwriteRingProducer<QueuedCanvasInput>>,
     active: bool,
     command_epoch: u64,
     thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueuedCanvasInput {
+    epoch: u64,
+    input: CanvasInput,
 }
 
 #[derive(Debug)]
@@ -77,15 +88,19 @@ impl BrushThreadRuntime {
     ) -> Self {
         let capacity = command_capacity.max(1);
         let (command_sender, command_receiver) = sync_channel(capacity);
+        let (overflow_input_producer, overflow_input_consumer) = create_overwrite_ring(capacity);
         let worker = BrushWorker::new(tool_set.clone(), active_tool, brush_settings);
         let thread = thread::Builder::new()
             .name("glaphica-brush".to_owned())
-            .spawn(move || run_brush_thread(worker, command_receiver, capacity))
+            .spawn(move || {
+                run_brush_thread(worker, command_receiver, overflow_input_consumer, capacity)
+            })
             .expect("brush thread should spawn");
         Self {
             tool_set,
             active_tool,
             command_sender: Some(command_sender),
+            overflow_input_producer: Some(overflow_input_producer),
             active: false,
             command_epoch: 0,
             thread: Some(thread),
@@ -103,6 +118,7 @@ impl BrushThreadRuntime {
             return false;
         }
         self.next_epoch();
+        self.clear_overflow_inputs();
         let sent = self.send_control(BrushThreadCommand::SetActiveTool(active_tool));
         if sent {
             self.active_tool = active_tool;
@@ -117,6 +133,7 @@ impl BrushThreadRuntime {
             return false;
         }
         let epoch = self.next_epoch();
+        self.clear_overflow_inputs();
         let sent = self.send_control(BrushThreadCommand::Begin { epoch });
         self.active = sent;
         sent
@@ -135,7 +152,10 @@ impl BrushThreadRuntime {
             input,
         };
         match sender.try_send(command) {
-            Ok(()) | Err(TrySendError::Full(BrushThreadCommand::CanvasInput { .. })) => {}
+            Ok(()) => {}
+            Err(TrySendError::Full(BrushThreadCommand::CanvasInput { epoch, input })) => {
+                self.push_overflow_input(QueuedCanvasInput { epoch, input });
+            }
             Err(TrySendError::Full(command)) => {
                 if sender.send(command).is_err() {
                     self.active = false;
@@ -172,6 +192,7 @@ impl BrushThreadRuntime {
 
     pub(crate) fn restore_active_stroke(&mut self, stroke: FinishedRootStroke) {
         let epoch = self.next_epoch();
+        self.clear_overflow_inputs();
         self.active = self.send_control(BrushThreadCommand::Restore { epoch, stroke });
     }
 
@@ -181,6 +202,7 @@ impl BrushThreadRuntime {
         }
         self.active = false;
         let epoch = self.next_epoch();
+        self.clear_overflow_inputs();
         self.send_control(BrushThreadCommand::Cancel { epoch })
     }
 
@@ -191,6 +213,7 @@ impl BrushThreadRuntime {
     pub(crate) fn update_brush_settings(&mut self, brush_settings: BrushSettings) {
         self.next_epoch();
         self.active = false;
+        self.clear_overflow_inputs();
         let _ = self.send_control(BrushThreadCommand::UpdateBrushSettings(brush_settings));
     }
 
@@ -205,10 +228,24 @@ impl BrushThreadRuntime {
         };
         sender.send(command).is_ok()
     }
+
+    fn push_overflow_input(&mut self, input: QueuedCanvasInput) {
+        let Some(producer) = self.overflow_input_producer.as_ref() else {
+            return;
+        };
+        producer.push(input);
+    }
+
+    fn clear_overflow_inputs(&self) {
+        if let Some(producer) = self.overflow_input_producer.as_ref() {
+            producer.clear();
+        }
+    }
 }
 
 impl Drop for BrushThreadRuntime {
     fn drop(&mut self) {
+        drop(self.overflow_input_producer.take());
         drop(self.command_sender.take());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -450,17 +487,20 @@ impl WorkerStrokeState {
 fn run_brush_thread(
     mut worker: BrushWorker,
     command_receiver: Receiver<BrushThreadCommand>,
+    overflow_input_consumer: OverwriteRingConsumer<QueuedCanvasInput>,
     batch_capacity: usize,
 ) {
     let batch_capacity = batch_capacity.max(1);
     let mut command_batch = Vec::with_capacity(batch_capacity);
     let mut canvas_batch = Vec::with_capacity(batch_capacity);
+    let mut overflow_batch = Vec::with_capacity(batch_capacity);
     let mut stroke_state = WorkerStrokeState::Idle;
 
     while receive_command_batch(&command_receiver, &mut command_batch, batch_capacity) {
         for command in command_batch.drain(..) {
             match command {
                 BrushThreadCommand::Begin { epoch } => {
+                    overflow_input_consumer.clear();
                     canvas_batch.clear();
                     worker.begin_active_stroke();
                     stroke_state = WorkerStrokeState::Active { epoch };
@@ -471,6 +511,13 @@ fn run_brush_thread(
                     }
                 }
                 BrushThreadCommand::Finish { epoch, response } => {
+                    drain_overflow_inputs(
+                        &overflow_input_consumer,
+                        &mut overflow_batch,
+                        batch_capacity,
+                        stroke_state,
+                        &mut canvas_batch,
+                    );
                     let finished = if stroke_state.accepts(epoch) {
                         flush_canvas_batch(&mut worker, &mut canvas_batch);
                         worker.finish_active_stroke()
@@ -481,21 +528,25 @@ fn run_brush_thread(
                     let _ = response.send(finished);
                 }
                 BrushThreadCommand::Restore { epoch, stroke } => {
+                    overflow_input_consumer.clear();
                     canvas_batch.clear();
                     worker.restore_active_stroke(stroke);
                     stroke_state = WorkerStrokeState::Active { epoch };
                 }
                 BrushThreadCommand::Cancel { epoch: _ } => {
+                    overflow_input_consumer.clear();
                     canvas_batch.clear();
                     worker.cancel_active_stroke();
                     stroke_state = WorkerStrokeState::Idle;
                 }
                 BrushThreadCommand::SetActiveTool(active_tool) => {
+                    overflow_input_consumer.clear();
                     canvas_batch.clear();
                     worker.set_active_tool(active_tool);
                     stroke_state = WorkerStrokeState::Idle;
                 }
                 BrushThreadCommand::UpdateBrushSettings(settings) => {
+                    overflow_input_consumer.clear();
                     canvas_batch.clear();
                     worker.cancel_active_stroke();
                     worker.update_brush_settings(settings);
@@ -503,7 +554,29 @@ fn run_brush_thread(
                 }
             }
         }
+        drain_overflow_inputs(
+            &overflow_input_consumer,
+            &mut overflow_batch,
+            batch_capacity,
+            stroke_state,
+            &mut canvas_batch,
+        );
         flush_canvas_batch(&mut worker, &mut canvas_batch);
+    }
+}
+
+fn drain_overflow_inputs(
+    overflow_input_consumer: &OverwriteRingConsumer<QueuedCanvasInput>,
+    output: &mut Vec<QueuedCanvasInput>,
+    max_items: usize,
+    stroke_state: WorkerStrokeState,
+    canvas_batch: &mut Vec<CanvasInput>,
+) {
+    overflow_input_consumer.drain_batch_with_wait(output, max_items, Duration::ZERO);
+    for queued in output.drain(..) {
+        if stroke_state.accepts(queued.epoch) {
+            canvas_batch.push(queued.input);
+        }
     }
 }
 
@@ -537,10 +610,14 @@ fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInp
 
 #[cfg(test)]
 mod tests {
-    use super::{ActiveRootStroke, BrushThreadCommand, BrushThreadRuntime, BrushWorker};
+    use super::{
+        ActiveRootStroke, BrushThreadCommand, BrushThreadRuntime, BrushWorker, QueuedCanvasInput,
+    };
+    use crate::create_overwrite_ring;
     use crate::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
     use gla_core::{CanvasCoordF, CanvasInput};
     use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
         CanvasInput {
@@ -776,6 +853,7 @@ mod tests {
             })
             .unwrap();
         drop(command_sender);
+        let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
 
         super::run_brush_thread(
             BrushWorker::new(
@@ -784,6 +862,7 @@ mod tests {
                 BrushSettings::default(),
             ),
             command_receiver,
+            overflow_consumer,
             16,
         );
         let finished = response_receiver.recv().unwrap().unwrap();
@@ -833,6 +912,7 @@ mod tests {
             })
             .unwrap();
         drop(command_sender);
+        let (_overflow_producer, overflow_consumer) = create_overwrite_ring(16);
 
         super::run_brush_thread(
             BrushWorker::new(
@@ -841,6 +921,7 @@ mod tests {
                 BrushSettings::default(),
             ),
             command_receiver,
+            overflow_consumer,
             16,
         );
         let finished = response_receiver.recv().unwrap().unwrap();
@@ -849,6 +930,39 @@ mod tests {
         assert_eq!(finished.inputs().len(), 1);
         assert_eq!(finished.inputs()[0].position, CanvasCoordF::new(3.0, 3.0));
         assert_eq!(samples[0].radius_px, 4.0);
+    }
+
+    #[test]
+    fn brush_thread_overflow_input_ring_keeps_newest_inputs() {
+        let (overflow_producer, overflow_consumer) = create_overwrite_ring(2);
+        let mut overflow_batch = Vec::new();
+        let mut canvas_batch = Vec::new();
+
+        overflow_producer.push(QueuedCanvasInput {
+            epoch: 1,
+            input: canvas_input(1, 1.0, 1.0, 1.0),
+        });
+        overflow_producer.push(QueuedCanvasInput {
+            epoch: 1,
+            input: canvas_input(2, 2.0, 2.0, 1.0),
+        });
+        overflow_producer.push(QueuedCanvasInput {
+            epoch: 1,
+            input: canvas_input(3, 3.0, 3.0, 1.0),
+        });
+        super::drain_overflow_inputs(
+            &overflow_consumer,
+            &mut overflow_batch,
+            16,
+            super::WorkerStrokeState::Active { epoch: 1 },
+            &mut canvas_batch,
+        );
+
+        assert_eq!(overflow_producer.pushed_items(), 3);
+        assert_eq!(overflow_producer.dropped_items(), 1);
+        assert_eq!(canvas_batch.len(), 2);
+        assert_eq!(canvas_batch[0].position, CanvasCoordF::new(2.0, 2.0));
+        assert_eq!(canvas_batch[1].position, CanvasCoordF::new(3.0, 3.0));
     }
 
     #[test]

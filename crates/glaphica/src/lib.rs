@@ -2,6 +2,7 @@ mod display;
 mod document;
 mod export;
 mod frame;
+mod input_ring;
 mod layer_tree;
 mod runtime;
 mod script;
@@ -26,6 +27,7 @@ pub use export::{
     workspace_from_export_snapshot, write_workspace_manifest,
 };
 pub use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
+pub use input_ring::{OverwriteRingConsumer, OverwriteRingProducer, create_overwrite_ring};
 pub use layer_tree::{
     DocumentBlendMode, DocumentLayerNode, DocumentLayerTree, DocumentLayerTreeError,
     DocumentNodeId, DocumentNodeKind,
