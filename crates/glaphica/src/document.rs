@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures};
+use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures, TilePos};
 use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
 use gla_core::CanvasCoordF;
 use gla_draw_on::DrawOnInput;
@@ -43,6 +43,14 @@ pub struct DocumentWorkspace {
     root: ImageId,
     format: GlaFormat,
     layout: ImageLayoutSpec,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentRootTileRead {
+    pub tile_index: u32,
+    pub src: TilePos,
+    pub source_width: u32,
+    pub source_height: u32,
 }
 
 impl DocumentWorkspace {
@@ -282,6 +290,21 @@ impl DocumentWorkspace {
         self.root_present_tiles_for_view(&AppView::identity())
     }
 
+    pub fn root_physical_tiles(&self) -> Result<Vec<DocumentRootTileRead>, DocumentPresentError> {
+        let layout = self.root_layout()?;
+        let tile_count_x = layout.tile_count_x();
+        let tile_count = layout.tile_count();
+        let mut tiles = Vec::new();
+
+        for tile_index in 0..tile_count {
+            if let Some(tile) = self.root_physical_tile_for_index(tile_count_x, tile_index)? {
+                tiles.push(tile);
+            }
+        }
+
+        Ok(tiles)
+    }
+
     pub fn root_present_tiles_for_view(
         &self,
         view: &AppView,
@@ -332,6 +355,36 @@ impl DocumentWorkspace {
         tile_count_x: u32,
         tile_index: u32,
     ) -> Result<Option<PresentTile>, DocumentPresentError> {
+        let Some(tile) = self.root_physical_tile_for_index(tile_count_x, tile_index)? else {
+            return Ok(None);
+        };
+        let tile_x = tile_index % tile_count_x;
+        let tile_y = tile_index / tile_count_x;
+        let origin_x = tile_x * IMAGE_TILE_SIZE;
+        let origin_y = tile_y * IMAGE_TILE_SIZE;
+        let target_min =
+            view.document_to_screen_point(CanvasCoordF::new(origin_x as f32, origin_y as f32));
+        let target_max = view.document_to_screen_point(CanvasCoordF::new(
+            (origin_x + tile.source_width) as f32,
+            (origin_y + tile.source_height) as f32,
+        ));
+
+        Ok(Some(PresentTile {
+            src: tile.src,
+            params: PresentTileParams {
+                target_min_px: [target_min.x, target_min.y],
+                target_max_px: [target_max.x, target_max.y],
+                source_width: tile.source_width,
+                source_height: tile.source_height,
+            },
+        }))
+    }
+
+    fn root_physical_tile_for_index(
+        &self,
+        tile_count_x: u32,
+        tile_index: u32,
+    ) -> Result<Option<DocumentRootTileRead>, DocumentPresentError> {
         let tile_ref = self
             .storage
             .read_global_ref(self.root, tile_index)
@@ -357,21 +410,12 @@ impl DocumentWorkspace {
         if source_width == 0 || source_height == 0 {
             return Ok(None);
         }
-        let target_min =
-            view.document_to_screen_point(CanvasCoordF::new(origin_x as f32, origin_y as f32));
-        let target_max = view.document_to_screen_point(CanvasCoordF::new(
-            (origin_x + source_width) as f32,
-            (origin_y + source_height) as f32,
-        ));
 
-        Ok(Some(PresentTile {
+        Ok(Some(DocumentRootTileRead {
+            tile_index,
             src,
-            params: PresentTileParams {
-                target_min_px: [target_min.x, target_min.y],
-                target_max_px: [target_max.x, target_max.y],
-                source_width,
-                source_height,
-            },
+            source_width,
+            source_height,
         }))
     }
 }
@@ -665,6 +709,7 @@ mod tests {
     fn root_present_tiles_skip_zero_tiles_and_include_committed_physical_tiles() {
         let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
         assert!(workspace.root_present_tiles().unwrap().is_empty());
+        assert!(workspace.root_physical_tiles().unwrap().is_empty());
 
         let mut history = DrawHistory::new();
         let mut backend = RecordingBackend::default();
@@ -686,6 +731,33 @@ mod tests {
         assert_eq!(tiles[0].params.target_max_px, [62.0, 62.0]);
         assert_eq!(tiles[0].params.source_width, IMAGE_TILE_SIZE);
         assert_eq!(tiles[0].params.source_height, IMAGE_TILE_SIZE);
+    }
+
+    #[test]
+    fn root_physical_tiles_expose_export_readback_metadata() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        workspace
+            .replace_circle_on_root(
+                &mut history,
+                &mut backend,
+                24.0,
+                32.0,
+                8.0,
+                PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
+            )
+            .unwrap()
+            .unwrap();
+
+        let physical = workspace.root_physical_tiles().unwrap();
+        let present = workspace.root_present_tiles().unwrap();
+
+        assert_eq!(physical.len(), 1);
+        assert_eq!(physical[0].tile_index, 0);
+        assert_eq!(physical[0].source_width, IMAGE_TILE_SIZE);
+        assert_eq!(physical[0].source_height, IMAGE_TILE_SIZE);
+        assert_eq!(physical[0].src, present[0].src);
     }
 
     #[test]
