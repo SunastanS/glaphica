@@ -20,6 +20,7 @@ use crate::{
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
+    script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
     stroke::BrushThreadRuntime,
 };
 
@@ -183,6 +184,59 @@ impl App {
         self.brush_thread.push_canvas_input(input);
     }
 
+    fn begin_stroke_with_canvas_input(
+        &mut self,
+        input: CanvasInput,
+    ) -> Result<(), ScriptHostError> {
+        if self.active_brush_id().is_none() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "active tool is not a registered brush".to_owned(),
+            });
+        }
+        if !self.brush_thread.begin_active_stroke() {
+            return Err(ScriptHostError::Runtime {
+                reason: "brush thread did not start a stroke".to_owned(),
+            });
+        }
+        self.brush_thread.push_canvas_input(input);
+        Ok(())
+    }
+
+    fn push_canvas_input_from_script(&mut self, input: CanvasInput) -> Result<(), ScriptHostError> {
+        if !self.brush_thread.has_active_stroke() {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: "cannot push stroke input before beginning a stroke".to_owned(),
+            });
+        }
+        self.brush_thread.push_canvas_input(input);
+        Ok(())
+    }
+
+    fn set_active_tool_from_script(
+        &mut self,
+        active_tool: ActiveTool,
+    ) -> Result<(), ScriptHostError> {
+        if !self.config.tool_set.contains(active_tool.as_tool()) {
+            return Err(ScriptHostError::InvalidCommand {
+                reason: format!("active tool {active_tool:?} is not registered"),
+            });
+        }
+        if !self.brush_thread.set_active_tool(active_tool) {
+            return Err(ScriptHostError::Runtime {
+                reason: "brush thread did not accept active tool update".to_owned(),
+            });
+        }
+        self.config.active_tool = active_tool;
+        self.primary_down = false;
+        Ok(())
+    }
+
+    fn set_round_brush_settings_from_script(&mut self, settings: RoundBrushSettings) {
+        let brush_settings = BrushSettings::from_round_brush(settings);
+        self.config.brush_settings = brush_settings;
+        self.brush_thread.update_brush_settings(brush_settings);
+    }
+
     fn active_brush_id(&self) -> Option<BrushId> {
         self.brush_thread.active_brush_id()
     }
@@ -207,12 +261,16 @@ impl App {
     }
 
     fn commit_active_stroke(&mut self) -> bool {
+        self.commit_active_stroke_dirty_tiles().is_some()
+    }
+
+    fn commit_active_stroke_dirty_tiles(&mut self) -> Option<Vec<u32>> {
         let Some(stroke) = self.brush_thread.finish_active_stroke() else {
-            return false;
+            return None;
         };
         let (Some(workspace), Some(gpu)) = (self.workspace.as_mut(), self.gpu.as_mut()) else {
             self.brush_thread.restore_active_stroke(stroke);
-            return false;
+            return None;
         };
         let samples = stroke.replace_circle_samples();
 
@@ -222,18 +280,18 @@ impl App {
             samples.iter().copied(),
         ) {
             Ok(Some(commit)) => commit,
-            Ok(None) => return false,
+            Ok(None) => return None,
             Err(error) => {
                 eprintln!("stroke failed: {error}");
                 self.brush_thread.restore_active_stroke(stroke);
-                return false;
+                return None;
             }
         };
         let dirty_tiles = workspace.root_dirty_tile_indices(&commit);
         self.undo_stack.push(commit.record_id);
         self.redo_stack.clear();
         self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
-        true
+        Some(dirty_tiles)
     }
 
     fn cancel_active_stroke(&mut self) -> bool {
@@ -339,6 +397,71 @@ impl App {
             return false;
         }
         true
+    }
+}
+
+impl ScriptHost for App {
+    fn execute_script_command(
+        &mut self,
+        command: ScriptCommand,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        match command {
+            ScriptCommand::ApplyRegistryPatch(_) => Err(ScriptHostError::UnsupportedCommand {
+                command: "ApplyRegistryPatch",
+            }),
+            ScriptCommand::RunDrawSession(_) => Err(ScriptHostError::UnsupportedCommand {
+                command: "RunDrawSession",
+            }),
+            ScriptCommand::SetActiveTool(active_tool) => {
+                self.set_active_tool_from_script(active_tool)?;
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::SetRoundBrushSettings(settings) => {
+                self.set_round_brush_settings_from_script(settings);
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::BeginStroke(input) => {
+                self.begin_stroke_with_canvas_input(input)?;
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::PushStrokeInput(input) => {
+                self.push_canvas_input_from_script(input)?;
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::FinishStroke => {
+                let Some(dirty_tiles) = self.commit_active_stroke_dirty_tiles() else {
+                    return Ok(ScriptCommandOutcome::None);
+                };
+                self.request_redraw();
+                Ok(ScriptCommandOutcome::DirtyRootTiles(dirty_tiles))
+            }
+            ScriptCommand::CancelStroke => {
+                if self.cancel_active_stroke() {
+                    self.primary_down = false;
+                }
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::Undo => {
+                if self.undo() {
+                    self.request_redraw();
+                    Ok(ScriptCommandOutcome::RedrawRequested)
+                } else {
+                    Ok(ScriptCommandOutcome::None)
+                }
+            }
+            ScriptCommand::Redo => {
+                if self.redo() {
+                    self.request_redraw();
+                    Ok(ScriptCommandOutcome::RedrawRequested)
+                } else {
+                    Ok(ScriptCommandOutcome::None)
+                }
+            }
+            ScriptCommand::RequestRedraw => {
+                self.request_redraw();
+                Ok(ScriptCommandOutcome::RedrawRequested)
+            }
+        }
     }
 }
 
@@ -804,10 +927,21 @@ mod tests {
     use super::{App, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppView, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
-        DEFAULT_CANVAS_WIDTH_PX, RoundBrushSettings, Tool,
+        DEFAULT_CANVAS_WIDTH_PX, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
+        ScriptHost, ScriptHostError, Tool, ToolSet,
     };
-    use gla_core::{CanvasCoordF, ScreenCoordF};
-    use gla_ir::DrawOnToolKind;
+    use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
+    use gla_ir::{DocImageUse, DocumentVersionId, DrawOnToolKind, DrawSessionIR, ImageId};
+
+    fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
+        CanvasInput {
+            time_ns,
+            position: CanvasCoordF::new(x, y),
+            pressure,
+            tilt: (0.0, 0.0),
+            twist: 0.0,
+        }
+    }
 
     #[test]
     fn default_runtime_config_keeps_window_contract_stable() {
@@ -916,6 +1050,134 @@ mod tests {
         assert!(app.cancel_active_stroke());
         assert!(!app.brush_thread.has_active_stroke());
         assert!(!app.cancel_active_stroke());
+    }
+
+    #[test]
+    fn script_host_updates_round_brush_settings_for_next_stroke() {
+        let mut app = App::new(AppRuntimeConfig::default());
+
+        let outcome = app
+            .execute_script_command(ScriptCommand::SetRoundBrushSettings(RoundBrushSettings {
+                base_radius_px: 3.0,
+                spacing_ratio: 1.0,
+                base_hardness: 0.4,
+                base_flow: 1.0,
+                base_opacity: 1.0,
+                tint: [0.2, 0.4, 0.6],
+            }))
+            .unwrap();
+        app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(0, 1.0, 2.0, 1.0)))
+            .unwrap();
+
+        let samples = app
+            .brush_thread
+            .finish_active_stroke()
+            .unwrap()
+            .replace_circle_samples();
+
+        assert_eq!(outcome, ScriptCommandOutcome::None);
+        assert_eq!(app.config.brush_settings.radius_px, 3.0);
+        assert_eq!(samples[0].radius_px, 3.0);
+        assert_eq!(
+            samples[0].color,
+            gla_color::PremultipliedRgbaF32::new(0.2, 0.4, 0.6, 1.0)
+        );
+    }
+
+    #[test]
+    fn script_host_sets_registered_active_tool() {
+        let second_brush = BrushId::new(2);
+        let mut config = AppRuntimeConfig::default();
+        config.tool_set = ToolSet::new(vec![
+            Tool::Brush(BrushId::DEFAULT),
+            Tool::Brush(second_brush),
+        ]);
+        let mut app = App::new(config);
+
+        app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(0, 0.0, 0.0, 1.0)))
+            .unwrap();
+        let outcome = app
+            .execute_script_command(ScriptCommand::SetActiveTool(ActiveTool::Brush(
+                second_brush,
+            )))
+            .unwrap();
+        app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(1, 1.0, 2.0, 1.0)))
+            .unwrap();
+        let finished = app.brush_thread.finish_active_stroke().unwrap();
+
+        assert_eq!(outcome, ScriptCommandOutcome::None);
+        assert_eq!(app.config.active_tool, ActiveTool::Brush(second_brush));
+        assert_eq!(finished.brush_id(), second_brush);
+    }
+
+    #[test]
+    fn script_host_rejects_unregistered_active_tool() {
+        let mut app = App::new(AppRuntimeConfig::default());
+
+        let error = app
+            .execute_script_command(ScriptCommand::SetActiveTool(ActiveTool::Brush(
+                BrushId::new(99),
+            )))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("is not registered")
+        ));
+        assert_eq!(app.config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
+    }
+
+    #[test]
+    fn script_host_requires_begin_before_push() {
+        let mut app = App::new(AppRuntimeConfig::default());
+
+        let error = app
+            .execute_script_command(ScriptCommand::PushStrokeInput(canvas_input(
+                0, 1.0, 2.0, 1.0,
+            )))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ScriptHostError::InvalidCommand { reason }
+                if reason.contains("before beginning a stroke")
+        ));
+    }
+
+    #[test]
+    fn script_host_request_redraw_latches_scheduler() {
+        let mut app = App::new(AppRuntimeConfig::default());
+
+        let outcome = app
+            .execute_script_command(ScriptCommand::RequestRedraw)
+            .unwrap();
+
+        assert_eq!(outcome, ScriptCommandOutcome::RedrawRequested);
+        assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn script_host_reports_unimplemented_document_commands() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        let ir = DrawSessionIR {
+            expected_document_version: DocumentVersionId::new(7),
+            doc_images: vec![DocImageUse::read(ImageId::new(1))],
+            session_images: Vec::new(),
+            draw_on: Vec::new(),
+            derive: Vec::new(),
+        };
+
+        let error = app
+            .execute_script_command(ScriptCommand::RunDrawSession(ir))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ScriptHostError::UnsupportedCommand {
+                command: "RunDrawSession"
+            }
+        );
     }
 
     #[test]

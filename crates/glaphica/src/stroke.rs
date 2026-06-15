@@ -32,6 +32,7 @@ enum BrushThreadCommand {
     Finish(SyncSender<Option<FinishedRootStroke>>),
     Restore(FinishedRootStroke),
     Cancel,
+    SetActiveTool(ActiveTool),
     UpdateBrushSettings(BrushSettings),
 }
 
@@ -74,6 +75,18 @@ impl BrushThreadRuntime {
         self.tool_set
             .contains(self.active_tool.as_tool())
             .then_some(self.active_tool.brush_id())?
+    }
+
+    pub(crate) fn set_active_tool(&mut self, active_tool: ActiveTool) -> bool {
+        if !self.tool_set.contains(active_tool.as_tool()) {
+            return false;
+        }
+        let sent = self.send_control(BrushThreadCommand::SetActiveTool(active_tool));
+        if sent {
+            self.active_tool = active_tool;
+            self.active = false;
+        }
+        sent
     }
 
     pub(crate) fn begin_active_stroke(&mut self) -> bool {
@@ -182,6 +195,15 @@ impl BrushWorker {
         self.tool_set
             .contains(self.active_tool.as_tool())
             .then_some(self.active_tool.brush_id())?
+    }
+
+    pub(crate) fn set_active_tool(&mut self, active_tool: ActiveTool) -> bool {
+        if !self.tool_set.contains(active_tool.as_tool()) {
+            return false;
+        }
+        self.active_tool = active_tool;
+        self.active_stroke = None;
+        true
     }
 
     pub(crate) fn begin_active_stroke(&mut self) -> bool {
@@ -384,6 +406,9 @@ fn run_brush_thread(
             BrushThreadCommand::Cancel => {
                 worker.cancel_active_stroke();
             }
+            BrushThreadCommand::SetActiveTool(active_tool) => {
+                worker.set_active_tool(active_tool);
+            }
             BrushThreadCommand::UpdateBrushSettings(settings) => {
                 worker.update_brush_settings(settings);
             }
@@ -394,7 +419,7 @@ fn run_brush_thread(
 #[cfg(test)]
 mod tests {
     use super::{ActiveRootStroke, BrushThreadRuntime, BrushWorker};
-    use crate::{ActiveTool, BrushId, BrushSettings, ToolSet};
+    use crate::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
     use gla_core::{CanvasCoordF, CanvasInput};
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
@@ -532,6 +557,26 @@ mod tests {
     }
 
     #[test]
+    fn brush_worker_switches_registered_active_tool() {
+        let second_brush = BrushId::new(2);
+        let mut worker = BrushWorker::new(
+            ToolSet::new(vec![
+                Tool::Brush(BrushId::DEFAULT),
+                Tool::Brush(second_brush),
+            ]),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            BrushSettings::default(),
+        );
+
+        assert!(worker.begin_active_stroke());
+        worker.push_canvas_input(canvas_input(0, 0.0, 0.0, 1.0));
+        assert!(worker.set_active_tool(ActiveTool::Brush(second_brush)));
+
+        assert_eq!(worker.active_brush_id(), Some(second_brush));
+        assert!(!worker.has_active_stroke());
+    }
+
+    #[test]
     fn brush_worker_setting_updates_apply_to_next_stroke() {
         let mut worker = BrushWorker::new(
             ToolSet::default_brush(),
@@ -590,6 +635,28 @@ mod tests {
 
         assert_eq!(restored.inputs().len(), 1);
         assert_eq!(restored.inputs()[0].position, CanvasCoordF::new(5.0, 6.0));
+    }
+
+    #[test]
+    fn brush_thread_runtime_switches_registered_active_tool() {
+        let second_brush = BrushId::new(2);
+        let mut runtime = BrushThreadRuntime::spawn(
+            ToolSet::new(vec![
+                Tool::Brush(BrushId::DEFAULT),
+                Tool::Brush(second_brush),
+            ]),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            BrushSettings::default(),
+            8,
+        );
+
+        assert!(runtime.set_active_tool(ActiveTool::Brush(second_brush)));
+        assert_eq!(runtime.active_brush_id(), Some(second_brush));
+        assert!(runtime.begin_active_stroke());
+        runtime.push_canvas_input(canvas_input(0, 1.0, 2.0, 1.0));
+        let finished = runtime.finish_active_stroke().unwrap();
+
+        assert_eq!(finished.brush_id(), second_brush);
     }
 
     #[test]
