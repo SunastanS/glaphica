@@ -2,7 +2,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use gla_color::PremultipliedRgbaF32;
 use gla_core::ScreenCoordF;
 use gla_ir::DrawOnToolKind;
 use gla_renderer::{GpuRenderer, GpuRendererError, PresentTarget};
@@ -16,7 +15,7 @@ use winit::{
 };
 
 use crate::{
-    ActiveTool, AppView, AppViewMatrixError, BrushId, DEFAULT_CANVAS_HEIGHT_PX,
+    ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError,
     ReplaceCircleStrokeSample, ToolSet, frame::AppFrameScheduler,
 };
@@ -30,8 +29,7 @@ pub struct AppRuntimeConfig {
     pub tool_set: ToolSet,
     pub active_tool: ActiveTool,
     pub draw_on_tools: Vec<DrawOnToolKind>,
-    pub brush_radius_px: f32,
-    pub brush_color: PremultipliedRgbaF32,
+    pub brush_settings: BrushSettings,
 }
 
 impl Default for AppRuntimeConfig {
@@ -49,8 +47,7 @@ impl Default for AppRuntimeConfig {
             tool_set: ToolSet::default_brush(),
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
-            brush_radius_px: 10.0,
-            brush_color: PremultipliedRgbaF32::new(0.95, 0.17, 0.10, 1.0),
+            brush_settings: BrushSettings::default(),
         }
     }
 }
@@ -175,8 +172,8 @@ impl App {
         let canvas = self.view.screen_to_document_point(position);
         ReplaceCircleStrokeSample {
             center: canvas,
-            radius_px: self.config.brush_radius_px,
-            color: self.config.brush_color,
+            radius_px: self.config.brush_settings.radius_px,
+            color: self.config.brush_settings.color,
         }
     }
 
@@ -693,7 +690,9 @@ fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{App, AppRuntimeConfig};
-    use crate::{ActiveTool, BrushId, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, Tool};
+    use crate::{
+        ActiveTool, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, Tool,
+    };
     use gla_ir::DrawOnToolKind;
 
     #[test]
@@ -710,11 +709,7 @@ mod tests {
         assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
-        assert_eq!(config.brush_radius_px, 10.0);
-        assert_eq!(
-            config.brush_color,
-            gla_color::PremultipliedRgbaF32::new(0.95, 0.17, 0.10, 1.0)
-        );
+        assert_eq!(config.brush_settings, BrushSettings::default());
     }
 
     #[test]
