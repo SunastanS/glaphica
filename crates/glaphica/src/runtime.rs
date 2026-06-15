@@ -58,6 +58,7 @@ pub struct AppPerfTraceConfig {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct AppFramePerf {
+    process_preview: Duration,
     update_cache: Duration,
     acquire_frame: Duration,
     present_surface: Duration,
@@ -68,6 +69,7 @@ struct AppFramePerf {
 struct ActiveStrokePreview {
     brush_settings: BrushSettings,
     inputs: Vec<CanvasInput>,
+    dirty: bool,
 }
 
 impl ActiveStrokePreview {
@@ -75,11 +77,21 @@ impl ActiveStrokePreview {
         Self {
             brush_settings,
             inputs: vec![input],
+            dirty: true,
         }
     }
 
     fn push_input(&mut self, input: CanvasInput) {
         self.inputs.push(input);
+        self.dirty = true;
+    }
+
+    fn needs_render(&self) -> bool {
+        self.dirty
+    }
+
+    fn mark_rendered(&mut self) {
+        self.dirty = false;
     }
 
     fn replace_circle_samples(&self) -> Vec<crate::ReplaceCircleStrokeSample> {
@@ -309,7 +321,7 @@ impl App {
         self.brush_thread.push_canvas_input(input);
         self.active_stroke_preview =
             Some(ActiveStrokePreview::new(self.config.brush_settings, input));
-        self.refresh_active_stroke_preview();
+        self.request_redraw();
         Ok(())
     }
 
@@ -326,16 +338,19 @@ impl App {
             self.active_stroke_preview =
                 Some(ActiveStrokePreview::new(self.config.brush_settings, input));
         }
-        self.refresh_active_stroke_preview();
+        self.request_redraw();
         Ok(())
     }
 
-    fn refresh_active_stroke_preview(&mut self) {
-        let Some(preview) = self.active_stroke_preview.as_ref() else {
-            return;
+    fn process_pending_active_stroke_preview(&mut self) {
+        let samples = match self.active_stroke_preview.as_ref() {
+            Some(preview) if preview.needs_render() => preview.replace_circle_samples(),
+            _ => return,
         };
-        let samples = preview.replace_circle_samples();
         if samples.is_empty() {
+            if let Some(preview) = self.active_stroke_preview.as_mut() {
+                preview.mark_rendered();
+            }
             return;
         }
         self.refresh_layer_composite_if_needed();
@@ -344,9 +359,16 @@ impl App {
         };
         match workspace.render_stroke_preview(gpu.renderer_mut(), samples) {
             Ok(dirty_tiles) if !dirty_tiles.is_empty() => {
+                if let Some(preview) = self.active_stroke_preview.as_mut() {
+                    preview.mark_rendered();
+                }
                 self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
             }
-            Ok(_) => {}
+            Ok(_) => {
+                if let Some(preview) = self.active_stroke_preview.as_mut() {
+                    preview.mark_rendered();
+                }
+            }
             Err(error) => eprintln!("stroke preview render failed: {error}"),
         }
     }
@@ -1636,12 +1658,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let frame_started = Instant::now();
+                let process_preview_started = Instant::now();
                 self.refresh_layer_composite_if_needed();
+                self.process_pending_active_stroke_preview();
+                let process_preview = process_preview_started.elapsed();
                 let update_request = self.frame_scheduler.take_screen_update_request();
-                let perf = self.gpu.as_mut().and_then(|gpu| {
+                let mut perf = self.gpu.as_mut().and_then(|gpu| {
                     gpu.render(self.workspace.as_ref(), &self.view, update_request)
                 });
-                if let Some(perf) = perf.as_ref() {
+                if let Some(perf) = perf.as_mut() {
+                    perf.process_preview = process_preview;
                     self.trace_frame_perf(frame_started.elapsed(), perf);
                 }
                 self.frame_scheduler.reset_redraw_request();
@@ -1694,6 +1720,7 @@ fn duration_ms(duration: Duration) -> f64 {
 
 fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) -> String {
     let stages = [
+        ("process_preview", perf.process_preview),
         ("update_cache", perf.update_cache),
         ("acquire_frame", perf.acquire_frame),
         ("present_surface", perf.present_surface),
@@ -1704,10 +1731,11 @@ fn format_app_perf_line(frame_seq: u64, total: Duration, perf: &AppFramePerf) ->
         .copied()
         .expect("app frame perf should always have stages");
     format!(
-        "[PERF][app][frame={frame_seq}] total_ms={:.3} bottleneck={bottleneck} ({:.3}ms) dirty_tiles={} stages_ms={{update_cache:{:.3}, acquire_frame:{:.3}, present_surface:{:.3}}}",
+        "[PERF][app][frame={frame_seq}] total_ms={:.3} bottleneck={bottleneck} ({:.3}ms) dirty_tiles={} stages_ms={{process_preview:{:.3}, update_cache:{:.3}, acquire_frame:{:.3}, present_surface:{:.3}}}",
         duration_ms(total),
         duration_ms(bottleneck_duration),
         perf.dirty_tile_count,
+        duration_ms(perf.process_preview),
         duration_ms(perf.update_cache),
         duration_ms(perf.acquire_frame),
         duration_ms(perf.present_surface),
@@ -1802,6 +1830,7 @@ mod tests {
     #[test]
     fn app_perf_line_reports_stage_breakdown_and_bottleneck() {
         let perf = AppFramePerf {
+            process_preview: Duration::from_micros(400),
             update_cache: Duration::from_micros(500),
             acquire_frame: Duration::from_micros(250),
             present_surface: Duration::from_micros(1_250),
@@ -1814,7 +1843,25 @@ mod tests {
         assert!(line.contains("total_ms=2.000"));
         assert!(line.contains("bottleneck=present_surface (1.250ms)"));
         assert!(line.contains("dirty_tiles=3"));
+        assert!(line.contains("process_preview:0.400"));
         assert!(line.contains("update_cache:0.500"));
+    }
+
+    #[test]
+    fn active_stroke_preview_tracks_deferred_render_work() {
+        let mut preview = super::ActiveStrokePreview::new(
+            BrushSettings::default(),
+            canvas_input(0, 1.0, 2.0, 1.0),
+        );
+
+        assert!(preview.needs_render());
+        preview.mark_rendered();
+        assert!(!preview.needs_render());
+
+        preview.push_input(canvas_input(1, 3.0, 4.0, 1.0));
+
+        assert!(preview.needs_render());
+        assert_eq!(preview.replace_circle_samples().len(), 2);
     }
 
     #[test]
@@ -1839,6 +1886,7 @@ mod tests {
         assert!(stroke.inputs()[1].time_ns > stroke.inputs()[0].time_ns);
 
         let samples = stroke.replace_circle_samples();
+        assert!(app.frame_scheduler.has_requested_redraw());
         assert_eq!(preview_samples, samples);
         assert_eq!(samples[0].center, CanvasCoordF::new(1.0, 2.0));
         assert_eq!(samples[1].center, CanvasCoordF::new(2.0, 4.0));
