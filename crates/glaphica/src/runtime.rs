@@ -20,7 +20,7 @@ use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
     DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
     ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
-    SurfaceRuntime, ToolSet, WorkspaceExportError,
+    SurfaceRuntime, ToolSet, UiAction, WorkspaceExportError,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     import_workspace_directory,
     script::{ScriptCommand, ScriptCommandOutcome, ScriptHost, ScriptHostError},
@@ -436,6 +436,52 @@ impl App {
             self.request_full_screen_update();
         }
         Ok(outcome)
+    }
+
+    fn execute_ui_action(
+        &mut self,
+        action: UiAction,
+    ) -> Result<ScriptCommandOutcome, ScriptHostError> {
+        match action {
+            UiAction::UndoRequested => {
+                if self.undo() {
+                    self.request_redraw();
+                    Ok(ScriptCommandOutcome::RedrawRequested)
+                } else {
+                    Ok(ScriptCommandOutcome::None)
+                }
+            }
+            UiAction::CreateLayerRequested => {
+                self.execute_script_command(ScriptCommand::CreateLayerAboveActive)
+            }
+            UiAction::CreateGroupRequested => {
+                self.execute_script_command(ScriptCommand::CreateGroupAboveActive)
+            }
+            UiAction::DeleteActiveNodeRequested => {
+                self.execute_script_command(ScriptCommand::DeleteActiveNode)
+            }
+            UiAction::ActiveNodeChanged(node_id) => {
+                self.execute_script_command(ScriptCommand::SetActiveNode(node_id))
+            }
+            UiAction::NodeOpacityChanged(node_id, opacity) => {
+                self.execute_script_command(ScriptCommand::SetNodeOpacity { node_id, opacity })
+            }
+            UiAction::NodeBlendModeChanged(node_id, blend_mode) => {
+                self.execute_script_command(ScriptCommand::SetNodeBlendMode {
+                    node_id,
+                    blend_mode,
+                })
+            }
+            UiAction::RoundBrushSettingsChanged(settings) => {
+                self.execute_script_command(ScriptCommand::SetRoundBrushSettings(settings))
+            }
+        }
+    }
+
+    fn execute_ui_action_from_window(&mut self, action: UiAction) {
+        if let Err(error) = self.execute_ui_action(action) {
+            eprintln!("ui action failed: {error}");
+        }
     }
 
     fn delete_active_node_from_script(&mut self) -> Result<ScriptCommandOutcome, ScriptHostError> {
@@ -1304,6 +1350,9 @@ impl ApplicationHandler for App {
                                 self.primary_down = false;
                             }
                         }
+                        Key::Named(NamedKey::Delete) if self.modifiers.control_key() => {
+                            self.execute_ui_action_from_window(UiAction::DeleteActiveNodeRequested);
+                        }
                         Key::Character(value) => {
                             if self.modifiers.control_key()
                                 && self.modifiers.shift_key()
@@ -1313,11 +1362,20 @@ impl ApplicationHandler for App {
                                     self.request_redraw();
                                 }
                             } else if self.modifiers.control_key()
+                                && self.modifiers.shift_key()
+                                && value.eq_ignore_ascii_case("l")
+                            {
+                                self.execute_ui_action_from_window(UiAction::CreateGroupRequested);
+                            } else if self.modifiers.control_key()
                                 && value.eq_ignore_ascii_case("z")
                             {
                                 if self.undo_from_window() {
                                     self.request_redraw();
                                 }
+                            } else if self.modifiers.control_key()
+                                && value.eq_ignore_ascii_case("l")
+                            {
+                                self.execute_ui_action_from_window(UiAction::CreateLayerRequested);
                             } else if self.modifiers.control_key()
                                 && value.eq_ignore_ascii_case("y")
                             {
@@ -1426,7 +1484,7 @@ mod tests {
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppView, BrushId,
         BrushSettings, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentBlendMode,
         DocumentNodeId, DocumentWorkspace, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
-        ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, load_trace_file,
+        ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, UiAction, load_trace_file,
         save_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
@@ -1856,6 +1914,51 @@ mod tests {
         assert!(!workspace.layer_tree().contains_node(group));
         assert!(app.undo_stack.is_empty());
         assert!(app.redo_stack.is_empty());
+        assert!(app.frame_scheduler.has_requested_redraw());
+    }
+
+    #[test]
+    fn ui_actions_drive_document_layer_runtime_commands() {
+        let mut app = App::new(AppRuntimeConfig::default());
+        app.workspace = Some(DocumentWorkspace::blank(320, 240).unwrap());
+        let root_node = app.workspace.as_ref().unwrap().layer_tree().root_id();
+
+        let ScriptCommandOutcome::DocumentNode(layer) = app
+            .execute_ui_action(UiAction::CreateLayerRequested)
+            .unwrap()
+        else {
+            panic!("create layer action should return the new node id");
+        };
+        let ScriptCommandOutcome::DocumentNode(group) = app
+            .execute_ui_action(UiAction::CreateGroupRequested)
+            .unwrap()
+        else {
+            panic!("create group action should return the new node id");
+        };
+        let active = app
+            .execute_ui_action(UiAction::ActiveNodeChanged(layer))
+            .unwrap();
+        let opacity = app
+            .execute_ui_action(UiAction::NodeOpacityChanged(layer, 0.25))
+            .unwrap();
+        let blend = app
+            .execute_ui_action(UiAction::NodeBlendModeChanged(
+                layer,
+                DocumentBlendMode::Overlay,
+            ))
+            .unwrap();
+        let deleted = app
+            .execute_ui_action(UiAction::DeleteActiveNodeRequested)
+            .unwrap();
+
+        let workspace = app.workspace.as_ref().unwrap();
+        assert_eq!(active, ScriptCommandOutcome::None);
+        assert_eq!(opacity, ScriptCommandOutcome::RedrawRequested);
+        assert_eq!(blend, ScriptCommandOutcome::RedrawRequested);
+        assert_eq!(deleted, ScriptCommandOutcome::RedrawRequested);
+        assert_eq!(workspace.layer_tree().active_node_id(), root_node);
+        assert!(!workspace.layer_tree().contains_node(layer));
+        assert!(workspace.layer_tree().contains_node(group));
         assert!(app.frame_scheduler.has_requested_redraw());
     }
 

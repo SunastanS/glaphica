@@ -8,6 +8,7 @@ mod script;
 mod stroke;
 mod tool;
 mod trace;
+mod ui;
 mod view;
 
 pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime};
@@ -42,4 +43,5 @@ pub use trace::{
     AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent, AppTraceMode,
     AppTraceStatus, load_trace_file, save_trace_file,
 };
+pub use ui::{UiAction, UiLayerItem, collect_ui_layers, visible_layer_index};
 pub use view::{AppView, AppViewMatrixError};
