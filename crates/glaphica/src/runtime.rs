@@ -17,8 +17,8 @@ use winit::{
 
 use crate::{
     ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
-    DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, ScreenBlitter,
-    ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet,
+    DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
+    ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
     stroke::ActiveRootStroke,
 };
@@ -52,6 +52,13 @@ impl Default for AppRuntimeConfig {
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
             brush_settings: BrushSettings::default(),
         }
+    }
+}
+
+impl AppRuntimeConfig {
+    pub fn with_round_brush_settings(mut self, settings: RoundBrushSettings) -> Self {
+        self.brush_settings = BrushSettings::from_round_brush(settings);
+        self
     }
 }
 
@@ -799,7 +806,7 @@ mod tests {
     use super::{App, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppView, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
-        DEFAULT_CANVAS_WIDTH_PX, Tool,
+        DEFAULT_CANVAS_WIDTH_PX, RoundBrushSettings, Tool,
     };
     use gla_core::{CanvasCoordF, ScreenCoordF};
     use gla_ir::DrawOnToolKind;
@@ -828,6 +835,28 @@ mod tests {
         let app = App::new(config);
 
         assert_eq!(app.active_brush_id(), None);
+    }
+
+    #[test]
+    fn runtime_config_accepts_round_brush_settings() {
+        let config = AppRuntimeConfig::default().with_round_brush_settings(RoundBrushSettings {
+            base_radius_px: 18.0,
+            spacing_ratio: 0.25,
+            base_hardness: 0.4,
+            base_flow: 0.8,
+            base_opacity: 0.6,
+            tint: [0.2, 0.3, 0.4],
+        });
+
+        assert_eq!(config.brush_settings.radius_px, 18.0);
+        assert_eq!(config.brush_settings.spacing_ratio, 0.25);
+        assert_eq!(config.brush_settings.hardness, 0.4);
+        assert_eq!(config.brush_settings.flow, 0.8);
+        assert_eq!(config.brush_settings.opacity, 0.6);
+        assert_eq!(
+            config.brush_settings.color,
+            gla_color::PremultipliedRgbaF32::new(0.2, 0.3, 0.4, 1.0)
+        );
     }
 
     #[test]

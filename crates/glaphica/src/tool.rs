@@ -41,6 +41,16 @@ pub struct BrushSettings {
     pub opacity: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoundBrushSettings {
+    pub base_radius_px: f32,
+    pub spacing_ratio: f32,
+    pub base_hardness: f32,
+    pub base_flow: f32,
+    pub base_opacity: f32,
+    pub tint: [f32; 3],
+}
+
 impl Tool {
     pub fn brush_id(self) -> Option<BrushId> {
         match self {
@@ -100,9 +110,46 @@ impl Default for BrushSettings {
     }
 }
 
+impl Default for RoundBrushSettings {
+    fn default() -> Self {
+        Self {
+            base_radius_px: 5.0,
+            spacing_ratio: 1.0,
+            base_hardness: 0.7,
+            base_flow: 1.0,
+            base_opacity: 1.0,
+            tint: [0.0, 0.0, 1.0],
+        }
+    }
+}
+
+impl From<RoundBrushSettings> for BrushSettings {
+    fn from(settings: RoundBrushSettings) -> Self {
+        Self {
+            radius_px: settings.base_radius_px,
+            color: PremultipliedRgbaF32::new(
+                settings.tint[0],
+                settings.tint[1],
+                settings.tint[2],
+                1.0,
+            ),
+            spacing_ratio: settings.spacing_ratio,
+            hardness: settings.base_hardness,
+            flow: settings.base_flow,
+            opacity: settings.base_opacity,
+        }
+    }
+}
+
+impl BrushSettings {
+    pub fn from_round_brush(settings: RoundBrushSettings) -> Self {
+        settings.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
+    use super::{ActiveTool, BrushId, BrushSettings, RoundBrushSettings, Tool, ToolSet};
 
     #[test]
     fn active_tool_round_trips_into_tool_set_membership() {
@@ -133,5 +180,39 @@ mod tests {
         assert_eq!(settings.hardness, 0.7);
         assert_eq!(settings.flow, 1.0);
         assert_eq!(settings.opacity, 1.0);
+    }
+
+    #[test]
+    fn round_brush_settings_match_dev_field_contract() {
+        let settings = RoundBrushSettings::default();
+
+        assert_eq!(settings.base_radius_px, 5.0);
+        assert_eq!(settings.spacing_ratio, 1.0);
+        assert_eq!(settings.base_hardness, 0.7);
+        assert_eq!(settings.base_flow, 1.0);
+        assert_eq!(settings.base_opacity, 1.0);
+        assert_eq!(settings.tint, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn round_brush_settings_convert_to_runtime_brush_settings() {
+        let settings = BrushSettings::from_round_brush(RoundBrushSettings {
+            base_radius_px: 12.0,
+            spacing_ratio: 0.5,
+            base_hardness: 0.4,
+            base_flow: 0.75,
+            base_opacity: 0.6,
+            tint: [0.1, 0.2, 0.3],
+        });
+
+        assert_eq!(settings.radius_px, 12.0);
+        assert_eq!(
+            settings.color,
+            gla_color::PremultipliedRgbaF32::new(0.1, 0.2, 0.3, 1.0)
+        );
+        assert_eq!(settings.spacing_ratio, 0.5);
+        assert_eq!(settings.hardness, 0.4);
+        assert_eq!(settings.flow, 0.75);
+        assert_eq!(settings.opacity, 0.6);
     }
 }
