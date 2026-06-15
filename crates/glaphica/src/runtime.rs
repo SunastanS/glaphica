@@ -9,6 +9,8 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
+use crate::{DocumentWorkspace, DocumentWorkspaceError};
+
 #[derive(Debug, Clone)]
 pub struct AppRuntimeConfig {
     pub window_title: String,
@@ -31,12 +33,14 @@ impl Default for AppRuntimeConfig {
 
 #[derive(Debug)]
 pub enum AppRunError {
+    Document(DocumentWorkspaceError),
     EventLoop(winit::error::EventLoopError),
 }
 
 impl Display for AppRunError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Document(error) => write!(f, "document workspace initialization failed: {error}"),
             Self::EventLoop(error) => write!(f, "app event loop failed: {error}"),
         }
     }
@@ -45,6 +49,7 @@ impl Display for AppRunError {
 impl Error for AppRunError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Document(error) => Some(error),
             Self::EventLoop(error) => Some(error),
         }
     }
@@ -56,23 +61,30 @@ pub fn run_app_window() -> Result<(), AppRunError> {
 
 pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRunError> {
     let event_loop = EventLoop::new().map_err(AppRunError::EventLoop)?;
-    let mut app = App::new(config);
+    let mut app = App::new(config).map_err(AppRunError::Document)?;
     event_loop.run_app(&mut app).map_err(AppRunError::EventLoop)
 }
 
 struct App {
     config: AppRuntimeConfig,
+    workspace: DocumentWorkspace,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
 }
 
 impl App {
-    fn new(config: AppRuntimeConfig) -> Self {
-        Self {
+    fn new(config: AppRuntimeConfig) -> Result<Self, DocumentWorkspaceError> {
+        Ok(Self {
             config,
+            workspace: DocumentWorkspace::default_blank()?,
             window: None,
             gpu: None,
-        }
+        })
+    }
+
+    fn window_attributes(&self) -> WindowAttributes {
+        let _ = self.workspace.version();
+        WindowAttributes::default().with_title(self.config.window_title.clone())
     }
 }
 
@@ -235,9 +247,7 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let window = match event_loop
-            .create_window(WindowAttributes::default().with_title(self.config.window_title.clone()))
-        {
+        let window = match event_loop.create_window(self.window_attributes()) {
             Ok(window) => Arc::new(window),
             Err(error) => {
                 eprintln!("window creation failed: {error}");
