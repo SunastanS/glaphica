@@ -34,6 +34,7 @@ use crate::{
 };
 
 const BRUSH_THREAD_COMMAND_CAPACITY: usize = 1024;
+const ACTIVE_STROKE_COMMIT_FRAME_DAB_BUDGET: u32 = 512;
 
 #[derive(Debug, Clone)]
 pub struct AppRuntimeConfig {
@@ -749,10 +750,11 @@ impl App {
         }
         let samples = stroke.replace_circle_samples();
 
-        let commit = match workspace.replace_circle_stroke_on_active_paint_target(
+        let commit = match workspace.replace_circle_stroke_on_active_paint_target_with_frame_budget(
             &mut self.history,
             gpu.renderer_mut(),
             samples.iter().copied(),
+            ACTIVE_STROKE_COMMIT_FRAME_DAB_BUDGET,
         ) {
             Ok(Some(commit)) => commit,
             Ok(None) => return None,

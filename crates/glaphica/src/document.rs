@@ -13,7 +13,7 @@ use gla_ir::{
     ImageId, ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
 };
 use gla_renderer::{Pass, PresentTile, PresentTileParams, RenderBackend};
-use gla_session::{DrawCommit, DrawHistory, DrawRecordId, DrawSession, SessionError};
+use gla_session::{DrawCommit, DrawHistory, DrawRecordId, DrawSession, FrameBudget, SessionError};
 use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
 
@@ -943,12 +943,32 @@ impl DocumentWorkspace {
     where
         B: RenderBackend,
     {
+        self.replace_circle_stroke_on_root_with_frame_budget(history, backend, samples, u32::MAX)
+    }
+
+    pub fn replace_circle_stroke_on_root_with_frame_budget<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
+        max_dabs_per_frame: u32,
+    ) -> Result<Option<DrawCommit>, SessionError>
+    where
+        B: RenderBackend,
+    {
         let root = self.root;
         let ir = self.root_replace_circle_ir();
         let mut session = self.begin_session(&ir)?;
-        {
+        let mut samples = samples.into_iter();
+        let mut next_sample = samples.next();
+        while next_sample.is_some() {
+            let mut budget = FrameBudget::new(max_dabs_per_frame.max(1));
             let mut frame = session.begin_frame();
-            for sample in samples {
+            while let Some(sample) = next_sample.take() {
+                if !budget.try_accept_dab() {
+                    next_sample = Some(sample);
+                    break;
+                }
                 let radius_px = sample.radius_px.max(0.0);
                 frame.draw_on(
                     root,
@@ -960,6 +980,7 @@ impl DocumentWorkspace {
                         sample.color,
                     ),
                 )?;
+                next_sample = samples.next();
             }
             frame.flush(backend)?;
         }
@@ -979,14 +1000,39 @@ impl DocumentWorkspace {
     where
         B: RenderBackend,
     {
+        self.replace_circle_stroke_on_active_paint_target_with_frame_budget(
+            history,
+            backend,
+            samples,
+            u32::MAX,
+        )
+    }
+
+    pub fn replace_circle_stroke_on_active_paint_target_with_frame_budget<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
+        max_dabs_per_frame: u32,
+    ) -> Result<Option<DrawCommit>, SessionError>
+    where
+        B: RenderBackend,
+    {
         let Some(target) = self.active_paint_image() else {
             return Ok(None);
         };
         let ir = self.replace_circle_ir(target);
         let mut session = self.begin_session(&ir)?;
-        {
+        let mut samples = samples.into_iter();
+        let mut next_sample = samples.next();
+        while next_sample.is_some() {
+            let mut budget = FrameBudget::new(max_dabs_per_frame.max(1));
             let mut frame = session.begin_frame();
-            for sample in samples {
+            while let Some(sample) = next_sample.take() {
+                if !budget.try_accept_dab() {
+                    next_sample = Some(sample);
+                    break;
+                }
                 let radius_px = sample.radius_px.max(0.0);
                 frame.draw_on(
                     target,
@@ -998,6 +1044,7 @@ impl DocumentWorkspace {
                         sample.color,
                     ),
                 )?;
+                next_sample = samples.next();
             }
             frame.flush(backend)?;
         }
@@ -2079,6 +2126,48 @@ mod tests {
     }
 
     #[test]
+    fn replace_circle_stroke_on_root_splits_flushes_by_frame_budget() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let color = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+
+        let commit = workspace
+            .replace_circle_stroke_on_root_with_frame_budget(
+                &mut history,
+                &mut backend,
+                [
+                    ReplaceCircleStrokeSample::new(24.0, 32.0, 8.0, color),
+                    ReplaceCircleStrokeSample::new(34.0, 42.0, 8.0, color),
+                    ReplaceCircleStrokeSample::new(44.0, 52.0, 8.0, color),
+                ],
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        let draw_counts: Vec<usize> = backend
+            .submitted
+            .iter()
+            .map(|passes| {
+                passes
+                    .iter()
+                    .filter(|pass| {
+                        matches!(
+                            pass,
+                            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+                        )
+                    })
+                    .count()
+            })
+            .collect();
+
+        assert_eq!(commit.version, DocumentVersionId::new(2));
+        assert_eq!(workspace.version(), DocumentVersionId::new(2));
+        assert_eq!(draw_counts, vec![2, 1]);
+        assert_eq!(workspace.root_dirty_tile_indices(&commit), vec![0]);
+    }
+
+    #[test]
     fn replace_circle_stroke_on_active_layer_writes_layer_image() {
         let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
         let root_node = workspace.layer_tree().root_id();
@@ -2104,6 +2193,49 @@ mod tests {
             workspace.root_dirty_tile_indices(&commit),
             Vec::<u32>::new()
         );
+        assert!(workspace.layer_composite_needs_render());
+    }
+
+    #[test]
+    fn replace_circle_stroke_on_active_layer_splits_flushes_by_frame_budget() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+        let layer = workspace.append_layer(root_node).unwrap();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let color = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+
+        let commit = workspace
+            .replace_circle_stroke_on_active_paint_target_with_frame_budget(
+                &mut history,
+                &mut backend,
+                [
+                    ReplaceCircleStrokeSample::new(24.0, 32.0, 8.0, color),
+                    ReplaceCircleStrokeSample::new(34.0, 42.0, 8.0, color),
+                ],
+                1,
+            )
+            .unwrap()
+            .unwrap();
+        let draw_counts: Vec<usize> = backend
+            .submitted
+            .iter()
+            .map(|passes| {
+                passes
+                    .iter()
+                    .filter(|pass| {
+                        matches!(
+                            pass,
+                            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+                        )
+                    })
+                    .count()
+            })
+            .collect();
+
+        assert!(commit.dirty.contains_key(&layer_image));
+        assert_eq!(draw_counts, vec![1, 1]);
         assert!(workspace.layer_composite_needs_render());
     }
 
