@@ -243,7 +243,7 @@ impl App {
         let brush_thread = BrushThreadRuntime::spawn(
             config.tool_set.clone(),
             config.active_tool,
-            config.brush_settings,
+            config.brush_settings.clone(),
             BRUSH_THREAD_COMMAND_CAPACITY,
         );
         Ok(Self {
@@ -337,8 +337,10 @@ impl App {
             });
         }
         self.brush_thread.push_canvas_input(input);
-        self.active_stroke_preview =
-            Some(ActiveStrokePreview::new(self.config.brush_settings, input));
+        self.active_stroke_preview = Some(ActiveStrokePreview::new(
+            self.config.brush_settings.clone(),
+            input,
+        ));
         self.request_redraw();
         Ok(())
     }
@@ -353,8 +355,10 @@ impl App {
         if let Some(preview) = self.active_stroke_preview.as_mut() {
             preview.push_input(input);
         } else {
-            self.active_stroke_preview =
-                Some(ActiveStrokePreview::new(self.config.brush_settings, input));
+            self.active_stroke_preview = Some(ActiveStrokePreview::new(
+                self.config.brush_settings.clone(),
+                input,
+            ));
         }
         self.request_redraw();
         Ok(())
@@ -432,7 +436,7 @@ impl App {
 
     fn set_round_brush_settings_from_script(&mut self, settings: RoundBrushSettings) {
         let brush_settings = BrushSettings::from_round_brush(settings.clone());
-        self.config.brush_settings = brush_settings;
+        self.config.brush_settings = brush_settings.clone();
         self.brush_thread.update_brush_settings(brush_settings);
         if let Some(ui) = self.ui.as_mut() {
             ui.set_round_brush_settings(settings);
@@ -1661,7 +1665,7 @@ impl ApplicationHandler for App {
         self.ui = Some(AppUi::new(
             event_loop,
             &window,
-            round_brush_settings_from_brush_settings(self.config.brush_settings),
+            round_brush_settings_from_brush_settings(self.config.brush_settings.clone()),
         ));
         self.window = Some(window);
         self.workspace = Some(workspace);
@@ -1897,6 +1901,7 @@ fn round_brush_settings_from_brush_settings(settings: BrushSettings) -> RoundBru
         base_flow: settings.flow,
         base_opacity: settings.opacity,
         tint: [settings.color.r, settings.color.g, settings.color.b],
+        modulations: settings.modulations,
     }
 }
 
@@ -2040,6 +2045,7 @@ mod tests {
             base_flow: 0.8,
             base_opacity: 0.6,
             tint: [0.2, 0.3, 0.4],
+            ..RoundBrushSettings::default()
         });
 
         assert_eq!(config.brush_settings.radius_px, 18.0);
@@ -2172,6 +2178,7 @@ mod tests {
                 base_flow: 1.0,
                 base_opacity: 1.0,
                 tint: [0.2, 0.4, 0.6],
+                ..RoundBrushSettings::default()
             }))
             .unwrap();
         app.execute_script_command(ScriptCommand::BeginStroke(canvas_input(0, 1.0, 2.0, 1.0)))

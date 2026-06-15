@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use gla_core::{CanvasCoordF, CanvasInput};
 use serde::{Deserialize, Serialize};
 
-use crate::{DocumentBlendMode, RoundBrushSettings};
+use crate::{DocumentBlendMode, RoundBrushModulationSet, RoundBrushSettings};
 
 const TRACE_VERSION: u32 = 1;
 
@@ -121,6 +121,8 @@ pub struct AppTraceRoundBrushSettings {
     base_flow: f32,
     base_opacity: f32,
     tint: [f32; 3],
+    #[serde(default, skip_serializing_if = "RoundBrushModulationSet::is_default")]
+    modulations: RoundBrushModulationSet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -291,6 +293,7 @@ impl From<RoundBrushSettings> for AppTraceRoundBrushSettings {
             base_flow: value.base_flow,
             base_opacity: value.base_opacity,
             tint: value.tint,
+            modulations: value.modulations,
         }
     }
 }
@@ -304,6 +307,7 @@ impl From<AppTraceRoundBrushSettings> for RoundBrushSettings {
             base_flow: value.base_flow,
             base_opacity: value.base_opacity,
             tint: value.tint,
+            modulations: value.modulations,
         }
     }
 }

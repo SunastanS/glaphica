@@ -45,7 +45,11 @@ pub use script::{
     script_draw_session_from_json_str, script_draw_session_to_json_string_pretty,
 };
 pub use stroke::{BrushInput, BrushInputBlock, BrushInputBlockList, BrushInputError};
-pub use tool::{ActiveTool, BrushId, BrushSettings, RoundBrushSettings, Tool, ToolSet};
+pub use tool::{
+    ActiveTool, BrushId, BrushSettings, CurvePoint, CurveValidationError, ModulationCurve,
+    RoundBrushDabVariable, RoundBrushInputFeature, RoundBrushModulationSet, RoundBrushSettings,
+    RoundBrushVariableModulation, Tool, ToolSet,
+};
 pub use trace::{
     AppTraceBlendMode, AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent,
     AppTraceMode, AppTraceRoundBrushSettings, AppTraceStatus, AppTraceUiAction, load_trace_file,

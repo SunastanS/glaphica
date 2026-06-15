@@ -42,6 +42,8 @@ fn script_command_plan_fixture_is_readable_and_writable_json() {
     .unwrap();
     assert!(rendered.contains("\"CreateLayerAboveActive\""));
     assert!(rendered.contains("\"RunDrawSession\""));
+    assert!(rendered.contains("\"modulations\""));
+    assert!(rendered.contains("\"pressure\""));
 }
 
 #[test]

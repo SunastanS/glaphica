@@ -1,6 +1,7 @@
 use gla_color::{PremultipliedRgbaF32, apply_value_mask_to_premultiplied_rgba};
 use gla_core::{CanvasCoordF, CanvasInput};
 use std::error::Error;
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::fmt::{Display, Formatter};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
@@ -8,13 +9,14 @@ use std::time::Duration;
 
 use crate::{
     ActiveTool, BrushId, BrushSettings, OverwriteRingConsumer, OverwriteRingProducer,
-    ReplaceCircleStrokeSample, ToolSet, create_overwrite_ring,
+    ReplaceCircleStrokeSample, RoundBrushDabVariable, ToolSet, create_overwrite_ring,
 };
 
 const MIN_SPACING_RATIO: f32 = 0.05;
 const MIN_SPACING_PX: f32 = 1.0;
 const SAME_POSITION_EPSILON: f32 = 1e-5;
 const REPLACE_CIRCLE_BLOCK_VALUE_COUNT: usize = 7;
+const ROUND_INPUT_MAX_SPEED_PX_PER_S: f32 = 1000.0;
 
 #[derive(Debug)]
 pub(crate) struct BrushWorker {
@@ -588,7 +590,7 @@ impl BrushWorker {
             self.active_stroke = None;
             return false;
         };
-        self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.brush_settings));
+        self.active_stroke = Some(ActiveRootStroke::new(brush_id, self.brush_settings.clone()));
         true
     }
 
@@ -688,11 +690,12 @@ impl FinishedRootStroke {
 
 impl ReplaceCircleSampleCache {
     pub(crate) fn new(brush_settings: BrushSettings) -> Self {
+        let next_sample_distance = dab_spacing_px(&brush_settings);
         Self {
             brush_settings,
             sampled_inputs: Vec::new(),
             path_distance: 0.0,
-            next_sample_distance: dab_spacing_px(brush_settings),
+            next_sample_distance,
             trailing_endpoint: false,
         }
     }
@@ -715,7 +718,7 @@ impl ReplaceCircleSampleCache {
                 let t = (self.next_sample_distance - self.path_distance) / segment_length;
                 self.sampled_inputs
                     .push(interpolate_input(previous, input, t));
-                self.next_sample_distance += dab_spacing_px(self.brush_settings);
+                self.next_sample_distance += dab_spacing_px(&self.brush_settings);
             }
             self.path_distance = segment_end_distance;
         }
@@ -731,7 +734,7 @@ impl ReplaceCircleSampleCache {
     }
 
     pub(crate) fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
-        replace_circle_samples_for_sampled_inputs(&self.sampled_inputs, self.brush_settings)
+        replace_circle_samples_for_sampled_inputs(&self.sampled_inputs, &self.brush_settings)
     }
 }
 
@@ -741,47 +744,61 @@ impl ActiveRootStroke {
     }
 
     fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
-        replace_circle_samples_for_inputs(&self.inputs, self.brush_settings)
+        replace_circle_samples_for_inputs(&self.inputs, &self.brush_settings)
     }
 }
 
 pub(crate) fn replace_circle_samples_for_inputs(
     inputs: &[CanvasInput],
-    brush_settings: BrushSettings,
+    brush_settings: &BrushSettings,
 ) -> Vec<ReplaceCircleStrokeSample> {
-    sample_canvas_inputs(inputs, brush_settings)
-        .into_iter()
-        .map(|input| replace_circle_sample_for_input(input, brush_settings))
-        .collect()
+    let sampled_inputs = sample_canvas_inputs(inputs, brush_settings);
+    replace_circle_samples_for_sampled_inputs(&sampled_inputs, brush_settings)
 }
 
 fn replace_circle_samples_for_sampled_inputs(
     inputs: &[CanvasInput],
-    brush_settings: BrushSettings,
+    brush_settings: &BrushSettings,
 ) -> Vec<ReplaceCircleStrokeSample> {
     inputs
         .iter()
         .copied()
-        .map(|input| replace_circle_sample_for_input(input, brush_settings))
+        .enumerate()
+        .map(|(index, input)| {
+            replace_circle_sample_for_input(input, previous_input(inputs, index), brush_settings)
+        })
         .collect()
 }
 
 fn replace_circle_sample_for_input(
     input: CanvasInput,
-    brush_settings: BrushSettings,
+    previous_input: Option<CanvasInput>,
+    brush_settings: &BrushSettings,
 ) -> ReplaceCircleStrokeSample {
+    let pressure = input.pressure.clamp(0.0, 1.0);
+    let tilt = normalize_tilt(input.tilt);
+    let twist = normalize_twist(input.twist);
+    let speed = normalized_input_speed(previous_input, input);
+    let radius_factor = brush_settings
+        .modulations
+        .sample_factor(RoundBrushDabVariable::Radius, pressure, tilt, twist, speed)
+        .clamp(0.0, 1.0);
+    let flow_factor = brush_settings
+        .modulations
+        .sample_factor(RoundBrushDabVariable::Flow, pressure, tilt, twist, speed)
+        .clamp(0.0, 1.0);
     ReplaceCircleStrokeSample {
         center: input.position,
-        radius_px: brush_settings.radius_px,
+        radius_px: brush_settings.radius_px * radius_factor,
         color: apply_value_mask_to_premultiplied_rgba(
             brush_settings.color,
-            brush_settings.flow * input.pressure.clamp(0.0, 1.0),
+            brush_settings.flow * flow_factor,
             brush_settings.opacity,
         ),
     }
 }
 
-fn sample_canvas_inputs(inputs: &[CanvasInput], settings: BrushSettings) -> Vec<CanvasInput> {
+fn sample_canvas_inputs(inputs: &[CanvasInput], settings: &BrushSettings) -> Vec<CanvasInput> {
     let Some(&first) = inputs.first() else {
         return Vec::new();
     };
@@ -817,7 +834,7 @@ fn sample_canvas_inputs(inputs: &[CanvasInput], settings: BrushSettings) -> Vec<
     output
 }
 
-fn dab_spacing_px(settings: BrushSettings) -> f32 {
+fn dab_spacing_px(settings: &BrushSettings) -> f32 {
     settings.radius_px.max(MIN_SPACING_PX) * sanitized_spacing_ratio(settings.spacing_ratio)
 }
 
@@ -835,6 +852,38 @@ fn distance_between(lhs: CanvasCoordF, rhs: CanvasCoordF) -> f32 {
 
 fn same_position(lhs: CanvasCoordF, rhs: CanvasCoordF) -> bool {
     (lhs.x - rhs.x).abs() <= SAME_POSITION_EPSILON && (lhs.y - rhs.y).abs() <= SAME_POSITION_EPSILON
+}
+
+fn previous_input(inputs: &[CanvasInput], index: usize) -> Option<CanvasInput> {
+    index
+        .checked_sub(1)
+        .and_then(|previous| inputs.get(previous))
+        .copied()
+}
+
+fn normalize_tilt(tilt: (f32, f32)) -> f32 {
+    let magnitude = (tilt.0 * tilt.0 + tilt.1 * tilt.1).sqrt();
+    (magnitude / FRAC_PI_2).clamp(0.0, 1.0)
+}
+
+fn normalize_twist(twist: f32) -> f32 {
+    ((twist + PI) / (2.0 * PI)).clamp(0.0, 1.0)
+}
+
+fn normalized_input_speed(previous: Option<CanvasInput>, input: CanvasInput) -> f32 {
+    let Some(previous) = previous else {
+        return 0.0;
+    };
+    let delta_time_ns = input.time_ns.saturating_sub(previous.time_ns);
+    if delta_time_ns == 0 {
+        return 0.0;
+    }
+    let distance = distance_between(previous.position, input.position);
+    let seconds = delta_time_ns as f32 * 1e-9;
+    if seconds <= f32::EPSILON {
+        return 0.0;
+    }
+    (distance / seconds / ROUND_INPUT_MAX_SPEED_PX_PER_S).clamp(0.0, 1.0)
 }
 
 fn interpolate_input(start: CanvasInput, end: CanvasInput, t: f32) -> CanvasInput {
@@ -1008,7 +1057,10 @@ mod tests {
         ReplaceCircleSampleCache,
     };
     use crate::create_overwrite_ring;
-    use crate::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
+    use crate::{
+        ActiveTool, BrushId, BrushSettings, CurvePoint, ModulationCurve, RoundBrushDabVariable,
+        RoundBrushInputFeature, RoundBrushModulationSet, Tool, ToolSet,
+    };
     use gla_core::{CanvasCoordF, CanvasInput};
     use std::sync::mpsc::sync_channel;
 
@@ -1095,6 +1147,35 @@ mod tests {
     }
 
     #[test]
+    fn replace_circle_samples_apply_round_brush_pressure_modulation() {
+        let mut settings = BrushSettings::default();
+        settings.radius_px = 10.0;
+        settings.flow = 1.0;
+        settings.opacity = 1.0;
+        settings.modulations = RoundBrushModulationSet::default()
+            .with_curve(
+                RoundBrushDabVariable::Radius,
+                RoundBrushInputFeature::Pressure,
+                ModulationCurve::new(vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 1.0)])
+                    .unwrap(),
+            )
+            .with_curve(
+                RoundBrushDabVariable::Flow,
+                RoundBrushInputFeature::Pressure,
+                ModulationCurve::flat_one(),
+            );
+        let mut stroke = ActiveRootStroke::new(BrushId::DEFAULT, settings);
+
+        stroke.push_input(canvas_input(0, 0.0, 0.0, 0.5));
+
+        let samples = stroke.replace_circle_samples();
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].radius_px, 7.5);
+        assert_eq!(samples[0].color.a, 1.0);
+    }
+
+    #[test]
     fn replace_circle_sample_cache_matches_batch_sampling_incrementally() {
         let mut settings = BrushSettings::default();
         settings.radius_px = 10.0;
@@ -1111,7 +1192,7 @@ mod tests {
             canvas_input(5, 30.0, 0.0, 0.1),
             canvas_input(6, 35.0, 5.0, 1.0),
         ];
-        let mut cache = ReplaceCircleSampleCache::new(settings);
+        let mut cache = ReplaceCircleSampleCache::new(settings.clone());
         let mut seen_inputs = Vec::new();
 
         for input in inputs {
@@ -1120,7 +1201,7 @@ mod tests {
 
             assert_eq!(
                 cache.replace_circle_samples(),
-                super::replace_circle_samples_for_inputs(&seen_inputs, settings)
+                super::replace_circle_samples_for_inputs(&seen_inputs, &settings)
             );
         }
     }
