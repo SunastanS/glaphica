@@ -1684,6 +1684,39 @@ mod tests {
     }
 
     #[test]
+    fn active_layer_stroke_undo_redo_reports_layer_dirty_tiles() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let root_node = workspace.layer_tree().root_id();
+        let layer = workspace.append_layer(root_node).unwrap();
+        let layer_image = workspace.layer_tree().node(layer).unwrap().image();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let color = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+
+        let paint_commit = workspace
+            .replace_circle_stroke_on_active_paint_target(
+                &mut history,
+                &mut backend,
+                [ReplaceCircleStrokeSample::new(24.0, 32.0, 8.0, color)],
+            )
+            .unwrap()
+            .unwrap();
+        let undo_commit = workspace
+            .apply_draw_record(&mut history, &mut backend, paint_commit.record_id)
+            .unwrap();
+        let redo_commit = workspace
+            .apply_draw_record(&mut history, &mut backend, undo_commit.record_id)
+            .unwrap();
+
+        assert!(undo_commit.dirty.contains_key(&layer_image));
+        assert!(redo_commit.dirty.contains_key(&layer_image));
+        assert!(!undo_commit.dirty.contains_key(&workspace.root()));
+        assert!(!redo_commit.dirty.contains_key(&workspace.root()));
+        assert_eq!(workspace.dirty_tile_indices(&undo_commit), vec![0]);
+        assert_eq!(workspace.dirty_tile_indices(&redo_commit), vec![0]);
+    }
+
+    #[test]
     fn root_present_tiles_skip_zero_tiles_and_include_committed_physical_tiles() {
         let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
         assert!(workspace.root_present_tiles().unwrap().is_empty());

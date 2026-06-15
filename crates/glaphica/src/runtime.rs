@@ -640,7 +640,7 @@ impl App {
         let Some(workspace) = self.workspace.as_ref() else {
             return;
         };
-        let dirty_tiles = workspace.root_dirty_tile_indices(commit);
+        let dirty_tiles = workspace.dirty_tile_indices(commit);
         self.frame_scheduler.schedule_tile_indices(&dirty_tiles);
     }
 
