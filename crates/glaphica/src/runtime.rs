@@ -47,6 +47,7 @@ pub struct AppRuntimeConfig {
     pub draw_on_tools: Vec<DrawOnToolKind>,
     pub brush_settings: BrushSettings,
     pub trace_config: AppTraceConfig,
+    pub trace_default_path: PathBuf,
     pub perf_trace_config: AppPerfTraceConfig,
 }
 
@@ -117,6 +118,7 @@ impl Default for AppRuntimeConfig {
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
             brush_settings: BrushSettings::default(),
             trace_config: AppTraceConfig::default(),
+            trace_default_path: PathBuf::from("target/glaphica-trace.json"),
             perf_trace_config: AppPerfTraceConfig::default(),
         }
     }
@@ -571,6 +573,24 @@ impl App {
         action: UiAction,
     ) -> Result<ScriptCommandOutcome, ScriptHostError> {
         match action {
+            UiAction::StartRecordingRequested => {
+                self.trace.start_recording(&self.config.trace_default_path);
+                Ok(ScriptCommandOutcome::None)
+            }
+            UiAction::StopRecordingRequested => self
+                .trace
+                .stop_recording()
+                .map(|_| ScriptCommandOutcome::None)
+                .map_err(|error| ScriptHostError::Runtime {
+                    reason: error.to_string(),
+                }),
+            UiAction::ReplayRequested => self
+                .trace
+                .load_replay(&self.config.trace_default_path)
+                .map(|()| ScriptCommandOutcome::None)
+                .map_err(|error| ScriptHostError::Runtime {
+                    reason: error.to_string(),
+                }),
             UiAction::UndoRequested => {
                 if self.undo() {
                     self.request_redraw();
@@ -1139,6 +1159,9 @@ fn trace_action_for_ui_action(
         UiAction::RoundBrushSettingsChanged(settings) => Some(
             AppTraceUiAction::SetRoundBrushSettings(settings.clone().into()),
         ),
+        UiAction::StartRecordingRequested
+        | UiAction::StopRecordingRequested
+        | UiAction::ReplayRequested => None,
     }
 }
 
@@ -1757,6 +1780,7 @@ mod tests {
         DocImageUse, DocumentVersionId, DrawOnToolKind, DrawSessionIR, ImageId, ImageLayoutSpec,
         ImageRole, RegistryPatch, RegistryPatchOp,
     };
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn canvas_input(time_ns: u64, x: f32, y: f32, pressure: f32) -> CanvasInput {
@@ -1793,6 +1817,10 @@ mod tests {
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
         assert_eq!(config.brush_settings, BrushSettings::default());
         assert_eq!(config.trace_config, AppTraceConfig::Disabled);
+        assert_eq!(
+            config.trace_default_path,
+            PathBuf::from("target/glaphica-trace.json")
+        );
         assert_eq!(config.perf_trace_config, AppPerfTraceConfig::default());
     }
 
@@ -2293,6 +2321,26 @@ mod tests {
             load_trace_file(&path).unwrap(),
             vec![AppTraceEvent::Ui(AppTraceUiAction::CreateLayer)]
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ui_trace_control_actions_start_stop_and_replay_default_path() {
+        let path = trace_path("ui-trace-control");
+        let mut config = AppRuntimeConfig::default();
+        config.trace_default_path = path.clone();
+        let mut app = App::try_new(config).unwrap();
+
+        app.execute_ui_action_from_window(UiAction::StartRecordingRequested);
+        app.execute_ui_action_from_window(UiAction::UndoRequested);
+        app.execute_ui_action_from_window(UiAction::StopRecordingRequested);
+
+        let events = load_trace_file(&path).unwrap();
+        assert_eq!(events, vec![AppTraceEvent::Ui(AppTraceUiAction::Undo)]);
+
+        app.execute_ui_action(UiAction::ReplayRequested).unwrap();
+        assert!(app.process_next_trace_replay_event());
+        assert!(!app.process_next_trace_replay_event());
         let _ = std::fs::remove_file(path);
     }
 

@@ -6,6 +6,9 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     UndoRequested,
+    StartRecordingRequested,
+    StopRecordingRequested,
+    ReplayRequested,
     CreateLayerRequested,
     CreateGroupRequested,
     DeleteActiveNodeRequested,
