@@ -6,7 +6,7 @@ mod view;
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
     DocumentPresentError, DocumentWorkspace, DocumentWorkspaceBuildError, DocumentWorkspaceError,
-    ReplaceCircleStrokeSample,
+    DocumentWorkspaceInitError, ReplaceCircleStrokeSample,
 };
 pub use gla_session::{DrawCommit, DrawHistory, DrawRecordId};
 pub use runtime::{AppRunError, AppRuntimeConfig, run_app_window, run_app_window_with_config};

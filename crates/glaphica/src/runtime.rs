@@ -17,7 +17,7 @@ use winit::{
 
 use crate::{
     AppView, AppViewMatrixError, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
-    DocumentWorkspace, DocumentWorkspaceBuildError, ReplaceCircleStrokeSample,
+    DocumentWorkspace, DocumentWorkspaceInitError, ReplaceCircleStrokeSample,
     frame::AppFrameScheduler,
 };
 
@@ -312,7 +312,7 @@ struct GpuCtx {
 #[derive(Debug)]
 enum GpuInitError {
     CreateSurface(wgpu::CreateSurfaceError),
-    Document(DocumentWorkspaceBuildError<GpuRendererError>),
+    Document(DocumentWorkspaceInitError<GpuRendererError>),
     Renderer(GpuRendererError),
     RequestAdapter(wgpu::RequestAdapterError),
     RequestDevice(wgpu::RequestDeviceError),
@@ -413,7 +413,7 @@ impl GpuCtx {
             app_config.draw_on_tools.iter().copied(),
         )
         .map_err(GpuInitError::Renderer)?;
-        let workspace = DocumentWorkspace::blank_with_textures(
+        let workspace = DocumentWorkspace::white_with_textures(
             app_config.canvas_width_px,
             app_config.canvas_height_px,
             &mut renderer,

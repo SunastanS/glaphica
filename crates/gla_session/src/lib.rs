@@ -811,6 +811,40 @@ impl<'g> DrawSession<'g> {
         }
     }
 
+    pub fn commit_discarding_undo(mut self) -> Result<Option<DocumentVersionId>, SessionError> {
+        if self.aborted_by_unflushed_frame {
+            self.release_local_tiles();
+            return Err(SessionError::UnflushedFrameDropped);
+        }
+        if self.expected_document_version != self.global.version() {
+            let expected = self.expected_document_version;
+            let actual = self.global.version();
+            self.release_local_tiles();
+            return Err(SessionError::ExpectedDocumentVersion { expected, actual });
+        }
+
+        let edits = self.take_commit_edits();
+        if edits.is_empty() {
+            self.release_local_tiles();
+            return Ok(None);
+        }
+
+        match self.global.apply_session_edits(edits) {
+            Ok(inverse) => {
+                let version = self.global.bump_version();
+                release_image_edits(self.global.tiles_mut(), inverse);
+                self.release_local_tiles();
+                Ok(Some(version))
+            }
+            Err(error) => {
+                let (error, edits) = error.into_parts();
+                release_image_edits(self.global.tiles_mut(), edits);
+                self.release_local_tiles();
+                Err(error.into())
+            }
+        }
+    }
+
     pub fn discard(mut self) {
         self.release_local_tiles();
     }
@@ -3290,6 +3324,24 @@ mod tests {
     }
 
     #[test]
+    fn empty_commit_discarding_undo_returns_none_without_bumping_version() {
+        let mut global = storage_with_atlases();
+        let ir = DrawSessionIR {
+            expected_document_version: global.version(),
+            doc_images: Vec::new(),
+            session_images: Vec::new(),
+            draw_on: Vec::new(),
+            derive: Vec::new(),
+        };
+        let session = DrawSession::begin(&ir, &mut global).unwrap();
+
+        let commit = session.commit_discarding_undo().unwrap();
+
+        assert_eq!(commit, None);
+        assert_eq!(global.version(), DocumentVersionId::default());
+    }
+
+    #[test]
     fn commit_applies_primitive_edit_and_history_patch_consumes_record() {
         let base = ImageId::new(1);
         let mut global = storage_with_atlases();
@@ -3323,6 +3375,37 @@ mod tests {
             global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
             TileReadRef::Zero
         );
+    }
+
+    #[test]
+    fn commit_discarding_undo_applies_primitive_edit_without_history_patch() {
+        let base = ImageId::new(1);
+        let mut global = storage_with_atlases();
+        add_global_primitive(&mut global, base, rgba_format());
+        let begin_version = global.version();
+        let ir = DrawSessionIR {
+            expected_document_version: begin_version,
+            doc_images: vec![DocImageUse::read_write(base)],
+            session_images: Vec::new(),
+            draw_on: vec![replace_draw(base)],
+            derive: Vec::new(),
+        };
+        let mut session = DrawSession::begin(&ir, &mut global).unwrap();
+        let mut frame = session.begin_frame();
+        let mut backend = TestBackend::default();
+        frame.draw_on(base, replace_input(0.0, 0.0, 1.0)).unwrap();
+        frame.flush(&mut backend).unwrap();
+        drop(frame);
+
+        let version = session.commit_discarding_undo().unwrap().unwrap();
+
+        assert_eq!(version, begin_version.next());
+        assert_eq!(global.version(), version);
+        let image = global.image(base).unwrap().as_dense().unwrap();
+        assert!(matches!(
+            global.tiles().read_ref(image.tile(0).unwrap()).unwrap(),
+            TileReadRef::Physical(_)
+        ));
     }
 
     #[test]

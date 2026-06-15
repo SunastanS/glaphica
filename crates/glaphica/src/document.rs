@@ -19,7 +19,7 @@ use tile_key::{NewAtlasError, TileReadRef, Tiles};
 use crate::AppView;
 
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
-pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 768;
+pub const DEFAULT_CANVAS_HEIGHT_PX: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReplaceCircleStrokeSample {
@@ -95,6 +95,22 @@ impl DocumentWorkspace {
         })
     }
 
+    pub fn white_with_textures<B>(
+        width_px: u32,
+        height_px: u32,
+        backend: &mut B,
+    ) -> Result<Self, DocumentWorkspaceInitError<<B as AtlasTextureStore>::Error>>
+    where
+        B: AtlasTextureStore + RenderBackend,
+    {
+        let mut workspace = Self::blank_with_textures(width_px, height_px, backend)
+            .map_err(DocumentWorkspaceInitError::Build)?;
+        workspace
+            .initialize_root_to_color(backend, PremultipliedRgbaF32::new(1.0, 1.0, 1.0, 1.0))
+            .map_err(DocumentWorkspaceInitError::InitialPaint)?;
+        Ok(workspace)
+    }
+
     pub fn storage(&self) -> &GlobalStorage {
         &self.storage
     }
@@ -148,6 +164,38 @@ impl DocumentWorkspace {
 
     pub fn begin_session(&mut self, ir: &DrawSessionIR) -> Result<DrawSession<'_>, SessionError> {
         DrawSession::begin(ir, &mut self.storage)
+    }
+
+    fn initialize_root_to_color<B>(
+        &mut self,
+        backend: &mut B,
+        color: PremultipliedRgbaF32,
+    ) -> Result<(), SessionError>
+    where
+        B: RenderBackend,
+    {
+        let center_x = self.layout.width_px as f32 * 0.5;
+        let center_y = self.layout.height_px as f32 * 0.5;
+        let radius_px = (self.layout.width_px as f32).hypot(self.layout.height_px as f32);
+        let root = self.root;
+        let ir = self.root_replace_circle_ir();
+        let mut session = self.begin_session(&ir)?;
+        {
+            let mut frame = session.begin_frame();
+            frame.draw_on(
+                root,
+                DrawOnInput::replace_circle_4d(
+                    center_x,
+                    center_y,
+                    radius_px.max(1.0),
+                    radius_px.max(1.0),
+                    color,
+                ),
+            )?;
+            frame.flush(backend)?;
+        }
+        session.commit_discarding_undo()?;
+        Ok(())
     }
 
     pub fn replace_circle_on_root<B>(
@@ -287,6 +335,12 @@ pub enum DocumentWorkspaceBuildError<E> {
 }
 
 #[derive(Debug)]
+pub enum DocumentWorkspaceInitError<E> {
+    Build(DocumentWorkspaceBuildError<E>),
+    InitialPaint(SessionError),
+}
+
+#[derive(Debug)]
 pub enum DocumentPresentError {
     MissingRoot { id: ImageId },
     Tile(GlobalTileError),
@@ -311,6 +365,27 @@ impl Error for DocumentPresentError {
 }
 
 pub type DocumentWorkspaceError = DocumentWorkspaceBuildError<Infallible>;
+
+impl<E: Display> Display for DocumentWorkspaceInitError<E> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Build(error) => Display::fmt(error, f),
+            Self::InitialPaint(error) => write!(f, "failed to initialize document canvas: {error}"),
+        }
+    }
+}
+
+impl<E> Error for DocumentWorkspaceInitError<E>
+where
+    E: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Build(error) => Some(error),
+            Self::InitialPaint(error) => Some(error),
+        }
+    }
+}
 
 impl<E: Display> Display for DocumentWorkspaceBuildError<E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -379,6 +454,27 @@ mod tests {
         }
     }
 
+    impl AtlasTextureStore for RecordingBackend {
+        type Error = RecordingBackendError;
+
+        fn create_atlas_texture(
+            &mut self,
+            _atlas_id: u8,
+            _layout: AtlasLayout,
+            _format: GlaFormat,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_blank_matches_preview_canvas_size_contract() {
+        let workspace = DocumentWorkspace::default_blank().unwrap();
+
+        assert_eq!(workspace.canvas_size_px(), (1024, 1024));
+        assert_eq!(workspace.version(), DocumentVersionId::new(1));
+    }
+
     #[test]
     fn blank_workspace_creates_root_primitive_document() {
         let workspace = DocumentWorkspace::blank(320, 240).unwrap();
@@ -425,6 +521,28 @@ mod tests {
 
         assert_eq!(workspace.canvas_size_px(), (128, 96));
         assert_eq!(workspace.storage().root(), Some(workspace.root()));
+    }
+
+    #[test]
+    fn white_workspace_initializes_root_tiles_without_external_history() {
+        let mut backend = RecordingBackend::default();
+        let workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
+
+        assert_eq!(workspace.canvas_size_px(), (128, 96));
+        assert_eq!(workspace.version(), DocumentVersionId::new(2));
+        assert_eq!(
+            workspace.root_present_tiles().unwrap().len() as u32,
+            workspace
+                .storage()
+                .image(workspace.root())
+                .unwrap()
+                .layout()
+                .tile_count()
+        );
+        assert!(backend.submitted_passes().any(|pass| matches!(
+            pass,
+            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+        )));
     }
 
     #[test]
