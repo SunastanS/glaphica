@@ -18,11 +18,11 @@ use winit::{
 };
 
 use crate::{
-    ActiveTool, AppView, AppViewMatrixError, BrushId, BrushSettings, DEFAULT_CANVAS_HEIGHT_PX,
-    DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError, RoundBrushSettings,
-    ScreenBlitter, ScreenPresentCache, ScriptDrawSession, SurfaceError, SurfaceFrame,
-    SurfaceRuntime, ToolSet, UiAction, UiLayerItem, UiTraceStatus, WorkspaceExportError,
-    collect_ui_layers,
+    ActiveTool, AppView, AppViewMatrixError, BrushId, BrushInput, BrushInputError, BrushSettings,
+    DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
+    DocumentWorkspaceInitError, RoundBrushSettings, ScreenBlitter, ScreenPresentCache,
+    ScriptDrawSession, SurfaceError, SurfaceFrame, SurfaceRuntime, ToolSet, UiAction, UiLayerItem,
+    UiTraceStatus, WorkspaceExportError, collect_ui_layers,
     egui_overlay::EguiRenderer,
     export_workspace_directory,
     frame::{AppFrameScheduler, ScreenUpdateRequest},
@@ -80,6 +80,7 @@ struct AppFramePerf {
 #[derive(Debug, Clone)]
 struct ActiveStrokePreview {
     samples: ReplaceCircleSampleCache,
+    brush_input_samples: Vec<crate::ReplaceCircleStrokeSample>,
     dirty: bool,
 }
 
@@ -89,6 +90,7 @@ impl ActiveStrokePreview {
         samples.push_input(input);
         Self {
             samples,
+            brush_input_samples: Vec::new(),
             dirty: true,
         }
     }
@@ -96,6 +98,16 @@ impl ActiveStrokePreview {
     fn push_input(&mut self, input: CanvasInput) {
         self.samples.push_input(input);
         self.dirty = true;
+    }
+
+    fn push_brush_input(&mut self, input: &BrushInput) -> Result<usize, BrushInputError> {
+        let samples = input.replace_circle_samples()?;
+        let sample_count = samples.len();
+        if sample_count > 0 {
+            self.brush_input_samples.extend(samples);
+            self.dirty = true;
+        }
+        Ok(sample_count)
     }
 
     fn needs_render(&self) -> bool {
@@ -107,6 +119,9 @@ impl ActiveStrokePreview {
     }
 
     fn replace_circle_samples(&self) -> Vec<crate::ReplaceCircleStrokeSample> {
+        if !self.brush_input_samples.is_empty() {
+            return self.brush_input_samples.clone();
+        }
         self.samples.replace_circle_samples()
     }
 }
@@ -371,7 +386,7 @@ impl App {
     }
 
     fn process_pending_active_stroke_preview(&mut self) {
-        self.drain_pending_brush_inputs();
+        self.drain_pending_brush_input_preview();
         let samples = match self.active_stroke_preview.as_ref() {
             Some(preview) if preview.needs_render() => preview.replace_circle_samples(),
             _ => return,
@@ -402,15 +417,24 @@ impl App {
         }
     }
 
-    fn drain_pending_brush_inputs(&mut self) {
-        self.frame_scheduler.drain_brush_inputs(
+    fn drain_pending_brush_input_preview(&mut self) {
+        let drained = self.frame_scheduler.drain_brush_inputs(
             self.brush_thread.brush_input_consumer(),
             ACTIVE_STROKE_BRUSH_INPUT_BATCH_CAPACITY,
             Duration::ZERO,
         );
-        if !self.frame_scheduler.pending_brush_inputs().is_empty() {
-            self.frame_scheduler.finish_brush_inputs();
+        if drained == 0 {
+            return;
         }
+
+        if let Some(preview) = self.active_stroke_preview.as_mut() {
+            for brush_input in self.frame_scheduler.pending_brush_inputs() {
+                if let Err(error) = preview.push_brush_input(brush_input) {
+                    eprintln!("stroke preview brush input failed: {error}");
+                }
+            }
+        }
+        self.frame_scheduler.finish_brush_inputs();
     }
 
     fn clear_active_stroke_preview_cache(&mut self) {
@@ -1995,11 +2019,11 @@ mod tests {
     use super::{App, AppFramePerf, AppPerfTraceConfig, AppRunError, AppRuntimeConfig};
     use crate::{
         ActiveTool, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceUiAction, AppView,
-        BrushId, BrushSettings, BrushThreadRuntimeError, DEFAULT_CANVAS_HEIGHT_PX,
+        BrushId, BrushInput, BrushSettings, BrushThreadRuntimeError, DEFAULT_CANVAS_HEIGHT_PX,
         DEFAULT_CANVAS_WIDTH_PX, DocumentBlendMode, DocumentNodeId, DocumentWorkspace,
-        RoundBrushSettings, ScriptCommand, ScriptCommandOutcome, ScriptCommandPlan,
-        ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, UiAction, load_trace_file,
-        save_trace_file, script_command_plan_to_json_string_pretty,
+        ReplaceCircleStrokeSample, RoundBrushSettings, ScriptCommand, ScriptCommandOutcome,
+        ScriptCommandPlan, ScriptDrawSession, ScriptHost, ScriptHostError, Tool, ToolSet, UiAction,
+        load_trace_file, save_trace_file, script_command_plan_to_json_string_pretty,
     };
     use gla_core::{CanvasCoordF, CanvasInput, ScreenCoordF};
     use gla_ir::{
@@ -2128,6 +2152,28 @@ mod tests {
 
         assert!(preview.needs_render());
         assert_eq!(preview.replace_circle_samples().len(), 2);
+    }
+
+    #[test]
+    fn active_stroke_preview_uses_worker_brush_input_samples_when_available() {
+        let mut preview = super::ActiveStrokePreview::new(
+            BrushSettings::default(),
+            canvas_input(0, 1.0, 2.0, 1.0),
+        );
+        preview.mark_rendered();
+        let worker_sample = ReplaceCircleStrokeSample::new(
+            9.0,
+            10.0,
+            11.0,
+            gla_color::PremultipliedRgbaF32::new(0.25, 0.5, 0.75, 1.0),
+        );
+        let brush_input =
+            BrushInput::from_replace_circle_samples(BrushId::DEFAULT, [worker_sample]);
+
+        assert_eq!(preview.push_brush_input(&brush_input).unwrap(), 1);
+
+        assert!(preview.needs_render());
+        assert_eq!(preview.replace_circle_samples(), vec![worker_sample]);
     }
 
     #[test]
