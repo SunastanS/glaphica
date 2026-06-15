@@ -58,6 +58,7 @@ pub struct AppTraceStatus {
 pub enum AppTraceError {
     Io(std::io::Error),
     Json(serde_json::Error),
+    InvalidLegacyTrace(String),
     UnsupportedVersion(u32),
 }
 
@@ -65,6 +66,12 @@ pub enum AppTraceError {
 struct AppTraceFile {
     version: u32,
     events: Vec<AppTraceEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawAppTraceFile {
+    version: u32,
+    events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -318,6 +325,7 @@ impl Display for AppTraceError {
         match self {
             Self::Io(error) => write!(f, "trace io error: {error}"),
             Self::Json(error) => write!(f, "trace json error: {error}"),
+            Self::InvalidLegacyTrace(reason) => write!(f, "invalid legacy trace: {reason}"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported app trace version {version}")
             }
@@ -330,6 +338,7 @@ impl Error for AppTraceError {
         match self {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
+            Self::InvalidLegacyTrace(_) => None,
             Self::UnsupportedVersion(_) => None,
         }
     }
@@ -366,18 +375,95 @@ pub fn save_trace_file(path: &Path, events: Vec<AppTraceEvent>) -> Result<(), Ap
 
 pub fn load_trace_file(path: &Path) -> Result<Vec<AppTraceEvent>, AppTraceError> {
     let reader = BufReader::new(File::open(path)?);
-    let file: AppTraceFile = serde_json::from_reader(reader)?;
+    let file: RawAppTraceFile = serde_json::from_reader(reader)?;
     if file.version != TRACE_VERSION {
         return Err(AppTraceError::UnsupportedVersion(file.version));
     }
-    Ok(file.events)
+    convert_trace_events(file.events)
+}
+
+enum LegacyTraceEvent {
+    BeginStrokeMarker,
+    Event(AppTraceEvent),
+}
+
+fn convert_trace_events(
+    values: Vec<serde_json::Value>,
+) -> Result<Vec<AppTraceEvent>, AppTraceError> {
+    let mut events = Vec::with_capacity(values.len());
+    let mut pending_legacy_begin = false;
+
+    for value in values {
+        if pending_legacy_begin {
+            match serde_json::from_value::<AppTraceEvent>(value.clone()) {
+                Ok(AppTraceEvent::StrokeSample(input)) => {
+                    events.push(AppTraceEvent::BeginStroke(input));
+                    pending_legacy_begin = false;
+                    continue;
+                }
+                Ok(_) => {
+                    return Err(AppTraceError::InvalidLegacyTrace(
+                        "legacy BeginStroke must be followed by StrokeSample".to_owned(),
+                    ));
+                }
+                Err(error) => {
+                    if legacy_trace_event_from_value(&value)?.is_some() {
+                        return Err(AppTraceError::InvalidLegacyTrace(
+                            "legacy BeginStroke must be followed by StrokeSample".to_owned(),
+                        ));
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+
+        match serde_json::from_value::<AppTraceEvent>(value.clone()) {
+            Ok(event) => events.push(event),
+            Err(error) => match legacy_trace_event_from_value(&value)? {
+                Some(LegacyTraceEvent::BeginStrokeMarker) => {
+                    pending_legacy_begin = true;
+                }
+                Some(LegacyTraceEvent::Event(event)) => events.push(event),
+                None => return Err(error.into()),
+            },
+        }
+    }
+
+    if pending_legacy_begin {
+        return Err(AppTraceError::InvalidLegacyTrace(
+            "legacy BeginStroke reached end of file before StrokeSample".to_owned(),
+        ));
+    }
+    Ok(events)
+}
+
+fn legacy_trace_event_from_value(
+    value: &serde_json::Value,
+) -> Result<Option<LegacyTraceEvent>, AppTraceError> {
+    if value.as_str() == Some("BeginStroke") {
+        return Ok(Some(LegacyTraceEvent::BeginStrokeMarker));
+    }
+    if value.as_str() == Some("EndStroke") {
+        return Ok(Some(LegacyTraceEvent::Event(AppTraceEvent::FinishStroke)));
+    }
+    if value
+        .as_object()
+        .and_then(|object| object.get("Ui"))
+        .and_then(serde_json::Value::as_str)
+        == Some("DeleteActiveLayer")
+    {
+        return Ok(Some(LegacyTraceEvent::Event(AppTraceEvent::Ui(
+            AppTraceUiAction::DeleteActiveNode,
+        ))));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AppTraceBlendMode, AppTraceCanvasInput, AppTraceConfig, AppTraceEvent, AppTraceMode,
-        AppTraceState, AppTraceUiAction, load_trace_file,
+        AppTraceBlendMode, AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent,
+        AppTraceMode, AppTraceState, AppTraceUiAction, load_trace_file,
     };
     use gla_core::{CanvasCoordF, CanvasInput};
 
@@ -418,6 +504,99 @@ mod tests {
         assert!(json.contains("\"Ui\""));
         assert!(json.contains("\"SetLayerBlendMode\""));
         assert!(json.contains("\"visible_index\": 2"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_trace_file_accepts_dev_preview_trace_schema() {
+        let path = trace_path("legacy-preview");
+        std::fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "events": [
+    {
+      "Ui": "DeleteActiveLayer"
+    },
+    "BeginStroke",
+    {
+      "StrokeSample": {
+        "time_ns": 7,
+        "position": [1.0, 2.0],
+        "pressure": 0.5,
+        "tilt": [0.1, 0.2],
+        "twist": 0.3
+      }
+    },
+    {
+      "StrokeSample": {
+        "time_ns": 8,
+        "position": [3.0, 4.0],
+        "pressure": 0.75,
+        "tilt": [0.0, 0.0],
+        "twist": 0.0
+      }
+    },
+    "EndStroke",
+    {
+      "Ui": {
+        "SetLayerBlendMode": {
+          "visible_index": 1,
+          "blend_mode": "Multiply"
+        }
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let events = load_trace_file(&path).unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AppTraceEvent::Ui(AppTraceUiAction::DeleteActiveNode),
+                AppTraceEvent::BeginStroke(_),
+                AppTraceEvent::StrokeSample(_),
+                AppTraceEvent::FinishStroke,
+                AppTraceEvent::Ui(AppTraceUiAction::SetLayerBlendMode {
+                    visible_index: 1,
+                    blend_mode: AppTraceBlendMode::Multiply
+                })
+            ]
+        ));
+        let AppTraceEvent::BeginStroke(input) = events[1] else {
+            panic!("legacy BeginStroke should be materialized from first StrokeSample");
+        };
+        assert_eq!(input.time_ns, 7);
+        assert_eq!(input.position, [1.0, 2.0]);
+        let AppTraceEvent::StrokeSample(input) = events[2] else {
+            panic!("second legacy StrokeSample should remain a sample");
+        };
+        assert_eq!(input.time_ns, 8);
+        assert_eq!(input.position, [3.0, 4.0]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_trace_file_rejects_legacy_begin_without_sample() {
+        let path = trace_path("legacy-missing-sample");
+        std::fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "events": [
+    "BeginStroke",
+    "EndStroke"
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let error = load_trace_file(&path).unwrap_err();
+
+        assert!(matches!(error, AppTraceError::InvalidLegacyTrace(_)));
         let _ = std::fs::remove_file(path);
     }
 
