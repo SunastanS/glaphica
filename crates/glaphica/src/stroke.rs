@@ -1,4 +1,4 @@
-use gla_color::apply_value_mask_to_premultiplied_rgba;
+use gla_color::{PremultipliedRgbaF32, apply_value_mask_to_premultiplied_rgba};
 use gla_core::{CanvasCoordF, CanvasInput};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -14,6 +14,7 @@ use crate::{
 const MIN_SPACING_RATIO: f32 = 0.05;
 const MIN_SPACING_PX: f32 = 1.0;
 const SAME_POSITION_EPSILON: f32 = 1e-5;
+const REPLACE_CIRCLE_BLOCK_VALUE_COUNT: usize = 7;
 
 #[derive(Debug)]
 pub(crate) struct BrushWorker {
@@ -38,6 +39,42 @@ pub(crate) enum BrushThreadRuntimeError {
     ActiveToolUnavailable(ActiveTool),
     ThreadStopped,
     ThreadPanicked,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushInputBlock {
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushInputBlockList {
+    brush_id: BrushId,
+    blocks: Vec<BrushInputBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrushInput {
+    pub brush_id: BrushId,
+    pub blocks: BrushInputBlockList,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrushInputError {
+    WrongBrush {
+        expected: BrushId,
+        actual: BrushId,
+    },
+    InvalidBlockLength {
+        brush_id: BrushId,
+        block_index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    InvalidBlockValue {
+        brush_id: BrushId,
+        block_index: usize,
+        value_index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -334,6 +371,178 @@ impl Display for BrushThreadRuntimeError {
 
 impl Error for BrushThreadRuntimeError {}
 
+impl BrushInputBlock {
+    pub fn new(values: Vec<f32>) -> Self {
+        Self { values }
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    fn from_replace_circle_sample(sample: ReplaceCircleStrokeSample) -> Self {
+        Self::new(vec![
+            sample.center.x,
+            sample.center.y,
+            sample.radius_px,
+            sample.color.r,
+            sample.color.g,
+            sample.color.b,
+            sample.color.a,
+        ])
+    }
+
+    fn replace_circle_sample(
+        &self,
+        brush_id: BrushId,
+        block_index: usize,
+    ) -> Result<ReplaceCircleStrokeSample, BrushInputError> {
+        if self.values.len() != REPLACE_CIRCLE_BLOCK_VALUE_COUNT {
+            return Err(BrushInputError::InvalidBlockLength {
+                brush_id,
+                block_index,
+                expected: REPLACE_CIRCLE_BLOCK_VALUE_COUNT,
+                actual: self.values.len(),
+            });
+        }
+        for (value_index, value) in self.values.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(BrushInputError::InvalidBlockValue {
+                    brush_id,
+                    block_index,
+                    value_index,
+                });
+            }
+        }
+        Ok(ReplaceCircleStrokeSample::new(
+            self.values[0],
+            self.values[1],
+            self.values[2],
+            PremultipliedRgbaF32::new(
+                self.values[3],
+                self.values[4],
+                self.values[5],
+                self.values[6],
+            ),
+        ))
+    }
+}
+
+impl BrushInputBlockList {
+    pub fn new(brush_id: BrushId) -> Self {
+        Self {
+            brush_id,
+            blocks: Vec::new(),
+        }
+    }
+
+    pub fn brush_id(&self) -> BrushId {
+        self.brush_id
+    }
+
+    pub fn blocks(&self) -> &[BrushInputBlock] {
+        &self.blocks
+    }
+
+    pub fn push_block(&mut self, values: Vec<f32>) {
+        self.blocks.push(BrushInputBlock::new(values));
+    }
+
+    pub fn push_replace_circle_sample(&mut self, sample: ReplaceCircleStrokeSample) {
+        self.blocks
+            .push(BrushInputBlock::from_replace_circle_sample(sample));
+    }
+
+    fn from_replace_circle_samples(
+        brush_id: BrushId,
+        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
+    ) -> Self {
+        let mut blocks = Self::new(brush_id);
+        for sample in samples {
+            blocks.push_replace_circle_sample(sample);
+        }
+        blocks
+    }
+
+    fn replace_circle_samples(&self) -> Result<Vec<ReplaceCircleStrokeSample>, BrushInputError> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .map(|(block_index, block)| block.replace_circle_sample(self.brush_id, block_index))
+            .collect()
+    }
+}
+
+impl BrushInput {
+    pub fn new(blocks: BrushInputBlockList) -> Self {
+        Self {
+            brush_id: blocks.brush_id(),
+            blocks,
+        }
+    }
+
+    pub fn from_replace_circle_samples(
+        brush_id: BrushId,
+        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
+    ) -> Self {
+        Self::new(BrushInputBlockList::from_replace_circle_samples(
+            brush_id, samples,
+        ))
+    }
+
+    pub fn replace_circle_samples(
+        &self,
+    ) -> Result<Vec<ReplaceCircleStrokeSample>, BrushInputError> {
+        let actual = self.blocks.brush_id();
+        if actual != self.brush_id {
+            return Err(BrushInputError::WrongBrush {
+                expected: self.brush_id,
+                actual,
+            });
+        }
+        self.blocks.replace_circle_samples()
+    }
+}
+
+impl Display for BrushInputError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongBrush { expected, actual } => write!(
+                formatter,
+                "brush input is for brush {}, expected brush {}",
+                actual.value(),
+                expected.value()
+            ),
+            Self::InvalidBlockLength {
+                brush_id,
+                block_index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "brush {} input block {} length mismatch: expected {}, got {}",
+                brush_id.value(),
+                block_index,
+                expected,
+                actual
+            ),
+            Self::InvalidBlockValue {
+                brush_id,
+                block_index,
+                value_index,
+            } => write!(
+                formatter,
+                "brush {} input block {} value {} is not finite",
+                brush_id.value(),
+                block_index,
+                value_index
+            ),
+        }
+    }
+}
+
+impl Error for BrushInputError {}
+
 impl Drop for BrushThreadRuntime {
     fn drop(&mut self) {
         drop(self.overflow_input_producer.take());
@@ -451,6 +660,10 @@ impl ActiveRootStroke {
 }
 
 impl FinishedRootStroke {
+    pub(crate) fn brush_input(&self) -> BrushInput {
+        self.stroke.brush_input()
+    }
+
     pub(crate) fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
         self.stroke.replace_circle_samples()
     }
@@ -514,6 +727,10 @@ impl ReplaceCircleSampleCache {
 }
 
 impl ActiveRootStroke {
+    fn brush_input(&self) -> BrushInput {
+        BrushInput::from_replace_circle_samples(self.brush_id, self.replace_circle_samples())
+    }
+
     fn replace_circle_samples(&self) -> Vec<ReplaceCircleStrokeSample> {
         replace_circle_samples_for_inputs(&self.inputs, self.brush_settings)
     }
@@ -777,8 +994,9 @@ fn flush_canvas_batch(worker: &mut BrushWorker, canvas_batch: &mut Vec<CanvasInp
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRootStroke, BrushThreadCommand, BrushThreadRuntime, BrushThreadRuntimeError,
-        BrushWorker, QueuedCanvasInput, ReplaceCircleSampleCache,
+        ActiveRootStroke, BrushInput, BrushInputBlockList, BrushInputError, BrushThreadCommand,
+        BrushThreadRuntime, BrushThreadRuntimeError, BrushWorker, QueuedCanvasInput,
+        ReplaceCircleSampleCache,
     };
     use crate::create_overwrite_ring;
     use crate::{ActiveTool, BrushId, BrushSettings, Tool, ToolSet};
@@ -917,6 +1135,60 @@ mod tests {
         assert_eq!(finished.brush_id(), BrushId::DEFAULT);
         assert!(!worker.has_active_stroke());
         assert_eq!(finished.replace_circle_samples().len(), 4);
+    }
+
+    #[test]
+    fn finished_stroke_exports_replace_circle_brush_input_blocks() {
+        let mut worker = BrushWorker::new(
+            ToolSet::default_brush(),
+            ActiveTool::Brush(BrushId::DEFAULT),
+            BrushSettings::default(),
+        );
+
+        assert!(worker.begin_active_stroke());
+        worker.push_canvas_input(canvas_input(0, 10.0, 20.0, 0.5));
+        let finished = worker.finish_active_stroke().unwrap();
+        let samples = finished.replace_circle_samples();
+        let brush_input = finished.brush_input();
+
+        assert_eq!(brush_input.brush_id, BrushId::DEFAULT);
+        assert_eq!(brush_input.blocks.brush_id(), BrushId::DEFAULT);
+        assert_eq!(brush_input.blocks.blocks().len(), samples.len());
+        assert_eq!(brush_input.replace_circle_samples().unwrap(), samples);
+    }
+
+    #[test]
+    fn brush_input_reports_invalid_replace_circle_blocks() {
+        let mut blocks = BrushInputBlockList::new(BrushId::DEFAULT);
+        blocks.push_block(vec![1.0, 2.0]);
+        let error = BrushInput::new(blocks)
+            .replace_circle_samples()
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrushInputError::InvalidBlockLength {
+                brush_id: BrushId::DEFAULT,
+                block_index: 0,
+                expected: 7,
+                actual: 2
+            }
+        ));
+
+        let mut blocks = BrushInputBlockList::new(BrushId::DEFAULT);
+        blocks.push_block(vec![1.0, f32::NAN, 8.0, 1.0, 0.0, 0.0, 1.0]);
+        let error = BrushInput::new(blocks)
+            .replace_circle_samples()
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrushInputError::InvalidBlockValue {
+                brush_id: BrushId::DEFAULT,
+                block_index: 0,
+                value_index: 1
+            }
+        ));
     }
 
     #[test]

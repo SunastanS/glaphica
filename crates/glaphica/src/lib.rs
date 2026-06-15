@@ -15,7 +15,7 @@ mod view;
 pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame, SurfaceRuntime};
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
-    DocumentLayerRenderError, DocumentPresentError, DocumentRootTileRead,
+    DocumentBrushInputError, DocumentLayerRenderError, DocumentPresentError, DocumentRootTileRead,
     DocumentStrokePreviewError, DocumentWorkspace, DocumentWorkspaceBuildError,
     DocumentWorkspaceError, DocumentWorkspaceInitError, DocumentWorkspaceLayerError,
     ReplaceCircleStrokeSample,
@@ -42,6 +42,7 @@ pub use script::{
     script_command_plan_from_json_str, script_command_plan_to_json_string_pretty,
     script_draw_session_from_json_str, script_draw_session_to_json_string_pretty,
 };
+pub use stroke::{BrushInput, BrushInputBlock, BrushInputBlockList, BrushInputError};
 pub use tool::{ActiveTool, BrushId, BrushSettings, RoundBrushSettings, Tool, ToolSet};
 pub use trace::{
     AppTraceBlendMode, AppTraceCanvasInput, AppTraceConfig, AppTraceError, AppTraceEvent,

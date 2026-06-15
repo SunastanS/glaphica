@@ -18,8 +18,8 @@ use gla_storage::{GlobalStorage, GlobalStorageError, GlobalTileError};
 use tile_key::{NewAtlasError, TileReadRef, Tiles};
 
 use crate::{
-    AppView, DocumentBlendMode, DocumentLayerTree, DocumentLayerTreeError, DocumentNodeId,
-    DocumentNodeKind, ScriptDrawCommand, ScriptDrawSession,
+    AppView, BrushInput, BrushInputError, DocumentBlendMode, DocumentLayerTree,
+    DocumentLayerTreeError, DocumentNodeId, DocumentNodeKind, ScriptDrawCommand, ScriptDrawSession,
 };
 
 pub const DEFAULT_CANVAS_WIDTH_PX: u32 = 1024;
@@ -40,6 +40,12 @@ impl ReplaceCircleStrokeSample {
             color,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum DocumentBrushInputError {
+    BrushInput(BrushInputError),
+    Session(SessionError),
 }
 
 pub struct DocumentWorkspace {
@@ -934,6 +940,43 @@ impl DocumentWorkspace {
         )
     }
 
+    pub fn replace_circle_brush_input_on_root<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        brush_input: &BrushInput,
+    ) -> Result<Option<DrawCommit>, DocumentBrushInputError>
+    where
+        B: RenderBackend,
+    {
+        self.replace_circle_brush_input_on_root_with_frame_budget(
+            history,
+            backend,
+            brush_input,
+            u32::MAX,
+        )
+    }
+
+    pub fn replace_circle_brush_input_on_root_with_frame_budget<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        brush_input: &BrushInput,
+        max_dabs_per_frame: u32,
+    ) -> Result<Option<DrawCommit>, DocumentBrushInputError>
+    where
+        B: RenderBackend,
+    {
+        let samples = brush_input.replace_circle_samples()?;
+        self.replace_circle_stroke_on_root_with_frame_budget(
+            history,
+            backend,
+            samples,
+            max_dabs_per_frame,
+        )
+        .map_err(DocumentBrushInputError::Session)
+    }
+
     pub fn replace_circle_stroke_on_root<B>(
         &mut self,
         history: &mut DrawHistory,
@@ -989,6 +1032,43 @@ impl DocumentWorkspace {
             self.invalidate_layer_composite();
         }
         Ok(commit)
+    }
+
+    pub fn replace_circle_brush_input_on_active_paint_target<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        brush_input: &BrushInput,
+    ) -> Result<Option<DrawCommit>, DocumentBrushInputError>
+    where
+        B: RenderBackend,
+    {
+        self.replace_circle_brush_input_on_active_paint_target_with_frame_budget(
+            history,
+            backend,
+            brush_input,
+            u32::MAX,
+        )
+    }
+
+    pub fn replace_circle_brush_input_on_active_paint_target_with_frame_budget<B>(
+        &mut self,
+        history: &mut DrawHistory,
+        backend: &mut B,
+        brush_input: &BrushInput,
+        max_dabs_per_frame: u32,
+    ) -> Result<Option<DrawCommit>, DocumentBrushInputError>
+    where
+        B: RenderBackend,
+    {
+        let samples = brush_input.replace_circle_samples()?;
+        self.replace_circle_stroke_on_active_paint_target_with_frame_budget(
+            history,
+            backend,
+            samples,
+            max_dabs_per_frame,
+        )
+        .map_err(DocumentBrushInputError::Session)
     }
 
     pub fn replace_circle_stroke_on_active_paint_target<B>(
@@ -1359,6 +1439,36 @@ impl Error for DocumentPresentError {
             Self::MissingRoot { .. } => None,
             Self::Tile(error) => Some(error),
         }
+    }
+}
+
+impl Display for DocumentBrushInputError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BrushInput(error) => Display::fmt(error, f),
+            Self::Session(error) => Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for DocumentBrushInputError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::BrushInput(error) => Some(error),
+            Self::Session(error) => Some(error),
+        }
+    }
+}
+
+impl From<BrushInputError> for DocumentBrushInputError {
+    fn from(error: BrushInputError) -> Self {
+        Self::BrushInput(error)
+    }
+}
+
+impl From<SessionError> for DocumentBrushInputError {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
     }
 }
 
@@ -2141,6 +2251,52 @@ mod tests {
                     ReplaceCircleStrokeSample::new(34.0, 42.0, 8.0, color),
                     ReplaceCircleStrokeSample::new(44.0, 52.0, 8.0, color),
                 ],
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        let draw_counts: Vec<usize> = backend
+            .submitted
+            .iter()
+            .map(|passes| {
+                passes
+                    .iter()
+                    .filter(|pass| {
+                        matches!(
+                            pass,
+                            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
+                        )
+                    })
+                    .count()
+            })
+            .collect();
+
+        assert_eq!(commit.version, DocumentVersionId::new(2));
+        assert_eq!(workspace.version(), DocumentVersionId::new(2));
+        assert_eq!(draw_counts, vec![2, 1]);
+        assert_eq!(workspace.root_dirty_tile_indices(&commit), vec![0]);
+    }
+
+    #[test]
+    fn replace_circle_brush_input_on_root_commits_with_frame_budget() {
+        let mut workspace = DocumentWorkspace::blank(128, 96).unwrap();
+        let mut history = DrawHistory::new();
+        let mut backend = RecordingBackend::default();
+        let color = PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0);
+        let brush_input = BrushInput::from_replace_circle_samples(
+            crate::BrushId::DEFAULT,
+            [
+                ReplaceCircleStrokeSample::new(24.0, 32.0, 8.0, color),
+                ReplaceCircleStrokeSample::new(34.0, 42.0, 8.0, color),
+                ReplaceCircleStrokeSample::new(44.0, 52.0, 8.0, color),
+            ],
+        );
+
+        let commit = workspace
+            .replace_circle_brush_input_on_root_with_frame_budget(
+                &mut history,
+                &mut backend,
+                &brush_input,
                 2,
             )
             .unwrap()
