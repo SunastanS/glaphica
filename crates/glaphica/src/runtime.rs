@@ -379,6 +379,11 @@ impl App {
                 reason: "brush thread did not accept active tool update".to_owned(),
             });
         }
+        if !self.brush_thread.reset_active_stroke_processing() {
+            return Err(ScriptHostError::Runtime {
+                reason: "brush thread did not reset active stroke processing".to_owned(),
+            });
+        }
         self.config.active_tool = active_tool;
         self.primary_down = false;
         self.clear_active_stroke_preview_cache();
