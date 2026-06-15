@@ -48,5 +48,7 @@ pub use trace::{
     AppTraceMode, AppTraceRoundBrushSettings, AppTraceStatus, AppTraceUiAction, load_trace_file,
     save_trace_file,
 };
-pub use ui::{UiAction, UiLayerItem, collect_ui_layers, visible_layer_index};
+pub use ui::{
+    UiAction, UiLayerItem, UiTraceMode, UiTraceStatus, collect_ui_layers, visible_layer_index,
+};
 pub use view::{AppView, AppViewMatrixError};

@@ -40,6 +40,7 @@ fn config_from_args(
         }
     }
 
+    config.trace_default_path = trace_path.clone();
     config.trace_config = match trace_mode {
         TraceModeArg::Disabled => glaphica::AppTraceConfig::Disabled,
         TraceModeArg::Record => glaphica::AppTraceConfig::record(trace_path),
@@ -77,6 +78,10 @@ mod tests {
         assert_eq!(
             config.trace_config,
             AppTraceConfig::record("target/trace.json")
+        );
+        assert_eq!(
+            config.trace_default_path,
+            PathBuf::from("target/trace.json")
         );
     }
 

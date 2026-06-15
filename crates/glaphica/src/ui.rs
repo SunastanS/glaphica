@@ -1,6 +1,7 @@
 use crate::{
     DocumentBlendMode, DocumentLayerTreeError, DocumentNodeId, DocumentNodeKind, DocumentWorkspace,
     RoundBrushSettings,
+    trace::{AppTraceMode, AppTraceStatus},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +17,22 @@ pub enum UiAction {
     NodeOpacityChanged(DocumentNodeId, f32),
     NodeBlendModeChanged(DocumentNodeId, DocumentBlendMode),
     RoundBrushSettingsChanged(RoundBrushSettings),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiTraceMode {
+    Idle,
+    Recording,
+    Replaying,
+    ReplayDone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiTraceStatus {
+    pub mode: UiTraceMode,
+    pub event_count: usize,
+    pub replay_index: usize,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +56,28 @@ pub fn collect_ui_layers(
 
 pub fn visible_layer_index(layers: &[UiLayerItem], node_id: DocumentNodeId) -> Option<usize> {
     layers.iter().position(|layer| layer.id == node_id)
+}
+
+impl From<AppTraceMode> for UiTraceMode {
+    fn from(value: AppTraceMode) -> Self {
+        match value {
+            AppTraceMode::Idle => Self::Idle,
+            AppTraceMode::Recording => Self::Recording,
+            AppTraceMode::Replaying => Self::Replaying,
+            AppTraceMode::ReplayDone => Self::ReplayDone,
+        }
+    }
+}
+
+impl From<AppTraceStatus> for UiTraceStatus {
+    fn from(value: AppTraceStatus) -> Self {
+        Self {
+            mode: value.mode.into(),
+            event_count: value.event_count,
+            replay_index: value.replay_index,
+            path: value.path,
+        }
+    }
 }
 
 fn collect_ui_layer_subtree(
@@ -68,7 +107,8 @@ fn collect_ui_layer_subtree(
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_ui_layers, visible_layer_index};
+    use super::{UiTraceMode, UiTraceStatus, collect_ui_layers, visible_layer_index};
+    use crate::{AppTraceMode, AppTraceStatus};
     use crate::{DocumentNodeKind, DocumentWorkspace};
 
     #[test]
@@ -96,5 +136,25 @@ mod tests {
         assert!(layers[2].active);
         assert!(layers[2].paintable);
         assert_eq!(visible_layer_index(&layers, nested), Some(2));
+    }
+
+    #[test]
+    fn ui_trace_status_maps_app_trace_status() {
+        let status = AppTraceStatus {
+            mode: AppTraceMode::Replaying,
+            event_count: 8,
+            replay_index: 3,
+            path: Some("target/trace.json".to_owned()),
+        };
+
+        assert_eq!(
+            UiTraceStatus::from(status),
+            UiTraceStatus {
+                mode: UiTraceMode::Replaying,
+                event_count: 8,
+                replay_index: 3,
+                path: Some("target/trace.json".to_owned()),
+            }
+        );
     }
 }
