@@ -2,6 +2,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
+use gla_ir::DrawOnToolKind;
+use gla_renderer::{GpuRenderer, GpuRendererError};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -9,12 +11,18 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-use crate::{DocumentWorkspace, DocumentWorkspaceError};
+use crate::{
+    DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace,
+    DocumentWorkspaceBuildError,
+};
 
 #[derive(Debug, Clone)]
 pub struct AppRuntimeConfig {
     pub window_title: String,
     pub clear_color: wgpu::Color,
+    pub canvas_width_px: u32,
+    pub canvas_height_px: u32,
+    pub draw_on_tools: Vec<DrawOnToolKind>,
 }
 
 impl Default for AppRuntimeConfig {
@@ -27,20 +35,21 @@ impl Default for AppRuntimeConfig {
                 b: 0.10,
                 a: 1.0,
             },
+            canvas_width_px: DEFAULT_CANVAS_WIDTH_PX,
+            canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
+            draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
         }
     }
 }
 
 #[derive(Debug)]
 pub enum AppRunError {
-    Document(DocumentWorkspaceError),
     EventLoop(winit::error::EventLoopError),
 }
 
 impl Display for AppRunError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Document(error) => write!(f, "document workspace initialization failed: {error}"),
             Self::EventLoop(error) => write!(f, "app event loop failed: {error}"),
         }
     }
@@ -49,7 +58,6 @@ impl Display for AppRunError {
 impl Error for AppRunError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Document(error) => Some(error),
             Self::EventLoop(error) => Some(error),
         }
     }
@@ -61,29 +69,28 @@ pub fn run_app_window() -> Result<(), AppRunError> {
 
 pub fn run_app_window_with_config(config: AppRuntimeConfig) -> Result<(), AppRunError> {
     let event_loop = EventLoop::new().map_err(AppRunError::EventLoop)?;
-    let mut app = App::new(config).map_err(AppRunError::Document)?;
+    let mut app = App::new(config);
     event_loop.run_app(&mut app).map_err(AppRunError::EventLoop)
 }
 
 struct App {
     config: AppRuntimeConfig,
-    workspace: DocumentWorkspace,
+    workspace: Option<DocumentWorkspace>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuCtx>,
 }
 
 impl App {
-    fn new(config: AppRuntimeConfig) -> Result<Self, DocumentWorkspaceError> {
-        Ok(Self {
+    fn new(config: AppRuntimeConfig) -> Self {
+        Self {
             config,
-            workspace: DocumentWorkspace::default_blank()?,
+            workspace: None,
             window: None,
             gpu: None,
-        })
+        }
     }
 
     fn window_attributes(&self) -> WindowAttributes {
-        let _ = self.workspace.version();
         WindowAttributes::default().with_title(self.config.window_title.clone())
     }
 }
@@ -94,11 +101,14 @@ struct GpuCtx {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     clear_color: wgpu::Color,
+    renderer: GpuRenderer,
 }
 
 #[derive(Debug)]
 enum GpuInitError {
     CreateSurface(wgpu::CreateSurfaceError),
+    Document(DocumentWorkspaceBuildError<GpuRendererError>),
+    Renderer(GpuRendererError),
     RequestAdapter(wgpu::RequestAdapterError),
     RequestDevice(wgpu::RequestDeviceError),
     UnsupportedSurfaceFormat,
@@ -108,6 +118,10 @@ impl Display for GpuInitError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CreateSurface(error) => write!(f, "failed to create surface: {error}"),
+            Self::Document(error) => {
+                write!(f, "failed to create GPU-backed document workspace: {error}")
+            }
+            Self::Renderer(error) => write!(f, "failed to create GPU renderer: {error}"),
             Self::RequestAdapter(error) => write!(f, "failed to request adapter: {error}"),
             Self::RequestDevice(error) => write!(f, "failed to request device: {error}"),
             Self::UnsupportedSurfaceFormat => f.write_str("surface has no supported format"),
@@ -115,10 +129,24 @@ impl Display for GpuInitError {
     }
 }
 
-impl Error for GpuInitError {}
+impl Error for GpuInitError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::CreateSurface(error) => Some(error),
+            Self::Document(error) => Some(error),
+            Self::Renderer(error) => Some(error),
+            Self::RequestAdapter(error) => Some(error),
+            Self::RequestDevice(error) => Some(error),
+            Self::UnsupportedSurfaceFormat => None,
+        }
+    }
+}
 
 impl GpuCtx {
-    async fn new(window: Arc<Window>, clear_color: wgpu::Color) -> Result<Self, GpuInitError> {
+    async fn new(
+        window: Arc<Window>,
+        app_config: &AppRuntimeConfig,
+    ) -> Result<(Self, DocumentWorkspace), GpuInitError> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
@@ -133,10 +161,11 @@ impl GpuCtx {
             .await
             .map_err(GpuInitError::RequestAdapter)?;
 
+        let required_features = required_draw_on_features(&app_config.draw_on_tools);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("glaphica-device"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::default(),
@@ -172,13 +201,35 @@ impl GpuCtx {
 
         surface.configure(&device, &config);
 
-        Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            clear_color,
-        })
+        let mut renderer = GpuRenderer::with_draw_on_tools(
+            &adapter,
+            device.clone(),
+            queue.clone(),
+            app_config.draw_on_tools.iter().copied(),
+        )
+        .map_err(GpuInitError::Renderer)?;
+        let workspace = DocumentWorkspace::blank_with_textures(
+            app_config.canvas_width_px,
+            app_config.canvas_height_px,
+            &mut renderer,
+        )
+        .map_err(GpuInitError::Document)?;
+
+        Ok((
+            Self {
+                surface,
+                device,
+                queue,
+                config,
+                clear_color: app_config.clear_color,
+                renderer,
+            },
+            workspace,
+        ))
+    }
+
+    fn renderer_mut(&mut self) -> &mut GpuRenderer {
+        &mut self.renderer
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -194,6 +245,7 @@ impl GpuCtx {
     }
 
     fn render(&mut self) {
+        let _ = self.renderer_mut().capabilities();
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(error) => {
@@ -241,6 +293,14 @@ impl GpuCtx {
     }
 }
 
+fn required_draw_on_features(tools: &[DrawOnToolKind]) -> wgpu::Features {
+    if tools.contains(&DrawOnToolKind::RadialKernel1D) {
+        wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+    } else {
+        wgpu::Features::empty()
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -256,8 +316,8 @@ impl ApplicationHandler for App {
             }
         };
 
-        let gpu = match pollster::block_on(GpuCtx::new(window.clone(), self.config.clear_color)) {
-            Ok(gpu) => gpu,
+        let (gpu, workspace) = match pollster::block_on(GpuCtx::new(window.clone(), &self.config)) {
+            Ok(parts) => parts,
             Err(error) => {
                 eprintln!("gpu initialization failed: {error}");
                 event_loop.exit();
@@ -266,6 +326,7 @@ impl ApplicationHandler for App {
         };
 
         self.window = Some(window);
+        self.workspace = Some(workspace);
         self.gpu = Some(gpu);
     }
 
@@ -309,6 +370,8 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::AppRuntimeConfig;
+    use crate::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
+    use gla_ir::DrawOnToolKind;
 
     #[test]
     fn default_runtime_config_keeps_window_contract_stable() {
@@ -319,5 +382,8 @@ mod tests {
         assert_eq!(config.clear_color.g, 0.09);
         assert_eq!(config.clear_color.b, 0.10);
         assert_eq!(config.clear_color.a, 1.0);
+        assert_eq!(config.canvas_width_px, DEFAULT_CANVAS_WIDTH_PX);
+        assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
+        assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
     }
 }
