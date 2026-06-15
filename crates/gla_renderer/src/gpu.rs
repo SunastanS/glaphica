@@ -1976,21 +1976,22 @@ impl CompositeStages {
     }
 }
 
-struct RgbaCompositeStage {
+struct CompositeTarget {
+    format: wgpu::TextureFormat,
     pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
     scratch_a: RendererTexture,
     scratch_a_view: wgpu::TextureView,
     scratch_b: RendererTexture,
     scratch_b_view: wgpu::TextureView,
 }
 
+struct RgbaCompositeStage {
+    bind_group_layout: wgpu::BindGroupLayout,
+    targets: Vec<CompositeTarget>,
+}
+
 impl RgbaCompositeStage {
     fn new(device: &wgpu::Device) -> Result<Self, GpuRendererError> {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("glaphica-render-to-shader"),
-            source: wgpu::ShaderSource::Wgsl(RGBA_COMPOSITE_SHADER.into()),
-        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("glaphica-render-to-bind-group-layout"),
             entries: &[
@@ -2026,50 +2027,34 @@ impl RgbaCompositeStage {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("glaphica-render-to-pipeline-layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glaphica-render-to-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let scratch_a = create_scratch_texture(device, "glaphica-render-to-scratch-a")?;
-        let scratch_a_view = scratch_a.create_layer_view(0)?;
-        let scratch_b = create_scratch_texture(device, "glaphica-render-to-scratch-b")?;
-        let scratch_b_view = scratch_b.create_layer_view(0)?;
-
         Ok(Self {
-            pipeline,
             bind_group_layout,
-            scratch_a,
-            scratch_a_view,
-            scratch_b,
-            scratch_b_view,
+            targets: Vec::new(),
         })
+    }
+
+    fn target_index(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Result<usize, GpuRendererError> {
+        if let Some(index) = self
+            .targets
+            .iter()
+            .position(|target| target.format == format)
+        {
+            return Ok(index);
+        }
+
+        let target = create_composite_target(
+            device,
+            &self.bind_group_layout,
+            "glaphica-render-to",
+            RGBA_COMPOSITE_SHADER,
+            format,
+        )?;
+        self.targets.push(target);
+        Ok(self.targets.len() - 1)
     }
 
     fn encode_resolved(
@@ -2079,6 +2064,8 @@ impl RgbaCompositeStage {
         dst: ResolvedTile<'_>,
         uniforms: CompositeUniforms,
     ) -> Result<(), GpuRendererError> {
+        let target_index = self.target_index(ctx.device, dst.runtime.texture_format)?;
+        let target = &self.targets[target_index];
         ctx.encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &dst.texture.texture,
@@ -2087,7 +2074,7 @@ impl RgbaCompositeStage {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyTextureInfo {
-                texture: &self.scratch_a.texture,
+                texture: &target.scratch_a.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2114,7 +2101,7 @@ impl RgbaCompositeStage {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.scratch_a_view),
+                    resource: wgpu::BindingResource::TextureView(&target.scratch_a_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2130,7 +2117,7 @@ impl RgbaCompositeStage {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glaphica-render-to-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scratch_b_view,
+                    view: &target.scratch_b_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -2143,14 +2130,14 @@ impl RgbaCompositeStage {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&target.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
         ctx.encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.scratch_b.texture,
+                texture: &target.scratch_b.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2172,20 +2159,12 @@ impl RgbaCompositeStage {
 }
 
 struct ValueMaskStage {
-    pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
-    scratch_a: RendererTexture,
-    scratch_a_view: wgpu::TextureView,
-    scratch_b: RendererTexture,
-    scratch_b_view: wgpu::TextureView,
+    targets: Vec<CompositeTarget>,
 }
 
 impl ValueMaskStage {
     fn new(device: &wgpu::Device) -> Result<Self, GpuRendererError> {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("glaphica-value-mask-shader"),
-            source: wgpu::ShaderSource::Wgsl(VALUE_MASK_SHADER.into()),
-        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("glaphica-value-mask-bind-group-layout"),
             entries: &[
@@ -2221,50 +2200,34 @@ impl ValueMaskStage {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("glaphica-value-mask-pipeline-layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glaphica-value-mask-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let scratch_a = create_scratch_texture(device, "glaphica-value-mask-scratch-a")?;
-        let scratch_a_view = scratch_a.create_layer_view(0)?;
-        let scratch_b = create_scratch_texture(device, "glaphica-value-mask-scratch-b")?;
-        let scratch_b_view = scratch_b.create_layer_view(0)?;
-
         Ok(Self {
-            pipeline,
             bind_group_layout,
-            scratch_a,
-            scratch_a_view,
-            scratch_b,
-            scratch_b_view,
+            targets: Vec::new(),
         })
+    }
+
+    fn target_index(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> Result<usize, GpuRendererError> {
+        if let Some(index) = self
+            .targets
+            .iter()
+            .position(|target| target.format == format)
+        {
+            return Ok(index);
+        }
+
+        let target = create_composite_target(
+            device,
+            &self.bind_group_layout,
+            "glaphica-value-mask",
+            VALUE_MASK_SHADER,
+            format,
+        )?;
+        self.targets.push(target);
+        Ok(self.targets.len() - 1)
     }
 
     fn encode_resolved(
@@ -2274,6 +2237,8 @@ impl ValueMaskStage {
         color: ResolvedTile<'_>,
         uniforms: CompositeUniforms,
     ) -> Result<(), GpuRendererError> {
+        let target_index = self.target_index(ctx.device, color.runtime.texture_format)?;
+        let target = &self.targets[target_index];
         ctx.encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &color.texture.texture,
@@ -2282,7 +2247,7 @@ impl ValueMaskStage {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyTextureInfo {
-                texture: &self.scratch_a.texture,
+                texture: &target.scratch_a.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2309,7 +2274,7 @@ impl ValueMaskStage {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.scratch_a_view),
+                    resource: wgpu::BindingResource::TextureView(&target.scratch_a_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2325,7 +2290,7 @@ impl ValueMaskStage {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glaphica-value-mask-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scratch_b_view,
+                    view: &target.scratch_b_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -2338,14 +2303,14 @@ impl ValueMaskStage {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&target.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
         ctx.encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.scratch_b.texture,
+                texture: &target.scratch_b.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2368,7 +2333,8 @@ impl ValueMaskStage {
 
 fn create_scratch_texture(
     device: &wgpu::Device,
-    label: &'static str,
+    label: &str,
+    format: wgpu::TextureFormat,
 ) -> Result<RendererTexture, GpuRendererError> {
     Ok(RendererTexture::new(
         device,
@@ -2377,13 +2343,74 @@ fn create_scratch_texture(
             width: ATLAS_TILE_SIZE,
             height: ATLAS_TILE_SIZE,
             layers: 1,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
         },
     )?)
+}
+
+fn create_composite_target(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    label: &'static str,
+    shader_source: &'static str,
+    format: wgpu::TextureFormat,
+) -> Result<CompositeTarget, GpuRendererError> {
+    let shader_label = format!("{label}-shader");
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&shader_label),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+    let pipeline_layout_label = format!("{label}-pipeline-layout");
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(&pipeline_layout_label),
+        bind_group_layouts: &[bind_group_layout],
+        immediate_size: 0,
+    });
+    let pipeline_label = format!("{label}-pipeline");
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&pipeline_label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let scratch_a_label = format!("{label}-scratch-a");
+    let scratch_a = create_scratch_texture(device, &scratch_a_label, format)?;
+    let scratch_a_view = scratch_a.create_layer_view(0)?;
+    let scratch_b_label = format!("{label}-scratch-b");
+    let scratch_b = create_scratch_texture(device, &scratch_b_label, format)?;
+    let scratch_b_view = scratch_b.create_layer_view(0)?;
+    Ok(CompositeTarget {
+        format,
+        pipeline,
+        scratch_a,
+        scratch_a_view,
+        scratch_b,
+        scratch_b_view,
+    })
 }
 
 fn create_zero_tile_buffer(
@@ -2572,6 +2599,49 @@ mod tests {
         ];
 
         gpu.submit(&passes).unwrap();
+    }
+
+    #[test]
+    fn gpu_render_to_preserves_f32_destination_format_when_adapter_is_available() {
+        let _guard = gpu_test_lock().lock().unwrap();
+        let (device, queue) = match pollster::block_on(test_device()) {
+            Some(device) => device,
+            None => {
+                eprintln!("skipping GPU f32 render_to test: no adapter available");
+                return;
+            }
+        };
+        let mut gpu = GpuRenderer::new(device, queue).unwrap();
+        let format = GlaFormat {
+            channel_count: ChannelCount::D4,
+            channel_type: ChannelType::F32,
+        };
+        gpu.create_atlas_texture(0, AtlasLayout::TINY8, format)
+            .unwrap();
+        let src = TilePos::new(0, 0, 0, 0);
+        let dst = TilePos::new(0, 0, 1, 0);
+        let (padded_bytes_per_row, buffer_size) = tile_transfer_layout(16).unwrap();
+        let mut bytes = vec![0_u8; buffer_size as usize];
+        let offset = ((6 + GUTTER_SIZE) * padded_bytes_per_row + (5 + GUTTER_SIZE) * 16) as usize;
+        for (channel, value) in [0.25_f32, 0.5, 0.75, 1.0].into_iter().enumerate() {
+            let start = offset + channel * 4;
+            bytes[start..start + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+        gpu.write_tile_bytes(src, 16, &bytes).unwrap();
+
+        gpu.submit(&[
+            Pass::Clear { dst },
+            Pass::RenderTo {
+                src,
+                dst,
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
+            },
+        ])
+        .unwrap();
+
+        let readback = gpu.read_tile_bytes(dst, 16).unwrap();
+        assert_eq!(read_rgba_pixel(&readback, 16, 5, 6), [0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]
