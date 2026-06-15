@@ -16,9 +16,9 @@ use winit::{
 };
 
 use crate::{
-    AppView, AppViewMatrixError, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX,
-    DocumentWorkspace, DocumentWorkspaceInitError, ReplaceCircleStrokeSample,
-    frame::AppFrameScheduler,
+    ActiveTool, AppView, AppViewMatrixError, BrushId, DEFAULT_CANVAS_HEIGHT_PX,
+    DEFAULT_CANVAS_WIDTH_PX, DocumentWorkspace, DocumentWorkspaceInitError,
+    ReplaceCircleStrokeSample, ToolSet, frame::AppFrameScheduler,
 };
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,8 @@ pub struct AppRuntimeConfig {
     pub clear_color: wgpu::Color,
     pub canvas_width_px: u32,
     pub canvas_height_px: u32,
+    pub tool_set: ToolSet,
+    pub active_tool: ActiveTool,
     pub draw_on_tools: Vec<DrawOnToolKind>,
     pub brush_radius_px: f32,
     pub brush_color: PremultipliedRgbaF32,
@@ -44,6 +46,8 @@ impl Default for AppRuntimeConfig {
             },
             canvas_width_px: DEFAULT_CANVAS_WIDTH_PX,
             canvas_height_px: DEFAULT_CANVAS_HEIGHT_PX,
+            tool_set: ToolSet::default_brush(),
+            active_tool: ActiveTool::Brush(BrushId::DEFAULT),
             draw_on_tools: vec![DrawOnToolKind::ReplaceCircle4D],
             brush_radius_px: 10.0,
             brush_color: PremultipliedRgbaF32::new(0.95, 0.17, 0.10, 1.0),
@@ -137,7 +141,11 @@ impl App {
     }
 
     fn begin_stroke_at(&mut self, position: ScreenCoordF) {
-        self.active_stroke = Some(ActiveRootStroke::default());
+        let Some(brush_id) = self.active_brush_id() else {
+            self.active_stroke = None;
+            return;
+        };
+        self.active_stroke = Some(ActiveRootStroke::new(brush_id));
         self.push_stroke_sample(position);
     }
 
@@ -154,6 +162,13 @@ impl App {
         if let Some(stroke) = self.active_stroke.as_mut() {
             stroke.push(sample);
         }
+    }
+
+    fn active_brush_id(&self) -> Option<BrushId> {
+        self.config
+            .tool_set
+            .contains(self.config.active_tool.as_tool())
+            .then_some(self.config.active_tool.brush_id())?
     }
 
     fn stroke_sample_from_screen(&self, position: ScreenCoordF) -> ReplaceCircleStrokeSample {
@@ -191,7 +206,10 @@ impl App {
             Ok(None) => false,
             Err(error) => {
                 eprintln!("stroke failed: {error}");
-                self.active_stroke = Some(ActiveRootStroke { samples });
+                self.active_stroke = Some(ActiveRootStroke {
+                    brush_id: stroke.brush_id,
+                    samples,
+                });
                 false
             }
         }
@@ -289,12 +307,20 @@ impl App {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ActiveRootStroke {
+    brush_id: BrushId,
     samples: Vec<ReplaceCircleStrokeSample>,
 }
 
 impl ActiveRootStroke {
+    fn new(brush_id: BrushId) -> Self {
+        Self {
+            brush_id,
+            samples: Vec::new(),
+        }
+    }
+
     fn push(&mut self, sample: ReplaceCircleStrokeSample) {
         self.samples.push(sample);
     }
@@ -666,8 +692,8 @@ fn scroll_delta_lines(delta: &MouseScrollDelta) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::AppRuntimeConfig;
-    use crate::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
+    use super::{App, AppRuntimeConfig};
+    use crate::{ActiveTool, BrushId, DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX, Tool};
     use gla_ir::DrawOnToolKind;
 
     #[test]
@@ -681,12 +707,23 @@ mod tests {
         assert_eq!(config.clear_color.a, 1.0);
         assert_eq!(config.canvas_width_px, DEFAULT_CANVAS_WIDTH_PX);
         assert_eq!(config.canvas_height_px, DEFAULT_CANVAS_HEIGHT_PX);
+        assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
+        assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
         assert_eq!(config.draw_on_tools, vec![DrawOnToolKind::ReplaceCircle4D]);
         assert_eq!(config.brush_radius_px, 10.0);
         assert_eq!(
             config.brush_color,
             gla_color::PremultipliedRgbaF32::new(0.95, 0.17, 0.10, 1.0)
         );
+    }
+
+    #[test]
+    fn active_brush_requires_registered_tool() {
+        let mut config = AppRuntimeConfig::default();
+        config.active_tool = ActiveTool::Brush(BrushId::new(99));
+        let app = App::new(config);
+
+        assert_eq!(app.active_brush_id(), None);
     }
 
     #[test]
