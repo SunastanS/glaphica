@@ -69,10 +69,7 @@ fn dev_style_replay_trace_runs_in_window() {
     let export_path = smoke_root.join("workspace");
     let _ = std::fs::remove_dir_all(&smoke_root);
     std::fs::create_dir_all(&smoke_root).unwrap();
-    let trace_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("app_trace_replay.json");
+    let trace_path = fixture_path("app_trace_replay.json");
     let output = run_window_smoke([
         OsString::from("--replay-input"),
         trace_path.into_os_string(),
@@ -93,6 +90,37 @@ fn dev_style_replay_trace_runs_in_window() {
     assert!(
         !stderr.contains("length mismatch"),
         "window replay smoke should not reject round brush input blocks:\n{stderr}"
+    );
+}
+
+#[test]
+#[ignore = "requires xvfb and a GPU-capable wgpu adapter"]
+fn dev_preview_legacy_trace_runs_in_window() {
+    let smoke_root = smoke_root("legacy-replay-export-on-exit");
+    let export_path = smoke_root.join("workspace");
+    let _ = std::fs::remove_dir_all(&smoke_root);
+    std::fs::create_dir_all(&smoke_root).unwrap();
+    let trace_path = fixture_path("dev_preview_trace_legacy.json");
+    let output = run_window_smoke([
+        OsString::from("--replay-input"),
+        trace_path.into_os_string(),
+        OsString::from("--export-workspace-on-exit"),
+        export_path.clone().into_os_string(),
+        OsString::from("--exit-after-frames"),
+        OsString::from("10"),
+    ]);
+    assert_success(&output);
+    assert_perf_frames(&output, 10);
+    assert_readable_workspace_export(&export_path);
+
+    let output_text = command_output_text(&output);
+    assert!(
+        !output_text.contains("trace replay event failed"),
+        "legacy dev replay smoke should not report trace replay errors:\n{output_text}"
+    );
+    assert!(
+        !output_text.contains("length mismatch"),
+        "legacy dev replay smoke should not reject round brush input blocks:\n{output_text}"
     );
 }
 
@@ -125,6 +153,13 @@ fn smoke_root(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap().join("target/window-smoke"));
     base.join(format!("{name}-{}", std::process::id()))
+}
+
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
 }
 
 fn write_startup_export_open_plan(smoke_root: &Path) -> (PathBuf, PathBuf) {
