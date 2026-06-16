@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use glaphica::{
@@ -14,25 +14,9 @@ const STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON: &str =
 #[ignore = "requires xvfb and a GPU-capable wgpu adapter"]
 fn startup_export_open_command_plan_runs_in_window() {
     let smoke_root = smoke_root("startup-export-open");
-    let plan_path = smoke_root.join("startup_export_open_command_plan.json");
-    let export_path = smoke_root.join("workspace");
     let _ = std::fs::remove_dir_all(&smoke_root);
     std::fs::create_dir_all(&smoke_root).unwrap();
-
-    let mut plan = script_command_plan_from_json_str(STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON)
-        .expect("startup export/open command plan fixture should parse");
-    for command in &mut plan.commands {
-        match command {
-            ScriptCommand::ExportWorkspaceDirectory(path)
-            | ScriptCommand::OpenWorkspaceDirectory(path) => {
-                *path = export_path.clone();
-            }
-            _ => {}
-        }
-    }
-    let rendered =
-        script_command_plan_to_json_string_pretty(&plan).expect("smoke command plan renders");
-    std::fs::write(&plan_path, rendered).unwrap();
+    let (plan_path, export_path) = write_startup_export_open_plan(&smoke_root);
 
     let output = run_window_smoke([
         OsString::from("--run-command-plan"),
@@ -42,16 +26,39 @@ fn startup_export_open_command_plan_runs_in_window() {
     ]);
     assert_success(&output);
     assert_perf_frames(&output, 8);
+    assert_readable_workspace_export(&export_path);
+}
 
-    let manifest = read_workspace_manifest(&export_path)
-        .expect("window smoke should export a readable workspace manifest");
+#[test]
+#[ignore = "requires xvfb and a GPU-capable wgpu adapter"]
+fn open_workspace_argument_runs_exported_workspace_in_window() {
+    let smoke_root = smoke_root("open-workspace");
+    let _ = std::fs::remove_dir_all(&smoke_root);
+    std::fs::create_dir_all(&smoke_root).unwrap();
+    let (plan_path, export_path) = write_startup_export_open_plan(&smoke_root);
+
+    let export_output = run_window_smoke([
+        OsString::from("--run-command-plan"),
+        plan_path.into_os_string(),
+        OsString::from("--exit-after-frames"),
+        OsString::from("8"),
+    ]);
+    assert_success(&export_output);
+    assert_perf_frames(&export_output, 8);
+    assert_readable_workspace_export(&export_path);
+
+    let open_output = run_window_smoke([
+        OsString::from("--open-workspace"),
+        export_path.into_os_string(),
+        OsString::from("--exit-after-frames"),
+        OsString::from("4"),
+    ]);
+    assert_success(&open_output);
+    assert_perf_frames(&open_output, 4);
+    let output_text = command_output_text(&open_output);
     assert!(
-        !manifest.tiles.is_empty(),
-        "window smoke should export at least one physical tile"
-    );
-    assert!(
-        export_path.join("tiles").is_dir(),
-        "window smoke should export tile assets"
+        !output_text.contains("failed to import workspace"),
+        "open-workspace smoke should not report import failures:\n{output_text}"
     );
 }
 
@@ -111,6 +118,50 @@ fn smoke_root(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap().join("target/window-smoke"));
     base.join(format!("{name}-{}", std::process::id()))
+}
+
+fn write_startup_export_open_plan(smoke_root: &Path) -> (PathBuf, PathBuf) {
+    let plan_path = smoke_root.join("startup_export_open_command_plan.json");
+    let export_path = smoke_root.join("workspace");
+    let mut plan = script_command_plan_from_json_str(STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON)
+        .expect("startup export/open command plan fixture should parse");
+    for command in &mut plan.commands {
+        match command {
+            ScriptCommand::ExportWorkspaceDirectory(path)
+            | ScriptCommand::OpenWorkspaceDirectory(path) => {
+                *path = export_path.clone();
+            }
+            _ => {}
+        }
+    }
+    let rendered =
+        script_command_plan_to_json_string_pretty(&plan).expect("smoke command plan renders");
+    std::fs::write(&plan_path, rendered).unwrap();
+    (plan_path, export_path)
+}
+
+fn assert_readable_workspace_export(export_path: &Path) {
+    let manifest = read_workspace_manifest(export_path)
+        .expect("window smoke should export a readable workspace manifest");
+    assert!(
+        !manifest.tiles.is_empty(),
+        "window smoke should export at least one physical tile"
+    );
+    assert!(
+        manifest.layer_tree.is_some(),
+        "window smoke should export layer tree metadata"
+    );
+    assert!(
+        export_path.join("tiles").is_dir(),
+        "window smoke should export tile assets"
+    );
+    for tile in &manifest.tiles {
+        assert!(
+            export_path.join(&tile.path).is_file(),
+            "window smoke should export tile asset {}",
+            tile.path.display()
+        );
+    }
 }
 
 #[test]
