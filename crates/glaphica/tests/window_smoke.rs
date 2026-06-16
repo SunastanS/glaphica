@@ -125,6 +125,52 @@ fn dev_preview_legacy_trace_runs_in_window() {
 }
 
 #[test]
+#[ignore = "requires xvfb, glaphica-dev, and a GPU-capable wgpu adapter"]
+fn manual_legacy_replay_perf_matches_dev_preview_baseline() {
+    let Some(dev_root) = std::env::var_os("GLAPHICA_DEV_ROOT").map(PathBuf::from) else {
+        eprintln!("skipping perf comparison because GLAPHICA_DEV_ROOT is not set");
+        return;
+    };
+    let trace_path = fixture_path("dev_preview_trace_legacy.json");
+
+    let dev_output = run_dev_preview_perf_smoke(&dev_root, &trace_path);
+    assert_success_or_timeout(&dev_output);
+    let dev_frames = preview_perf_frames(&dev_output);
+    assert!(
+        dev_frames.len() >= 2,
+        "dev preview perf baseline should report at least 2 frames, got {}\n{}",
+        dev_frames.len(),
+        command_output_text(&dev_output)
+    );
+    assert!(
+        dev_frames.iter().any(|frame| frame.dirty_tiles > 0),
+        "dev preview perf baseline should include at least one dirty frame\n{}",
+        command_output_text(&dev_output)
+    );
+
+    let manual_frame_count = dev_frames.len().max(10);
+    let manual_output = run_window_smoke([
+        OsString::from("--replay-input"),
+        trace_path.into_os_string(),
+        OsString::from("--exit-after-frames"),
+        OsString::from(manual_frame_count.to_string()),
+    ]);
+    assert_success(&manual_output);
+    let manual_frames = app_perf_frames(&manual_output);
+    assert!(
+        manual_frames.len() >= manual_frame_count,
+        "manual perf sample should report at least {} frames, got {}\n{}",
+        manual_frame_count,
+        manual_frames.len(),
+        command_output_text(&manual_output)
+    );
+
+    let dev_stats = PerfStats::from_frames(&dev_frames);
+    let manual_stats = PerfStats::from_frames(&manual_frames);
+    assert_perf_not_worse(&manual_stats, &dev_stats);
+}
+
+#[test]
 #[ignore = "requires xvfb and a GPU-capable wgpu adapter"]
 fn dev_style_record_trace_writes_file_on_exit() {
     let smoke_root = smoke_root("record-trace");
@@ -255,12 +301,19 @@ fn assert_success(output: &Output) {
     );
 }
 
+fn assert_success_or_timeout(output: &Output) {
+    assert!(
+        output.status.success() || output.status.code() == Some(124),
+        "window smoke failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn assert_perf_frames(output: &Output, expected_minimum: usize) {
     let output_text = command_output_text(output);
-    let frames = output_text
-        .lines()
-        .filter_map(parse_app_perf_line)
-        .collect::<Vec<_>>();
+    let frames = app_perf_frames(output);
 
     assert!(
         frames.len() >= expected_minimum,
@@ -273,12 +326,49 @@ fn assert_perf_frames(output: &Output, expected_minimum: usize) {
     }
 }
 
+fn app_perf_frames(output: &Output) -> Vec<AppPerfFrame> {
+    command_output_text(output)
+        .lines()
+        .filter_map(parse_app_perf_line)
+        .collect()
+}
+
+fn preview_perf_frames(output: &Output) -> Vec<AppPerfFrame> {
+    command_output_text(output)
+        .lines()
+        .filter_map(parse_preview_perf_line)
+        .collect()
+}
+
 fn command_output_text(output: &Output) -> String {
     format!(
         "stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn run_dev_preview_perf_smoke(dev_root: &Path, trace_path: &Path) -> Output {
+    Command::new("timeout")
+        .arg("12s")
+        .arg("env")
+        .arg("CARGO_BUILD_JOBS=1")
+        .arg("GLAPHICA_PREVIEW_PERF_TRACE_STDERR=1")
+        .arg("GLAPHICA_PREVIEW_PERF_TRACE_SLOW_MS=0")
+        .arg("xvfb-run")
+        .arg("-a")
+        .arg("cargo")
+        .arg("run")
+        .arg("-p")
+        .arg("app")
+        .arg("--bin")
+        .arg("preview")
+        .arg("--")
+        .arg("--replay-input")
+        .arg(trace_path)
+        .current_dir(dev_root)
+        .output()
+        .expect("timeout, xvfb-run, and cargo should launch glaphica-dev preview")
 }
 
 fn assert_perf_frame_is_valid(frame: AppPerfFrame) {
@@ -300,6 +390,25 @@ fn assert_perf_frame_is_valid(frame: AppPerfFrame) {
     );
 }
 
+fn assert_perf_not_worse(manual: &PerfStats, dev: &PerfStats) {
+    const TOLERANCE: f64 = 1.15;
+
+    assert!(
+        manual.dirty_max_total_ms <= dev.dirty_max_total_ms * TOLERANCE,
+        "manual dirty-frame max should stay within 15% of dev preview\nmanual: {manual:?}\ndev: {dev:?}"
+    );
+    if manual.warm_frame_count >= 20 && dev.warm_frame_count >= 20 {
+        assert!(
+            manual.warm_avg_total_ms <= dev.warm_avg_total_ms * TOLERANCE,
+            "manual warm average should stay within 15% of dev preview\nmanual: {manual:?}\ndev: {dev:?}"
+        );
+        assert!(
+            manual.warm_p95_total_ms <= dev.warm_p95_total_ms * TOLERANCE,
+            "manual warm p95 should stay within 15% of dev preview\nmanual: {manual:?}\ndev: {dev:?}"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct AppPerfFrame {
     index: u64,
@@ -311,13 +420,62 @@ struct AppPerfFrame {
     present_surface_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PerfStats {
+    frame_count: usize,
+    dirty_frame_count: usize,
+    warm_frame_count: usize,
+    warm_avg_total_ms: f64,
+    warm_p95_total_ms: f64,
+    dirty_max_total_ms: f64,
+}
+
+impl PerfStats {
+    fn from_frames(frames: &[AppPerfFrame]) -> Self {
+        let warm_frames = frames
+            .iter()
+            .copied()
+            .filter(|frame| frame.index > 10)
+            .collect::<Vec<_>>();
+        let warm_totals = warm_frames
+            .iter()
+            .map(|frame| frame.total_ms)
+            .collect::<Vec<_>>();
+        let dirty_frames = frames
+            .iter()
+            .copied()
+            .filter(|frame| frame.dirty_tiles > 0)
+            .collect::<Vec<_>>();
+        Self {
+            frame_count: frames.len(),
+            dirty_frame_count: dirty_frames.len(),
+            warm_frame_count: warm_frames.len(),
+            warm_avg_total_ms: average(&warm_totals),
+            warm_p95_total_ms: percentile(warm_totals, 0.95),
+            dirty_max_total_ms: dirty_frames
+                .iter()
+                .map(|frame| frame.total_ms)
+                .fold(0.0, f64::max),
+        }
+    }
+}
+
 fn parse_app_perf_line(line: &str) -> Option<AppPerfFrame> {
-    if !line.starts_with("[PERF][app][frame=") {
+    parse_perf_line(line, "app")
+}
+
+fn parse_preview_perf_line(line: &str) -> Option<AppPerfFrame> {
+    parse_perf_line(line, "preview")
+}
+
+fn parse_perf_line(line: &str, label: &str) -> Option<AppPerfFrame> {
+    let frame_marker = format!("[PERF][{label}][frame=");
+    if !line.starts_with(&frame_marker) {
         return None;
     }
     let stages = between(line, "stages_ms={", "}")?;
     Some(AppPerfFrame {
-        index: parse_between(line, "[PERF][app][frame=", "]")?,
+        index: parse_between(line, &frame_marker, "]")?,
         total_ms: parse_between(line, " total_ms=", " ")?,
         dirty_tiles: parse_between(line, " dirty_tiles=", " stages_ms=")?,
         process_inputs_ms: parse_stage_ms(stages, "process_inputs")?,
@@ -325,6 +483,22 @@ fn parse_app_perf_line(line: &str) -> Option<AppPerfFrame> {
         acquire_frame_ms: parse_stage_ms(stages, "acquire_frame")?,
         present_surface_ms: parse_stage_ms(stages, "present_surface")?,
     })
+}
+
+fn average(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn percentile(mut values: Vec<f64>, percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(f64::total_cmp);
+    let index = ((values.len() - 1) as f64 * percentile).round() as usize;
+    values[index]
 }
 
 fn parse_stage_ms(stages: &str, name: &str) -> Option<f64> {
