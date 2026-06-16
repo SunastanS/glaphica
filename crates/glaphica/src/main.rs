@@ -13,12 +13,22 @@ fn config_from_args(
     config.perf_trace_config = glaphica::AppPerfTraceConfig::from_env();
     let mut trace_path = PathBuf::from("glaphica-trace.json");
     let mut trace_mode = TraceModeArg::Disabled;
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--record-input" => trace_mode = TraceModeArg::Record,
-            "--replay-input" => trace_mode = TraceModeArg::Replay,
+            "--record-input" => {
+                trace_mode = TraceModeArg::Record;
+                if let Some(path) = take_optional_path_arg(&mut args) {
+                    trace_path = path;
+                }
+            }
+            "--replay-input" => {
+                trace_mode = TraceModeArg::Replay;
+                if let Some(path) = take_optional_path_arg(&mut args) {
+                    trace_path = path;
+                }
+            }
             "--trace-path" => {
                 let Some(path) = args.next() else {
                     return Err(invalid_arg("--trace-path requires a file path"));
@@ -56,7 +66,7 @@ fn config_from_args(
             }
             "--help" | "-h" => {
                 return Err(invalid_arg(
-                    "usage: glaphica [--record-input | --replay-input] [--trace-path <file>] [--open-workspace <dir>] [--run-command-plan <command-plan-or-script>] [--export-workspace <dir>] [--exit-after-frames <n>]",
+                    "usage: glaphica [--record-input [file] | --replay-input [file]] [--trace-path <file>] [--open-workspace <dir>] [--run-command-plan <command-plan-or-script>] [--export-workspace <dir>] [--exit-after-frames <n>]",
                 ));
             }
             _ => return Err(invalid_arg(format!("unknown argument {arg}"))),
@@ -70,6 +80,14 @@ fn config_from_args(
         TraceModeArg::Replay => glaphica::AppTraceConfig::replay(trace_path),
     };
     Ok(config)
+}
+
+fn take_optional_path_arg<I>(args: &mut std::iter::Peekable<I>) -> Option<PathBuf>
+where
+    I: Iterator<Item = String>,
+{
+    let has_inline_path = args.peek().is_some_and(|value| !value.starts_with("--"));
+    has_inline_path.then(|| PathBuf::from(args.next().unwrap()))
 }
 
 fn parse_positive_u64(value: &str, error_message: &'static str) -> Result<u64, Error> {
@@ -116,6 +134,59 @@ mod tests {
             config.trace_default_path,
             PathBuf::from("target/trace.json")
         );
+    }
+
+    #[test]
+    fn parses_dev_style_record_trace_argument() {
+        let config =
+            config_from_args(["--record-input".to_owned(), "target/trace.json".to_owned()])
+                .unwrap();
+
+        assert_eq!(
+            config.trace_config,
+            AppTraceConfig::record("target/trace.json")
+        );
+        assert_eq!(
+            config.trace_default_path,
+            PathBuf::from("target/trace.json")
+        );
+    }
+
+    #[test]
+    fn parses_dev_style_replay_trace_argument_without_consuming_flags() {
+        let config = config_from_args([
+            "--replay-input".to_owned(),
+            "target/trace.json".to_owned(),
+            "--exit-after-frames".to_owned(),
+            "2".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.trace_config,
+            AppTraceConfig::replay("target/trace.json")
+        );
+        assert_eq!(
+            config.trace_default_path,
+            PathBuf::from("target/trace.json")
+        );
+        assert_eq!(config.exit_after_redraw_frames, Some(2));
+    }
+
+    #[test]
+    fn trace_mode_without_inline_path_preserves_following_flags() {
+        let config = config_from_args([
+            "--replay-input".to_owned(),
+            "--exit-after-frames".to_owned(),
+            "2".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            config.trace_config,
+            AppTraceConfig::replay("glaphica-trace.json")
+        );
+        assert_eq!(config.exit_after_redraw_frames, Some(2));
     }
 
     #[test]
