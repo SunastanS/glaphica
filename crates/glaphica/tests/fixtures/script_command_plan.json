@@ -12,6 +12,12 @@
       "ExportWorkspaceDirectory": "target/workspace-export"
     },
     {
+      "SetTraceDefaultPath": "target/script-command-plan-trace.json"
+    },
+    "StartTraceRecording",
+    "StopTraceRecording",
+    "ReplayTrace",
+    {
       "AppendLayer": {
         "parent": 1
       }

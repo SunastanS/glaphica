@@ -149,6 +149,26 @@ fn script_command_plan_fixture_reserves_full_rust_command_surface() {
     assert!(
         plan.commands
             .iter()
+            .any(|command| matches!(command, ScriptCommand::SetTraceDefaultPath(_)))
+    );
+    assert!(
+        plan.commands
+            .iter()
+            .any(|command| matches!(command, ScriptCommand::StartTraceRecording))
+    );
+    assert!(
+        plan.commands
+            .iter()
+            .any(|command| matches!(command, ScriptCommand::StopTraceRecording))
+    );
+    assert!(
+        plan.commands
+            .iter()
+            .any(|command| matches!(command, ScriptCommand::ReplayTrace))
+    );
+    assert!(
+        plan.commands
+            .iter()
             .any(|command| matches!(command, ScriptCommand::AppendLayer { .. }))
     );
     assert!(

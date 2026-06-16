@@ -36,6 +36,10 @@ pub enum ScriptCommand {
     ApplyRegistryPatch(RegistryPatch),
     OpenWorkspaceDirectory(PathBuf),
     ExportWorkspaceDirectory(PathBuf),
+    SetTraceDefaultPath(PathBuf),
+    StartTraceRecording,
+    StopTraceRecording,
+    ReplayTrace,
     AppendLayer {
         parent: DocumentNodeId,
     },
@@ -486,6 +490,10 @@ mod tests {
             ScriptCommand::RunDrawSession(ScriptDrawSession::new(ir.clone())),
             ScriptCommand::OpenWorkspaceDirectory("fixtures/workspace".into()),
             ScriptCommand::ExportWorkspaceDirectory("target/workspace-export".into()),
+            ScriptCommand::SetTraceDefaultPath("target/script-trace.json".into()),
+            ScriptCommand::StartTraceRecording,
+            ScriptCommand::StopTraceRecording,
+            ScriptCommand::ReplayTrace,
             ScriptCommand::AppendLayer {
                 parent: DocumentNodeId::new(1),
             },
@@ -530,22 +538,29 @@ mod tests {
             ScriptCommand::ExportWorkspaceDirectory(path) if path.ends_with("target/workspace-export")
         ));
         assert!(matches!(
-            commands[4],
+            &commands[3],
+            ScriptCommand::SetTraceDefaultPath(path) if path.ends_with("target/script-trace.json")
+        ));
+        assert!(matches!(commands[4], ScriptCommand::StartTraceRecording));
+        assert!(matches!(commands[5], ScriptCommand::StopTraceRecording));
+        assert!(matches!(commands[6], ScriptCommand::ReplayTrace));
+        assert!(matches!(
+            commands[8],
             ScriptCommand::AppendGroup { parent } if parent == DocumentNodeId::new(1)
         ));
-        assert!(matches!(commands[5], ScriptCommand::CreateLayerAboveActive));
+        assert!(matches!(commands[9], ScriptCommand::CreateLayerAboveActive));
         assert!(matches!(
-            commands[9],
+            commands[13],
             ScriptCommand::SetNodeBlendMode {
                 node_id,
                 blend_mode: DocumentBlendMode::Multiply,
             } if node_id == DocumentNodeId::new(2)
         ));
         assert!(matches!(
-            commands[14],
+            commands[18],
             ScriptCommand::SetRoundBrushSettings(_)
         ));
-        assert!(matches!(commands[15], ScriptCommand::BeginStroke(found) if found == input));
+        assert!(matches!(commands[19], ScriptCommand::BeginStroke(found) if found == input));
     }
 
     #[test]

@@ -709,23 +709,12 @@ impl App {
     ) -> Result<ScriptCommandOutcome, ScriptHostError> {
         match action {
             UiAction::StartRecordingRequested => {
-                self.trace.start_recording(&self.config.trace_default_path);
-                Ok(ScriptCommandOutcome::None)
+                self.execute_script_command(ScriptCommand::StartTraceRecording)
             }
-            UiAction::StopRecordingRequested => self
-                .trace
-                .stop_recording()
-                .map(|_| ScriptCommandOutcome::None)
-                .map_err(|error| ScriptHostError::Runtime {
-                    reason: error.to_string(),
-                }),
-            UiAction::ReplayRequested => self
-                .trace
-                .load_replay(&self.config.trace_default_path)
-                .map(|()| ScriptCommandOutcome::None)
-                .map_err(|error| ScriptHostError::Runtime {
-                    reason: error.to_string(),
-                }),
+            UiAction::StopRecordingRequested => {
+                self.execute_script_command(ScriptCommand::StopTraceRecording)
+            }
+            UiAction::ReplayRequested => self.execute_script_command(ScriptCommand::ReplayTrace),
             UiAction::UndoRequested => {
                 if self.undo() {
                     self.request_redraw();
@@ -1260,6 +1249,28 @@ impl ScriptHost for App {
             ScriptCommand::ExportWorkspaceDirectory(path) => {
                 self.export_workspace_directory_from_script(path)
             }
+            ScriptCommand::SetTraceDefaultPath(path) => {
+                self.config.trace_default_path = path;
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::StartTraceRecording => {
+                self.trace.start_recording(&self.config.trace_default_path);
+                Ok(ScriptCommandOutcome::None)
+            }
+            ScriptCommand::StopTraceRecording => self
+                .trace
+                .stop_recording()
+                .map(|_| ScriptCommandOutcome::None)
+                .map_err(|error| ScriptHostError::Runtime {
+                    reason: error.to_string(),
+                }),
+            ScriptCommand::ReplayTrace => self
+                .trace
+                .load_replay(&self.config.trace_default_path)
+                .map(|()| ScriptCommandOutcome::None)
+                .map_err(|error| ScriptHostError::Runtime {
+                    reason: error.to_string(),
+                }),
             ScriptCommand::AppendLayer { parent } => {
                 self.run_layer_command(true, true, |workspace| {
                     workspace
@@ -2980,6 +2991,29 @@ mod tests {
         assert_eq!(events, vec![AppTraceEvent::Ui(AppTraceUiAction::Undo)]);
 
         app.execute_ui_action(UiAction::ReplayRequested).unwrap();
+        assert!(app.process_next_trace_replay_event());
+        assert!(!app.process_next_trace_replay_event());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn script_trace_control_commands_start_stop_and_replay_default_path() {
+        let path = trace_path("script-trace-control");
+        let mut app = App::try_new(AppRuntimeConfig::default()).unwrap();
+
+        app.execute_script_command(ScriptCommand::SetTraceDefaultPath(path.clone()))
+            .unwrap();
+        app.execute_script_command(ScriptCommand::StartTraceRecording)
+            .unwrap();
+        app.execute_ui_action_from_window(UiAction::UndoRequested);
+        app.execute_script_command(ScriptCommand::StopTraceRecording)
+            .unwrap();
+
+        let events = load_trace_file(&path).unwrap();
+        assert_eq!(events, vec![AppTraceEvent::Ui(AppTraceUiAction::Undo)]);
+
+        app.execute_script_command(ScriptCommand::ReplayTrace)
+            .unwrap();
         assert!(app.process_next_trace_replay_event());
         assert!(!app.process_next_trace_replay_event());
         let _ = std::fs::remove_file(path);
