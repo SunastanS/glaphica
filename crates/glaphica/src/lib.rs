@@ -19,9 +19,8 @@ pub use display::{ScreenBlitter, ScreenPresentCache, SurfaceError, SurfaceFrame,
 pub use document::{DEFAULT_CANVAS_HEIGHT_PX, DEFAULT_CANVAS_WIDTH_PX};
 pub use document::{
     DocumentBrushInputError, DocumentLayerRenderError, DocumentPresentError, DocumentRootTileRead,
-    DocumentStrokePreviewError, DocumentWorkspace, DocumentWorkspaceBuildError,
-    DocumentWorkspaceError, DocumentWorkspaceInitError, DocumentWorkspaceLayerError,
-    ReplaceCircleStrokeSample,
+    DocumentWorkspace, DocumentWorkspaceBuildError, DocumentWorkspaceError,
+    DocumentWorkspaceInitError, DocumentWorkspaceLayerError, ReplaceCircleStrokeSample,
 };
 pub use export::{
     WorkspaceExportError, WorkspaceExportManifest, WorkspaceExportSnapshot, WorkspaceExportTile,

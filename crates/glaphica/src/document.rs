@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -6,8 +6,8 @@ use std::fmt::{Display, Formatter};
 use atlas::{AtlasLayout, AtlasTextureStore, NoAtlasTextures, TilePos};
 use gla_color::{ChannelCount, ChannelType, GlaFormat, PremultipliedRgbaF32};
 use gla_core::CanvasCoordF;
-use gla_draw_on::{DrawOnInput, DrawOnInvocation, DrawOnLoweringError, DrawOnPass, DrawOnToolSpec};
-use gla_image::{GlaImageLayout, IMAGE_TILE_SIZE};
+use gla_draw_on::{DrawOnInput, DrawOnToolSpec};
+use gla_image::IMAGE_TILE_SIZE;
 use gla_ir::{
     DocImageUse, DocumentVersionId, DrawOnCommand, DrawOnToolKind, DrawSessionIR, GraphCommand,
     ImageId, ImageLayoutSpec, ImageRole, RegistryPatch, RegistryPatchOp,
@@ -57,9 +57,6 @@ pub struct DocumentWorkspace {
     layer_composite_image: Option<ImageId>,
     layer_composite_valid: bool,
     layer_composite_tile_indices: Vec<u32>,
-    stroke_preview_image: Option<ImageId>,
-    stroke_preview_composite_image: Option<ImageId>,
-    stroke_preview_tile_indices: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,9 +158,6 @@ impl DocumentWorkspace {
             layer_composite_image: None,
             layer_composite_valid: false,
             layer_composite_tile_indices: Vec::new(),
-            stroke_preview_image: None,
-            stroke_preview_composite_image: None,
-            stroke_preview_tile_indices: Vec::new(),
         })
     }
 
@@ -428,7 +422,6 @@ impl DocumentWorkspace {
         self.layer_composite_image = composite;
         self.layer_composite_valid = false;
         self.layer_composite_tile_indices.clear();
-        self.clear_stroke_preview_state();
         Ok(())
     }
 
@@ -510,247 +503,6 @@ impl DocumentWorkspace {
         Ok(dirty)
     }
 
-    pub fn render_stroke_preview<B>(
-        &mut self,
-        backend: &mut B,
-        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
-    ) -> Result<Vec<u32>, DocumentStrokePreviewError<B::Error>>
-    where
-        B: RenderBackend,
-    {
-        let samples = samples.into_iter().collect::<Vec<_>>();
-        if samples.is_empty() {
-            return self.clear_stroke_preview(backend);
-        }
-
-        let preview = self.ensure_stroke_preview_image()?;
-        let composite = self.ensure_stroke_preview_composite_image()?;
-        let layout = self
-            .image_layout(preview)
-            .map_err(DocumentStrokePreviewError::Present)?;
-        let previous_tiles = self.stroke_preview_tile_indices.clone();
-        let (mut next_tiles, draw_invocations) =
-            lower_stroke_preview_samples(preview, layout, samples)?;
-
-        sort_dedup(&mut next_tiles);
-        let dirty_tiles = union_tile_indices(&previous_tiles, &next_tiles);
-        if dirty_tiles.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut passes = Vec::new();
-        self.append_stroke_preview_draw_on_passes(
-            preview,
-            &dirty_tiles,
-            draw_invocations,
-            true,
-            &mut passes,
-        )?;
-        self.append_stroke_preview_composite_passes(
-            preview,
-            composite,
-            layout,
-            &dirty_tiles,
-            &mut passes,
-        )?;
-
-        backend
-            .submit(&passes)
-            .map_err(DocumentStrokePreviewError::Render)?;
-        self.stroke_preview_tile_indices = next_tiles;
-        Ok(dirty_tiles)
-    }
-
-    pub fn append_stroke_preview<B>(
-        &mut self,
-        backend: &mut B,
-        samples: impl IntoIterator<Item = ReplaceCircleStrokeSample>,
-    ) -> Result<Vec<u32>, DocumentStrokePreviewError<B::Error>>
-    where
-        B: RenderBackend,
-    {
-        let samples = samples.into_iter().collect::<Vec<_>>();
-        if samples.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let preview = self.ensure_stroke_preview_image()?;
-        let composite = self.ensure_stroke_preview_composite_image()?;
-        let layout = self
-            .image_layout(preview)
-            .map_err(DocumentStrokePreviewError::Present)?;
-        let (mut dirty_tiles, draw_invocations) =
-            lower_stroke_preview_samples(preview, layout, samples)?;
-
-        sort_dedup(&mut dirty_tiles);
-        if dirty_tiles.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut passes = Vec::new();
-        self.append_stroke_preview_draw_on_passes(
-            preview,
-            &dirty_tiles,
-            draw_invocations,
-            false,
-            &mut passes,
-        )?;
-        self.append_stroke_preview_composite_passes(
-            preview,
-            composite,
-            layout,
-            &dirty_tiles,
-            &mut passes,
-        )?;
-
-        backend
-            .submit(&passes)
-            .map_err(DocumentStrokePreviewError::Render)?;
-        self.stroke_preview_tile_indices =
-            union_tile_indices(&self.stroke_preview_tile_indices, &dirty_tiles);
-        Ok(dirty_tiles)
-    }
-
-    fn append_stroke_preview_draw_on_passes<E>(
-        &mut self,
-        preview: ImageId,
-        dirty_tiles: &[u32],
-        draw_invocations: impl IntoIterator<Item = DrawOnInvocation<u32>>,
-        clear_preview_tiles: bool,
-        passes: &mut Vec<Pass>,
-    ) -> Result<(), DocumentStrokePreviewError<E>> {
-        let mut preview_tile_positions = BTreeMap::new();
-        for tile_index in dirty_tiles {
-            let dst = self
-                .storage
-                .write_global_cache_pos(preview, *tile_index)
-                .map_err(DocumentStrokePreviewError::Tile)?;
-            if clear_preview_tiles {
-                passes.push(Pass::Clear { dst });
-            }
-            preview_tile_positions.insert(*tile_index, dst);
-        }
-
-        let mut touched_preview_tiles = Vec::new();
-        for invocation in draw_invocations {
-            let tile_index = invocation.target();
-            let Some(&dst) = preview_tile_positions.get(&tile_index) else {
-                continue;
-            };
-            passes.push(Pass::DrawOn(invocation.map_target(|_| dst)));
-            touched_preview_tiles.push(dst);
-        }
-        sort_dedup_tile_pos(&mut touched_preview_tiles);
-        for dst in touched_preview_tiles {
-            passes.push(Pass::FixGutter { dst });
-        }
-        Ok(())
-    }
-
-    fn append_stroke_preview_composite_passes<E>(
-        &mut self,
-        preview: ImageId,
-        composite: ImageId,
-        layout: GlaImageLayout,
-        dirty_tiles: &[u32],
-        passes: &mut Vec<Pass>,
-    ) -> Result<(), DocumentStrokePreviewError<E>> {
-        let tile_count_x = layout.tile_count_x();
-        for tile_index in dirty_tiles {
-            let dst = self
-                .storage
-                .write_global_cache_pos(composite, *tile_index)
-                .map_err(DocumentStrokePreviewError::Tile)?;
-            passes.push(Pass::Clear { dst });
-            if let Some(base_tile) = self
-                .physical_tile_for_index(
-                    self.base_display_image_for_tile_index(*tile_index),
-                    tile_count_x,
-                    *tile_index,
-                )
-                .map_err(DocumentStrokePreviewError::Present)?
-            {
-                passes.push(Pass::Copy {
-                    src: base_tile.src,
-                    dst,
-                });
-            }
-            if let Some(preview_tile) = self
-                .physical_tile_for_index(preview, tile_count_x, *tile_index)
-                .map_err(DocumentStrokePreviewError::Present)?
-            {
-                passes.push(Pass::RenderTo {
-                    src: preview_tile.src,
-                    dst,
-                    blend_mode: gla_color::BlendMode::Normal,
-                    opacity: 1.0,
-                });
-            }
-            passes.push(Pass::FixGutter { dst });
-        }
-        Ok(())
-    }
-
-    pub fn clear_stroke_preview<B>(
-        &mut self,
-        backend: &mut B,
-    ) -> Result<Vec<u32>, DocumentStrokePreviewError<B::Error>>
-    where
-        B: RenderBackend,
-    {
-        let Some(preview) = self.stroke_preview_image else {
-            self.stroke_preview_tile_indices.clear();
-            return Ok(Vec::new());
-        };
-        let Some(composite) = self.stroke_preview_composite_image else {
-            self.stroke_preview_tile_indices.clear();
-            return Ok(Vec::new());
-        };
-        let dirty_tiles = std::mem::take(&mut self.stroke_preview_tile_indices);
-        if dirty_tiles.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let layout = self
-            .image_layout(preview)
-            .map_err(DocumentStrokePreviewError::Present)?;
-        let tile_count_x = layout.tile_count_x();
-        let mut passes = Vec::new();
-        for tile_index in &dirty_tiles {
-            let preview_dst = self
-                .storage
-                .write_global_cache_pos(preview, *tile_index)
-                .map_err(DocumentStrokePreviewError::Tile)?;
-            passes.push(Pass::Clear { dst: preview_dst });
-            passes.push(Pass::FixGutter { dst: preview_dst });
-
-            let composite_dst = self
-                .storage
-                .write_global_cache_pos(composite, *tile_index)
-                .map_err(DocumentStrokePreviewError::Tile)?;
-            passes.push(Pass::Clear { dst: composite_dst });
-            if let Some(base_tile) = self
-                .physical_tile_for_index(
-                    self.base_display_image_for_tile_index(*tile_index),
-                    tile_count_x,
-                    *tile_index,
-                )
-                .map_err(DocumentStrokePreviewError::Present)?
-            {
-                passes.push(Pass::Copy {
-                    src: base_tile.src,
-                    dst: composite_dst,
-                });
-            }
-            passes.push(Pass::FixGutter { dst: composite_dst });
-        }
-
-        backend
-            .submit(&passes)
-            .map_err(DocumentStrokePreviewError::Render)?;
-        Ok(dirty_tiles)
-    }
-
     pub fn root_reader_ir(&self) -> DrawSessionIR {
         DrawSessionIR {
             expected_document_version: self.version(),
@@ -820,7 +572,6 @@ impl DocumentWorkspace {
         self.layer_composite_image = None;
         self.layer_composite_valid = false;
         self.layer_composite_tile_indices.clear();
-        self.clear_stroke_preview_state();
         if self
             .layers
             .node(self.layers.root_id())
@@ -830,12 +581,6 @@ impl DocumentWorkspace {
         {
             self.layers = DocumentLayerTree::new(root);
         }
-    }
-
-    fn clear_stroke_preview_state(&mut self) {
-        self.stroke_preview_image = None;
-        self.stroke_preview_composite_image = None;
-        self.stroke_preview_tile_indices.clear();
     }
 
     fn register_layer_image(
@@ -874,44 +619,6 @@ impl DocumentWorkspace {
             self.layer_composite_image = Some(composite);
         }
         Ok(id)
-    }
-
-    fn register_hidden_cache_image(&mut self) -> Result<ImageId, DocumentWorkspaceLayerError> {
-        let id = self.next_image_id()?;
-        self.storage.insert_unversioned_cache_image(
-            id,
-            self.format,
-            self.layout,
-            GraphCommand::new(Vec::new()),
-        )?;
-        Ok(id)
-    }
-
-    fn ensure_stroke_preview_image(&mut self) -> Result<ImageId, DocumentWorkspaceLayerError> {
-        if let Some(id) = self.stroke_preview_image {
-            return Ok(id);
-        }
-        let id = self.register_hidden_cache_image()?;
-        self.stroke_preview_image = Some(id);
-        Ok(id)
-    }
-
-    fn ensure_stroke_preview_composite_image(
-        &mut self,
-    ) -> Result<ImageId, DocumentWorkspaceLayerError> {
-        if let Some(id) = self.stroke_preview_composite_image {
-            return Ok(id);
-        }
-        let id = self.register_hidden_cache_image()?;
-        self.stroke_preview_composite_image = Some(id);
-        Ok(id)
-    }
-
-    fn next_image_id(&self) -> Result<ImageId, DocumentWorkspaceLayerError> {
-        self.max_image_id()
-            .checked_add(1)
-            .map(ImageId::new)
-            .ok_or(DocumentWorkspaceLayerError::ImageIdExhausted)
     }
 
     fn max_image_id(&self) -> u64 {
@@ -963,15 +670,6 @@ impl DocumentWorkspace {
     }
 
     fn display_image_for_tile_index(&self, tile_index: u32) -> ImageId {
-        if self
-            .stroke_preview_tile_indices
-            .binary_search(&tile_index)
-            .is_ok()
-        {
-            if let Some(image) = self.stroke_preview_composite_image {
-                return image;
-            }
-        }
         self.base_display_image_for_tile_index(tile_index)
     }
 
@@ -1552,15 +1250,6 @@ pub enum DocumentLayerRenderError<E> {
     Render(E),
 }
 
-#[derive(Debug)]
-pub enum DocumentStrokePreviewError<E> {
-    Layer(DocumentWorkspaceLayerError),
-    Present(DocumentPresentError),
-    Tile(GlobalTileError),
-    DrawOnLowering(DrawOnLoweringError<Infallible>),
-    Render(E),
-}
-
 impl Display for DocumentPresentError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1662,41 +1351,6 @@ where
     }
 }
 
-impl<E: Display> Display for DocumentStrokePreviewError<E> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Layer(error) => Display::fmt(error, f),
-            Self::Present(error) => Display::fmt(error, f),
-            Self::Tile(error) => Display::fmt(error, f),
-            Self::DrawOnLowering(error) => {
-                write!(f, "document stroke preview draw lowering failed: {error:?}")
-            }
-            Self::Render(error) => write!(f, "document stroke preview render failed: {error}"),
-        }
-    }
-}
-
-impl<E> Error for DocumentStrokePreviewError<E>
-where
-    E: Error + 'static,
-{
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Layer(error) => Some(error),
-            Self::Present(error) => Some(error),
-            Self::Tile(error) => Some(error),
-            Self::DrawOnLowering(_) => None,
-            Self::Render(error) => Some(error),
-        }
-    }
-}
-
-impl<E> From<DocumentWorkspaceLayerError> for DocumentStrokePreviewError<E> {
-    fn from(error: DocumentWorkspaceLayerError) -> Self {
-        Self::Layer(error)
-    }
-}
-
 impl From<DocumentLayerTreeError> for DocumentWorkspaceLayerError {
     fn from(error: DocumentLayerTreeError) -> Self {
         Self::Tree(error)
@@ -1781,59 +1435,6 @@ fn atlas_layout_for_slot_count(slot_count: u64) -> AtlasLayout {
     .into_iter()
     .find(|layout| layout.total_slots() as u64 >= slot_count)
     .unwrap_or(AtlasLayout::HUGE20)
-}
-
-fn lower_stroke_preview_samples<E>(
-    preview: ImageId,
-    layout: GlaImageLayout,
-    samples: Vec<ReplaceCircleStrokeSample>,
-) -> Result<(Vec<u32>, Vec<DrawOnInvocation<u32>>), DocumentStrokePreviewError<E>> {
-    let mut dirty_tiles = Vec::new();
-    let mut draw_invocations = Vec::new();
-
-    for sample in samples {
-        let radius_px = sample.radius_px.max(0.0);
-        let input = DrawOnInput::replace_circle_4d(
-            sample.center.x,
-            sample.center.y,
-            radius_px,
-            radius_px,
-            sample.color,
-        );
-        let passes = gla_draw_on::lower_input(
-            preview,
-            DrawOnToolKind::ReplaceCircle4D,
-            layout,
-            input,
-            |_image, tile_index| {
-                let tile_index = tile_index.value();
-                dirty_tiles.push(tile_index);
-                Ok::<u32, Infallible>(tile_index)
-            },
-        )
-        .map_err(DocumentStrokePreviewError::DrawOnLowering)?;
-        draw_invocations.extend(passes.into_iter().map(DrawOnPass::invocation));
-    }
-
-    Ok((dirty_tiles, draw_invocations))
-}
-
-fn union_tile_indices(left: &[u32], right: &[u32]) -> Vec<u32> {
-    let mut union = Vec::with_capacity(left.len() + right.len());
-    union.extend_from_slice(left);
-    union.extend_from_slice(right);
-    sort_dedup(&mut union);
-    union
-}
-
-fn sort_dedup(values: &mut Vec<u32>) {
-    values.sort_unstable();
-    values.dedup();
-}
-
-fn sort_dedup_tile_pos(values: &mut Vec<TilePos>) {
-    values.sort_by_key(|pos| (pos.atlas_id, pos.layer, pos.tile_x, pos.tile_y));
-    values.dedup();
 }
 
 #[cfg(test)]
@@ -2266,151 +1867,6 @@ mod tests {
             pass,
             Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
         )));
-    }
-
-    #[test]
-    fn stroke_preview_renders_hidden_composite_for_present_tiles() {
-        let mut backend = RecordingBackend::default();
-        let mut workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
-        backend.submitted.clear();
-        let version = workspace.version();
-
-        let dirty = workspace
-            .render_stroke_preview(
-                &mut backend,
-                [ReplaceCircleStrokeSample::new(
-                    32.0,
-                    32.0,
-                    8.0,
-                    PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
-                )],
-            )
-            .unwrap();
-
-        assert_eq!(dirty, vec![0]);
-        assert_eq!(workspace.version(), version);
-        assert_eq!(workspace.layer_tree().len(), 1);
-        assert_eq!(workspace.stroke_preview_tile_indices, vec![0]);
-        let preview_composite = workspace.stroke_preview_composite_image.unwrap();
-        let TileReadRef::Physical(composite_tile) = workspace
-            .storage
-            .read_global_ref(preview_composite, 0)
-            .unwrap()
-        else {
-            panic!("stroke preview composite tile should be materialized");
-        };
-        let present = workspace
-            .root_present_tiles_for_view_tile_indices(&AppView::identity(), &[0])
-            .unwrap();
-        assert_eq!(present.len(), 1);
-        assert_eq!(present[0].src, composite_tile);
-        assert!(backend.submitted_passes().any(|pass| matches!(
-            pass,
-            Pass::DrawOn(gla_draw_on::DrawOnInvocation::ReplaceCircle4D { .. })
-        )));
-        assert!(backend.submitted_passes().any(|pass| matches!(
-            pass,
-            Pass::RenderTo {
-                blend_mode: gla_color::BlendMode::Normal,
-                opacity: 1.0,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn stroke_preview_move_marks_old_and_new_tiles_dirty() {
-        let mut backend = RecordingBackend::default();
-        let mut workspace = DocumentWorkspace::white_with_textures(300, 128, &mut backend).unwrap();
-
-        let first_dirty = workspace
-            .render_stroke_preview(
-                &mut backend,
-                [ReplaceCircleStrokeSample::new(
-                    32.0,
-                    32.0,
-                    8.0,
-                    PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
-                )],
-            )
-            .unwrap();
-        let moved_dirty = workspace
-            .render_stroke_preview(
-                &mut backend,
-                [ReplaceCircleStrokeSample::new(
-                    260.0,
-                    32.0,
-                    8.0,
-                    PremultipliedRgbaF32::new(0.0, 1.0, 0.0, 1.0),
-                )],
-            )
-            .unwrap();
-
-        assert_eq!(first_dirty, vec![0]);
-        assert_eq!(moved_dirty, vec![0, 4]);
-        assert_eq!(workspace.stroke_preview_tile_indices, vec![4]);
-    }
-
-    #[test]
-    fn append_stroke_preview_only_marks_newly_touched_tiles_dirty() {
-        let mut backend = RecordingBackend::default();
-        let mut workspace = DocumentWorkspace::white_with_textures(300, 128, &mut backend).unwrap();
-
-        let first_dirty = workspace
-            .render_stroke_preview(
-                &mut backend,
-                [ReplaceCircleStrokeSample::new(
-                    32.0,
-                    32.0,
-                    8.0,
-                    PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
-                )],
-            )
-            .unwrap();
-        let appended_dirty = workspace
-            .append_stroke_preview(
-                &mut backend,
-                [ReplaceCircleStrokeSample::new(
-                    260.0,
-                    32.0,
-                    8.0,
-                    PremultipliedRgbaF32::new(0.0, 1.0, 0.0, 1.0),
-                )],
-            )
-            .unwrap();
-
-        assert_eq!(first_dirty, vec![0]);
-        assert_eq!(appended_dirty, vec![4]);
-        assert_eq!(workspace.stroke_preview_tile_indices, vec![0, 4]);
-    }
-
-    #[test]
-    fn clear_stroke_preview_restores_base_presentation() {
-        let mut backend = RecordingBackend::default();
-        let mut workspace = DocumentWorkspace::white_with_textures(128, 96, &mut backend).unwrap();
-
-        workspace
-            .render_stroke_preview(
-                &mut backend,
-                [ReplaceCircleStrokeSample::new(
-                    32.0,
-                    32.0,
-                    8.0,
-                    PremultipliedRgbaF32::new(1.0, 0.0, 0.0, 1.0),
-                )],
-            )
-            .unwrap();
-        let root_tile = workspace.image_physical_tiles(workspace.root()).unwrap()[0].src;
-
-        let dirty = workspace.clear_stroke_preview(&mut backend).unwrap();
-        let present = workspace
-            .root_present_tiles_for_view_tile_indices(&AppView::identity(), &[0])
-            .unwrap();
-
-        assert_eq!(dirty, vec![0]);
-        assert!(workspace.stroke_preview_tile_indices.is_empty());
-        assert_eq!(present.len(), 1);
-        assert_eq!(present[0].src, root_tile);
     }
 
     #[test]
