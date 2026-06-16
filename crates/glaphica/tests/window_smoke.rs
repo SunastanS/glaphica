@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use glaphica::{
-    ScriptCommand, read_workspace_manifest, script_command_plan_from_json_str,
+    ScriptCommand, load_trace_file, read_workspace_manifest, script_command_plan_from_json_str,
     script_command_plan_to_json_string_pretty,
 };
 
@@ -77,6 +77,29 @@ fn dev_style_replay_trace_runs_in_window() {
     assert!(
         !stderr.contains("length mismatch"),
         "window replay smoke should not reject round brush input blocks:\n{stderr}"
+    );
+}
+
+#[test]
+#[ignore = "requires xvfb and a GPU-capable wgpu adapter"]
+fn dev_style_record_trace_writes_file_on_exit() {
+    let smoke_root = smoke_root("record-trace");
+    let trace_path = smoke_root.join("recorded_trace.json");
+    let _ = std::fs::remove_dir_all(&smoke_root);
+    std::fs::create_dir_all(&smoke_root).unwrap();
+
+    let output = run_window_smoke([
+        OsString::from("--record-input"),
+        trace_path.clone().into_os_string(),
+        OsString::from("--exit-after-frames"),
+        OsString::from("1"),
+    ]);
+    assert_success(&output);
+
+    let events = load_trace_file(&trace_path).expect("window smoke should write readable trace");
+    assert!(
+        events.is_empty(),
+        "record-only window smoke should not invent trace events"
     );
 }
 
