@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use glaphica::{
-    ScriptCommand, load_trace_file, read_workspace_manifest, script_command_plan_from_json_str,
-    script_command_plan_to_json_string_pretty,
+    ScriptCommand, load_trace_file, read_workspace_directory, read_workspace_manifest,
+    script_command_plan_from_json_str, script_command_plan_to_json_string_pretty,
 };
 
 const STARTUP_EXPORT_OPEN_COMMAND_PLAN_JSON: &str =
@@ -65,6 +65,10 @@ fn open_workspace_argument_runs_exported_workspace_in_window() {
 #[test]
 #[ignore = "requires xvfb and a GPU-capable wgpu adapter"]
 fn dev_style_replay_trace_runs_in_window() {
+    let smoke_root = smoke_root("replay-export-on-exit");
+    let export_path = smoke_root.join("workspace");
+    let _ = std::fs::remove_dir_all(&smoke_root);
+    std::fs::create_dir_all(&smoke_root).unwrap();
     let trace_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
@@ -72,11 +76,14 @@ fn dev_style_replay_trace_runs_in_window() {
     let output = run_window_smoke([
         OsString::from("--replay-input"),
         trace_path.into_os_string(),
+        OsString::from("--export-workspace-on-exit"),
+        export_path.clone().into_os_string(),
         OsString::from("--exit-after-frames"),
-        OsString::from("6"),
+        OsString::from("10"),
     ]);
     assert_success(&output);
-    assert_perf_frames(&output, 6);
+    assert_perf_frames(&output, 10);
+    assert_readable_workspace_export(&export_path);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -162,6 +169,9 @@ fn assert_readable_workspace_export(export_path: &Path) {
             tile.path.display()
         );
     }
+    let snapshot = read_workspace_directory(export_path)
+        .expect("window smoke should export a readable workspace snapshot");
+    assert_eq!(snapshot.tiles.len(), manifest.tiles.len());
 }
 
 #[test]

@@ -54,6 +54,7 @@ pub struct AppRuntimeConfig {
     pub workspace_path: Option<PathBuf>,
     pub startup_command_plan_path: Option<PathBuf>,
     pub startup_export_workspace_path: Option<PathBuf>,
+    pub exit_export_workspace_path: Option<PathBuf>,
     pub exit_after_redraw_frames: Option<u64>,
     pub tool_set: ToolSet,
     pub active_tool: ActiveTool,
@@ -196,6 +197,7 @@ impl Default for AppRuntimeConfig {
             workspace_path: None,
             startup_command_plan_path: None,
             startup_export_workspace_path: None,
+            exit_export_workspace_path: None,
             exit_after_redraw_frames: None,
             tool_set: ToolSet::default_brush(),
             active_tool: ActiveTool::Brush(BrushId::DEFAULT),
@@ -1231,6 +1233,11 @@ impl Drop for App {
         if let Err(error) = self.trace.stop_recording() {
             eprintln!("trace save failed: {error}");
         }
+        if let Some(path) = self.config.exit_export_workspace_path.clone()
+            && let Err(error) = self.export_workspace_directory_from_script(path)
+        {
+            eprintln!("exit workspace export failed: {error}");
+        }
         // Surface-backed resources must go away while the Arc<Window> used to create the surface
         // is still alive.
         self.ui = None;
@@ -2229,6 +2236,7 @@ mod tests {
         assert_eq!(config.workspace_path, None);
         assert_eq!(config.startup_command_plan_path, None);
         assert_eq!(config.startup_export_workspace_path, None);
+        assert_eq!(config.exit_export_workspace_path, None);
         assert_eq!(config.exit_after_redraw_frames, None);
         assert_eq!(config.tool_set.tools(), &[Tool::Brush(BrushId::DEFAULT)]);
         assert_eq!(config.active_tool, ActiveTool::Brush(BrushId::DEFAULT));
